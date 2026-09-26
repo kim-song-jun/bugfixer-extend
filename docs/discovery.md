@@ -23,6 +23,18 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 | Ego Lite | An open-source automation harness and skill for the separate macOS ego lite browser app, including agent task spaces. | An explicit app-to-E2E bridge that records evidence against tasks and runs and closes task spaces; Windows support needs separate validation later. |
 | posco-mds theme reference | Semantic light/dark color tokens, Pretendard typography, a dashboard shell, quick actions, and document/page tabs. | Apply the general visual system to project tasks and agent runs without importing laboratory-specific screens, data, or behavior. |
 
+## Provider account isolation: source check
+
+The installed CLIs checked on 2026-09-26 are Claude Code 2.1.283, Codex CLI 0.157.1, and Antigravity CLI 1.2.3. Their help and version commands were inspected without opening credential files or starting an authenticated run. Documentation describes different account boundaries:
+
+| Provider | Documented mechanism | What remains to prove |
+| --- | --- | --- |
+| Claude Code | [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars) points a process at a separate configuration directory; the official reference describes it as useful for accounts side by side. | A real, separate login in each app-owned directory and simultaneous runs that retain their selected identity. |
+| Codex CLI | [`CODEX_HOME`](https://developers.openai.com/codex/config-advanced) relocates local state. [Credential storage](https://developers.openai.com/codex/config-reference) may use a file or OS keyring; file-backed auth belongs to its own home. A config `--profile` is not an account boundary. | Whether the effective credential store in the packaged environment is file-backed and isolated. Keyring namespace behavior is not established by a separate `CODEX_HOME` alone. Each account must log in separately; copying one OAuth state between homes risks refresh-token conflicts. |
+| Antigravity CLI | [Installation and authentication](https://antigravity.google/docs/cli-install?hl=en) describe an OS keyring profile and an alternative Gemini API-key mode. [Headless mode](https://www.antigravity.google/docs/cli/headless/) uses cached credentials. Local `agy --help` exposed no per-run subscription account selector. | No documented mechanism was found for two signed-in subscription accounts in concurrent runs. A process-level API key is a different authentication and billing choice; it does not prove subscription-account isolation. |
+
+Account selection in this product must bind an immutable account reference to each run and never rewrite another running CLI's global credentials. The first macOS release still needs a user decision on the Antigravity multi-account scope, followed by a credential-isolation smoke test for every claimed provider mode. These findings do not establish provider plan entitlements or a numeric concurrency allowance.
+
 ## Product requirements to preserve
 
 1. Open multiple code projects in one desktop workspace and give each project its own task board and conventions. The app must expose editable project files and agent-produced changes; Whiteboard's review mode does not currently promise that workflow.
@@ -49,7 +61,7 @@ The current Review source navigator is not the editable project surface required
 
 - The provider-specific delivery and precedence of app-managed conventions alongside any instructions a Claude, Codex, or Antigravity runtime reads on its own. The app must show what it can verify about the actual instruction payload.
 - The connector package, permission, and credential contracts, including how logged-in website content is captured.
-- The provider-specific account isolation mechanism, run recovery contract, Docker boundary, and Windows equivalents.
+- The Antigravity subscription-account scope, provider credential-isolation smoke tests, run recovery contract, Docker boundary, and Windows equivalents.
 - Whether “Windows x86” means 32-bit x86 or x86-64. Whiteboard currently packages `win32-x64`; the target architecture must not assume that settles the user's requested platform.
 - The exact project bootstrap and multi-project switching behavior within the selected native project-window design. The dashboard/editor/review tab integration and project-aware review-open routing still need implementation and runtime verification.
 - Public distribution must retain applicable Whiteboard/Code OSS license and third-party notices.
