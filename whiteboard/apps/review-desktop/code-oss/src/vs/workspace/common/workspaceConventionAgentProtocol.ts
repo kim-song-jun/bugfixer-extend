@@ -33,6 +33,7 @@ export interface ConventionAgentReferenceDTO {
 	readonly id: string;
 	readonly version: number;
 	readonly title: string;
+	readonly sourceUri: string | null;
 	readonly contentType: string;
 	readonly contentSha256: string;
 	readonly content: string;

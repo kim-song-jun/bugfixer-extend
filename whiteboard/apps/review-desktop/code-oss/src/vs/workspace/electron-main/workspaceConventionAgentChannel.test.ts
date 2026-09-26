@@ -48,19 +48,22 @@ test('draft preview is project-window scoped and binds the selected immutable so
 	await withChannel(async ({ channel, database, projectId, taskId, sender, otherSender }) => {
 		const source = database.knowledge.importReference({
 			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'policy-source',
+			sourceUri: 'https://docs.example.test/review-notes',
 			title: 'Review notes', contentType: 'application/vnd.bugfixer.notion-source+json',
 			content: Buffer.from('{"block":"RAW JSON MUST STAY OUT OF PROMPT"}'), derivedText: 'Review the test first. Prefer small changes.',
 		});
 		const request = { projectId, taskId, providerId: 'codex' as const, sourceSnapshotIds: [source.id] };
 		const preview = await channel.call<ConventionAgentPreviewDTO>(sender, 'previewDraft', request);
 		assert.equal(preview.operation, 'draft');
-		assert.deepEqual(preview.references.map(item => ({ id: item.id, version: item.version, hash: item.contentSha256, content: item.content })), [
-			{ id: source.id, version: 1, hash: source.contentSha256, content: 'Review the test first. Prefer small changes.' },
+		assert.deepEqual(preview.references.map(item => ({ id: item.id, version: item.version, hash: item.contentSha256, title: item.title, sourceUri: item.sourceUri, content: item.content })), [
+			{ id: source.id, version: 1, hash: source.contentSha256, title: 'Review notes', sourceUri: 'https://docs.example.test/review-notes', content: 'Review the test first. Prefer small changes.' },
 		]);
 		assert.match(preview.prompt, /## Principles/);
 		assert.match(preview.prompt, /## Examples/);
 		assert.match(preview.prompt, new RegExp(source.id));
 		assert.match(preview.prompt, new RegExp(source.contentSha256));
+		assert.match(preview.prompt, new RegExp(source.sourceUri!));
+		assert.match(preview.prompt, /Do not assume company or product names/);
 		assert.doesNotMatch(preview.prompt, /RAW JSON MUST STAY OUT OF PROMPT/);
 		assert.equal(preview.allowed, false);
 		assert.match(preview.blockedReason ?? '', /Codex cannot currently guarantee reads are limited/);
@@ -73,6 +76,85 @@ test('draft preview is project-window scoped and binds the selected immutable so
 		await assert.rejects(channel.call(sender, 'previewDraft', { ...request, sourceSnapshotIds: [foreign.id] }), /unavailable in this project/);
 		await assert.rejects(channel.call(sender, 'draft', { ...request, digest: preview.digest }), /Codex cannot currently guarantee reads are limited/);
 		assert.deepEqual(database.listProviderAttempts(taskId), []);
+	});
+});
+
+test('saved convention Markdown appends escaped deterministic provenance and rejects model-authored citations', async () => {
+	await withChannel(async ({ channel, database, projectId, taskId }) => {
+		const withUri = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'provenance-source',
+			sourceUri: 'https://docs.example.test/policy?q=[draft]', title: 'Review `notes` [team]',
+			contentType: 'text/plain; charset=utf-8', content: Buffer.from('Review the test before changing it.'),
+		});
+		const withoutUri = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'no-uri-source',
+			title: 'Local guidance', contentType: 'text/plain; charset=utf-8', content: Buffer.from('Prefer small verified changes.'),
+		});
+		const makeAttempt = (prompt: string) => {
+			const attempt = database.createProviderAttempt({ taskId, provider: 'claude', purpose: 'connectionTest', profileRef: 'local-default-claude', folderIdentity: 'test-folder', cwd: process.cwd(), mode: 'convention-draft', prompt, refSnapshotIds: [withUri.id, withoutUri.id] });
+			database.setProviderAttemptRunning(attempt.attemptId, database.getTask(taskId)!.revision, process.pid);
+			return attempt;
+		};
+		const context = {
+			operation: 'draft', projectId, providerId: 'claude', sourceSnapshotIds: [withUri.id, withoutUri.id],
+			references: [withUri, withoutUri].map(reference => ({
+				id: reference.id, version: reference.version, title: reference.title, sourceUri: reference.sourceUri,
+				contentType: reference.contentType, contentSha256: reference.contentSha256, content: reference.derivedText,
+			})),
+		};
+		const validMarkdown = `# Project conventions
+
+## Principles
+Prefer precise guidance grounded in the selected source snapshots.
+
+## Do
+Check the relevant behavior before changing it and state the expected result.
+
+## Avoid
+Avoid claiming a change is verified before checking the result.
+
+## Examples
+### Example 1
+Situation: A behavior needs correction. Preferred response: make the smallest change and check it.
+
+### Example 2
+Situation: Evidence is incomplete. Preferred response: state the gap and request the missing source.`;
+		type StoredAttempt = ReturnType<typeof makeAttempt>;
+		type ProviderResult = { attemptId: string; providerId: 'claude'; state: 'succeeded'; cleanupVerified: boolean; exitCode: number; signal: null; finalText: string };
+		const internal = channel as unknown as {
+			finishAttempt(context: unknown, attempt: StoredAttempt, sessionId: string | null, result: ProviderResult): Promise<void>;
+		};
+		const validAttempt = makeAttempt('valid draft');
+		await internal.finishAttempt(context, validAttempt, null, {
+			attemptId: validAttempt.attemptId, providerId: 'claude', state: 'succeeded', cleanupVerified: true, exitCode: 0, signal: null, finalText: validMarkdown,
+		});
+		const saved = database.knowledge.listConventions(projectId).find(version => version.authorAttemptId === validAttempt.attemptId)!;
+		assert.match(saved.markdown, /## Input snapshots/);
+		assert.ok(saved.markdown.includes('Title: ``"Review `notes` [team]"``'));
+		assert.ok(saved.markdown.includes('URI: `"https://docs.example.test/policy?q=[draft]"`'));
+		assert.ok(saved.markdown.includes('snapshot ID: `"' + withUri.id + '"`; version: ' + withUri.version + '; SHA-256: `"' + withUri.contentSha256 + '"`'));
+		assert.ok(saved.markdown.includes('Title: `' + JSON.stringify(withoutUri.title) + '`; URI: unavailable; snapshot ID: `"' + withoutUri.id + '"`; version: ' + withoutUri.version + ';'));
+		assert.doesNotMatch(saved.markdown, /Molcube/i);
+
+		const unsupportedAttempt = makeAttempt('unsupported draft');
+		await internal.finishAttempt(context, unsupportedAttempt, null, {
+			attemptId: unsupportedAttempt.attemptId, providerId: 'claude', state: 'succeeded', cleanupVerified: true, exitCode: 0, signal: null,
+			finalText: validMarkdown.replace('Prefer precise guidance grounded in the selected source snapshots.', 'Use Molcube for every review.'),
+		});
+		const unsupported = database.knowledge.listConventions(projectId).find(version => version.authorAttemptId === unsupportedAttempt.attemptId)!;
+		assert.match(unsupported.markdown, /Use Molcube for every review/);
+		assert.match(unsupported.markdown, /## Input snapshots/);
+		assert.throws(() => database.knowledge.applyConventionVersion(projectId, unsupported.id), /requires a passing check/);
+
+		const citationAttempt = makeAttempt('cited draft');
+		await internal.finishAttempt(context, citationAttempt, null, {
+			attemptId: citationAttempt.attemptId, providerId: 'claude', state: 'succeeded', cleanupVerified: true, exitCode: 0, signal: null,
+			finalText: `${validMarkdown}\n\n[Invented source](https://invented.example.test)`,
+		});
+		const failed = database.getProviderAttempt(citationAttempt.attemptId)!;
+		assert.equal(failed.state, 'failed');
+		assert.match(failed.errorSummary ?? '', /leave citations and source provenance to the application/);
+		assert.equal(database.knowledge.listConventions(projectId).some(version => version.authorAttemptId === citationAttempt.attemptId), false);
 	});
 });
 
@@ -131,7 +213,13 @@ test('atomic draft save failure leaves a failed cleaned attempt and no orphan su
 			folderIdentity: 'test-folder', cwd: process.cwd(), mode: 'convention-draft', prompt: 'draft', refSnapshotIds: [source.id],
 		});
 		database.setProviderAttemptRunning(attempt.attemptId, task.revision, process.pid);
-		const context = { operation: 'draft', projectId, providerId: 'claude', sourceSnapshotIds: ['00000000-0000-4000-8000-000000000000'] };
+		const context = {
+			operation: 'draft', projectId, providerId: 'claude', sourceSnapshotIds: ['00000000-0000-4000-8000-000000000000'],
+			references: [{
+				id: source.id, version: source.version, title: source.title, sourceUri: source.sourceUri,
+				contentType: source.contentType, contentSha256: source.contentSha256, content: source.derivedText,
+			}],
+		};
 		const validMarkdown = `# Project conventions
 
 ## Principles
