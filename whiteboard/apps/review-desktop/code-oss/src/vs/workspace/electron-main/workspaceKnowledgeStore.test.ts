@@ -108,7 +108,22 @@ test('schema v15 backfills legacy readable text and round-trips new raw artifact
 	database.close();
 	const legacyDatabase = new DatabaseSync(path);
 	try {
-		legacyDatabase.exec('ALTER TABLE reference_snapshots DROP COLUMN derived_text; PRAGMA user_version = 14;');
+		// Recreate the v14 columns and triggers, then exercise every migration from v15 onward.
+		legacyDatabase.exec(`
+			DROP TRIGGER provider_attempt_parent_insert;
+			DROP TRIGGER provider_attempt_parent_update;
+			DROP INDEX provider_attempts_parent;
+			ALTER TABLE provider_attempts DROP COLUMN running_task_revision;
+			ALTER TABLE provider_attempts DROP COLUMN orchestration_phase;
+			ALTER TABLE provider_attempts DROP COLUMN result_sha256;
+			ALTER TABLE provider_attempts DROP COLUMN result_text;
+			ALTER TABLE provider_attempts DROP COLUMN child_scope_json;
+			ALTER TABLE provider_attempts DROP COLUMN parent_attempt_id;
+			ALTER TABLE frontend_e2e_evidence DROP COLUMN checkout_revision_unavailable_reason;
+			ALTER TABLE frontend_e2e_evidence DROP COLUMN checkout_revision;
+			ALTER TABLE reference_snapshots DROP COLUMN derived_text;
+			PRAGMA user_version = 14;
+		`);
 	} finally { legacyDatabase.close(); }
 	database = WorkspaceDatabase.open(path);
 	try {
