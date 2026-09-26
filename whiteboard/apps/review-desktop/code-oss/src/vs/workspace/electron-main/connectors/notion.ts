@@ -5,7 +5,7 @@
 
 import {
 	boundedOmissions, connectorRequestTimeoutMs, defaultConnectorTransport, encodeReferenceText, encodeSourceArtifact, requireAccountRef,
-	readJsonResponseWithBytes, requireCredential, richText, safeTitle, SourceArtifactLimitError, wouldExceedSourceArtifactLimit,
+	readJsonResponseWithBytes, requireCredential, retryAfterGuidance, richText, safeTitle, SourceArtifactLimitError, wouldExceedSourceArtifactLimit,
 	type ConnectorCredentialResolver, type ConnectorTransport, type ImportedReferenceInput,
 } from './types.js';
 
@@ -41,9 +41,9 @@ export async function importNotionPage(
 		if (url.origin !== notionApiHost) { throw new Error('Notion request escaped the official API origin.'); }
 		const response = await transport.fetch(url, { method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(connectorRequestTimeoutMs) });
 		if (response.status === 429) {
-			const retryAfter = response.headers.get('retry-after');
+			const guidance = retryAfterGuidance(response.headers.get('retry-after'));
 			await response.body?.cancel();
-			throw new Error(`Notion rate limit reached${retryAfter && /^\d+$/.test(retryAfter) ? `; retry after ${retryAfter} seconds` : ''}. Retry the import later.`);
+			throw new Error(`Notion rate limit reached. ${guidance}`);
 		}
 		const { payload, bytes: raw } = await readJsonResponseWithBytes(response);
 		const artifact = { request: path, bytes: raw };
@@ -74,9 +74,9 @@ export async function importNotionPage(
 			}
 			const response = await transport.fetch(url, { method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(connectorRequestTimeoutMs) });
 			if (response.status === 429) {
-				const retryAfter = response.headers.get('retry-after');
+				const guidance = retryAfterGuidance(response.headers.get('retry-after'));
 				await response.body?.cancel();
-				throw new Error(`Notion rate limit reached${retryAfter && /^\d+$/.test(retryAfter) ? `; retry after ${retryAfter} seconds` : ''}. Retry the import later.`);
+				throw new Error(`Notion rate limit reached. ${guidance}`);
 			}
 			const { payload, bytes: raw } = await readJsonResponseWithBytes(response);
 			const artifact = { request: `${url.pathname}${url.search}`, bytes: raw };

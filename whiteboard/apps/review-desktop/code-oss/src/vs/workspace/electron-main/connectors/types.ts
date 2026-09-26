@@ -35,6 +35,25 @@ export const connectorRequestTimeoutMs = 15_000;
 export const maxConnectorResponseBytes = 2 * 1024 * 1024;
 export const maxReferenceBytes = 1 * 1024 * 1024;
 
+/** Formats a bounded, actionable Retry-After value for the connector's user-visible error. */
+export function retryAfterGuidance(value: string | null, now = Date.now()): string {
+	const header = value?.trim();
+	if (!header) { return 'Retry the import later.'; }
+	let seconds: number;
+	if (/^\d+$/.test(header)) {
+		seconds = Number(header);
+	} else {
+		const httpDate = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4})$/;
+		if (!httpDate.test(header)) { return 'Retry the import later.'; }
+		const asctimeDate = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
+		const retryAt = Date.parse(asctimeDate.test(header) ? `${header} GMT` : header);
+		if (!Number.isFinite(retryAt)) { return 'Retry the import later.'; }
+		seconds = Math.max(0, Math.ceil((retryAt - now) / 1000));
+	}
+	if (!Number.isSafeInteger(seconds) || seconds > 24 * 60 * 60) { return 'Retry after more than 24 hours.'; }
+	return seconds === 0 ? 'Retry now.' : `Retry after ${seconds} seconds.`;
+}
+
 export function requireAccountRef(value: string): string {
 	if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(value)) {
 		throw new Error('A valid opaque connector account reference is required.');

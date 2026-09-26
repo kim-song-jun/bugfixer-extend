@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { importNotionPage } from './notion.js';
 import { importSlackConversation } from './slack.js';
+import { retryAfterGuidance } from './types.js';
 import type { ConnectorCredentialResolver, ConnectorTransport } from './types.js';
 
 const resolver: ConnectorCredentialResolver = { resolve: async () => 'test-secret-token' };
@@ -147,9 +148,36 @@ test('Slack derived text includes a visible marker when it is clipped at the dis
 	assert.ok(result.omissions.some(omission => /Content truncated at the 1 MiB/.test(omission)));
 });
 
-test('Slack rate limits report bounded retry guidance', async () => {
+test('Retry-After guidance accepts seconds and HTTP dates and bounds invalid or excessive values', () => {
+	const now = Date.UTC(2026, 8, 27, 12, 0, 0);
+	assert.equal(retryAfterGuidance('60', now), 'Retry after 60 seconds.');
+	assert.equal(retryAfterGuidance(new Date(now + 61_000).toUTCString(), now), 'Retry after 61 seconds.');
+	assert.equal(retryAfterGuidance(new Date(now - 1_000).toUTCString(), now), 'Retry now.');
+	assert.equal(retryAfterGuidance('not a date', now), 'Retry the import later.');
+	assert.equal(retryAfterGuidance(null, now), 'Retry the import later.');
+	assert.equal(retryAfterGuidance('86401', now), 'Retry after more than 24 hours.');
+	assert.equal(retryAfterGuidance('999999999999999999999999', now), 'Retry after more than 24 hours.');
+});
+
+test('Slack rate limits expose Retry-After guidance in the import error', async () => {
 	const transport: ConnectorTransport = { fetch: async () => new Response('rate limited', { status: 429, headers: { 'retry-after': '60' } }) };
-	await assert.rejects(importSlackConversation({ channelId: 'C1234', accountRef: 'workspace_1' }, resolver, transport), /retry after 60 seconds/);
+	await assert.rejects(importSlackConversation({ channelId: 'C1234', accountRef: 'workspace_1' }, resolver, transport), /Slack rate limit reached\. Retry after 60 seconds\./);
+});
+
+test('Notion page and block rate limits expose Retry-After guidance in the import error', async () => {
+	const pageRateLimit: ConnectorTransport = { fetch: async () => new Response('rate limited', {
+		status: 429, headers: { 'retry-after': new Date(Date.now() + 90_000).toUTCString() },
+	}) };
+	await assert.rejects(importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, pageRateLimit), /Notion rate limit reached\. Retry after (?:[89]\d|90) seconds\./);
+
+	const blockRateLimit: ConnectorTransport = { fetch: async input => {
+		const url = new URL(String(input));
+		if (url.pathname.endsWith('/children')) {
+			return new Response('rate limited', { status: 429, headers: { 'retry-after': '120' } });
+		}
+		return Response.json({ object: 'page', properties: { Name: { type: 'title', title: [{ plain_text: 'Page' }] } } });
+	} };
+	await assert.rejects(importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, blockRateLimit), /Notion rate limit reached\. Retry after 120 seconds\./);
 });
 
 test('connector source IDs and opaque account references are validated before network access', async () => {

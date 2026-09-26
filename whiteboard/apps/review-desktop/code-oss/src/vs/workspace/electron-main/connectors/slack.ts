@@ -5,7 +5,7 @@
 
 import {
 	boundedOmissions, connectorRequestTimeoutMs, defaultConnectorTransport, encodeReferenceText, encodeSourceArtifact, requireAccountRef,
-	readJsonResponseWithBytes, requireCredential, safeTitle, SourceArtifactLimitError, wouldExceedSourceArtifactLimit,
+	readJsonResponseWithBytes, requireCredential, retryAfterGuidance, safeTitle, SourceArtifactLimitError, wouldExceedSourceArtifactLimit,
 	type ConnectorCredentialResolver, type ConnectorTransport, type ImportedReferenceInput,
 } from './types.js';
 
@@ -54,9 +54,9 @@ export async function importSlackConversation(
 			signal: AbortSignal.timeout(connectorRequestTimeoutMs),
 		});
 		if (response.status === 429) {
-			const retryAfter = response.headers.get('retry-after');
+			const guidance = retryAfterGuidance(response.headers.get('retry-after'));
 			await response.body?.cancel();
-			throw new Error(`Slack rate limit reached${retryAfter && /^\d+$/.test(retryAfter) ? `; retry after ${retryAfter} seconds` : ''}. Retry the import later.`);
+			throw new Error(`Slack rate limit reached. ${guidance}`);
 		}
 		const { payload, bytes: raw } = await readJsonResponseWithBytes(response);
 		if (payload.ok !== true) { throw new Error('Slack rejected the import. Check the selected account and conversation access.'); }
