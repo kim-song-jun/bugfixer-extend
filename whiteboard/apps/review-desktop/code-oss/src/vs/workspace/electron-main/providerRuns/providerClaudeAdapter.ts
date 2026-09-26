@@ -3,7 +3,8 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { PROVIDER_MAX_EVENT_LINE_BYTES, type ProviderCommandSpec, type ProviderRunEvent, type ProviderRunRequest, type ProviderTerminalState } from './providerRunTypes.js';
 
 const MAX_SESSION_ID_LENGTH = 128;
@@ -44,7 +45,7 @@ export function createClaudeProviderCommand(request: ProviderRunRequest, executa
 			'--permission-prompts', 'none'
 		],
 		stdin: JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: request.prompt }] } }) + '\n',
-		env: { CLAUDE_CONFIG_DIR: request.profileDirectory },
+		...(request.profileDirectory === join(homedir(), '.claude') ? {} : { env: { CLAUDE_CONFIG_DIR: request.profileDirectory } }),
 		parseEvent: parseClaudeProviderEvent
 	};
 }

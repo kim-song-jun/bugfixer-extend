@@ -376,6 +376,11 @@ function childEnvironment(profileEnv: ProviderCommandSpec['env'], providerId: Pr
 		const value = process.env[key];
 		if (value !== undefined) env[key] = value;
 	}
+	// Claude CLI resolves its native login from the current user identity. Keep
+	// USER scoped to Claude launches instead of forwarding broader host env.
+	if (providerId === 'claude' && process.env.USER !== undefined) {
+		env.USER = process.env.USER;
+	}
 	const profileKey = providerId === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
 	const profileDirectory = profileEnv?.[profileKey];
 	if (profileDirectory !== undefined) env[profileKey] = profileDirectory;

@@ -247,6 +247,30 @@ test('sends private input through stdin and filters inherited and non-profile en
 	assert.deepEqual(events[0].metadata, { input: 'private prompt starting --as-a-flag', profile: '/selected/profile', apiKeyLeaked: false });
 });
 
+test('passes USER only to Claude with its selected authentication profile', async () => {
+	const events: ProviderRunEvent[] = [];
+	const claudeHandle = await new ProviderProcessSupervisor().run(
+		{ ...request, providerId: 'claude' },
+		{
+			executable: process.execPath,
+			args: ['-e', 'process.stdout.write(JSON.stringify(process.env))'],
+			env: { CLAUDE_CONFIG_DIR: '/selected/claude-profile', OPENAI_API_KEY: 'must-not-pass' },
+			parseEvent: line => {
+				const childEnv = JSON.parse(line) as NodeJS.ProcessEnv;
+				return { event: { type: 'launch', metadata: { user: childEnv.USER ?? '', profile: childEnv.CLAUDE_CONFIG_DIR ?? '', unrelatedSecretLeaked: Boolean(childEnv.OPENAI_API_KEY) } }, terminalState: 'succeeded' };
+			},
+		},
+		event => events.push(event),
+		() => undefined,
+	);
+	assert.equal((await claudeHandle.result).state, 'succeeded');
+	assert.deepEqual(events[0].metadata, {
+		user: process.env.USER ?? '',
+		profile: '/selected/claude-profile',
+		unrelatedSecretLeaked: false,
+	});
+});
+
 test('captures only an explicitly requested bounded final answer', async () => {
 	const spec = (answer: string): ProviderCommandSpec => ({
 		executable: process.execPath,
