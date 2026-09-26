@@ -10,9 +10,10 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 - Give each project its own native window. The project switcher focuses an existing window or opens that project's window, and each window restores its own tabs and task context. This is the user's selected multi-project option A.
 - Keep project conventions as versioned, readable documents in app settings. An agent may draft from selected reference snapshots and a separate agent run checks the draft; people review source links and examples, edit, and explicitly apply a version before it becomes an agent instruction. This is the user's selected convention option B with its requested agent-assisted workflow.
 - Use posco-mds as the visual theme reference: a simple project dashboard, clear tabs and navigation, restrained accents, and first-class light and dark modes. Reuse the visual principles and suitable generic interaction patterns, not laboratory-specific product content.
-- Build for macOS first and support Windows x86 in a later phase. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
+- Build for macOS first and support Windows later; whether the requested Windows x86 means 32-bit x86 or x86-64 is still open. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
 - Provide Slack, Notion, and website import as first-party connectors plus a contract for user-installable connectors. This is the user's selected option B; it does not imply enabling all general VS Code extensions.
 - Use app-interpreted declarative packages for the first public user-installable connectors. Installed packages contain no executable code; sources needing custom logic or unsupported authentication require an app capability or a later, separately approved runtime. This is the user's selected execution option A.
+- The first macOS task experience uses [selected C scope](first-macos-task-scope.md): real runs, app-owned subagents, archive/order, several review links, recoverable deletion, audited automatic Ready → In progress → Review transitions, and person-only Done. An opted-in ordinary folder can receive a mutating run without Git/jj; Whiteboard review creation still requires supported VCS.
 - Bring Claude, Codex, and Antigravity account use, subagent orchestration, and Ego Lite frontend E2E into one task flow.
 
 ## Source capabilities and gaps
@@ -40,13 +41,13 @@ Account selection in this product must bind an immutable account reference to ea
 ## Product requirements to preserve
 
 1. Keep multiple code projects available in one desktop app, each with its own native window, task board, and conventions. Switching projects focuses or opens the target project's window; tabs and task context remain with their owning project. The app must expose editable project files and agent-produced changes; Whiteboard's review mode does not currently promise that workflow.
-2. Create, organize, and dispatch tasks to agents directly from the board, with an explicit target repository/worktree, visible progress, logs, cancellation, and durable run history.
+2. Create, organize, and dispatch tasks to agents directly from the board, with an explicit target project-folder binding (Git/jj checkout or ordinary folder), visible progress, logs, cancellation, and durable run history. A mutating launch must match its held canonical target identity.
 3. Coordinate subagents under a parent task/run and retain each subagent's status, result, and produced artifacts.
-4. Select Claude, Codex, or Antigravity and an account for each run; support concurrent runs without one run changing another run's credentials.
+4. The product goal is to select Claude, Codex, or Antigravity and an account for each run, including concurrent runs without one changing another's credentials. The first macOS release may advertise only provider/account modes the user selects and a real same-provider concurrent identity-isolation proof verifies; Antigravity subscription multi-account support remains undecided.
 5. Import references from Slack, Notion, and websites, and allow installation of additional connectors. Preserve source identity, retrieval time, and the material used for a task.
 6. Keep imported content as reference material unless the user explicitly makes it a task instruction or project convention.
 7. Attach Whiteboard reviews and Ego Lite frontend E2E evidence to the originating task/run, including the tested target and task-space cleanup outcome.
-8. Support project execution and tests through Docker where configured, with explicit ownership and teardown of containers started for a run, while delivering the macOS desktop experience first and Windows x86 afterward.
+8. Support project execution and tests through Docker where configured, with explicit ownership and teardown of containers started for a run, while delivering the macOS desktop experience first and Windows later. The requested Windows x86 CPU target remains open.
 9. Follow the frontend layer direction `app → pages → widgets → features → entities → shared` for new UI code, with slice public APIs and no reverse or cross-slice imports.
 10. Show a dashboard first. Keep project navigation and tabs understandable at a glance, with task state and the next useful action visible, and make editor/review detail available when needed.
 
