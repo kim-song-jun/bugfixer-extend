@@ -1,6 +1,6 @@
 # First macOS task experience: selected C scope
 
-Status: **scope selected by the user on 2026-09-26; detailed behavior and implementation plan remain under review.** The user chose option C in the task-controls comparison. The first macOS task experience therefore includes option A's task create/edit/state controls, option B's archive/restore, manual order, and multiple visible reviews, and option C's deletion plus real agent-result suggestions/automatic state changes. This is a selected target, not a claim that source has been imported or product code exists.
+Status: **task scope C and state policy A selected by the user on 2026-09-26; remaining behavior and implementation plan under review.** The first macOS task experience includes task create/edit/state controls, archive/restore, manual order, multiple visible reviews, deletion, and real agent-driven state changes. Under selected state policy A, a real run start moves Ready to In progress, verified success moves In progress to Review, and only a person moves a task to Done. This is a selected target, not a claim that source has been imported or product code exists.
 
 The [foundation checkpoint](foundation-checkpoint.md) is an internal build step for projects, editable files, tasks, and linked reviews. Passing it does not fulfill this selected C scope. The dashboard placement choice remains open; its visual layout does not change the task/run IDs or the capabilities below.
 
@@ -14,9 +14,9 @@ The [foundation checkpoint](foundation-checkpoint.md) is an internal build step 
 | Delete | Provide a real delete flow distinct from archive, with clear effects on linked runs, reviews, and evidence | Delete/restore or final purge follows the approved retention rule; no accidental cascade deletes a shared Whiteboard review or immutable run evidence |
 | Real agent runs | Dispatch a task to a supported provider/account, show queue/preflight/live events/result, allow cancellation, and recover after restart | The immutable launch snapshot and redacted event/audit records match the actual process; permission denial, interruption, and cleanup are visible; credentials do not enter `workspace.db` |
 | App-owned subagents | Show child runs under their parent task/run with their own scope, provider/account, state, and result | A real child run's parent link, output, cancellation, and cleanup survive restart; provider-internal helpers are not mislabeled as independently managed children |
-| Agent-driven board state | Show suggestions and perform at least one approved automatic transition based on a verified run event; record the rule, prior/new task revision, run ID, and reason | A real automatic move has an atomic audit receipt; a missing terminal event, soft-denied tool, failed/cancelled run, or stale task revision cannot produce a false success transition |
+| Agent-driven board state | Perform Ready → In progress on a real run start and In progress → Review on verified success; leave Done to a person's action | Both automatic moves have atomic audit receipts with rule, run ID, event, and prior/new task revision; failed/cancelled runs and stale task revisions cannot produce a false move |
 
-Run status and board state are separate. A provider exit code alone is not an agent result, and a successful run alone does not prove a task is Done. The exact automatic transition policy still needs the user's choice; until it is fixed, this document does not authorize an automatic Done rule. An automatic transition must be atomic with its audit receipt in `workspace.db`, and a person must be able to see why it happened.
+Run status and board state are separate. Queue/preflight do not move a task; Ready → In progress occurs only after the provider process actually starts and the running event is recorded. In progress → Review requires a parsed terminal success with no unmet required-tool operation and completed owned-resource cleanup; an exit code alone is insufficient. Failure, cancellation, interruption, missing terminal event, or cleanup failure leave the board state unchanged and show the run outcome. A person's concurrent state move wins: a stale automatic transition returns a revision conflict and becomes a visible suggestion instead of overwriting the person. Each accepted move and its audit receipt commit atomically in `workspace.db`. Done is always a person's explicit, recorded action under selected policy A.
 
 ## Data and execution boundaries
 
@@ -31,7 +31,7 @@ Run status and board state are separate. A provider exit code alone is not an ag
 1. Import and build the pinned public Whiteboard source from a committed tree, then pass the internal [foundation checkpoint](foundation-checkpoint.md) for project windows, editable files, task persistence, and review links.
 2. Add archive/restore, persisted manual ordering, several review links, and the approved delete/retention flow. Prove two-window conflicts and restart recovery.
 3. Add the approved real provider/account adapters and execution environment, run records and app-owned child runs, permission preflight, canonical-target writer lock, cancellation, process cleanup, and restart reconciliation. Do not expose an agent button until its adapter works.
-4. Add the approved suggestion/automatic transition policy with durable receipts. Verify real terminal events, denied operations, failed runs, races with manual moves, and the Done rule. Complete the native UI and flow checks for the whole C scope before calling this first macOS task experience complete.
+4. Add selected state policy A with durable receipts. Verify both automatic moves against real start and terminal events, denied operations, failed runs, races with manual moves, and person-only Done. Complete the native UI and flow checks for the whole C scope before calling this first macOS task experience complete.
 
 These stages are internal checkpoints, not separate claims that option C has been delivered. Full-product conventions, Slack/Notion/website and installed declarative connectors, Ego Lite evidence, and Windows x86 remain in their own contracts and are not erased by this task-scope choice.
 
@@ -39,9 +39,8 @@ These stages are internal checkpoints, not separate claims that option C has bee
 
 1. Which provider and account modes must pass the first real-run proof, including the pending Antigravity subscription-account choice. Claimed multi-account modes require concurrent identity-isolation proof.
 2. Where agent processes and project commands run on macOS, including the pending Docker boundary choice and ownership/cleanup of any containers.
-3. Which verified run events suggest or automatically move Ready, In progress, Review, or Done; whether and under what evidence Done may be automatic.
-4. How archive, delete, restore, and permanent purge affect active runs, shared review links, and immutable evidence.
-5. Whether mutating agents can run in ordinary non-VCS folders and how the canonical directory lock and warning work.
-6. How a task displays/selects several reviews, what counts as primary, and when the user can create another review.
+3. How archive, delete, restore, and permanent purge affect active runs, shared review links, and immutable evidence.
+4. Whether mutating agents can run in ordinary non-VCS folders and how the canonical directory lock and warning work.
+5. How a task displays/selects several reviews, what counts as primary, and when the user can create another review.
 
 No default shown in a local comparison page is treated as an answer to these pending choices.

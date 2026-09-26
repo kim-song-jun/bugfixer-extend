@@ -13,4 +13,4 @@ Mobius의 계정 전환과 ego-lite의 브라우저 E2E도 이 워크스페이�
 
 첫 제품은 macOS에서 사용하고, Windows x86 지원은 이후 단계에서 진행합니다.
 
-현재 기능과 새 제품에서 구현할 범위는 [발견 기록](docs/discovery.md)에, 확정한 데이터 경계는 [아키텍처](docs/architecture.md)에 정리했습니다. 첫 macOS 작업 경험은 보관·정렬·여러 리뷰·삭제·실제 에이전트 실행과 상태 자동화를 포함하는 [C 범위](docs/first-macos-task-scope.md)로 선택했습니다. 프로젝트 창·작업 보드·리뷰 연결의 [내부 기반 검증 단계](docs/foundation-checkpoint.md)는 이 범위의 시작일 뿐이며, 설계 승인이나 구현 완료를 뜻하지 않습니다.
+현재 기능과 새 제품에서 구현할 범위는 [발견 기록](docs/discovery.md)에, 확정한 데이터 경계는 [아키텍처](docs/architecture.md)에 정리했습니다. 첫 macOS 작업 경험은 보관·정렬·여러 리뷰·삭제·실제 에이전트 실행을 포함하는 [C 범위](docs/first-macos-task-scope.md)로 선택했습니다. 실행 시작 시 In progress, 검증된 성공 시 Review로 자동 이동하고 Done은 사람이 선택합니다. 프로젝트 창·작업 보드·리뷰 연결의 [내부 기반 검증 단계](docs/foundation-checkpoint.md)는 이 범위의 시작일 뿐이며, 설계 승인이나 구현 완료를 뜻하지 않습니다.

@@ -1,6 +1,6 @@
 # Architecture: Whiteboard shell and workspace data
 
-Status: the product foundation, workspace data boundary, project-window layout, one-window-per-project behavior, and C task-management scope were selected by the user on 2026-09-26. C's run/deletion/automation policies still need design decisions. This is a design contract, not an implementation status report.
+Status: the product foundation, workspace data boundary, project-window layout, one-window-per-project behavior, C task-management scope, and state policy A were selected by the user on 2026-09-26. Provider/execution and deletion policies still need decisions. This is a design contract, not an implementation status report.
 
 ## Product foundation
 
@@ -74,7 +74,7 @@ The convention flow is accepted only when a selected reference set produces a dr
 
 ## Task board and run lifecycle
 
-The dashboard shows each project's next useful action and a compact board: **Ready**, **In progress**, **Review**, and **Done**. A task owns its title, description, project/folder binding, board state, reference links, run history, reviews, and E2E evidence. The selected [C task scope](first-macos-task-scope.md) adds archive/restore, manual order, multiple visible reviews, deletion, and real agent-driven suggestions/automatic transitions to the first macOS task experience. Task state remains separate from run state: a verified run event may move a task only under an approved rule with an atomic receipt, and provider success alone cannot establish Done. The exact transition and retention policies still need user choice. Opening a task keeps these details in one place; editor and review tabs return to that task. The dashboard suggests one next action by priority: an agent waiting for the user's input, a task awaiting review, a running task to inspect, then an executable Ready task. Ties use the oldest waiting item first so a restart shows the same choice.
+The dashboard shows each project's next useful action and a compact board: **Ready**, **In progress**, **Review**, and **Done**. A task owns its title, description, project/folder binding, board state, reference links, run history, reviews, and E2E evidence. The selected [C task scope and state policy A](first-macos-task-scope.md) add archive/restore, manual order, multiple visible reviews, deletion, and real agent-driven state changes to the first macOS task experience. Task state remains separate from run state: a recorded real run start moves Ready to In progress, and verified terminal success with completed cleanup moves In progress to Review. Both moves record an atomic receipt; stale revisions become suggestions instead of overwriting a person's move. Only a person moves a task to Done. Retention and execution policies still need user choice. Opening a task keeps these details in one place; editor and review tabs return to that task. The dashboard suggests one next action by priority: an agent waiting for the user's input, a task awaiting review, a running task to inspect, then an executable Ready task. Ties use the oldest waiting item first so a restart shows the same choice.
 
 A run has an immutable launch record: task ID, target checkout, provider and selected account ID, model/role, applied convention snapshot or explicit null version, selected reference snapshot IDs, any user-approved reference text promoted to a task instruction, tool permissions, and its parent run ID if it is a subagent. The app writes this record before starting a provider process. Events and result artifacts append to the run; retrying creates a new run linked to the failed attempt instead of overwriting its history. Queue, preflight, running, waiting for input, succeeded, failed, cancelled, and interrupted are distinct states. Preflight reports a missing checkout, unavailable account, invalid selected convention version, or unavailable execution environment before a process starts.
 
@@ -100,7 +100,7 @@ E2E evidence links to the exact task, run, target, and artifact hashes in `works
 
 ## Internal foundation checkpoint and selected C scope
 
-The internal [foundation checkpoint](foundation-checkpoint.md) needs projects, folder/checkout bindings, tasks, outgoing review requests, and review links. These records prove project selection, a task created on the board, and a task-linked review; they do not complete the selected first macOS task experience. The [C scope](first-macos-task-scope.md) then requires archive/restore, persisted manual order, multiple reviews, deletion, real run records/events and adapters, and audited agent-driven state handling before acceptance. Reference snapshots, conventions, connectors, and E2E evidence extend this same app-owned model in their own stages; they do not move into Whiteboard's review store. The detailed dashboard placement and the C execution/retention policies still require user decisions.
+The internal [foundation checkpoint](foundation-checkpoint.md) needs projects, folder/checkout bindings, tasks, outgoing review requests, and review links. These records prove project selection, a task created on the board, and a task-linked review; they do not complete the selected first macOS task experience. The [C scope](first-macos-task-scope.md) then requires archive/restore, persisted manual order, multiple reviews, deletion, real run records/events and adapters, and the selected audited start/success state transitions before acceptance. Reference snapshots, conventions, connectors, and E2E evidence extend this same app-owned model in their own stages; they do not move into Whiteboard's review store. The detailed dashboard placement and the C execution/retention policies still require user decisions.
 
 The foundation checkpoint is accepted only when:
 
@@ -111,6 +111,6 @@ The foundation checkpoint is accepted only when:
 
 ## Next design boundary
 
-Antigravity account scope, connector packaging and browser capture, Docker execution, and C automatic-state/deletion rules still need their own decisions or contracts. [Provider adapter research](provider-adapters.md) details native instruction loading, prompt delivery, event parsing, and the required account-isolation proof; the app-managed convention lifecycle above is selected.
+Antigravity account scope, connector packaging and browser capture, Docker execution, and C deletion/review-selection rules still need their own decisions or contracts. [Provider adapter research](provider-adapters.md) details native instruction loading, prompt delivery, event parsing, and the required account-isolation proof; the app-managed convention lifecycle and state policy A are selected.
 
 Source evidence and remaining product decisions are recorded in [discovery.md](discovery.md).
