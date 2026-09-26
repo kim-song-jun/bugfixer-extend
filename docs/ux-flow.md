@@ -1,0 +1,42 @@
+# Project dashboard and task journey
+
+Status: proposed UI section for the macOS design. The user selected a simple dashboard, the posco-mds visual direction, and native Code OSS tabs for the dashboard, editable files, and Whiteboard reviews. The detailed placement and screen behavior below are to be reviewed with the complete design spec; no product UI has been implemented.
+
+## Primary journey
+
+1. **Open a project.** The native project window opens the last project if its checkout is available. Otherwise, a project picker shows recent projects, the unavailable binding, and a clear **Rebind folder** action. The dashboard becomes the first editor tab for a valid project.
+2. **Choose work.** The dashboard shows one next action, active or waiting runs, and a compact four-state task board: Ready, In progress, Review, Done. Its next-action order follows [the run contract](architecture.md#task-board-and-run-lifecycle). This is the working surface; a second full board page would duplicate navigation.
+3. **Open a task.** Selecting a card opens its details within the dashboard. The first implementation slice shows intent, checkout, and a linked review. Later slices add selected source snapshots, the applied convention version, latest run, and test evidence as their services become available. The primary action depends on state and actual capability; agent and connector actions enter the UI with their real service slices.
+4. **Work in the same window.** A task's file opens in the native Code OSS editor tab. Its Whiteboard review opens in another native editor tab. The dashboard keeps the selected task ID independently from the file URI; a file opened from two tasks changes the visible task context explicitly. Returning to the dashboard preserves scroll position and card selection.
+5. **Check and finish.** Once runs and imports are implemented, run details show provider, chosen account, subagent tree, live events, cancellation, and resulting files. References show their source and retrieval time. The review and, when available, Ego Lite check are linked to the task and its run. A successful agent run can suggest **Review**; a person moves the task to **Done**.
+
+## Window and navigation
+
+- Use one native Code OSS tab strip for dashboard, files, and reviews. Do not draw a second general document tab strip inside the dashboard. Adapt the posco-mds tab principles to the native strip: clear active state, readable truncation, accessible overflow, close behavior, and distinct labels for duplicate titles.
+- The project switcher and task entry remain visible in the workbench's navigation area. Within the dashboard, use a compact project header, a single next-action panel, then the board. Selecting a task reveals an inspector instead of creating another top-level screen. Reference and account settings can be separate app views reached from the project/settings navigation.
+- A review opened from a task shows a return path to that task. The existing Whiteboard read-only source navigator remains a distinct action for pinned historical material; it does not replace the editable project tab.
+- Save the active project, task ID, dashboard position, and relevant tab identities for restart. A reused file tab never silently inherits a different task's evidence or action context. A closed or deleted review displays an unavailable link with its repair action.
+
+## Visual system
+
+Use the generic semantic direction of the read-only posco-mds theme reference, without importing its domain-specific content. For the light theme, the page/card/text/accent anchors are `#F2F4F6`, `#FFFFFF`, `#191F28`, and `#2370DE`. The dark anchors are `#17171C`, `#1E2028`, `#ECECEC`, and `#5B9FF5`. Pretendard Variable is the UI font with system fallbacks. Cards and standard controls use the reference's restrained 8–12 px radius scale. State meaning uses text and icons alongside color; the accent is reserved for selection and primary action.
+
+At a standard desktop width, the board can show four readable columns. At a narrow project window, columns reflow to two or one while the task inspector remains reachable without covering the primary action. Use native editor and workbench layout measurements during implementation rather than assuming a web page viewport. Respect the system light/dark choice and reduced-motion setting. Keyboard focus, selection, pending work, and errors must remain visible in both themes.
+
+## Screen states and first-slice behavior
+
+| Surface | Empty | Loading / skeleton | Error | Success |
+| --- | --- | --- | --- | --- |
+| Project picker | Explain how to open a local checkout; **Open folder** | Recent-project rows reserve their final size | Missing/moved checkout offers **Rebind folder** | Project opens to its dashboard tab |
+| Dashboard | One direct **Create task** action; no decorative metrics | Board columns and task cards reserve stable space | Workspace DB failure shows cause and retry or repair path | Next action, task counts, and selected card agree with persisted data |
+| Task inspector | Ask the user to choose a card | Details keep their panel bounds | Missing checkout or review is shown beside that link; later, the same applies to references | Task title, checkout, linked review, and working actions are visible together; source and run details appear only in later slices |
+| Run and subagents | State that no run exists yet | Queued work shows its reason, including a checkout writer conflict; running work shows real events | Preflight, provider, cancellation, and cleanup failures remain distinct; an unverified run after restart is **Interrupted** | Waiting for input names the decision and agent; parent/child results and cleanup outcome persist after restart |
+| Convention document | Offer **Write rule** or **Draft from references** once imports work | Draft/check progress is separate from active version | Unsupported or sensitive claim points to rule and source | Reasons, good/avoided examples, source links, diff, and **Apply** are readable |
+| Reference import | Show Slack, Notion, website, and installed connector entry points when live | Retrieval progress retains source identity | Auth, permission, and fetch errors name the affected source | Before installing or connecting a connector, show its domains, account scopes, and local/browser access for consent; afterward, snapshot origin, retrieval time, and version are visible before attachment |
+| E2E evidence | Offer a check only when Ego Lite is available | Target and task-space state remain visible | Scenario failure and cleanup failure use separate messages | Screenshot, console/network findings, target, verdict, and cleanup result are linked |
+
+No disabled placeholder buttons advertise a service that does not yet exist. A skeleton represents a pending request with stable geometry; it is not the default appearance for an empty project. When a section is not part of the current implementation slice, its entry point is absent until its backing contract works.
+
+## Validation when implemented
+
+The first real UI proof opens a project, creates a task, saves a file, opens its linked review in the same window, returns to the same task, and restores state after restart. It also opens one file from two tasks to prove context isolation. Inspect before/after native screenshots at normal and narrow window widths, keyboard focus, text wrap, contrast, tab alignment, and the bottom of scrollable content. Later slices add live run, connector, convention, and E2E journeys with screenshots and console/network evidence. Start UI verification with ego-browser on reachable app and web surfaces; use computer-use inspection for native shell behavior that a browser cannot expose. Ego Lite checks the web target and its task-space cleanup.
