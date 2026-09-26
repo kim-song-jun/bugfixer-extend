@@ -37,7 +37,7 @@ Account selection in this product must bind an immutable account reference to ea
 
 ## Product requirements to preserve
 
-1. Open multiple code projects in one desktop workspace and give each project its own task board and conventions. The app must expose editable project files and agent-produced changes; Whiteboard's review mode does not currently promise that workflow.
+1. Keep multiple code projects available in one desktop app, each with its own task board and conventions. The app must expose editable project files and agent-produced changes; Whiteboard's review mode does not currently promise that workflow. The selected native tab layout applies within a project window; cross-project switching and window restoration still need a decision.
 2. Create, organize, and dispatch tasks to agents directly from the board, with an explicit target repository/worktree, visible progress, logs, cancellation, and durable run history.
 3. Coordinate subagents under a parent task/run and retain each subagent's status, result, and produced artifacts.
 4. Select Claude, Codex, or Antigravity and an account for each run; support concurrent runs without one run changing another run's credentials.
