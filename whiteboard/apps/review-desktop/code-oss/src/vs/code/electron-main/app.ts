@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, BrowserWindow, desktopCapturer, Details, globalShortcut, GPUFeatureStatus, powerMonitor, protocol, screen as electronScreen, session, Session, systemPreferences, WebFrameMain } from 'electron';
+import { app, BrowserWindow, desktopCapturer, Details, dialog, globalShortcut, GPUFeatureStatus, powerMonitor, protocol, screen as electronScreen, session, Session, systemPreferences, WebFrameMain } from 'electron';
 import { addUNCHostToAllowlist, disableUNCAccessRestrictions } from '../../base/node/unc.js';
 import { validatedIpcMain } from '../../base/parts/ipc/electron-main/ipcMain.js';
 import { hostname, release } from 'os';
@@ -142,6 +142,7 @@ import { ReviewDesktopHost } from '../../review/electron-main/reviewDesktopHost.
 import { ReviewMenubarMainService } from '../../review/electron-main/reviewMenubar.js';
 import { ReviewUpdateDialog } from '../../review/electron-main/reviewUpdateDialog.js';
 import { REVIEW_DESKTOP_CHANNEL, ReviewDesktopChannel } from '../../review/electron-main/reviewDesktopChannel.js';
+import { WorkspaceDatabase } from '../../workspace/electron-main/workspaceDatabase.js';
 
 /**
  * The main VS Code application. There will only ever be one instance,
@@ -662,6 +663,19 @@ export class CodeApplication extends Disposable {
 
 		// Services
 		const appInstantiationService = await this.initServices(machineId, sqmId, devDeviceId, sharedProcessReady);
+
+		// Keep one app-owned workspace store for this profile. Review owns its own database.
+		try {
+			const workspaceDatabase = WorkspaceDatabase.open(join(this.environmentMainService.userDataPath, 'workspace.db'));
+			this._register(toDisposable(() => workspaceDatabase.close()));
+		} catch (error) {
+			this.logService.error(`Could not open workspace.db: ${toErrorMessage(error)}`);
+			dialog.showErrorBox(
+				localize('workspaceDatabaseUnavailable', "Workspace data unavailable"),
+				localize('workspaceDatabaseOpenFailure', "The workspace database could not be opened. Your existing data was not reset. Check the app's data folder and try again.")
+			);
+			throw error;
+		}
 
 		// Review Desktop owns one global embedded server for the application lifetime.
 		this.reviewDesktopHost = this._register(appInstantiationService.createInstance(ReviewDesktopHost));
