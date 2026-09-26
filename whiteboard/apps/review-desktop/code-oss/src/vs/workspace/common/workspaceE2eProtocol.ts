@@ -26,6 +26,9 @@ export interface WorkspaceE2eEvidenceDTO {
 	readonly taskId: string;
 	readonly attemptId: string;
 	readonly targetUrl: string;
+	/** Full VCS commit ID at check start; this does not identify uncommitted working-tree content. */
+	readonly checkoutRevision: string | null;
+	readonly checkoutRevisionUnavailableReason: string | null;
 	readonly environmentIdentity: string;
 	readonly scenario: readonly WorkspaceE2eStep[];
 	readonly state: 'running' | 'passed' | 'failed' | 'cancelled' | 'cleanupFailed';

@@ -4,8 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,8 +20,17 @@ test('E2E channel persists TaskSpace and requester snapshot before navigation, t
 	const directory = mkdtempSync(join(tmpdir(), 'workspace-e2e-channel-'));
 	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
 	try {
+		const checkoutPath = join(directory, 'checkout');
+		mkdirSync(checkoutPath);
+		execFileSync('git', ['-C', checkoutPath, 'init', '-q']);
+		execFileSync('git', ['-C', checkoutPath, 'config', 'user.name', 'E2E test']);
+		execFileSync('git', ['-C', checkoutPath, 'config', 'user.email', 'e2e@example.invalid']);
+		writeFileSync(join(checkoutPath, 'tracked.txt'), 'committed content\n');
+		execFileSync('git', ['-C', checkoutPath, 'add', 'tracked.txt']);
+		execFileSync('git', ['-C', checkoutPath, 'commit', '-q', '-m', 'initial snapshot']);
+		const checkoutRevision = execFileSync('git', ['-C', checkoutPath, 'rev-parse', '--verify', 'HEAD^{commit}'], { encoding: 'utf8' }).trim();
 		const project = database.createProject('Project');
-		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project', vcsKind: 'git', vcsRoot: '/checkout' });
+		const binding = database.createFolderBinding({ projectId: project.id, path: checkoutPath, vcsKind: 'git', vcsRoot: checkoutPath });
 		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Check page' });
 		const createdAttempt = database.createProviderAttempt({ taskId: task.id, provider: 'codex', purpose: 'task', profileRef: 'profile-1', folderIdentity: 'dev:inode', cwd: '/checkout/project', mode: 'mutating', prompt: 'Fix page' });
 		const attempt = database.setProviderAttemptRunning(createdAttempt.attemptId, task.revision, 9876);
@@ -37,6 +47,8 @@ test('E2E channel persists TaskSpace and requester snapshot before navigation, t
 				assert.equal(evidence?.state, 'running');
 				assert.equal(evidence?.targetUrl, target);
 				assert.equal(evidence?.attemptId, attempt.attemptId);
+				assert.equal(evidence?.checkoutRevision, checkoutRevision);
+				assert.equal(evidence?.checkoutRevisionUnavailableReason, null);
 				assert.deepEqual(scenario, [{ type: 'assertText', selector: 'h1', value: 'Welcome' }]);
 				runFinished();
 				return { passed: true, screenshot: Buffer.from('png-proof'), log: JSON.stringify([
@@ -48,11 +60,13 @@ test('E2E channel persists TaskSpace and requester snapshot before navigation, t
 			finish: async () => { throw new Error('run owns cleanup'); },
 		};
 		const channel = new WorkspaceE2eChannel(database, dashboard, runtime, join(directory, 'artifacts'));
-		const response = await channel.call<{ evidence: { id: string; state: string } }>(sender, 'start', {
+		const response = await channel.call<{ evidence: { id: string; state: string; checkoutRevision: string | null; checkoutRevisionUnavailableReason: string | null } }>(sender, 'start', {
 			projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000',
 			environmentIdentity: 'native-macos:project-server', scenario: [{ type: 'assertText', selector: 'h1', value: 'Welcome' }],
 		});
 		assert.equal(response.evidence.state, 'running');
+		assert.equal(response.evidence.checkoutRevision, checkoutRevision);
+		assert.equal(response.evidence.checkoutRevisionUnavailableReason, null);
 		await finished;
 		for (let attemptNumber = 0; attemptNumber < 50 && database.getWorkspaceE2eEvidence(response.evidence.id)?.state === 'running'; attemptNumber++) {
 			await new Promise(resolve => setTimeout(resolve, 5));
@@ -76,7 +90,7 @@ test('cleanup retry cannot close a running or completed check', async () => {
 	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
 	try {
 		const project = database.createProject('Project');
-		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project', vcsKind: 'git', vcsRoot: '/checkout' });
+		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project' });
 		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Check page' });
 		const attempt = database.createProviderAttempt({ taskId: task.id, provider: 'codex', purpose: 'task', profileRef: 'profile-1', folderIdentity: 'dev:inode', cwd: '/checkout/project', mode: 'mutating', prompt: 'Fix page' });
 		const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }) as unknown as WebContents;
@@ -84,7 +98,7 @@ test('cleanup retry cannot close a running or completed check', async () => {
 		let finishes = 0;
 		const runtime: EgoE2eRuntime = { createSpace: async () => 71, run: async () => { throw new Error('unexpected run'); }, finish: async () => { finishes++; throw new Error('unexpected finish'); } };
 		const channel = new WorkspaceE2eChannel(database, dashboard, runtime, join(directory, 'artifacts'));
-		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 71 });
+		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 71, checkoutRevision: 'c'.repeat(40), checkoutRevisionUnavailableReason: null });
 		const request = { projectId: project.id, taskId: task.id, evidenceId: evidence.id };
 		await assert.rejects(channel.call(sender, 'retryCleanup', request), /Cleanup can only be retried/);
 		assert.equal(finishes, 0);
@@ -99,7 +113,7 @@ test('a destroyed project window cannot navigate after task-space creation', asy
 	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
 	try {
 		const project = database.createProject('Project');
-		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project', vcsKind: 'git', vcsRoot: '/checkout' });
+		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project' });
 		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Check page' });
 		const attempt = database.createProviderAttempt({ taskId: task.id, provider: 'codex', purpose: 'task', profileRef: 'profile-1', folderIdentity: 'dev:inode', cwd: '/checkout/project', mode: 'mutating', prompt: 'Fix page' });
 		const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }) as unknown as WebContents;
@@ -128,7 +142,7 @@ test('artifact write failure records confirmed cleanup without finishing the Ego
 	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
 	try {
 		const project = database.createProject('Project');
-		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project', vcsKind: 'git', vcsRoot: '/checkout' });
+		const binding = database.createFolderBinding({ projectId: project.id, path: '/checkout/project' });
 		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Check page' });
 		const attempt = database.createProviderAttempt({ taskId: task.id, provider: 'codex', purpose: 'task', profileRef: 'profile-1', folderIdentity: 'dev:inode', cwd: '/checkout/project', mode: 'mutating', prompt: 'Fix page' });
 		const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }) as unknown as WebContents;
@@ -196,7 +210,7 @@ test('concurrent cleanup retries close one task space once', async () => {
 		};
 		const channel = new WorkspaceE2eChannel(database, dashboard, runtime, join(directory, 'artifacts'));
 		await channel.call(sender, 'list', { projectId: project.id, taskId: task.id });
-		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 76 });
+		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 76, checkoutRevision: null, checkoutRevisionUnavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' });
 		database.finishWorkspaceE2eEvidence({ id: evidence.id, state: 'cleanupFailed', screenshotSha256: null, screenshotPath: null, logSha256: null, logPath: null, failure: 'Interrupted.', cleanupError: 'Task space unverified.' });
 		const request = { projectId: project.id, taskId: task.id, evidenceId: evidence.id };
 		const first = channel.call(sender, 'retryCleanup', request);

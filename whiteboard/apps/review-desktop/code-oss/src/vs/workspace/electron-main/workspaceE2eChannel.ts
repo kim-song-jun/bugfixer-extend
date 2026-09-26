@@ -11,6 +11,7 @@ import type { WorkspaceDashboardDTO } from '../common/workspaceDashboardProtocol
 import type { StartWorkspaceE2eRequest, WorkspaceE2eEvidenceDTO, WorkspaceE2eRequest, WorkspaceE2eStep } from '../common/workspaceE2eProtocol.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase, type WorkspaceE2eEvidence } from './workspaceDatabase.js';
+import { readWorkspaceE2eCheckoutRevision } from './workspaceE2eCheckoutRevision.js';
 import { EgoBrowserCaptureError } from './browserCapture/egoCaptureRuntime.js';
 import { EgoE2eEvidenceError, type EgoE2eRuntime, type EgoE2eRunResult } from './browserCapture/egoE2eRuntime.js';
 
@@ -145,11 +146,14 @@ export class WorkspaceE2eChannel {
 		const targetUrl = this.validateTargetUrl(request.targetUrl);
 		const scenario = this.validateScenario(request.scenario);
 		const environmentIdentity = this.validateEnvironment(request.environmentIdentity);
+		const binding = this.database.listFolderBindings(task.projectId).find(item => item.id === task.bindingId);
+		if (!binding) { throw new Error('The task checkout binding is unavailable.'); }
+		const checkoutRevision = await readWorkspaceE2eCheckoutRevision(binding);
 		const evidenceId = randomUUID();
 		let spaceId: number | undefined;
 		try {
 			spaceId = await this.runtime.createSpace();
-			const evidence = this.database.createWorkspaceE2eEvidence({ id: evidenceId, projectId: request.projectId, taskId: request.taskId, attemptId: request.attemptId, targetUrl, environmentIdentity, scenario, taskSpaceId: spaceId });
+			const evidence = this.database.createWorkspaceE2eEvidence({ id: evidenceId, projectId: request.projectId, taskId: request.taskId, attemptId: request.attemptId, targetUrl, environmentIdentity, scenario, taskSpaceId: spaceId, checkoutRevision: checkoutRevision.revision, checkoutRevisionUnavailableReason: checkoutRevision.unavailableReason });
 			if (this.closing || this.destroyed.has(sender) || sender.isDestroyed()) {
 				let result: EgoE2eRunResult;
 				try { result = await this.runtime.finish(spaceId); }
@@ -359,6 +363,6 @@ export class WorkspaceE2eChannel {
 	private parseScope(value: unknown): { projectId: string; taskId: string } { const item = this.record(value); if (typeof item.projectId !== 'string' || !isUUID(item.projectId) || typeof item.taskId !== 'string' || !isUUID(item.taskId)) { throw new Error('Valid project and task IDs are required.'); } return { projectId: item.projectId, taskId: item.taskId }; }
 	private parseRequest(value: unknown): WorkspaceE2eRequest { const item = this.record(value); const scope = this.parseScope(item); if (typeof item.evidenceId !== 'string' || !isUUID(item.evidenceId)) { throw new Error('A valid E2E evidence ID is required.'); } return { ...scope, evidenceId: item.evidenceId }; }
 	private record(value: unknown): Record<string, unknown> { if (typeof value !== 'object' || value === null || Array.isArray(value)) { throw new Error('An E2E request is required.'); } return value as Record<string, unknown>; }
-	private dto(value: WorkspaceE2eEvidence): WorkspaceE2eEvidenceDTO { return { id: value.id, taskId: value.taskId, attemptId: value.attemptId, targetUrl: value.targetUrl, environmentIdentity: value.environmentIdentity, scenario: value.scenario, state: value.state, taskSpaceId: value.taskSpaceId, screenshotSha256: value.screenshotSha256, screenshotPath: value.screenshotPath, logSha256: value.logSha256, logPath: value.logPath, failure: value.failure, cleanupError: value.cleanupError, createdAt: value.createdAt, completedAt: value.completedAt }; }
+	private dto(value: WorkspaceE2eEvidence): WorkspaceE2eEvidenceDTO { return { id: value.id, taskId: value.taskId, attemptId: value.attemptId, targetUrl: value.targetUrl, checkoutRevision: value.checkoutRevision, checkoutRevisionUnavailableReason: value.checkoutRevisionUnavailableReason, environmentIdentity: value.environmentIdentity, scenario: value.scenario, state: value.state, taskSpaceId: value.taskSpaceId, screenshotSha256: value.screenshotSha256, screenshotPath: value.screenshotPath, logSha256: value.logSha256, logPath: value.logPath, failure: value.failure, cleanupError: value.cleanupError, createdAt: value.createdAt, completedAt: value.completedAt }; }
 	private safeFailure(error: unknown): string { return (error instanceof Error ? error.message : 'Ego E2E operation failed.').replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 512); }
 }

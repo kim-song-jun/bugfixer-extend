@@ -217,7 +217,8 @@ export interface ProjectView {
 export interface WorkspaceE2eEvidence {
 	readonly id: string; readonly projectId: string; readonly taskId: string; readonly attemptId: string;
 	readonly targetUrl: string; readonly environmentIdentity: string; readonly scenario: readonly WorkspaceE2eStep[];
-	readonly checkoutSnapshot: string; readonly requesterSnapshot: string; readonly taskSpaceId: number;
+	readonly checkoutSnapshot: string; readonly checkoutRevision: string | null; readonly checkoutRevisionUnavailableReason: string | null;
+	readonly requesterSnapshot: string; readonly taskSpaceId: number;
 	readonly state: 'running' | 'passed' | 'failed' | 'cancelled' | 'cleanupFailed';
 	readonly screenshotSha256: string | null; readonly screenshotPath: string | null;
 	readonly logSha256: string | null; readonly logPath: string | null;
@@ -277,7 +278,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 16;
+const schemaVersion = 17;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -332,6 +333,7 @@ export class WorkspaceDatabase {
 				if (version < 14) { WorkspaceDatabase.migrateV14(db); }
 				if (version < 15) { WorkspaceDatabase.migrateV15(db); }
 				if (version < 16) { WorkspaceDatabase.migrateV16(db); }
+				if (version < 17) { WorkspaceDatabase.migrateV17(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -651,6 +653,14 @@ export class WorkspaceDatabase {
 			CREATE TRIGGER provider_attempt_parent_update BEFORE UPDATE OF parent_attempt_id, task_id ON provider_attempts
 			BEGIN SELECT RAISE(ABORT, 'provider attempt parent is immutable'); END;
 			PRAGMA user_version = 16;
+		`);
+	}
+
+	private static migrateV17(db: DatabaseSync): void {
+		db.exec(`
+			ALTER TABLE frontend_e2e_evidence ADD COLUMN checkout_revision TEXT;
+			ALTER TABLE frontend_e2e_evidence ADD COLUMN checkout_revision_unavailable_reason TEXT DEFAULT 'Revision capture was not available when this evidence was recorded.';
+			PRAGMA user_version = 17;
 		`);
 	}
 
@@ -1861,10 +1871,13 @@ export class WorkspaceDatabase {
 
 	createWorkspaceE2eEvidence(input: {
 		id?: string; projectId: string; taskId: string; attemptId: string; targetUrl: string; environmentIdentity: string;
-		scenario: readonly WorkspaceE2eStep[]; taskSpaceId: number;
+		scenario: readonly WorkspaceE2eStep[]; taskSpaceId: number; checkoutRevision: string | null; checkoutRevisionUnavailableReason: string | null;
 	}): WorkspaceE2eEvidence {
 		this.assertOpen();
 		if (!Number.isSafeInteger(input.taskSpaceId) || input.taskSpaceId < 1) { throw new Error('A durable Ego TaskSpace ID is required.'); }
+		if ((input.checkoutRevision === null) === (input.checkoutRevisionUnavailableReason === null)) { throw new Error('E2E checkout evidence must contain either a revision or an unavailable reason.'); }
+		if (input.checkoutRevision !== null && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(input.checkoutRevision)) { throw new Error('E2E checkout revision must be a full hexadecimal commit ID.'); }
+		if (input.checkoutRevisionUnavailableReason !== null && (!input.checkoutRevisionUnavailableReason.trim() || input.checkoutRevisionUnavailableReason.length > 512)) { throw new Error('E2E checkout revision unavailable reason is invalid.'); }
 		return this.transaction(() => {
 			const task = this.getTask(input.taskId);
 			const attempt = this.getProviderAttempt(input.attemptId);
@@ -1872,12 +1885,13 @@ export class WorkspaceDatabase {
 			if (!attempt || attempt.taskId !== task.id || attempt.purpose !== 'task') { throw new Error('E2E evidence requires a provider attempt linked to this task.'); }
 			const binding = this.listFolderBindings(input.projectId).find(item => item.id === task.bindingId);
 			if (!binding) { throw new Error('The task checkout binding is unavailable.'); }
+			if (binding.vcsKind === null ? input.checkoutRevision !== null : input.checkoutRevision === null) { throw new Error('E2E checkout revision evidence does not match the task checkout binding.'); }
 			const id = input.id ?? randomUUID();
 			const now = new Date().toISOString();
 			const checkoutSnapshot = JSON.stringify({ bindingId: binding.id, path: binding.path, vcsKind: binding.vcsKind, vcsRoot: binding.vcsRoot, reviewRepositoryId: binding.reviewRepositoryId, folderIdentity: attempt.folderIdentity, cwd: attempt.cwd });
 			const requesterSnapshot = JSON.stringify({ attemptId: attempt.attemptId, provider: attempt.provider, profileRef: attempt.profileRef, requestedAt: now });
-			this.db.prepare(`INSERT INTO frontend_e2e_evidence (id, project_id, task_id, attempt_id, target_url, environment_identity, scenario_json, checkout_snapshot, requester_snapshot, task_space_id, state, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`).run(id, input.projectId, input.taskId, input.attemptId, input.targetUrl, input.environmentIdentity, JSON.stringify(input.scenario), checkoutSnapshot, requesterSnapshot, input.taskSpaceId, now);
+			this.db.prepare(`INSERT INTO frontend_e2e_evidence (id, project_id, task_id, attempt_id, target_url, environment_identity, scenario_json, checkout_snapshot, checkout_revision, checkout_revision_unavailable_reason, requester_snapshot, task_space_id, state, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`).run(id, input.projectId, input.taskId, input.attemptId, input.targetUrl, input.environmentIdentity, JSON.stringify(input.scenario), checkoutSnapshot, input.checkoutRevision, input.checkoutRevisionUnavailableReason, requesterSnapshot, input.taskSpaceId, now);
 			return this.getWorkspaceE2eEvidence(id)!;
 		});
 	}
@@ -2069,7 +2083,9 @@ export class WorkspaceDatabase {
 		return {
 			id: String(row.id), projectId: String(row.project_id), taskId: String(row.task_id), attemptId: String(row.attempt_id),
 			targetUrl: String(row.target_url), environmentIdentity: String(row.environment_identity), scenario: JSON.parse(String(row.scenario_json)) as WorkspaceE2eStep[],
-			checkoutSnapshot: String(row.checkout_snapshot), requesterSnapshot: String(row.requester_snapshot), taskSpaceId: Number(row.task_space_id),
+			checkoutSnapshot: String(row.checkout_snapshot), checkoutRevision: row.checkout_revision as string | null,
+			checkoutRevisionUnavailableReason: row.checkout_revision_unavailable_reason as string | null,
+			requesterSnapshot: String(row.requester_snapshot), taskSpaceId: Number(row.task_space_id),
 			state: row.state as WorkspaceE2eEvidence['state'], screenshotSha256: row.screenshot_sha256 as string | null,
 			screenshotPath: row.screenshot_path as string | null, logSha256: row.log_sha256 as string | null, logPath: row.log_path as string | null,
 			failure: row.failure as string | null, cleanupError: row.cleanup_error as string | null, createdAt: String(row.created_at), completedAt: row.completed_at as string | null,
