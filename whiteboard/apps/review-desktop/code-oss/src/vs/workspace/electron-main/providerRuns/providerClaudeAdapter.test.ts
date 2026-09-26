@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { homedir } from 'node:os';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { ProviderRunRequest } from './providerRunTypes.js';
@@ -36,11 +36,23 @@ test('builds a shell-free Claude command with isolated profile and enforced plan
 });
 
 test('Claude default profile uses the CLI default while custom profiles remain isolated', () => {
-	const defaultCommand = createClaudeProviderCommand(request({ profileDirectory: join(homedir(), '.claude') }));
+	const defaultCommand = createClaudeProviderCommand(request({ profileDirectory: join(userInfo().homedir, '.claude') }));
 	assert.equal(defaultCommand.env, undefined);
 
 	const customCommand = createClaudeProviderCommand(request({ profileDirectory: '/profile/claude-custom' }));
 	assert.deepEqual(customCommand.env, { CLAUDE_CONFIG_DIR: '/profile/claude-custom' });
+});
+
+test('Claude default profile remains native when HOME differs from the account home', () => {
+	const priorHome = process.env.HOME;
+	try {
+		process.env.HOME = '/tmp/claude-home-override';
+		const command = createClaudeProviderCommand(request({ profileDirectory: join(userInfo().homedir, '.claude') }));
+		assert.equal(command.env, undefined);
+	} finally {
+		if (priorHome === undefined) delete process.env.HOME;
+		else process.env.HOME = priorHome;
+	}
 });
 
 test('Claude task mode accepts project edits while denying tools that need a prompt broker', () => {
