@@ -62,7 +62,7 @@ The current Review source navigator is not the editable project surface required
 ## Decisions still open
 
 - The provider-specific delivery and precedence of app-managed conventions alongside any instructions a Claude, Codex, or Antigravity runtime reads on its own. The app must show what it can verify about the actual instruction payload.
-- The selected declarative connector schema, host-owned authentication and credential handling, permission display, Notion authorization route, and logged-in website capture path still need detailed design and source validation. [Reference import research](reference-import-research.md) records the official API constraints; executable connector code is outside the first release.
+- The selected declarative connector schema, host-owned authentication and credential handling, permission display, Notion authorization route, and logged-in website capture path still need detailed design and source validation. The [candidate package format](declarative-connector-format.md) defines a proposed v1; [reference import research](reference-import-research.md) records the official API constraints. Executable connector code is outside the first release.
 - The Antigravity subscription-account scope, provider credential-isolation smoke tests, run recovery contract, Docker boundary, and Windows equivalents.
 - Whether “Windows x86” means 32-bit x86 or x86-64. Whiteboard currently packages `win32-x64`; the target architecture must not assume that settles the user's requested platform.
 - The exact project bootstrap, dashboard/editor/review tab integration, per-project window restoration, and project-aware review-open routing still need implementation and runtime verification; the one-window-per-project behavior is selected.
