@@ -36,6 +36,14 @@ Following the desktop package manifests and root pnpm workspace overrides yields
 
 Root `package.json`, `pnpm-workspace.yaml`, the lockfile, build scripts, and referenced resources are also needed. The root declares Node `>=24 <25` and pnpm `>=11 <12`; its `.nvmrc` is `24`, while the Code OSS fork pins Node `24.18.0` in its own `.nvmrc`. Desktop build scripts switch to the fork's exact Node version with `fnm` or `nvm` and run a separate `npm ci` against the fork lockfile. The documented macOS prerequisites include Python 3 and a C/C++ toolchain. A source snapshot is not a built app: scripts also obtain pinned extension VSIX files, Electron, and runtime binaries such as `diffr`. The closure above follows manifests; build and packaging scripts consume further tracked files and downloaded artifacts, so a source import needs a build and launch check against the committed tree.
 
+## Isolated upstream macOS baseline rehearsal
+
+On 2026-09-26, a disposable `git archive` of the pinned commit built and launched on macOS arm64 outside the Bugfixer Extend repository. Root Node `24.15.0` and pnpm `11.1.2` ran `pnpm install --frozen-lockfile --prefer-offline --child-concurrency=1` successfully. The desktop script installed its Code OSS pin, Node `24.18.0`, and `pnpm desktop:build` exited successfully. The resulting development tree contained an executable `Whiteboard.app`, `code-oss/out/main.js`, `packages/review/dist/server/desktop-host.js`, and the Review CLI.
+
+An initial development launch failed before server startup because the temporary user-data path made Code OSS's IPC socket path 126 bytes long, above its 103-character warning threshold. With a short temporary state path, the same built app launched and `/health` returned HTTP 200 with `ok: true` and `desktopAttached: true`. The final isolated launch also set `DEV_REVIEW_IMPORT_FROM=none` and `DEV_FAST_REVIEW_SHARED_DATA_DIR` to a temporary directory so it neither imported the user's VS Code settings nor selected the default shared storage path. The app and its child processes exited after `TERM`, and its Review port closed. These environment controls should be retained in later disposable-profile checks; raw run logs include an ephemeral server token and must not be committed.
+
+This rehearsal proves only the unmodified upstream development build and launch. It does not prove a build from Bugfixer Extend's future imported commit, a packaged app, or any new project-mode behavior.
+
 ## First-slice source seams
 
 The selected first slice puts an editable project, dashboard, task board, and task-linked Review tabs in one native window. These are the concrete seams in the pinned source; they are implementation targets, not changes already made:
