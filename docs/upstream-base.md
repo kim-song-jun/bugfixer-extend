@@ -8,6 +8,12 @@ Status: source inventory for the selected desktop foundation. No Whiteboard code
 - The [root license](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/LICENSE) and [desktop license](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/LICENSE) are MIT. The desktop license identifies its embedded Code OSS fork and points to `apps/review-desktop/code-oss/LICENSE.txt` and `ThirdPartyNotices.txt`; additional fork notices are in `code-oss/licenses/`. The packaged Review runtime also requires `packages/review/THIRD_PARTY_NOTICES.md`. An imported source snapshot and packaged app must retain the applicable notices and preserve the Whiteboard copyright attribution.
 - [`apps/review-desktop/UPSTREAM`](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/UPSTREAM) records the Code OSS upstream pin and fork changes. Bugfixer Extend needs its own source pin and change record alongside this existing history.
 
+## Import integrity baseline
+
+At the pinned commit, the source tree object is `300cc9004c2a5b6cf43386d551c8dcfa68705a22`. It has 7,449 tracked blobs: 7,409 regular files (`100644`) and 40 executable files (`100755`), with no tracked symlink or submodule. The tracked blob payload is 108,912,698 bytes (about 104 MiB); the local checkout occupies about 176 MB including roughly 55 MB of `.git` data. These are source-snapshot measurements, not an estimate of installed dependencies or a packaged app.
+
+For a direct source import, preserve every tracked relative path, file content, and executable bit while excluding the source `.git` directory and local build products. Compare the imported tree against the pinned `git ls-tree` entries, not just the file count, and review tracked contents for credentials or private project material before the first public push. At the current Bugfixer Extend root, the only direct tracked-path collision is `README.md`; merging at the root would still require reconciling workspace and build behavior, while a nested import keeps the source's root contract together. The import layout is awaiting the user's choice.
+
 ## Buildable source boundary
 
 `apps/review-desktop/code-oss/` is a tracked fork, about 100 MB in the local checkout. Its review UI also depends on the surrounding pnpm workspace. The desktop's `scripts/run.sh` requires the built Review server at `packages/review/dist/server/desktop-host.js`; copying the Code OSS folder alone would leave that runtime missing.
