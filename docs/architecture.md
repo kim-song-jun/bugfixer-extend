@@ -52,6 +52,24 @@ Every project receives an app-generated UUID that remains stable when its local 
 
 The two databases have no shared transaction. The durable outgoing request and Whiteboard receipt make a lost response recoverable. A backup must capture both databases using SQLite-aware backup operations, then validate saved review links on restore. Copying only the main SQLite file while WAL is active would be unsafe.
 
+## Selected conventions: app-authored project document
+
+Each project has a human-readable, versioned convention document in `workspace.db`. The app is its source of truth; a repository file is not required. People can edit the document in project settings and export it as Markdown. The document is organized for reading: each rule has a clear statement, reason, good and avoided examples, applicable work type, and linked sources. Examples generated for explanation are labeled as examples rather than presented as quotes from a source.
+
+The app generates draft documents from reference material through this flow:
+
+1. The user starts from source snapshots imported through Slack, Notion, websites, or another installed connector. An agent may propose a relevant set; the final input list, origin, and retrieval time remain visible before drafting.
+2. A drafting agent writes a **draft** with a source link for every source-derived rule and readable examples. The imported material is still reference data at this point, not an agent instruction.
+3. A separate checking run compares the draft with the selected sources, flags unsupported claims, contradictions, duplicated rules, sensitive material, and examples that appear to be factual quotes without evidence. It records findings with rule and source references. This agent check informs the user; it does not approve the document.
+4. The project settings show the complete document, examples, sources, checker findings, and a diff from the active version. The user can edit and explicitly **Apply** a reviewed version. Only that action makes the version available as project instructions. A later source refresh proposes an update rather than silently rewriting the active version.
+5. At each agent launch, the app captures the exact active version, rendered instruction text, source/version IDs, ordering, content hash, and provider delivery path in a run snapshot. The run view shows the same text. A missing or invalid required section is an explicit preflight error.
+
+The provider adapter must account for any instructions the underlying CLI loads on its own, so the app does not blindly send the same rule twice. If an adapter cannot establish the effective instruction set, the UI reports that limitation instead of claiming that the preview is complete. Imported reference text is never promoted to instructions by merely appearing in a task or connector result.
+
+This design reuses only the Bugfixer concept that the visible rules and injected rules must agree. It does not copy Molcube-specific convention text, paths, snapshots, or the old redaction implementation. Credential masking by itself would not remove organization-specific instructions from a private document.
+
+The convention flow is accepted only when a selected reference set produces a draft while the active version stays unchanged; an independent check surfaces a contradictory or unsupported rule; the user can read its reasons, examples, and linked sources before applying; and the next real agent run records the exact applied version and payload. Exported Markdown must retain the readable structure and source labels.
+
 ## Minimal first slice
 
 The first implementation slice needs projects, checkout bindings, tasks, outgoing review requests, and review links. These records are enough to prove project selection, a task created on the board, and a task-linked review. The next slice adds runs and run events together with a real agent dispatch path, so the board never presents an inert run as a working agent. Reference snapshots, conventions, connectors, and E2E evidence extend this same app-owned model in later slices; they do not move into Whiteboard's review store.
@@ -65,6 +83,6 @@ The slice is accepted only when:
 
 ## Next design boundary
 
-Project conventions, provider accounts, connector permissions, Docker execution, and E2E evidence still need their own contracts. The first of those is how a project selects convention sources and how the exact injected rules are shown and snapshotted for each agent run.
+Provider accounts, connector permissions, Docker execution, and E2E evidence still need their own contracts. Provider-specific native instruction loading and delivery verification are part of the account/adapter section; the app-managed convention lifecycle above is selected.
 
 Source evidence and remaining product decisions are recorded in [discovery.md](discovery.md).
