@@ -229,6 +229,15 @@
 .project-dashboard__connector-connect select, .project-dashboard__connector-import select { max-width: 100%; }
 .project-dashboard__connector-import .project-dashboard__form-actions, .project-dashboard__connector-connect .project-dashboard__form-actions { margin-top: 2px; }
 .project-dashboard__connector-account button { flex: 0 0 auto; }
+.project-dashboard__connector-preview-region { max-width: 620px; }
+.project-dashboard__connector-preview { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--dashboard-accent); border-radius: 8px; background: var(--dashboard-card); }
+.project-dashboard__connector-preview h4, .project-dashboard__connector-preview h5 { margin: 0; font-size: 12px; }
+.project-dashboard__connector-preview dl { display: grid; grid-template-columns: minmax(105px, 150px) minmax(0, 1fr); gap: 6px 10px; margin: 0; font-size: 11px; }
+.project-dashboard__connector-preview dt { color: var(--vscode-descriptionForeground); }
+.project-dashboard__connector-preview dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family, monospace); }
+.project-dashboard__connector-preview-content { box-sizing: border-box; max-height: 300px; overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--dashboard-line); border-radius: 6px; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); font: 11px/1.5 var(--vscode-editor-font-family, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.project-dashboard__connector-preview-disclosure { margin: 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.5; }
+.project-dashboard__connector-preview .project-dashboard__form-actions { margin-top: 2px; }
 .project-dashboard__package-connectors { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--dashboard-line); }
 .project-dashboard__package-upload, .project-dashboard__package-review, .project-dashboard__package-card { display: grid; gap: 8px; min-width: 0; margin-top: 11px; padding: 12px; border: 1px solid var(--dashboard-line); border-radius: 8px; background: var(--dashboard-card); }
 .project-dashboard__package-upload label, .project-dashboard__package-import label { font-size: 11px; font-weight: 600; }
@@ -236,6 +245,17 @@
 .project-dashboard__package-review h4, .project-dashboard__package-card h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .project-dashboard__package-review h5 { margin: 8px 0 0; font-size: 11px; }
 .project-dashboard__package-review > p, .project-dashboard__package-card > p { margin: 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.project-dashboard__package-refresh { display: grid; gap: 7px; min-width: 0; margin-top: 9px; padding-top: 10px; border-top: 1px solid var(--dashboard-line); }
+.project-dashboard__package-refresh h5 { margin: 0; font-size: 11px; }
+.project-dashboard__package-refresh > p { margin: 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.project-dashboard__package-refresh label { font-size: 11px; font-weight: 600; }
+.project-dashboard__package-refresh select { box-sizing: border-box; width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--vscode-input-border, #C8CFD8); border-radius: 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); font: inherit; font-size: 11px; }
+.project-dashboard__package-refresh select:focus { outline: 2px solid var(--dashboard-accent); outline-offset: 0; }
+.project-dashboard__package-refresh-status.is-error { color: var(--vscode-errorForeground); }
+.project-dashboard__package-refresh-status.is-success { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
+.project-dashboard__package-refresh details { min-width: 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.project-dashboard__package-refresh details summary { cursor: pointer; }
+.project-dashboard__package-refresh details ol { display: grid; gap: 4px; max-height: 130px; overflow: auto; margin: 7px 0 0; padding-left: 20px; overflow-wrap: anywhere; }
 .project-dashboard__package-review dl { display: grid; grid-template-columns: minmax(135px, 190px) minmax(0, 1fr); gap: 6px 10px; margin: 3px 0; font-size: 11px; }
 .project-dashboard__package-review dt { color: var(--vscode-descriptionForeground); }
 .project-dashboard__package-review dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family, monospace); }

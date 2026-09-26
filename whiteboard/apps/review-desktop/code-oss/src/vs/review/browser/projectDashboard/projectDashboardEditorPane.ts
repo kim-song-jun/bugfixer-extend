@@ -12,9 +12,9 @@ import type { ReorderWorkspaceDashboardTasksRequest, TrashWorkspaceDashboardTask
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import type { OrdinaryFolderMutationGrantDTO, ProviderAttemptDTO, ProviderAttemptEventDTO, ProviderId, ProviderRunPreviewDTO } from '../../../workspace/common/workspaceProviderRunProtocol.js';
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../../workspace/common/workspaceProviderRunProtocol.js';
-import type { WorkspaceKnowledgeDTO } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
+import type { WorkspaceKnowledgeDTO, WorkspaceReferenceDTO } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
-import type { WorkspaceConnectorAccountDTO, WorkspaceConnectorId } from '../../../workspace/common/workspaceConnectorProtocol.js';
+import type { PreviewNotionPageRequest, PreviewSlackConversationRequest, WorkspaceConnectorAccountDTO, WorkspaceConnectorId, WorkspaceConnectorPreviewDTO } from '../../../workspace/common/workspaceConnectorProtocol.js';
 import { WORKSPACE_CONNECTOR_CHANNEL } from '../../../workspace/common/workspaceConnectorProtocol.js';
 import type { WorkspaceInstalledPackageDTO, WorkspacePackageReviewDTO, WorkspaceSignedPackageEnvelope } from '../../../workspace/common/workspacePackageConnectorProtocol.js';
 import { WORKSPACE_PACKAGE_CONNECTOR_CHANNEL } from '../../../workspace/common/workspacePackageConnectorProtocol.js';
@@ -36,6 +36,19 @@ const columns = [
 type DashboardTaskState = WorkspaceDashboardTaskItemDTO['state'];
 type DashboardTaskView = 'board' | 'archived' | 'trash';
 type KnowledgeView = 'references' | 'conventions';
+type ConnectorPreviewRequest =
+	| { readonly command: 'previewSlackConversation'; readonly payload: PreviewSlackConversationRequest }
+	| { readonly command: 'previewNotionPage'; readonly payload: PreviewNotionPageRequest };
+interface PackageRefreshCandidate {
+	readonly reference: WorkspaceReferenceDTO;
+	readonly sourceId: string;
+	readonly sourceKey: string;
+	readonly sourceLabel: string;
+}
+interface PackageRefreshState {
+	readonly state: 'loading' | 'error' | 'success';
+	readonly message: string;
+}
 
 function createElement<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
 	const element = document.createElement(tag);
@@ -142,6 +155,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private egoCapturedTaskTitle: string | undefined;
 	private conventionAgentProvider: ProviderId = 'claude';
 	private conventionAgentOperation: 'draft' | 'check' = 'draft';
+	private conventionCheckVersionId: string | undefined;
 	private conventionAgentSourceIds = new Set<string>();
 	private conventionAgentPreview: ConventionAgentPreviewDTO | undefined;
 	private conventionAgentResult: ConventionAgentResultDTO | undefined;
@@ -167,6 +181,13 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private connectorImportIdDraft = '';
 	private connectorImportTitleDraft = '';
 	private connectorImportMessageTsDraft = '';
+	private connectorPreview: WorkspaceConnectorPreviewDTO | undefined;
+	private connectorPreviewAccountId: string | undefined;
+	private connectorPreviewRequest: ConnectorPreviewRequest | undefined;
+	private connectorPreviewLoading = false;
+	private connectorPreviewError: string | undefined;
+	private connectorPreviewGeneration = 0;
+	private connectorOperationGeneration = 0;
 	private installedPackages: readonly WorkspaceInstalledPackageDTO[] = [];
 	private packageReview: WorkspacePackageReviewDTO | undefined;
 	private packageEnvelope: WorkspaceSignedPackageEnvelope | undefined;
@@ -177,6 +198,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private packageFileName = '';
 	private readonly packageSourceIds = new Map<string, string>();
 	private packageSourceKey = '';
+	private readonly packageRefreshReferenceIds = new Map<string, string>();
+	private readonly packageRefreshStates = new Map<string, PackageRefreshState>();
+	private packageRefreshGeneration = 0;
 	private readonly refreshOnReturn = () => {
 		if (document.visibilityState === 'visible' && this.selectedTaskId) void this.loadAttempts();
 	};
@@ -212,6 +236,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	override async setInput(input: ProjectDashboardEditorInput, options: unknown, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		if (this.projectId) {
+			try { await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'clearPreviews', { projectId: this.projectId }); }
+			catch (error) { console.error('Could not clear source previews while changing dashboard input.', error); }
+		}
+		this.clearConnectorPreview();
 		await this.closeEgoCapture();
 		await this.flushDashboardState();
 		await super.setInput(input, options as never, context, token);
@@ -228,6 +257,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.connectorLoading = false;
 		this.connectorError = undefined;
 		this.connectorMessage = undefined;
+		this.connectorBusy = false;
+		this.connectorPreviewLoading = false;
 		this.connectorTokenDraft = '';
 		this.connectorImportIdDraft = '';
 		this.connectorImportTitleDraft = '';
@@ -248,10 +279,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.packageFileName = '';
 		this.packageSourceIds.clear();
 		this.packageSourceKey = '';
+		this.packageRefreshReferenceIds.clear();
+		this.packageRefreshStates.clear();
+		this.packageRefreshGeneration++;
 		this.conventionSourceIdsDraft.clear();
 		this.egoStatus = undefined;
 		if (!this.egoCaptureId) { this.egoTaskId = undefined; this.egoProjectId = undefined; this.egoError = undefined; }
 		this.conventionAgentPreview = undefined; this.conventionAgentResult = undefined; this.conventionAgentError = undefined; this.conventionAgentNotice = undefined;
+		this.conventionCheckVersionId = undefined;
 		this.reviewLinks = []; this.reviewPendingCreates = []; this.reviewLinksTaskId = undefined; this.reviewAvailabilityError = undefined; this.reviewBridgeError = undefined; this.reviewBridgeNotice = undefined;
 		this.trashConfirmationTaskId = undefined;
 		this.selectedTaskId = undefined;
@@ -310,12 +345,116 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const accounts = await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'listAccounts', projectId) as readonly WorkspaceConnectorAccountDTO[];
 			if (this.projectId === projectId) {
 				this.connectorAccounts = accounts;
+				if (this.connectorPreviewAccountId && !accounts.some(account => account.id === this.connectorPreviewAccountId && account.state === 'active')) this.clearConnectorPreview();
 				if (!accounts.some(account => account.id === this.connectorImportAccountId && account.state === 'active')) this.connectorImportAccountId = accounts.find(account => account.provider === this.connectorProvider && account.state === 'active')?.id ?? accounts.find(account => account.state === 'active')?.id ?? '';
 			}
 		} catch (error) {
 			if (this.projectId === projectId) this.connectorError = this.errorMessage(error, 'Could not load connected accounts.');
 		} finally {
 			if (this.projectId === projectId) { this.connectorLoading = false; this.render(); }
+		}
+	}
+
+	private clearConnectorPreview(): void {
+		this.connectorPreviewGeneration++;
+		this.connectorPreview = undefined;
+		this.connectorPreviewAccountId = undefined;
+		this.connectorPreviewRequest = undefined;
+		this.connectorPreviewLoading = false;
+		this.connectorPreviewError = undefined;
+	}
+
+	private async requestConnectorPreview(request: ConnectorPreviewRequest): Promise<void> {
+		if (this.connectorBusy || !this.projectId) return;
+		const projectId = this.projectId;
+		const generation = ++this.connectorPreviewGeneration;
+		const operation = ++this.connectorOperationGeneration;
+		this.connectorPreview = undefined;
+		this.connectorPreviewAccountId = request.payload.accountId;
+		this.connectorPreviewRequest = request;
+		this.connectorPreviewLoading = true;
+		this.connectorPreviewError = undefined;
+		this.connectorError = undefined;
+		this.connectorMessage = undefined;
+		this.connectorBusy = true;
+		this.render();
+		try {
+			const preview = await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, request.command, request.payload) as WorkspaceConnectorPreviewDTO;
+			if (this.projectId !== projectId || this.connectorPreviewGeneration !== generation) return;
+			if (!/^[a-f0-9-]{36}$/i.test(preview.previewId) || !/^[a-f0-9]{64}$/.test(preview.contentSha256)
+				|| !Number.isFinite(Date.parse(preview.expiresAt)) || Date.parse(preview.expiresAt) <= Date.now()
+				|| new TextEncoder().encode(preview.derivedText).byteLength > 1024 * 1024) {
+				throw new Error('The connector returned an invalid or expired preview. Try previewing the source again.');
+			}
+			this.connectorPreview = preview;
+			this.connectorMessage = 'Preview ready. Review this snapshot before importing.';
+		} catch (error) {
+			if (this.projectId === projectId && this.connectorPreviewGeneration === generation) {
+				this.connectorPreviewError = this.errorMessage(error, 'Could not preview this source.');
+			}
+		} finally {
+			if (this.connectorOperationGeneration === operation) {
+				this.connectorPreviewLoading = false;
+				this.connectorBusy = false;
+				this.render();
+			}
+		}
+	}
+
+	private async importReviewedConnectorPreview(preview: WorkspaceConnectorPreviewDTO, accountId: string): Promise<void> {
+		if (this.connectorBusy || !this.projectId || this.connectorPreview?.previewId !== preview.previewId || this.connectorPreviewAccountId !== accountId) return;
+		const projectId = this.projectId;
+		if (!Number.isFinite(Date.parse(preview.expiresAt)) || Date.parse(preview.expiresAt) <= Date.now()) {
+			this.clearConnectorPreview();
+			this.connectorPreviewError = 'This source preview expired. Preview the source again before importing.';
+			this.render();
+			return;
+		}
+		const taskId = this.selectedTaskId;
+		const generation = this.connectorPreviewGeneration;
+		const operation = ++this.connectorOperationGeneration;
+		this.connectorBusy = true;
+		this.connectorPreviewError = undefined;
+		this.connectorError = undefined;
+		this.connectorMessage = undefined;
+		this.render();
+		try {
+			const reference = await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'importPreview', {
+				projectId, accountId, previewId: preview.previewId,
+			}) as WorkspaceReferenceDTO;
+			if (reference.connectorId !== preview.connectorId || reference.externalId !== preview.externalId
+				|| reference.sourceUri !== preview.sourceUri || reference.title !== preview.title
+				|| reference.contentSha256 !== preview.contentSha256) {
+				throw new Error('The saved source identity did not match the reviewed preview.');
+			}
+			if (this.projectId !== projectId || this.connectorPreviewGeneration !== generation) return;
+			this.clearConnectorPreview();
+			this.connectorImportIdDraft = '';
+			this.connectorImportTitleDraft = '';
+			this.connectorImportMessageTsDraft = '';
+			if (taskId) {
+				try {
+					await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'attachTaskReference', { projectId, taskId, snapshotId: reference.id });
+				} catch (error) {
+					this.connectorPreviewError = `Source imported, but it could not be linked to the selected task: ${this.errorMessage(error, 'linking failed')}`;
+					this.connectorMessage = 'Source imported. You can link it from the source list.';
+					await this.loadKnowledge();
+					return;
+				}
+			}
+			this.connectorMessage = taskId ? 'Source imported and linked to the original task.' : 'Source imported. Select a task to link it.';
+			await this.loadKnowledge();
+		} catch (error) {
+			if (this.projectId === projectId) {
+				const message = this.errorMessage(error, 'The reviewed source could not be imported.');
+				if (/source preview (?:expired|is no longer available)/i.test(message)) this.clearConnectorPreview();
+				this.connectorPreviewError = message;
+			}
+		} finally {
+			if (this.connectorOperationGeneration === operation) {
+				this.connectorBusy = false;
+				this.render();
+			}
 		}
 	}
 
@@ -357,14 +496,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const meta = details.appendChild($('span')); meta.textContent = `${account.remoteIdentity} · ${account.state === 'active' ? 'Connected' : 'Keychain cleanup pending'}`;
 			const action = row.appendChild(createElement('button', 'project-dashboard__secondary')); action.type = 'button'; action.disabled = this.connectorBusy;
 			action.textContent = account.state === 'active' ? 'Disconnect' : 'Retry cleanup';
-			action.addEventListener('click', () => { if (!projectId) return; void this.runConnectorAction(() => ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, account.state === 'active' ? 'disconnectAccount' : 'retryAccountCleanup', { projectId, accountId: account.id }), account.state === 'active' ? 'Account disconnected.' : 'Keychain cleanup completed.'); });
+			action.addEventListener('click', () => { if (!projectId) return; if (account.id === this.connectorPreviewAccountId) { this.clearConnectorPreview(); } void this.runConnectorAction(() => ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, account.state === 'active' ? 'disconnectAccount' : 'retryAccountCleanup', { projectId, accountId: account.id }), account.state === 'active' ? 'Account disconnected.' : 'Keychain cleanup completed.'); });
 		}
 		const form = section.appendChild(createElement('form', 'project-dashboard__connector-connect'));
 		const formTitle = form.appendChild($('h4')); formTitle.textContent = 'Connect an account';
 		const providerLabel = form.appendChild(createElement('label')); providerLabel.htmlFor = 'connector-provider'; providerLabel.textContent = 'Service';
 		const provider = form.appendChild(createElement('select')); provider.id = 'connector-provider'; provider.disabled = this.connectorBusy;
 		for (const [value, text] of [['slack', 'Slack'], ['notion', 'Notion']] as const) { const option = provider.appendChild($('option') as HTMLOptionElement); option.value = value; option.textContent = text; }
-		provider.value = this.connectorProvider; provider.addEventListener('change', () => { this.connectorProvider = provider.value as WorkspaceConnectorId; });
+		provider.value = this.connectorProvider; provider.addEventListener('change', () => { this.connectorProvider = provider.value as WorkspaceConnectorId; clearReview(); });
 		const tokenLabel = form.appendChild(createElement('label')); tokenLabel.htmlFor = 'connector-token'; tokenLabel.textContent = 'Access token';
 		const token = form.appendChild(createElement('input')); token.id = 'connector-token'; token.type = 'password'; token.autocomplete = 'off'; token.spellcheck = false; token.required = true; token.value = this.connectorTokenDraft; token.disabled = this.connectorBusy; token.dataset.focusKey = 'connector-token';
 		token.addEventListener('input', () => { this.connectorTokenDraft = token.value; });
@@ -373,43 +512,59 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const connect = connectActions.appendChild(createElement('button', 'project-dashboard__primary')); connect.type = 'submit'; connect.disabled = this.connectorBusy; connect.textContent = this.connectorBusy ? 'Connecting…' : 'Connect';
 		form.addEventListener('submit', event => { event.preventDefault(); const tokenValue = token.value; if (!projectId || !tokenValue) return; token.value = ''; this.connectorTokenDraft = ''; void this.runConnectorAction(() => ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'connectAccount', { projectId, provider: this.connectorProvider, token: tokenValue }), 'Account connected.'); });
 		const importForm = section.appendChild(createElement('form', 'project-dashboard__connector-import'));
-		const importTitle = importForm.appendChild($('h4')); importTitle.textContent = 'Import a conversation or page';
+		const previewRegion = section.appendChild($('.project-dashboard__connector-preview-region'));
+		const clearReview = () => {
+			this.clearConnectorPreview();
+			if (this.connectorMessage?.startsWith('Preview ready.')) this.connectorMessage = undefined;
+			previewRegion.replaceChildren();
+		};
+		const importTitle = importForm.appendChild($('h4')); importTitle.textContent = 'Preview and import a conversation or page';
 		const accountLabel = importForm.appendChild(createElement('label')); accountLabel.htmlFor = 'connector-account'; accountLabel.textContent = 'Connected account';
 		const accountSelect = importForm.appendChild(createElement('select')); accountSelect.id = 'connector-account'; accountSelect.disabled = this.connectorBusy;
 		for (const account of this.connectorAccounts.filter(item => item.state === 'active')) { const option = accountSelect.appendChild($('option') as HTMLOptionElement); option.value = account.id; option.textContent = `${account.provider === 'slack' ? 'Slack' : 'Notion'} · ${account.label}`; }
 		accountSelect.value = this.connectorImportAccountId;
 		const selectedAccount = () => this.connectorAccounts.find(item => item.id === accountSelect.value && item.state === 'active');
-		accountSelect.addEventListener('change', () => { this.connectorImportAccountId = accountSelect.value; messageTsField.hidden = selectedAccount()?.provider !== 'slack'; });
+		accountSelect.addEventListener('change', () => { this.connectorImportAccountId = accountSelect.value; messageTsField.hidden = selectedAccount()?.provider !== 'slack'; clearReview(); });
 		const idLabel = importForm.appendChild(createElement('label')); idLabel.htmlFor = 'connector-remote-id'; idLabel.textContent = 'Slack channel ID or Notion page ID';
-		const remoteId = importForm.appendChild(createElement('input')); remoteId.id = 'connector-remote-id'; remoteId.required = true; remoteId.autocomplete = 'off'; remoteId.placeholder = 'Slack: C… · Notion: page UUID'; remoteId.value = this.connectorImportIdDraft; remoteId.disabled = this.connectorBusy || !this.connectorAccounts.some(account => account.state === 'active'); remoteId.dataset.focusKey = 'connector-remote-id'; remoteId.addEventListener('input', () => { this.connectorImportIdDraft = remoteId.value; });
+		const remoteId = importForm.appendChild(createElement('input')); remoteId.id = 'connector-remote-id'; remoteId.required = true; remoteId.autocomplete = 'off'; remoteId.placeholder = 'Slack: C… · Notion: page UUID'; remoteId.value = this.connectorImportIdDraft; remoteId.disabled = this.connectorBusy || !this.connectorAccounts.some(account => account.state === 'active'); remoteId.dataset.focusKey = 'connector-remote-id'; remoteId.addEventListener('input', () => { this.connectorImportIdDraft = remoteId.value; clearReview(); });
 		const messageTsField = importForm.appendChild(createElement('div')); messageTsField.hidden = selectedAccount()?.provider !== 'slack';
 		const messageTsLabel = messageTsField.appendChild(createElement('label')); messageTsLabel.htmlFor = 'connector-slack-message-ts'; messageTsLabel.textContent = 'Slack message timestamp (optional)';
-		const messageTs = messageTsField.appendChild(createElement('input')); messageTs.id = 'connector-slack-message-ts'; messageTs.type = 'text'; messageTs.autocomplete = 'off'; messageTs.placeholder = '1712345678.123456'; messageTs.value = this.connectorImportMessageTsDraft; messageTs.disabled = this.connectorBusy; messageTs.dataset.focusKey = 'connector-slack-message-ts'; messageTs.addEventListener('input', () => { this.connectorImportMessageTsDraft = messageTs.value; });
+		const messageTs = messageTsField.appendChild(createElement('input')); messageTs.id = 'connector-slack-message-ts'; messageTs.type = 'text'; messageTs.autocomplete = 'off'; messageTs.placeholder = '1712345678.123456'; messageTs.value = this.connectorImportMessageTsDraft; messageTs.disabled = this.connectorBusy; messageTs.dataset.focusKey = 'connector-slack-message-ts'; messageTs.addEventListener('input', () => { this.connectorImportMessageTsDraft = messageTs.value; clearReview(); });
 		const messageTsHelp = messageTsField.appendChild($('p')); messageTsHelp.className = 'project-dashboard__connector-note'; messageTsHelp.textContent = 'Leave blank to import the channel conversation. Add a message timestamp to import that message and its thread replies.';
 		const titleLabel = importForm.appendChild(createElement('label')); titleLabel.htmlFor = 'connector-import-title'; titleLabel.textContent = 'Title (optional for Slack)';
-		const remoteTitle = importForm.appendChild(createElement('input')); remoteTitle.id = 'connector-import-title'; remoteTitle.value = this.connectorImportTitleDraft; remoteTitle.disabled = this.connectorBusy; remoteTitle.dataset.focusKey = 'connector-import-title'; remoteTitle.addEventListener('input', () => { this.connectorImportTitleDraft = remoteTitle.value; });
+		const remoteTitle = importForm.appendChild(createElement('input')); remoteTitle.id = 'connector-import-title'; remoteTitle.value = this.connectorImportTitleDraft; remoteTitle.disabled = this.connectorBusy; remoteTitle.dataset.focusKey = 'connector-import-title'; remoteTitle.addEventListener('input', () => { this.connectorImportTitleDraft = remoteTitle.value; clearReview(); });
 		const importActions = importForm.appendChild($('.project-dashboard__form-actions'));
-		const doImport = importActions.appendChild(createElement('button', 'project-dashboard__primary')); doImport.type = 'submit'; doImport.disabled = this.connectorBusy || !this.connectorImportAccountId || !this.connectorAccounts.some(account => account.id === this.connectorImportAccountId && account.state === 'active'); doImport.textContent = this.connectorBusy ? 'Importing…' : 'Import source';
+		const doImport = importActions.appendChild(createElement('button', 'project-dashboard__primary')); doImport.type = 'submit'; doImport.disabled = this.connectorBusy || !this.connectorImportAccountId || !this.connectorAccounts.some(account => account.id === this.connectorImportAccountId && account.state === 'active'); doImport.textContent = this.connectorPreviewLoading ? 'Loading preview…' : 'Preview source';
 		importForm.addEventListener('submit', event => {
 			event.preventDefault();
 			const account = selectedAccount(); const externalId = remoteId.value.trim();
 			if (!projectId || !account || !externalId) return;
-			const taskId = this.selectedTaskId;
-			const command = account.provider === 'slack' ? 'importSlackConversation' : 'importNotionPage';
 			const messageTimestamp = messageTs.value.trim();
-			const payload = account.provider === 'slack'
-				? { projectId, accountId: account.id, channelId: externalId, title: remoteTitle.value.trim() || undefined, ...(messageTimestamp ? { messageTs: messageTimestamp } : {}) }
-				: { projectId, accountId: account.id, pageId: externalId };
-			void this.runConnectorAction(async () => {
-				const reference = await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, command, payload) as { id: string };
-				if (taskId) await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'attachTaskReference', { projectId, taskId, snapshotId: reference.id });
-				if (this.projectId === projectId) {
-					this.connectorImportIdDraft = ''; this.connectorImportTitleDraft = ''; this.connectorImportMessageTsDraft = '';
-					this.knowledgeMessage = taskId ? 'Source imported and linked to the original task.' : 'Source imported. Select a task to link it.';
-					await this.loadKnowledge();
-				}
-			}, 'Source imported.');
+			const request: ConnectorPreviewRequest = account.provider === 'slack'
+				? { command: 'previewSlackConversation', payload: { projectId, accountId: account.id, channelId: externalId, title: remoteTitle.value.trim() || undefined, ...(messageTimestamp ? { messageTs: messageTimestamp } : {}) } }
+				: { command: 'previewNotionPage', payload: { projectId, accountId: account.id, pageId: externalId } };
+			void this.requestConnectorPreview(request);
 		});
+		if (this.connectorPreviewLoading) { const loading = previewRegion.appendChild($('.project-dashboard__status')); loading.setAttribute('role', 'status'); loading.textContent = 'Loading source preview…'; }
+		if (this.connectorPreviewError) {
+			const error = previewRegion.appendChild($('.project-dashboard__error')); error.setAttribute('role', 'alert');
+			const text = error.appendChild($('span')); text.textContent = this.connectorPreviewError;
+			if (this.connectorPreviewRequest) { const retry = error.appendChild(createElement('button', 'project-dashboard__retry')); retry.type = 'button'; retry.textContent = 'Retry preview'; retry.disabled = this.connectorBusy; retry.addEventListener('click', () => void this.requestConnectorPreview(this.connectorPreviewRequest!)); }
+		}
+		const reviewedPreview = this.connectorPreview;
+		const previewAccountId = this.connectorPreviewAccountId;
+		if (reviewedPreview && previewAccountId) {
+			const card = previewRegion.appendChild($('.project-dashboard__connector-preview'));
+			const previewHeading = card.appendChild($('h4')); previewHeading.textContent = 'Review source snapshot';
+			const metadata = card.appendChild($('dl'));
+			for (const [label, value] of [['Source', reviewedPreview.title], ['Source URI', reviewedPreview.sourceUri], ['Content SHA-256', reviewedPreview.contentSha256], ['Preview expires', new Date(reviewedPreview.expiresAt).toLocaleString()]] as const) { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; }
+			if (reviewedPreview.omissions.length) { const omitted = card.appendChild($('p')); omitted.className = 'project-dashboard__connector-note'; omitted.textContent = `Preview includes these source limitations: ${reviewedPreview.omissions.join(' · ')}`; }
+			const contentLabel = card.appendChild($('h5')); contentLabel.textContent = 'Readable text preview';
+			const artifactNotice = card.appendChild($('p')); artifactNotice.className = 'project-dashboard__connector-preview-disclosure'; artifactNotice.textContent = 'Import saves the original Slack or Notion response bytes, including metadata and properties not shown here. This readable text is only a preview. The SHA-256 above covers the full saved artifact.';
+			const content = card.appendChild($('pre')); content.className = 'project-dashboard__connector-preview-content'; content.textContent = reviewedPreview.derivedText;
+			const actions = card.appendChild($('.project-dashboard__form-actions'));
+			const confirm = actions.appendChild(createElement('button', 'project-dashboard__primary')); confirm.type = 'button'; confirm.textContent = this.connectorBusy ? 'Importing reviewed snapshot…' : 'Import reviewed source'; confirm.disabled = this.connectorBusy || Date.parse(reviewedPreview.expiresAt) <= Date.now(); confirm.addEventListener('click', () => void this.importReviewedConnectorPreview(reviewedPreview, previewAccountId));
+		}
 		this.renderPackageConnectors(panel);
 	}
 
@@ -479,6 +634,76 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if (this.projectId === projectId) this.packageError = this.errorMessage(error, 'Could not review this signed package.');
 		} finally {
 			if (this.projectId === projectId) { this.packageBusy = false; this.render(); }
+		}
+	}
+
+	private packageRefreshCandidates(installed: WorkspaceInstalledPackageDTO): PackageRefreshCandidate[] {
+		const sources = [...installed.sources].sort((left, right) => right.sourceId.length - left.sourceId.length);
+		const latestBySource = new Map<string, PackageRefreshCandidate>();
+		for (const reference of this.knowledge?.references ?? []) {
+			if (reference.connectorId !== `local:${installed.packageId}` || reference.accountRef !== null) continue;
+			const source = sources.find(item => reference.externalId.startsWith(`${installed.packageId}:${item.sourceId}:`));
+			if (!source) continue;
+			const sourceKey = reference.externalId.slice(`${installed.packageId}:${source.sourceId}:`.length);
+			if (!sourceKey) continue;
+			const candidate: PackageRefreshCandidate = { reference, sourceId: source.sourceId, sourceKey, sourceLabel: source.label };
+			const current = latestBySource.get(reference.sourceId);
+			if (!current || reference.version > current.reference.version
+				|| (reference.version === current.reference.version && reference.retrievedAt > current.reference.retrievedAt)) {
+				latestBySource.set(reference.sourceId, candidate);
+			}
+		}
+		return [...latestBySource.values()].sort((left, right) => left.sourceLabel.localeCompare(right.sourceLabel)
+			|| left.sourceKey.localeCompare(right.sourceKey));
+	}
+
+	private async refreshInstalledPackageSource(installed: WorkspaceInstalledPackageDTO, candidate: PackageRefreshCandidate): Promise<void> {
+		if (!this.projectId || this.packageBusy) return;
+		const projectId = this.projectId;
+		const generation = ++this.packageRefreshGeneration;
+		const latest = this.packageRefreshCandidates(installed).find(item => item.reference.id === candidate.reference.id);
+		if (!latest || latest.sourceId !== candidate.sourceId || latest.sourceKey !== candidate.sourceKey) {
+			this.packageRefreshStates.set(installed.packageId, { state: 'error', message: 'Select the latest existing snapshot for this installed package source before refreshing.' });
+			this.render();
+			return;
+		}
+		this.packageBusy = true;
+		this.packageError = undefined;
+		this.packageMessage = undefined;
+		this.packageRefreshStates.set(installed.packageId, { state: 'loading', message: `Refreshing ${latest.sourceLabel} from version ${latest.reference.version}…` });
+		this.render();
+		let refreshed: WorkspaceReferenceDTO | undefined;
+		try {
+			refreshed = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'refreshPackageSource', {
+				projectId, packageId: installed.packageId, sourceId: latest.sourceId, sourceKey: latest.sourceKey,
+				previousReferenceId: latest.reference.id,
+			}) as WorkspaceReferenceDTO;
+			if (refreshed.sourceId !== latest.reference.sourceId || refreshed.previousId !== latest.reference.id
+				|| refreshed.connectorId !== latest.reference.connectorId || refreshed.externalId !== latest.reference.externalId
+				|| refreshed.accountRef !== null || refreshed.version <= latest.reference.version) {
+				throw new Error('The refreshed snapshot did not continue the selected package source history.');
+			}
+			const knowledge = await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'getProjectKnowledge', projectId) as WorkspaceKnowledgeDTO;
+			if (this.projectId === projectId) {
+				this.knowledge = knowledge;
+				this.packageRefreshReferenceIds.set(installed.packageId, refreshed.id);
+				this.packageRefreshStates.set(installed.packageId, {
+					state: 'success', message: `Updated ${latest.sourceLabel}: version ${latest.reference.version} → ${refreshed.version} · SHA-256 ${refreshed.contentSha256}`,
+				});
+			}
+		} catch (error) {
+			if (this.projectId === projectId) {
+				const detail = this.errorMessage(error, 'the refresh request failed');
+				const message = refreshed
+					? `Snapshot version ${refreshed.version} was received, but its history could not be verified or reloaded: ${detail}`
+					: `Could not refresh this package source: ${detail}`;
+				this.packageRefreshStates.set(installed.packageId, { state: 'error', message });
+			}
+		} finally {
+			if (this.packageRefreshGeneration === generation) {
+				this.packageBusy = false;
+				this.render();
+			}
 		}
 	}
 
@@ -562,6 +787,54 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					if (this.projectId === projectId) { this.packageSourceKey = ''; await this.loadKnowledge(); }
 				}, taskId ? 'Source imported and linked to the original task.' : 'Source imported. Select a task to link it.');
 			});
+			const refreshCard = card.appendChild(createElement('div', 'project-dashboard__package-refresh'));
+			const refreshTitle = refreshCard.appendChild($('h5')); refreshTitle.textContent = 'Refresh an existing source';
+			const refreshHint = refreshCard.appendChild($('p')); refreshHint.textContent = 'Choose the latest saved snapshot for this package source. Its signed source rule and stored resource ID are used for the refresh.';
+			const candidates = this.packageRefreshCandidates(installed);
+			let selectedReferenceId = this.packageRefreshReferenceIds.get(installed.packageId);
+			if (!candidates.some(candidate => candidate.reference.id === selectedReferenceId)) {
+				selectedReferenceId = candidates[0]?.reference.id;
+				if (selectedReferenceId) this.packageRefreshReferenceIds.set(installed.packageId, selectedReferenceId);
+				else this.packageRefreshReferenceIds.delete(installed.packageId);
+			}
+			const refreshLabel = refreshCard.appendChild(createElement('label')); refreshLabel.htmlFor = `package-refresh-source-${installed.packageId}`; refreshLabel.textContent = 'Latest saved source snapshot';
+			const refreshSelect = refreshCard.appendChild(document.createElement('select')); refreshSelect.id = `package-refresh-source-${installed.packageId}`; refreshSelect.disabled = this.packageBusy || !candidates.length; refreshSelect.dataset.focusKey = `package-refresh-source:${installed.packageId}`;
+			for (const candidate of candidates) {
+				const option = refreshSelect.appendChild(document.createElement('option')); option.value = candidate.reference.id;
+				option.textContent = `${candidate.sourceLabel} · ${candidate.sourceKey} · version ${candidate.reference.version} · ${new Date(candidate.reference.retrievedAt).toLocaleString()}`;
+				option.selected = candidate.reference.id === selectedReferenceId;
+			}
+			if (!candidates.length) {
+				const option = refreshSelect.appendChild(document.createElement('option')); option.value = ''; option.textContent = this.knowledge ? 'No matching source snapshots yet' : 'Project source history is loading';
+			}
+			refreshSelect.addEventListener('change', () => {
+				this.packageRefreshReferenceIds.set(installed.packageId, refreshSelect.value);
+				this.packageRefreshStates.delete(installed.packageId);
+				this.render();
+			});
+			const selectedCandidate = candidates.find(candidate => candidate.reference.id === selectedReferenceId);
+			const refreshButton = refreshCard.appendChild(createElement('button', 'project-dashboard__secondary')); refreshButton.type = 'button';
+			const refreshState = this.packageRefreshStates.get(installed.packageId);
+			refreshButton.textContent = refreshState?.state === 'loading' ? 'Refreshing…' : 'Refresh selected source';
+			refreshButton.disabled = this.packageBusy || !selectedCandidate;
+			refreshButton.addEventListener('click', () => { if (selectedCandidate) void this.refreshInstalledPackageSource(installed, selectedCandidate); });
+			if (refreshState) {
+				const status = refreshCard.appendChild(createElement('p', `project-dashboard__package-refresh-status is-${refreshState.state}`));
+				status.setAttribute('role', refreshState.state === 'error' ? 'alert' : 'status'); status.textContent = refreshState.message;
+				if (refreshState.state === 'error') {
+					const reloadHistory = refreshCard.appendChild(createElement('button', 'project-dashboard__retry')); reloadHistory.type = 'button'; reloadHistory.textContent = 'Reload source history';
+					reloadHistory.addEventListener('click', () => void this.loadKnowledge());
+				}
+			}
+			if (selectedCandidate) {
+				const historyDetails = refreshCard.appendChild(document.createElement('details'));
+				const historySummary = historyDetails.appendChild(document.createElement('summary')); historySummary.textContent = 'Snapshot history';
+				const historyList = historyDetails.appendChild(document.createElement('ol'));
+				for (const snapshot of (this.knowledge?.references ?? []).filter(reference => reference.sourceId === selectedCandidate.reference.sourceId).sort((left, right) => left.version - right.version)) {
+					const item = historyList.appendChild(document.createElement('li'));
+					item.textContent = `Version ${snapshot.version} · ${new Date(snapshot.retrievedAt).toLocaleString()}${snapshot.id === selectedCandidate.reference.id ? ' · latest' : ''}`;
+				}
+			}
 			const uninstall = card.appendChild(createElement('button', 'project-dashboard__danger')); uninstall.type = 'button'; uninstall.disabled = this.packageBusy; uninstall.textContent = 'Uninstall package'; uninstall.addEventListener('click', () => { if (!projectId) return; void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'uninstallPackage', { projectId, packageId: installed.packageId }), 'Package uninstalled.'); });
 		}
 	}
@@ -635,12 +908,15 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (this.knowledgeMessage) { const message = panel.appendChild($('.project-dashboard__knowledge-success')); message.setAttribute('role', 'status'); message.textContent = this.knowledgeMessage; }
 		if (!this.knowledge) {
 			const status = panel.appendChild($('.project-dashboard__status')); status.textContent = 'Project knowledge is not available yet.';
-			this.renderConnectorManagement(panel);
+			if (this.knowledgeView === 'references') this.renderConnectorManagement(panel);
 			return;
 		}
-		if (this.knowledgeView === 'references') this.renderProjectReferences(panel);
-		else this.renderProjectConventions(panel);
-		this.renderConnectorManagement(panel);
+		if (this.knowledgeView === 'references') {
+			this.renderProjectReferences(panel);
+			this.renderConnectorManagement(panel);
+		} else {
+			this.renderProjectConventions(panel);
+		}
 	}
 
 	private renderConnectorManagement(panel: HTMLElement): void {
@@ -720,10 +996,20 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private renderProjectConventions(panel: HTMLElement): void {
 		const knowledge = this.knowledge!;
 		const active = knowledge.conventions.find(item => item.id === knowledge.activeConventionId);
+		const selectedCheckConvention = knowledge.conventions.find(item => item.id === this.conventionCheckVersionId) ?? active ?? knowledge.conventions[0];
+		if (this.conventionAgentOperation === 'check' && selectedCheckConvention) this.conventionCheckVersionId = selectedCheckConvention.id;
 		const activeCard = panel.appendChild($('.project-dashboard__active-convention'));
 		const activeTitle = activeCard.appendChild($('h3')); activeTitle.textContent = active ? `Active convention · v${active.version}` : 'No active convention';
-		const activeDescription = activeCard.appendChild($('p')); activeDescription.textContent = active ? `Applied ${active.lastAppliedAt ? new Date(active.lastAppliedAt).toLocaleString() : 'date unavailable'}. This version guides future project runs.` : 'Create a draft and apply it when the project guidance is ready.';
+		const activeNeedsCheck = !!active && active.authoredBy !== 'person' && active.latestCheckVerdict !== 'pass';
+		const activeDescription = activeCard.appendChild($('p'));
+		activeDescription.textContent = active
+			? `Applied ${active.lastAppliedAt ? new Date(active.lastAppliedAt).toLocaleString() : 'date unavailable'}.${active.authoredBy !== 'person' ? ` Latest check: ${active.latestCheckVerdict ?? 'not checked'}.` : ''} ${activeNeedsCheck ? 'Future agent runs are blocked until this version passes a new check.' : 'This version guides future project runs.'}`
+			: 'Create a draft and apply it when the project guidance is ready.';
 		if (active) { const preview = activeCard.appendChild(createElement('pre', 'project-dashboard__convention-preview')); preview.textContent = active.markdown; }
+		if (activeNeedsCheck && active) {
+			const recheck = activeCard.appendChild(createElement('button', 'project-dashboard__secondary')); recheck.type = 'button'; recheck.textContent = 'Check active version'; recheck.disabled = this.conventionAgentBusy;
+			recheck.addEventListener('click', () => this.selectConventionForCheck(active));
+		}
 		const heading = panel.appendChild($('.project-dashboard__knowledge-section-heading'));
 		const title = heading.appendChild($('h3')); title.textContent = 'Draft a convention';
 		const draftForm = panel.appendChild(createElement('form', 'project-dashboard__knowledge-form'));
@@ -760,30 +1046,56 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		provider.addEventListener('change', () => { this.conventionAgentProvider = provider.value as ProviderId; this.conventionAgentPreview = undefined; this.conventionAgentResult = undefined; this.render(); });
 		const operationLabel = agentForm.appendChild(createElement('label')); operationLabel.htmlFor = 'convention-agent-operation'; operationLabel.textContent = 'Action';
 		const operation = agentForm.appendChild(document.createElement('select')); operation.id = 'convention-agent-operation'; operation.disabled = this.conventionAgentBusy;
-		for (const [value, label] of [['draft','Draft a new convention'],['check','Check the active convention']] as const) { const option = operation.appendChild(document.createElement('option')); option.value = value; option.textContent = label; option.selected = this.conventionAgentOperation === value; }
+		for (const [value, label] of [['draft','Draft a new convention'],['check','Check a convention version']] as const) { const option = operation.appendChild(document.createElement('option')); option.value = value; option.textContent = label; option.selected = this.conventionAgentOperation === value; }
 		operation.addEventListener('change', () => { this.conventionAgentOperation = operation.value as 'draft' | 'check'; this.conventionAgentPreview = undefined; this.conventionAgentResult = undefined; this.render(); });
+		if (this.conventionAgentOperation === 'check' && knowledge.conventions.length) {
+			const versionLabel = agentForm.appendChild(createElement('label')); versionLabel.htmlFor = 'convention-check-version'; versionLabel.textContent = 'Version to check';
+			const versionSelect = agentForm.appendChild(document.createElement('select')); versionSelect.id = 'convention-check-version'; versionSelect.disabled = this.conventionAgentBusy;
+			for (const convention of knowledge.conventions) {
+				const option = versionSelect.appendChild(document.createElement('option')); option.value = convention.id;
+				option.textContent = `v${convention.version}${convention.active ? ' · Active' : ' · Draft'} · ${convention.authoredBy === 'person' ? 'You' : convention.authoredBy}`;
+				option.selected = convention.id === this.conventionCheckVersionId;
+			}
+			versionSelect.addEventListener('change', () => { this.conventionCheckVersionId = versionSelect.value; this.conventionAgentPreview = undefined; this.conventionAgentResult = undefined; this.conventionAgentError = undefined; this.conventionAgentNotice = undefined; this.render(); });
+		}
 		if (this.conventionAgentOperation === 'draft') {
 			const sourceBox = agentForm.appendChild($('.project-dashboard__knowledge-source-list'));
 			const sourceHeading = sourceBox.appendChild($('span')); sourceHeading.textContent = 'Reference snapshots';
 			for (const reference of knowledge.references) { const label = sourceBox.appendChild(createElement('label','project-dashboard__knowledge-source')); const checkbox = label.appendChild(createElement('input')); checkbox.type='checkbox'; checkbox.value=reference.id; checkbox.checked=this.conventionAgentSourceIds.has(reference.id); checkbox.disabled=this.conventionAgentBusy; checkbox.addEventListener('change',()=>{checkbox.checked?this.conventionAgentSourceIds.add(reference.id):this.conventionAgentSourceIds.delete(reference.id);this.conventionAgentPreview=undefined;this.conventionAgentResult=undefined;this.render();}); const text=label.appendChild($('span')); text.textContent=`${reference.title} · v${reference.version}`; }
 		}
 		const agentActions = agentForm.appendChild($('.project-dashboard__form-actions'));
-		const previewButton = agentActions.appendChild(createElement('button','project-dashboard__secondary')); previewButton.type='button'; previewButton.textContent='Preview request'; previewButton.disabled=this.conventionAgentBusy || !this.selectedTaskId || (this.conventionAgentOperation === 'check' && !active); previewButton.addEventListener('click',()=>void this.previewConventionAgent());
+		const previewButton = agentActions.appendChild(createElement('button','project-dashboard__secondary')); previewButton.type='button'; previewButton.textContent='Preview request'; previewButton.disabled=this.conventionAgentBusy || !this.selectedTaskId || (this.conventionAgentOperation === 'check' && !selectedCheckConvention); previewButton.addEventListener('click',()=>void this.previewConventionAgent());
 		agentForm.addEventListener('submit',event=>event.preventDefault());
 		if (!this.selectedTaskId) { const hint=agent.appendChild($('.project-dashboard__flow-status')); hint.textContent='Select a task before preparing an agent request.'; }
-		if (this.conventionAgentOperation === 'check' && !active) { const hint=agent.appendChild($('.project-dashboard__flow-status')); hint.textContent='Create or activate a convention version before running a check.'; }
+		if (this.conventionAgentOperation === 'check' && !selectedCheckConvention) { const hint=agent.appendChild($('.project-dashboard__flow-status')); hint.textContent='Save a convention version before running a check.'; }
 		if (this.conventionAgentPreview) {
 			const preview = agent.appendChild($('.project-dashboard__agent-preview'));
 			const summary = preview.appendChild($('p')); summary.textContent=`${this.conventionAgentPreview.operation === 'draft' ? 'Draft' : 'Check'} · ${this.conventionAgentPreview.providerId} (${this.conventionAgentPreview.accountLabel}) · task revision ${this.conventionAgentPreview.task.revision}`;
 			const permission=preview.appendChild($('p')); permission.textContent=`Permission: ${this.conventionAgentPreview.permissionSummary}${this.conventionAgentPreview.blockedReason ? ` · Blocked: ${this.conventionAgentPreview.blockedReason}` : ''}`;
 			for (const reference of this.conventionAgentPreview.references) { const meta=preview.appendChild($('p')); meta.textContent=`Snapshot: ${reference.title} · v${reference.version} · SHA-256 ${reference.contentSha256}`; const body=preview.appendChild(createElement('pre','project-dashboard__convention-preview')); body.textContent=reference.content; }
-			if (this.conventionAgentPreview.convention) { const existing=preview.appendChild(createElement('pre','project-dashboard__convention-preview')); existing.textContent=`Active convention v${this.conventionAgentPreview.convention.version} · SHA-256 ${this.conventionAgentPreview.convention.contentSha256}\n\n${this.conventionAgentPreview.convention.markdown}`; }
+			if (this.conventionAgentPreview.convention) { const existing=preview.appendChild(createElement('pre','project-dashboard__convention-preview')); existing.textContent=`Selected convention v${this.conventionAgentPreview.convention.version} · SHA-256 ${this.conventionAgentPreview.convention.contentSha256}\n\n${this.conventionAgentPreview.convention.markdown}`; }
 			const prompt=preview.appendChild(createElement('pre','project-dashboard__convention-preview')); prompt.textContent=this.conventionAgentPreview.prompt;
 			const run=agent.appendChild(createElement('button','project-dashboard__primary')); run.type='button'; run.textContent=this.conventionAgentBusy?'Running…':this.conventionAgentOperation==='draft'?'Run draft':'Run check'; run.disabled=this.conventionAgentBusy || !this.conventionAgentPreview.allowed; run.addEventListener('click',()=>void this.runConventionAgent());
 		}
 		if (this.conventionAgentError) { const error=agent.appendChild($('.project-dashboard__error')); error.setAttribute('role','alert'); error.textContent=this.conventionAgentError; }
 		if (this.conventionAgentNotice) { const notice=agent.appendChild($('.project-dashboard__flow-status')); notice.setAttribute('role','status'); notice.textContent=this.conventionAgentNotice; }
-		if (this.conventionAgentResult) { const result=agent.appendChild($('.project-dashboard__agent-preview')); const heading=result.appendChild($('h4')); heading.textContent=this.conventionAgentResult.versionNumber ? `Draft saved as version ${this.conventionAgentResult.versionNumber}` : `Check report · ${this.conventionAgentResult.verdict ?? this.conventionAgentResult.attempt.state}`; const report=result.appendChild(createElement('pre','project-dashboard__convention-preview')); const generated=this.conventionAgentResult.versionId ? this.knowledge?.conventions.find(item=>item.id===this.conventionAgentResult!.versionId)?.markdown : undefined; report.textContent=generated ?? this.conventionAgentResult.report ?? this.conventionAgentResult.attempt.errorSummary ?? `Attempt ${this.conventionAgentResult.attempt.id}: ${this.conventionAgentResult.attempt.state}`; const refresh=result.appendChild(createElement('button','project-dashboard__secondary')); refresh.type='button'; refresh.textContent='Refresh knowledge and versions'; refresh.addEventListener('click',()=>void this.loadKnowledge()); }
+		if (this.conventionAgentResult) {
+			const outcome = this.conventionAgentResult;
+			const result = agent.appendChild($('.project-dashboard__agent-preview'));
+			const heading = result.appendChild($('h4'));
+			if (this.conventionAgentOperation === 'draft') {
+				heading.textContent = outcome.versionNumber ? `Draft saved as version ${outcome.versionNumber}` : `Draft · ${outcome.attempt.state}`;
+			} else {
+				heading.textContent = `Check report · ${outcome.verdict ?? outcome.attempt.state}`;
+			}
+			const report = result.appendChild(createElement('pre', 'project-dashboard__convention-preview'));
+			const generated = outcome.versionId ? knowledge.conventions.find(item => item.id === outcome.versionId)?.markdown : undefined;
+			report.textContent = generated ?? outcome.report ?? outcome.attempt.errorSummary ?? `Attempt ${outcome.attempt.id}: ${outcome.attempt.state}`;
+			const refresh = result.appendChild(createElement('button', 'project-dashboard__secondary'));
+			refresh.type = 'button';
+			refresh.textContent = 'Refresh knowledge and versions';
+			refresh.addEventListener('click', () => void this.loadKnowledge());
+		}
 		const historyHeading = panel.appendChild($('.project-dashboard__knowledge-section-heading'));
 		const historyTitle = historyHeading.appendChild($('h3')); historyTitle.textContent = 'Version history';
 		if (!knowledge.conventions.length) { const empty = panel.appendChild($('.project-dashboard__knowledge-empty')); empty.textContent = 'No convention drafts yet.'; return; }
@@ -792,13 +1104,29 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const row = history.appendChild($('.project-dashboard__knowledge-card'));
 			const main = row.appendChild($('.project-dashboard__knowledge-card-main'));
 			const name = main.appendChild($('h4')); name.textContent = `Version ${convention.version}${convention.active ? ' · Active' : ''}`;
-			const meta = main.appendChild($('p')); meta.textContent = `Saved ${new Date(convention.createdAt).toLocaleDateString()} · ${convention.authoredBy === 'person' ? 'You' : convention.authoredBy}`;
+			const verdict = convention.latestCheckVerdict ? `Latest check: ${convention.latestCheckVerdict}` : 'Latest check: not checked';
+			const meta = main.appendChild($('p')); meta.textContent = `Saved ${new Date(convention.createdAt).toLocaleDateString()} · ${convention.authoredBy === 'person' ? 'You' : convention.authoredBy} · ${verdict}`;
 			const preview = main.appendChild(createElement('pre', 'project-dashboard__convention-preview')); preview.textContent = convention.markdown;
+			if (convention.authoredBy !== 'person') {
+				const check = row.appendChild(createElement('button', 'project-dashboard__secondary')); check.type = 'button'; check.textContent = 'Check this version'; check.disabled = this.conventionAgentBusy;
+				check.addEventListener('click', () => this.selectConventionForCheck(convention));
+			}
 			if (!convention.active) {
-				const apply = row.appendChild(createElement('button', 'project-dashboard__secondary')); apply.type = 'button'; apply.textContent = 'Make active'; apply.disabled = this.knowledgeBusy;
+				const requiresPass = convention.authoredBy !== 'person' && convention.latestCheckVerdict !== 'pass';
+				const apply = row.appendChild(createElement('button', 'project-dashboard__secondary')); apply.type = 'button'; apply.textContent = requiresPass ? 'Passing check required' : 'Make active'; apply.disabled = this.knowledgeBusy || requiresPass;
 				apply.addEventListener('click', () => { if (this.projectId) void this.mutateKnowledge(() => ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'applyConvention', { projectId: this.projectId, versionId: convention.id }), `Convention v${convention.version} is now active.`); });
 			}
 		}
+	}
+
+	private selectConventionForCheck(convention: WorkspaceKnowledgeDTO['conventions'][number]): void {
+		this.conventionCheckVersionId = convention.id;
+		this.conventionAgentOperation = 'check';
+		this.conventionAgentPreview = undefined;
+		this.conventionAgentResult = undefined;
+		this.conventionAgentError = undefined;
+		this.conventionAgentNotice = undefined;
+		this.render();
 	}
 
 	private async startEgoCapture(url: string): Promise<void> {
@@ -841,7 +1169,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private async previewConventionAgent(): Promise<void> {
 		if (!this.projectId || !this.selectedTaskId) return;
 		this.conventionAgentBusy=true; this.conventionAgentError=undefined; this.conventionAgentNotice=undefined; this.conventionAgentResult=undefined; this.render();
-		try { const scope={projectId:this.projectId,taskId:this.selectedTaskId,providerId:this.conventionAgentProvider}; const command=this.conventionAgentOperation==='draft'?'previewDraft':'previewCheck'; const request=this.conventionAgentOperation==='draft'?{...scope,sourceSnapshotIds:[...this.conventionAgentSourceIds]}:{...scope,versionId:this.knowledge?.activeConventionId ?? ''}; this.conventionAgentPreview=await ipcRenderer.invoke(WORKSPACE_CONVENTION_AGENT_CHANNEL,command,request) as ConventionAgentPreviewDTO; }
+		try { const scope={projectId:this.projectId,taskId:this.selectedTaskId,providerId:this.conventionAgentProvider}; const command=this.conventionAgentOperation==='draft'?'previewDraft':'previewCheck'; const request=this.conventionAgentOperation==='draft'?{...scope,sourceSnapshotIds:[...this.conventionAgentSourceIds]}:{...scope,versionId:this.conventionCheckVersionId ?? this.knowledge?.activeConventionId ?? ''}; this.conventionAgentPreview=await ipcRenderer.invoke(WORKSPACE_CONVENTION_AGENT_CHANNEL,command,request) as ConventionAgentPreviewDTO; }
 		catch(error) { this.conventionAgentError=this.errorMessage(error,'Could not prepare the convention agent preview.'); }
 		finally { this.conventionAgentBusy=false; this.render(); }
 	}
@@ -1739,6 +2067,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const auditSummary = audit.appendChild(createElement('summary')); auditSummary.textContent = 'Evidence file details';
 			const auditList = audit.appendChild($('dl'));
 			for (const [label, value] of [
+				['Commit at check start (full revision)', evidence.checkoutRevision ?? evidence.checkoutRevisionUnavailableReason ?? 'Not available'],
 				['Screenshot SHA-256', evidence.screenshotSha256 ?? 'Not available'], ['Screenshot path', evidence.screenshotPath ?? 'Not available'],
 				['Log SHA-256', evidence.logSha256 ?? 'Not available'], ['Log path', evidence.logPath ?? 'Not available'],
 			] as const) { const term = auditList.appendChild($('dt')); term.textContent = label; const detail = auditList.appendChild($('dd')); detail.textContent = value; }
