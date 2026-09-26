@@ -4,7 +4,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 
 ## Confirmed direction
 
-- Build generic project, task, and agent workflow features using Bugfixer's concepts. Do not copy files, operational data, or credentials from the private Bugfixer repository. The earlier Whiteboard/Code OSS foundation choice is being reconsidered against a newly built dashboard app; the product must still provide a VS Code-based project workflow.
+- Use the Whiteboard/Code OSS desktop shell and its review capability as the foundation. Build generic project, task, and agent workflow features inside it using Bugfixer's concepts. Do not copy files, operational data, or credentials from the private Bugfixer repository.
 - Use posco-mds as the visual theme reference: a simple project dashboard, clear tabs and navigation, restrained accents, and first-class light and dark modes. Reuse the visual principles and suitable generic interaction patterns, not laboratory-specific product content.
 - Build for macOS first and support Windows x86 in a later phase. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
 - Allow conventions to be supplied per project and attached to agent work.
@@ -36,8 +36,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 
 ## Decisions still open
 
-- The app foundation: Whiteboard/Code OSS shell with a new dashboard, a newly built Bugfixer-inspired desktop app, or another VS Code-based route. The user's dashboard and theme requirement is settled; the technical foundation is not.
-- The exact ownership and placement of project/task data relative to Whiteboard review data. A separate workspace database with ID references was proposed, but its review depends on the foundation choice.
+- The exact ownership and placement of project/task data relative to Whiteboard review data. A separate workspace database with ID references was proposed and awaits confirmation.
 - How project convention sources are selected, ordered, snapshotted, and shown to the user before an agent run.
 - The connector package, permission, and credential contracts, including how logged-in website content is captured.
 - The provider-specific account isolation mechanism, run recovery contract, Docker boundary, and Windows equivalents.
