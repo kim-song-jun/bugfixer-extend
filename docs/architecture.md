@@ -18,7 +18,7 @@ The current entry selection loads `navigator.desktop.main` for a workspace and `
 
 An in-app task click opens its stored `reviewId` through the project window's review editor service. The existing HTTP `POST /reviews-api/:id/open` dispatches to Whiteboard's attached desktop control; it does not yet prove that an active project tab will open. External review-open requests need project-aware routing, or an explicit project choice when the review is not linked. They must not silently send a task-linked review to an unrelated window.
 
-The first UI proof opens two macOS project windows with different checkouts. In one, edit and save a file, create or select a task on the dashboard, open its Whiteboard review in another tab of the **same** window, and return to the dashboard. Switch to the other project and back without moving either project's tabs or active task. Restart with both windows, tabs, and task selections restored. Open the same file from a second task in one project and confirm the task context changes without misattributing either task. Confirm separately that pinned review-source navigation stays read-only.
+The first UI proof opens two macOS project windows with different checkouts. In one, edit and save a file, create or select a task on the dashboard, open its Whiteboard review in another tab of the **same** window, and return to the dashboard. Switch to the other project and back without moving either project's tabs or active task. Restart with both windows, tabs, and task selections restored. Open the same file from a second task in one project and confirm the task context changes without misattributing either task. Confirm separately that pinned review-source navigation stays read-only. The [project-window integration contract](project-window-integration.md) identifies the source seams and the single-control-relay change needed to make this work.
 
 ## Selected data boundary: app-owned workspace database
 
@@ -33,7 +33,7 @@ flowchart LR
   WS -->|reviewId reference| WDB
 ```
 
-The app main process owns the workspace service and is the only writer of `workspace.db`; renderer views use a typed application API. It calls Whiteboard through its supported Review API and never reads or writes Review tables directly. Whiteboard's existing main-process supervisor owns the Review server utility process; the app main process closes its own workspace connection and coordinates shutdown with that supervisor. The Review server's local URL and token are private process capabilities, never task data or renderer-visible settings.
+The app main process owns the workspace service and is the only writer of `workspace.db`; renderer views use a typed application API. It calls Whiteboard through its supported Review API and never reads or writes Review tables directly. Whiteboard's existing main-process supervisor owns the Review server utility process; the app main process closes its own workspace connection and coordinates shutdown with that supervisor. The Review server's local URL and token are private process capabilities, never task data or renderer-visible settings. Upstream Whiteboard currently passes these values into its desktop renderer; the [project-window integration contract](project-window-integration.md#review-api-and-external-open-routing) requires a typed main-process gateway before this product can satisfy that boundary.
 
 | Data | Authority | Stored link or identity |
 | --- | --- | --- |
