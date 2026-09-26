@@ -12,6 +12,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 - Use posco-mds as the visual theme reference: a simple project dashboard, clear tabs and navigation, restrained accents, and first-class light and dark modes. Reuse the visual principles and suitable generic interaction patterns, not laboratory-specific product content.
 - Build for macOS first and support Windows x86 in a later phase. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
 - Provide Slack, Notion, and website import as first-party connectors plus a contract for user-installable connectors. This is the user's selected option B; it does not imply enabling all general VS Code extensions.
+- Use app-interpreted declarative packages for the first public user-installable connectors. Installed packages contain no executable code; sources needing custom logic or unsupported authentication require an app capability or a later, separately approved runtime. This is the user's selected execution option A.
 - Bring Claude, Codex, and Antigravity account use, subagent orchestration, and Ego Lite frontend E2E into one task flow.
 
 ## Source capabilities and gaps
@@ -61,7 +62,7 @@ The current Review source navigator is not the editable project surface required
 ## Decisions still open
 
 - The provider-specific delivery and precedence of app-managed conventions alongside any instructions a Claude, Codex, or Antigravity runtime reads on its own. The app must show what it can verify about the actual instruction payload.
-- The connector package, permission, and credential contracts, including how logged-in website content is captured.
+- The selected declarative connector schema, host-owned authentication and credential handling, permission display, and logged-in website capture path still need detailed design and source validation. Executable connector code is outside the first release.
 - The Antigravity subscription-account scope, provider credential-isolation smoke tests, run recovery contract, Docker boundary, and Windows equivalents.
 - Whether “Windows x86” means 32-bit x86 or x86-64. Whiteboard currently packages `win32-x64`; the target architecture must not assume that settles the user's requested platform.
 - The exact project bootstrap, dashboard/editor/review tab integration, per-project window restoration, and project-aware review-open routing still need implementation and runtime verification; the one-window-per-project behavior is selected.
