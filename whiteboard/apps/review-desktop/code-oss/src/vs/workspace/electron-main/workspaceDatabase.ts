@@ -1871,7 +1871,7 @@ export class WorkspaceDatabase {
 
 	createWorkspaceE2eEvidence(input: {
 		id?: string; projectId: string; taskId: string; attemptId: string; targetUrl: string; environmentIdentity: string;
-		scenario: readonly WorkspaceE2eStep[]; taskSpaceId: number; checkoutRevision: string | null; checkoutRevisionUnavailableReason: string | null;
+		scenario: readonly WorkspaceE2eStep[]; taskSpaceId: number; expectedBinding: WorkspaceFolderBinding; checkoutRevision: string | null; checkoutRevisionUnavailableReason: string | null;
 	}): WorkspaceE2eEvidence {
 		this.assertOpen();
 		if (!Number.isSafeInteger(input.taskSpaceId) || input.taskSpaceId < 1) { throw new Error('A durable Ego TaskSpace ID is required.'); }
@@ -1885,6 +1885,11 @@ export class WorkspaceDatabase {
 			if (!attempt || attempt.taskId !== task.id || attempt.purpose !== 'task') { throw new Error('E2E evidence requires a provider attempt linked to this task.'); }
 			const binding = this.listFolderBindings(input.projectId).find(item => item.id === task.bindingId);
 			if (!binding) { throw new Error('The task checkout binding is unavailable.'); }
+			if (binding.id !== input.expectedBinding.id || binding.path !== input.expectedBinding.path
+				|| binding.vcsKind !== input.expectedBinding.vcsKind || binding.vcsRoot !== input.expectedBinding.vcsRoot
+				|| binding.reviewRepositoryId !== input.expectedBinding.reviewRepositoryId) {
+				throw new Error('The task checkout binding changed before the E2E check started; preview and retry the check.');
+			}
 			if (binding.vcsKind === null ? input.checkoutRevision !== null : input.checkoutRevision === null) { throw new Error('E2E checkout revision evidence does not match the task checkout binding.'); }
 			const id = input.id ?? randomUUID();
 			const now = new Date().toISOString();

@@ -22,6 +22,18 @@ test('E2E checkout snapshot reads the exact checked-out Git commit and identifie
 		execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'initial snapshot']);
 		const expectedRevision = execFileSync('git', ['-C', root, 'rev-parse', '--verify', 'HEAD^{commit}'], { encoding: 'utf8' }).trim();
 		assert.deepEqual(await readWorkspaceE2eCheckoutRevision({ vcsKind: 'git', vcsRoot: root }), { revision: expectedRevision, unavailableReason: null });
+		const priorGitDir = process.env.GIT_DIR;
+		const priorGitWorkTree = process.env.GIT_WORK_TREE;
+		try {
+			process.env.GIT_DIR = join(root, 'unrelated-repository');
+			process.env.GIT_WORK_TREE = join(root, 'unrelated-worktree');
+			assert.deepEqual(await readWorkspaceE2eCheckoutRevision({ vcsKind: 'git', vcsRoot: root }), { revision: expectedRevision, unavailableReason: null });
+		} finally {
+			if (priorGitDir === undefined) delete process.env.GIT_DIR;
+			else process.env.GIT_DIR = priorGitDir;
+			if (priorGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+			else process.env.GIT_WORK_TREE = priorGitWorkTree;
+		}
 		assert.deepEqual(await readWorkspaceE2eCheckoutRevision({ vcsKind: null, vcsRoot: null }), { revision: null, unavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' });
 		await assert.rejects(readWorkspaceE2eCheckoutRevision({ vcsKind: 'svn', vcsRoot: root } as never), /unsupported version control kind/);
 	} finally {

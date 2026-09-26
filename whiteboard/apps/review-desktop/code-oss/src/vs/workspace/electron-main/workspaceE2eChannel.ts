@@ -153,7 +153,7 @@ export class WorkspaceE2eChannel {
 		let spaceId: number | undefined;
 		try {
 			spaceId = await this.runtime.createSpace();
-			const evidence = this.database.createWorkspaceE2eEvidence({ id: evidenceId, projectId: request.projectId, taskId: request.taskId, attemptId: request.attemptId, targetUrl, environmentIdentity, scenario, taskSpaceId: spaceId, checkoutRevision: checkoutRevision.revision, checkoutRevisionUnavailableReason: checkoutRevision.unavailableReason });
+			const evidence = this.database.createWorkspaceE2eEvidence({ id: evidenceId, projectId: request.projectId, taskId: request.taskId, attemptId: request.attemptId, targetUrl, environmentIdentity, scenario, taskSpaceId: spaceId, expectedBinding: binding, checkoutRevision: checkoutRevision.revision, checkoutRevisionUnavailableReason: checkoutRevision.unavailableReason });
 			if (this.closing || this.destroyed.has(sender) || sender.isDestroyed()) {
 				let result: EgoE2eRunResult;
 				try { result = await this.runtime.finish(spaceId); }

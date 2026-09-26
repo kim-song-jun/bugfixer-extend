@@ -35,8 +35,14 @@ export async function readWorkspaceE2eCheckoutRevision(binding: Pick<WorkspaceFo
 			throw new Error('The task checkout has an unsupported version control kind; E2E checks cannot capture its revision.');
 	}
 	let output: string;
+	// Git and jj must resolve the repository from the verified binding, not
+	// from GIT_DIR, GIT_WORK_TREE, or another inherited VCS override.
+	const env: NodeJS.ProcessEnv = {};
+	for (const key of ['PATH', 'HOME', 'USER', 'TMPDIR', 'LANG', 'LC_ALL']) {
+		if (process.env[key] !== undefined) { env[key] = process.env[key]; }
+	}
 	try {
-		({ stdout: output } = await execFileAsync(binding.vcsKind, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 4096, windowsHide: true }));
+		({ stdout: output } = await execFileAsync(binding.vcsKind, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 4096, windowsHide: true, env }));
 	} catch {
 		throw new Error(`Could not read the checked-out ${binding.vcsKind} revision; the E2E check was not started.`);
 	}

@@ -85,6 +85,53 @@ test('E2E channel persists TaskSpace and requester snapshot before navigation, t
 	} finally { database.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('a checkout rebind before navigation rejects the stale revision and closes the Ego space', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-e2e-rebind-'));
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	try {
+		const firstRoot = join(directory, 'first');
+		const secondRoot = join(directory, 'second');
+		for (const root of [firstRoot, secondRoot]) {
+			mkdirSync(root);
+			execFileSync('git', ['-C', root, 'init', '-q']);
+			execFileSync('git', ['-C', root, 'config', 'user.name', 'E2E test']);
+			execFileSync('git', ['-C', root, 'config', 'user.email', 'e2e@example.invalid']);
+			writeFileSync(join(root, 'tracked.txt'), root);
+			execFileSync('git', ['-C', root, 'add', 'tracked.txt']);
+			execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'checkout snapshot']);
+		}
+		const project = database.createProject('Rebind');
+		const binding = database.createFolderBinding({ projectId: project.id, path: firstRoot, vcsKind: 'git', vcsRoot: firstRoot });
+		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Check page' });
+		const attempt = database.createProviderAttempt({ taskId: task.id, provider: 'codex', purpose: 'task', profileRef: 'profile-1', folderIdentity: 'dev:inode', cwd: firstRoot, mode: 'mutating', prompt: 'Check page' });
+		const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }) as unknown as WebContents;
+		const dashboard = { call: async () => ({ tasks: [{ id: task.id }] }) } as unknown as WorkspaceDashboardChannel;
+		let finishes = 0;
+		let navigated = false;
+		const runtime: EgoE2eRuntime = {
+			createSpace: async () => {
+				database.rebindProjectFolder(project.id, secondRoot, firstRoot, { vcsKind: 'git', vcsRoot: secondRoot });
+				return 72;
+			},
+			run: async () => { navigated = true; throw new Error('The stale checkout must not navigate.'); },
+			finish: async spaceId => {
+				assert.equal(spaceId, 72);
+				finishes++;
+				return { passed: false, screenshot: Buffer.from('closed'), log: '[]', failure: null };
+			},
+		};
+		const channel = new WorkspaceE2eChannel(database, dashboard, runtime, join(directory, 'artifacts'));
+		await assert.rejects(channel.call(sender, 'start', {
+			projectId: project.id, taskId: task.id, attemptId: attempt.attemptId,
+			targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'native-macos:dev',
+			scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }],
+		}), /checkout binding changed before the E2E check started/);
+		assert.equal(finishes, 1);
+		assert.equal(navigated, false);
+		assert.deepEqual(database.listWorkspaceE2eEvidence(task.id), []);
+	} finally { database.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('cleanup retry cannot close a running or completed check', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'workspace-e2e-retry-'));
 	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
@@ -98,7 +145,7 @@ test('cleanup retry cannot close a running or completed check', async () => {
 		let finishes = 0;
 		const runtime: EgoE2eRuntime = { createSpace: async () => 71, run: async () => { throw new Error('unexpected run'); }, finish: async () => { finishes++; throw new Error('unexpected finish'); } };
 		const channel = new WorkspaceE2eChannel(database, dashboard, runtime, join(directory, 'artifacts'));
-		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 71, checkoutRevision: 'c'.repeat(40), checkoutRevisionUnavailableReason: null });
+		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 71, expectedBinding: binding, checkoutRevision: null, checkoutRevisionUnavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' });
 		const request = { projectId: project.id, taskId: task.id, evidenceId: evidence.id };
 		await assert.rejects(channel.call(sender, 'retryCleanup', request), /Cleanup can only be retried/);
 		assert.equal(finishes, 0);
@@ -210,7 +257,7 @@ test('concurrent cleanup retries close one task space once', async () => {
 		};
 		const channel = new WorkspaceE2eChannel(database, dashboard, runtime, join(directory, 'artifacts'));
 		await channel.call(sender, 'list', { projectId: project.id, taskId: task.id });
-		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 76, checkoutRevision: null, checkoutRevisionUnavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' });
+		const evidence = database.createWorkspaceE2eEvidence({ projectId: project.id, taskId: task.id, attemptId: attempt.attemptId, targetUrl: 'http://127.0.0.1:3000', environmentIdentity: 'macOS', scenario: [{ type: 'assertText', selector: 'h1', value: 'Ready' }], taskSpaceId: 76, expectedBinding: binding, checkoutRevision: null, checkoutRevisionUnavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' });
 		database.finishWorkspaceE2eEvidence({ id: evidence.id, state: 'cleanupFailed', screenshotSha256: null, screenshotPath: null, logSha256: null, logPath: null, failure: 'Interrupted.', cleanupError: 'Task space unverified.' });
 		const request = { projectId: project.id, taskId: task.id, evidenceId: evidence.id };
 		const first = channel.call(sender, 'retryCleanup', request);
