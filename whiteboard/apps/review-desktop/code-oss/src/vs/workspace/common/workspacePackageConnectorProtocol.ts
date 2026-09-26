@@ -71,10 +71,16 @@ export interface WorkspacePackageImportRequest extends WorkspacePackageRequest {
 	readonly sourceKey: string;
 }
 
+export interface WorkspacePackageRefreshRequest extends WorkspacePackageImportRequest {
+	/** Latest immutable snapshot selected by the user for this remote source. */
+	readonly previousReferenceId: string;
+}
+
 export interface WorkspacePackageConnectorOperations {
 	readonly listPackages: { readonly request: string; readonly response: readonly WorkspaceInstalledPackageDTO[] };
 	readonly reviewPackage: { readonly request: WorkspacePackageReviewRequest; readonly response: WorkspacePackageReviewDTO };
 	readonly installPackage: { readonly request: WorkspacePackageInstallRequest; readonly response: WorkspaceInstalledPackageDTO };
 	readonly uninstallPackage: { readonly request: WorkspacePackageRequest; readonly response: void };
 	readonly importPackageSource: { readonly request: WorkspacePackageImportRequest; readonly response: WorkspaceReferenceDTO };
+	readonly refreshPackageSource: { readonly request: WorkspacePackageRefreshRequest; readonly response: WorkspaceReferenceDTO };
 }

@@ -9,7 +9,7 @@ import { isUUID } from '../../base/common/uuid.js';
 import type { WorkspaceDashboardDTO } from '../common/workspaceDashboardProtocol.js';
 import type {
 	WorkspaceInstalledPackageDTO, WorkspacePackageApproval, WorkspacePackageImportRequest, WorkspacePackageInstallRequest,
-	WorkspacePackageRequest, WorkspacePackageReviewDTO, WorkspacePackageReviewRequest, WorkspaceSignedPackageEnvelope,
+	WorkspacePackageRefreshRequest, WorkspacePackageRequest, WorkspacePackageReviewDTO, WorkspacePackageReviewRequest, WorkspaceSignedPackageEnvelope,
 } from '../common/workspacePackageConnectorProtocol.js';
 import {
 	approveDeclarativePackage, validateDeclarativePackage, type DeclarativePackageTrustContext, type ValidatedDeclarativePackage,
@@ -71,6 +71,30 @@ export class WorkspacePackageConnectorChannel {
 					const approved = approveDeclarativePackage(validated, this.approval(installed));
 					const source = await importDeclarativePackageSource(approved, request, this.transportFactory());
 					const { content: _content, derivedText: _derivedText, ...metadata } = this.database.knowledge.importReference({ projectId, ...source });
+					return metadata;
+				}) as T;
+			}
+			case 'refreshPackageSource': {
+				const request = this.refreshRequest(arg);
+				return await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
+					const installed = this.database.getInstalledConnectorPackage(projectId, request.packageId);
+					if (!installed) { throw new Error('The connector package is not installed in this project.'); }
+					const previous = this.database.knowledge.readReference(request.previousReferenceId);
+					const expectedExternalId = `${request.packageId}:${request.sourceId}:${request.sourceKey}`;
+					if (!previous || previous.projectId !== projectId || previous.connectorId !== `local:${request.packageId}`
+						|| previous.accountRef !== null || previous.externalId !== expectedExternalId) {
+						throw new Error('The selected reference does not belong to this connector source in this project.');
+					}
+					const validated = this.validateInstalled(installed);
+					const approved = approveDeclarativePackage(validated, this.approval(installed));
+					const source = await importDeclarativePackageSource(approved, request, this.transportFactory());
+					// Recheck after network I/O, immediately before the synchronous store transaction.
+					const latest = this.database.knowledge.listProjectReferences(projectId)
+						.filter(reference => reference.sourceId === previous.sourceId)
+						.sort((left, right) => right.version - left.version)[0];
+					if (latest?.id !== previous.id) { throw new Error('Refresh the latest version of this connector source.'); }
+					const imported = this.database.knowledge.importReference({ projectId, ...source });
+					const { content: _content, derivedText: _derivedText, ...metadata } = imported;
 					return metadata;
 				}) as T;
 			}
@@ -157,6 +181,14 @@ export class WorkspacePackageConnectorChannel {
 			throw new Error('A connector source and selected resource ID are required.');
 		}
 		return record as unknown as WorkspacePackageImportRequest;
+	}
+
+	private refreshRequest(value: unknown): WorkspacePackageRefreshRequest {
+		const record = this.importRequest(value) as unknown as Record<string, unknown>;
+		if (typeof record.previousReferenceId !== 'string' || !isUUID(record.previousReferenceId)) {
+			throw new Error('A valid previous reference ID is required to refresh a connector source.');
+		}
+		return record as unknown as WorkspacePackageRefreshRequest;
 	}
 
 	private record(value: unknown): Record<string, unknown> {

@@ -50,11 +50,13 @@ test('signed package install requires native consent, pins updates, and imports 
 		};
 		let allowNativeInstall = false;
 		const reviews: WorkspacePackageReviewDTO[] = [];
+		let fetchNumber = 0;
 		const transport: DeclarativePackageTransport = {
 			get: async (url, domain) => {
 				assert.equal(domain, 'api.example.org');
 				assert.equal(url.href, 'https://api.example.org/issues/selected_1');
-				return { title: 'Imported issue text' };
+				fetchNumber++;
+				return { title: fetchNumber === 1 ? 'Imported issue text' : 'Refreshed issue text' };
 			},
 		};
 		const channel = new WorkspacePackageConnectorChannel(database, new WorkspaceDashboardChannel(database, windows),
@@ -85,6 +87,19 @@ test('signed package install requires native consent, pins updates, and imports 
 		});
 		assert.equal(imported.connectorId, 'local:example-issues');
 		assert.match(Buffer.from(database.knowledge.readReference(imported.id)!.content).toString('utf8'), /Imported issue text/);
+		const refreshed = await channel.call<WorkspaceReferenceDTO>(sender, 'refreshPackageSource', {
+			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1', previousReferenceId: imported.id,
+		});
+		assert.equal(refreshed.previousId, imported.id);
+		assert.equal(refreshed.version, imported.version + 1);
+		assert.equal(refreshed.connectorVersion, installed.version);
+		assert.match(Buffer.from(database.knowledge.readReference(refreshed.id)!.content).toString('utf8'), /Refreshed issue text/);
+		await assert.rejects(channel.call(sender, 'refreshPackageSource', {
+			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1', previousReferenceId: imported.id,
+		}), /latest version/i);
+		await assert.rejects(channel.call(sender, 'refreshPackageSource', {
+			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_2', previousReferenceId: refreshed.id,
+		}), /does not belong/i);
 		const next = envelopeFor('2.0.0');
 		const nextReview = await channel.call<WorkspacePackageReviewDTO>(sender, 'reviewPackage', { projectId: one.project.id, envelope: next });
 		assert.equal(nextReview.trustStatus, 'same-key-update');
