@@ -7,9 +7,9 @@ import { randomUUID } from 'node:crypto';
 import type { WebContents } from 'electron';
 import { isUUID } from '../../base/common/uuid.js';
 import type { WorkspaceDashboardDTO } from '../common/workspaceDashboardProtocol.js';
-import type { AttachWorkspaceTaskReferenceRequest, CreateWorkspaceConventionDraftRequest, ImportWorkspaceTextReferenceRequest, WorkspaceKnowledgeDTO, WorkspaceKnowledgeReferenceRequest, WorkspaceKnowledgeTaskRequest, WorkspaceKnowledgeConventionRequest, WorkspaceReferenceContentDTO } from '../common/workspaceKnowledgeProtocol.js';
+import type { AttachWorkspaceTaskReferenceRequest, CreateWorkspaceConventionDraftRequest, ImportWorkspaceTextReferenceRequest, WorkspaceConventionDTO, WorkspaceKnowledgeDTO, WorkspaceKnowledgeReferenceRequest, WorkspaceKnowledgeTaskRequest, WorkspaceKnowledgeConventionRequest, WorkspaceReferenceContentDTO } from '../common/workspaceKnowledgeProtocol.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
-import { WorkspaceDatabase } from './workspaceDatabase.js';
+import { WorkspaceDatabase, type ConventionVersion } from './workspaceDatabase.js';
 
 const maximumManualReferenceBytes = 1024 * 1024;
 
@@ -24,7 +24,7 @@ export class WorkspaceKnowledgeChannel {
 			case 'getProjectKnowledge': {
 				const taskReferences: Record<string, ReturnType<typeof this.database.knowledge.listTaskReferences>> = {};
 				for (const task of dashboard.tasks) { taskReferences[task.id] = this.database.knowledge.listTaskReferences(task.id); }
-				const conventions = this.database.knowledge.listConventions(projectId);
+			const conventions = this.database.knowledge.listConventions(projectId).map(version => this.conventionDTO(version));
 				return {
 					references: this.database.knowledge.listProjectReferences(projectId),
 					taskReferences,
@@ -55,16 +55,17 @@ export class WorkspaceKnowledgeChannel {
 				return this.database.knowledge.listTaskReferences(taskId) as T;
 			}
 			case 'listConventions':
-				return this.database.knowledge.listConventions(projectId) as T;
+				return this.database.knowledge.listConventions(projectId).map(version => this.conventionDTO(version)) as T;
 			case 'createConventionDraft': {
 				const request = this.conventionDraftRequest(arg);
-				return this.database.knowledge.createConventionVersion({
+				const version = this.database.knowledge.createConventionVersion({
 					projectId, markdown: request.markdown, sourceSnapshotIds: request.sourceSnapshotIds, authoredBy: 'person',
-				}) as T;
+				});
+				return this.conventionDTO(version) as T;
 			}
 			case 'applyConvention': {
 				const { versionId } = this.conventionRequest(arg);
-				return this.database.knowledge.applyConventionVersion(projectId, versionId) as T;
+				return this.conventionDTO(this.database.knowledge.applyConventionVersion(projectId, versionId)) as T;
 			}
 			case 'listConventionChecks': {
 				const { versionId } = this.conventionRequest(arg);
@@ -75,6 +76,10 @@ export class WorkspaceKnowledgeChannel {
 			default:
 				throw new Error(`Call not found: ${command}`);
 		}
+	}
+
+	private conventionDTO(version: ConventionVersion): WorkspaceConventionDTO {
+		return { ...version, latestCheckVerdict: this.database.knowledge.latestConventionCheckVerdict(version.id) };
 	}
 
 	private importTextReference(projectId: string, request: ImportWorkspaceTextReferenceRequest) {

@@ -202,6 +202,7 @@ test('agent-authored drafts and checks require matching successful cleaned-up pr
 			projectId: project.id, markdown: '# Agent draft', sourceSnapshotIds: [reference.id], authoredBy: 'claude', authorAttemptId: authorRun.attemptId,
 		});
 		assert.equal(draft.authorAttemptId, authorRun.attemptId);
+		assert.throws(() => database.knowledge.applyConventionVersion(project.id, draft.id), /requires a passing check/);
 		assert.throws(() => database.knowledge.recordConventionCheck({
 			versionId: draft.id, provider: 'claude', attemptId: authorRun.attemptId, verdict: 'pass', report: 'self review',
 		}), /cannot check itself/);
@@ -225,5 +226,22 @@ test('agent-authored drafts and checks require matching successful cleaned-up pr
 		});
 		assert.equal(check.attemptId, checkRun.attemptId);
 		assert.deepEqual(database.knowledge.listConventionChecks(draft.id), [check]);
+		assert.throws(() => database.knowledge.applyConventionVersion(project.id, draft.id), /requires a passing check/);
+
+		const passTask = makeTask('Passing checker');
+		const passRun = createSuccessfulTaskAttempt(database, passTask, { provider: 'codex', mode: 'convention-check', conventionSnapshotId: draft.id, refSnapshotId: reference.id });
+		const passed = database.knowledge.recordConventionCheck({
+			versionId: draft.id, provider: 'codex', attemptId: passRun.attemptId, verdict: 'pass', report: 'All guidance is supported.',
+		});
+		assert.deepEqual(database.knowledge.listConventionChecks(draft.id), [check, passed]);
+		assert.equal(database.knowledge.applyConventionVersion(project.id, draft.id).active, true);
+
+		const failTask = makeTask('Failed recheck');
+		const failRun = createSuccessfulTaskAttempt(database, failTask, { provider: 'codex', mode: 'convention-check', conventionSnapshotId: draft.id, refSnapshotId: reference.id });
+		database.knowledge.recordConventionCheck({
+			versionId: draft.id, provider: 'codex', attemptId: failRun.attemptId, verdict: 'fail', report: 'A later contradiction was found.',
+		});
+		assert.throws(() => database.knowledge.applyConventionVersion(project.id, draft.id), /requires a passing check/);
+		assert.throws(() => database.knowledge.activeConvention(project.id), /no longer has a passing latest check/);
 	});
 });

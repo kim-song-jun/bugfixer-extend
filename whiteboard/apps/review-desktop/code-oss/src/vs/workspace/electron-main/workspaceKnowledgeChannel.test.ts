@@ -12,7 +12,7 @@ import type { WebContents } from 'electron';
 import { URI } from '../../base/common/uri.js';
 import type { ICodeWindow } from '../../platform/window/electron-main/window.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
-import type { WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO } from '../common/workspaceKnowledgeProtocol.js';
+import type { WorkspaceConventionDTO, WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO } from '../common/workspaceKnowledgeProtocol.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
 import { WorkspaceKnowledgeChannel } from './workspaceKnowledgeChannel.js';
@@ -45,6 +45,11 @@ test('knowledge IPC imports immutable text, attaches it to its task, and rejects
 		const snapshot = await channel.call<WorkspaceKnowledgeDTO>(sender, 'getProjectKnowledge', one.project.id);
 		assert.equal(snapshot.taskReferences[task.id][0].id, imported.id);
 		assert.equal(snapshot.references[0].contentSha256, content.contentSha256);
+		const draft = await channel.call<WorkspaceConventionDTO>(sender, 'createConventionDraft', {
+			projectId: one.project.id, markdown: '# Project conventions\n\nKeep examples readable.', sourceSnapshotIds: [imported.id],
+		});
+		assert.equal(draft.latestCheckVerdict, null);
+		assert.equal((await channel.call<WorkspaceKnowledgeDTO>(sender, 'getProjectKnowledge', one.project.id)).conventions[0].latestCheckVerdict, null);
 		const reimported = await channel.call<WorkspaceReferenceDTO>(sender, 'importTextReference', {
 			projectId: one.project.id, sourceId: imported.sourceId, title: 'Design notes v2', content: 'A newer version.',
 		});

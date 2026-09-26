@@ -63,6 +63,8 @@ export interface WorkspaceConventionDTO {
 	readonly createdAt: string;
 	readonly active: boolean;
 	readonly lastAppliedAt: string | null;
+	/** The most recently recorded agent check for this exact immutable version. */
+	readonly latestCheckVerdict: 'pass' | 'concerns' | 'fail' | null;
 }
 
 export interface CreateWorkspaceConventionDraftRequest extends WorkspaceKnowledgeProjectRequest {

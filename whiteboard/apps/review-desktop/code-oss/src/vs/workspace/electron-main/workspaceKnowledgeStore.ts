@@ -170,7 +170,12 @@ export class WorkspaceKnowledgeStore {
 	activeConvention(projectId: string): ConventionVersion | undefined {
 		this.assertOpen();
 		const row = this.db.prepare('SELECT version_id FROM project_active_conventions WHERE project_id = ?').get(projectId);
-		return row ? this.readConvention(String(row.version_id)) : undefined;
+		if (!row) { return undefined; }
+		const version = this.readConvention(String(row.version_id));
+		if (version?.authorAttemptId && this.latestConventionCheckVerdict(version.id) !== 'pass') {
+			throw new Error('The active agent-authored convention no longer has a passing latest check. Review this version before running an agent.');
+		}
+		return version;
 	}
 
 	applyConventionVersion(projectId: string, versionId: string): ConventionVersion {
@@ -179,6 +184,11 @@ export class WorkspaceKnowledgeStore {
 			const version = this.readConvention(versionId);
 			if (!version || version.projectId !== projectId) { throw new Error('Convention version does not belong to this project.'); }
 			this.requireProjectSources(projectId, version.sourceSnapshotIds);
+			if (version.authorAttemptId) {
+				if (this.latestConventionCheckVerdict(versionId) !== 'pass') {
+					throw new Error('An agent-authored convention requires a passing check for this version before it can be applied.');
+				}
+			}
 			const previous = this.db.prepare('SELECT version_id FROM project_active_conventions WHERE project_id = ?').get(projectId);
 			if (previous?.version_id === versionId) { return version; }
 			const appliedAt = new Date().toISOString();
@@ -214,12 +224,18 @@ export class WorkspaceKnowledgeStore {
 
 	listConventionChecks(versionId: string): ConventionCheck[] {
 		this.assertOpen();
-		return this.db.prepare('SELECT * FROM convention_checks WHERE version_id = ? ORDER BY checked_at, id').all(versionId)
+		return this.db.prepare('SELECT * FROM convention_checks WHERE version_id = ? ORDER BY rowid').all(versionId)
 			.map(row => ({
 				id: String(row.id), versionId: String(row.version_id), provider: row.provider as ProviderKind,
 				attemptId: String(row.attempt_id), verdict: row.verdict as ConventionCheck['verdict'],
 				report: String(row.report), checkedAt: String(row.checked_at),
 			}));
+	}
+
+	latestConventionCheckVerdict(versionId: string): ConventionCheck['verdict'] | null {
+		this.assertOpen();
+		const row = this.db.prepare('SELECT verdict FROM convention_checks WHERE version_id = ? ORDER BY rowid DESC LIMIT 1').get(versionId);
+		return row ? row.verdict as ConventionCheck['verdict'] : null;
 	}
 
 	private requireSuccessfulAttempt(attemptId: string, provider: ProviderKind, projectId: string, mode: 'convention-draft' | 'convention-check', conventionId: string | null = null): void {
