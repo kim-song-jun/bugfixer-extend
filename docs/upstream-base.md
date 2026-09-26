@@ -1,6 +1,6 @@
 # Whiteboard source boundary
 
-Status: the user selected the complete pinned source under `whiteboard/` on 2026-09-26. The source snapshot is present; Bugfixer Extend project mode and a build from this repository are separate proofs.
+Status: the user selected the complete pinned source under `whiteboard/` on 2026-09-26. The source snapshot is present and its unmodified Review development baseline built and launched from this repository on macOS arm64. Bugfixer Extend project mode and a packaged release are separate proofs.
 
 ## Pinned source and notices
 
@@ -49,6 +49,14 @@ On 2026-09-26, a disposable `git archive` of the pinned commit built and launche
 An initial development launch failed before server startup because the temporary user-data path made Code OSS's IPC socket path 126 bytes long, above its 103-character warning threshold. With a short temporary state path, the same built app launched and `/health` returned HTTP 200 with `ok: true` and `desktopAttached: true`. The final isolated launch also set `DEV_REVIEW_IMPORT_FROM=none` and `DEV_FAST_REVIEW_SHARED_DATA_DIR` to a temporary directory so it neither imported the user's VS Code settings nor selected the default shared storage path. The app and its child processes exited after `TERM`, and its Review port closed. These environment controls should be retained in later disposable-profile checks; raw run logs include an ephemeral server token and must not be committed.
 
 This rehearsal proves only the unmodified upstream development build and launch. It does not prove a build from Bugfixer Extend's imported commit, a packaged app, or any new project-mode behavior.
+
+## Committed nested-tree macOS baseline proof
+
+Commit `c65db19361212d474c62ef3b75fda74f66028b2d` contains the nested import. Its `whiteboard/` tree object is `300cc9004c2a5b6cf43386d551c8dcfa68705a22`, exactly the pinned upstream commit's root tree object. A full committed-path check found 7,449 Whiteboard files plus six outer README/documentation changes, and the working tree was clean before the build.
+
+From `whiteboard/`, root Node `24.15.0` and pnpm `11.1.2` ran `pnpm install --frozen-lockfile --prefer-offline --child-concurrency=1` with exit code 0; the Code OSS build used its pinned Node `24.18.0`. `pnpm desktop:build` exited 0. The built tree contained the executable `Whiteboard.app`, `code-oss/out/main.js`, `packages/review/dist/server/desktop-host.js`, and the Review CLI. The install warned that package bins pointing to the as-yet-unbuilt Review CLI could not be linked at install time; the later build produced that CLI.
+
+`pnpm desktop:run` then started the unmodified Review desktop with a short disposable `/tmp` profile, `DEV_REVIEW_IMPORT_FROM=none`, and an isolated shared-data directory. Its local `/health` returned HTTP 200 with `ok: true` and `desktopAttached: true`. After `TERM` to the owned app process, all ten recorded run-tree PIDs exited and the observed server port closed. The working tree remained clean. This is a development-app build and launch proof; it does not inspect a signed or packaged release, its complete notices, or any Bugfixer Extend project-mode behavior. The exact curated VSIX pins are recorded in the [manifest](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/scripts/curated-extensions.manifest.mjs) and [extension inventory](extension-distribution.md); downloaded runtime and package closure still needs release verification.
 
 ## First-slice source seams
 
