@@ -159,5 +159,10 @@ function parseCodexJsonlEventWithState(line: string, stream: 'stdout' | 'stderr'
 }
 
 function isFailedValidationCommand(command: string | undefined): boolean {
-	return command !== undefined && CODEX_VALIDATION_COMMAND.test(command);
+	if (command === undefined) {
+		return false;
+	}
+	const shellWrappedCommand = /^(?:\/(?:usr\/)?bin\/)?(?:bash|zsh|ksh|dash|sh)\s+-[a-z]*c[a-z]*\s+(['"])([\s\S]*)\1\s*$/i.exec(command.trim());
+	const validationTarget = shellWrappedCommand?.[2] ?? command;
+	return CODEX_VALIDATION_COMMAND.test(validationTarget);
 }

@@ -126,6 +126,21 @@ test('Codex failed validation remains a run failure unless the same check succee
 	assert.equal(parser('{"type":"turn.completed"}', 'stdout').terminalState, 'failed');
 });
 
+test('Codex recognizes a validation command inside its quoted login-shell wrapper', () => {
+	const parser = createCodexCommandSpec(request()).parseEvent;
+	const command = "/bin/zsh -lc 'npm test'";
+	const failedCheck = parser(JSON.stringify({ type: 'item.completed', item: {
+		type: 'command_execution', command, exit_code: 1, status: 'failed',
+	} }), 'stdout');
+	assert.equal(failedCheck.event?.metadata?.itemOutcome, 'failed');
+	assert.equal(failedCheck.terminalState, undefined);
+	const successfulRetry = parser(JSON.stringify({ type: 'item.completed', item: {
+		type: 'command_execution', command, exit_code: 0, status: 'completed',
+	} }), 'stdout');
+	assert.equal(successfulRetry.event?.metadata?.itemOutcome, undefined);
+	assert.equal(parser('{"type":"turn.completed"}', 'stdout').terminalState, 'succeeded');
+});
+
 test('Codex adapter rejects unsupported approval policy and another provider', () => {
 	assert.throws(() => createCodexCommandSpec(request('read-only', 'always')), /does not support/);
 	assert.throws(() => createCodexCommandSpec({ ...request(), providerId: 'claude' }), /another provider/);
