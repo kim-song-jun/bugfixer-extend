@@ -362,12 +362,12 @@ export class WorkspaceConventionAgentChannel {
 		if (!convention) {
 			framing.unshift(
 				'Write concise, human-readable project conventions as Markdown for people and agents.',
-				'Return only the Markdown document. Include exactly these useful sections: # Project conventions, ## Principles, ## Do, ## Avoid, and ## Examples. Make each section concrete and grounded in the supplied sources; show at least two short examples with a situation and the preferred response. Do not invent facts absent from the sources. Do not add citations, links, URLs, or a Sources/References section; the application appends deterministic input snapshot provenance. Do not assume company or product names, account names, paths, numeric limits, or other organization-specific defaults unless a source snapshot explicitly states them.',
+				'Return only the Markdown document. Include exactly these useful sections: # Project conventions, ## Principles, ## Do, ## Avoid, and ## Examples. Make each section concrete and grounded in the supplied sources. Under ## Examples, use the headings ### Example 1 and ### Example 2, each followed by a short situation and preferred response. Do not invent facts absent from the sources. Do not add citations, links, URLs, or a Sources/References section; the application appends deterministic input snapshot provenance. Do not assume company or product names, account names, paths, numeric limits, or other organization-specific defaults unless a source snapshot explicitly states them.',
 			);
 		} else {
 			framing.unshift(
 				`Check convention version ${convention.version} (ID ${convention.id}, SHA-256 ${createHash('sha256').update(convention.markdown, 'utf8').digest('hex')}) against only the supplied immutable sources.`,
-				'Return one JSON object only, with keys verdict and report. verdict must be pass, concerns, or fail. report must be readable Markdown with sections Summary, Supported guidance, Concerns, and Suggested changes. Do not apply changes. Use concerns when evidence is incomplete; use fail for contradictions or unsupported material.',
+				'Return one raw JSON object only, with keys verdict and report. Do not add a code fence, introduction, or conclusion. verdict must be pass, concerns, or fail. report must be readable Markdown with sections Summary, Supported guidance, Concerns, and Suggested changes. Do not apply changes. Use concerns when evidence is incomplete; use fail for contradictions or unsupported material.',
 				`Convention Markdown:\n${convention.markdown}`,
 			);
 		}
@@ -483,13 +483,29 @@ export class WorkspaceConventionAgentChannel {
 	private parseCheckReport(text: string): { verdict: 'pass' | 'concerns' | 'fail'; report: string } {
 		if (Buffer.byteLength(text, 'utf8') > maximumAgentTextBytes) { throw new Error('The convention review exceeded the output limit.'); }
 		let value: unknown;
-		try { value = JSON.parse(text); } catch { throw new Error('The convention review did not return the required JSON object.'); }
+		let surroundingText = '';
+		try {
+			value = JSON.parse(text);
+		} catch {
+			// Claude can wrap its final object in one JSON fence despite the requested raw format.
+			const fences = [...text.matchAll(/^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gim)];
+			if (fences.length !== 1 || (text.match(/^```/gm) ?? []).length !== 2) {
+				throw new Error('The convention review did not return one unambiguous JSON object.');
+			}
+			surroundingText = `${text.slice(0, fences[0].index)}${text.slice(fences[0].index! + fences[0][0].length)}`;
+			if (/[{}]/.test(surroundingText)) { throw new Error('The convention review did not return one unambiguous JSON object.'); }
+			try { value = JSON.parse(fences[0][1]); }
+			catch { throw new Error('The convention review did not return the required JSON object.'); }
+		}
 		if (!value || typeof value !== 'object' || Array.isArray(value)) { throw new Error('The convention review must return a JSON object.'); }
 		const record = value as Record<string, unknown>;
 		if (Object.keys(record).some(key => !['verdict', 'report'].includes(key))
-			|| !['pass', 'concerns', 'fail'].includes(String(record.verdict)) || typeof record.report !== 'string' || !record.report.trim()
+			|| typeof record.verdict !== 'string' || !['pass', 'concerns', 'fail'].includes(record.verdict) || typeof record.report !== 'string' || !record.report.trim()
 			|| record.report.length > 100_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(record.report)) {
 			throw new Error('The convention review must include a valid verdict and readable report.');
+		}
+		for (const claim of surroundingText.matchAll(/\bverdict\s+(?:is|:)\s*(pass|concerns|fail)\b/gi)) {
+			if (claim[1].toLowerCase() !== record.verdict) { throw new Error('The convention review returned conflicting verdicts.'); }
 		}
 		for (const section of ['Summary', 'Supported guidance', 'Concerns', 'Suggested changes']) {
 			if (!new RegExp(`^#{1,3}\\s+${section}\\s*$`, 'im').test(record.report)) { throw new Error(`The convention review report must include ${section}.`); }

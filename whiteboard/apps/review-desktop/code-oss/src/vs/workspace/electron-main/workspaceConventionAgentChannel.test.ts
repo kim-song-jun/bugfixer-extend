@@ -60,6 +60,7 @@ test('draft preview is project-window scoped and binds the selected immutable so
 		]);
 		assert.match(preview.prompt, /## Principles/);
 		assert.match(preview.prompt, /## Examples/);
+		assert.match(preview.prompt, /### Example 1 and ### Example 2/);
 		assert.match(preview.prompt, new RegExp(source.id));
 		assert.match(preview.prompt, new RegExp(source.contentSha256));
 		assert.match(preview.prompt, new RegExp(source.sourceUri!));
@@ -194,7 +195,7 @@ test('check preview pins the exact convention version and never applies it', asy
 		assert.deepEqual(preview.references.map(item => item.id), [source.id]);
 		assert.equal(preview.convention?.id, version.id);
 		assert.equal(preview.convention?.markdown, version.markdown);
-		assert.match(preview.prompt, /Return one JSON object only/);
+		assert.match(preview.prompt, /Return one raw JSON object only/);
 		await assert.rejects(channel.call(otherSender, 'previewCheck', request), /open project window/);
 		assert.equal(database.knowledge.activeConvention(projectId), undefined);
 		assert.deepEqual(database.listProviderAttempts(taskId), []);
@@ -252,5 +253,28 @@ Avoid: Make it better.`;
 		assert.equal(persisted.cleanupVerified, true);
 		assert.match(persisted.errorSummary ?? '', /Convention output was not saved/);
 		assert.equal(database.knowledge.listConventions(projectId).some(version => version.authorAttemptId === attempt.attemptId), false);
+	});
+});
+
+test('convention review accepts one fenced Claude JSON result while rejecting ambiguous output', async () => {
+	await withChannel(async ({ channel }) => {
+		const parser = channel as unknown as {
+			parseCheckReport(text: string): { verdict: 'pass' | 'concerns' | 'fail'; report: string };
+		};
+		const report = [
+			'## Summary', 'The selected draft matches the source.',
+			'## Supported guidance', 'The examples follow the selected source.',
+			'## Concerns', 'No unsupported claims were found.',
+			'## Suggested changes', 'No changes are needed before use.',
+		].join('\n\n');
+		const json = JSON.stringify({ verdict: 'pass', report });
+		assert.deepEqual(parser.parseCheckReport(json), { verdict: 'pass', report });
+		const claudeOutput = `The review is complete.\n\n\`\`\`json\n${json}\n\`\`\`\n\nThe verdict is pass.`;
+		assert.deepEqual(parser.parseCheckReport(claudeOutput), { verdict: 'pass', report });
+		assert.throws(() => parser.parseCheckReport(`${claudeOutput}\n\n\`\`\`json\n${JSON.stringify({ verdict: 'fail', report })}\n\`\`\``), /unambiguous JSON object/);
+		assert.throws(() => parser.parseCheckReport(`${claudeOutput}\n\n${JSON.stringify({ verdict: 'fail', report })}`), /unambiguous JSON object/);
+		assert.throws(() => parser.parseCheckReport(claudeOutput.replace('The verdict is pass.', 'The verdict is fail.')), /conflicting verdicts/);
+		assert.throws(() => parser.parseCheckReport(JSON.stringify({ verdict: ['pass'], report })), /valid verdict/);
+		assert.throws(() => parser.parseCheckReport(`\`\`\`json\n${JSON.stringify({ verdict: 'pass', report: 'Unstructured' })}\n\`\`\``), /must include Summary/);
 	});
 });
