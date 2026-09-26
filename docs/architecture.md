@@ -1,6 +1,6 @@
 # Architecture: Whiteboard shell and workspace data
 
-Status: the product foundation, workspace data boundary, and project-window layout in this document were selected by the user on 2026-09-26. This is a design contract, not an implementation status report.
+Status: the product foundation, workspace data boundary, project-window layout, and one-window-per-project behavior in this document were selected by the user on 2026-09-26. This is a design contract, not an implementation status report.
 
 ## Product foundation
 
@@ -12,13 +12,13 @@ Status: the product foundation, workspace data boundary, and project-window layo
 
 Open an actual project checkout in a native Code OSS project window. Put the MDS-themed dashboard, editable project files, and Whiteboard review canvas in that window's editor tabs. The project dashboard is the first useful tab; opening a task's file or review retains its task context and returns to the same dashboard. The Review source navigator remains read-only for pinned historical sources. The window stores an active task ID separately from a file URI or review ID: opening the same file from two tasks changes the visible task context explicitly, and restart restores the last selected task without treating a shared file tab as belonging to both tasks.
 
-This selected layout settles what is in a project window. It does not yet settle whether switching to another project focuses a second native window, replaces the current window's project context, or uses a multi-root workspace; that behavior needs a separate user decision before the multi-project flow is finalized.
+Each editable native window belongs to one project UUID and its active checkout. The project switcher focuses that project's existing window or opens a new one; it never replaces a window's checkout while its files are open. A main-process window registry binds project ID to window ID, and all task/file/review dispatch verifies that binding. Closing a window saves its tabs, selected task, and dashboard position for that project. Relaunch restores the project windows that were open at quit; a missing checkout shows **Rebind folder** in its own window without loading another project's files. This is the user's selected multi-project option A.
 
 The current entry selection loads `navigator.desktop.main` for a workspace and `review.desktop.main` for an empty window. Project mode therefore needs an explicit boot path distinct from the Review-owned navigator workspace. It must open the user's real checkout without the navigator's `files.readonlyInclude` setting. Whiteboard already registers its canvas as a Code OSS editor pane; its Review-only service initialization and automatic Home tab need to be separated so the review editor can open in a project workbench without replacing the dashboard.
 
 An in-app task click opens its stored `reviewId` through the project window's review editor service. The existing HTTP `POST /reviews-api/:id/open` dispatches to Whiteboard's attached desktop control; it does not yet prove that an active project tab will open. External review-open requests need project-aware routing, or an explicit project choice when the review is not linked. They must not silently send a task-linked review to an unrelated window.
 
-The first UI proof is one macOS project flow: open a real checkout, edit and save a file, create or select a task on the dashboard, open its Whiteboard review in another tab of the **same** window, return to the dashboard, and restart with the relevant tabs and active task restored. Open the same file from a second task and confirm the task context shown in the window changes without misattributing either task. Confirm separately that pinned review-source navigation stays read-only.
+The first UI proof opens two macOS project windows with different checkouts. In one, edit and save a file, create or select a task on the dashboard, open its Whiteboard review in another tab of the **same** window, and return to the dashboard. Switch to the other project and back without moving either project's tabs or active task. Restart with both windows, tabs, and task selections restored. Open the same file from a second task in one project and confirm the task context changes without misattributing either task. Confirm separately that pinned review-source navigation stays read-only.
 
 ## Selected data boundary: app-owned workspace database
 
@@ -104,7 +104,7 @@ The first implementation slice needs projects, checkout bindings, tasks, outgoin
 
 The slice is accepted only when:
 
-1. A project and task remain visible after app restart without Docker running.
+1. Two projects and their tasks remain visible in separate native windows after app restart without Docker running. Switching focuses the correct window; neither window shows the other's checkout, tabs, or selected task.
 2. A task creates or reuses a review through the Review API, stores the returned `reviewId`, opens its canvas in the same native project window, and recovers the same link after a simulated lost response using its saved `commandId`.
 3. Moving a local checkout keeps the project's UUID and task history; a missing checkout or deleted review is visible to the user.
 4. A backup/restore of both stores retains valid links and identifies any missing review. The public repository contains no private Bugfixer source or operational data, and `workspace.db` contains no provider credentials.

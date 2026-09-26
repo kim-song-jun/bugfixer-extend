@@ -7,6 +7,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 - Use the Whiteboard/Code OSS desktop shell and its review capability as the foundation. Build generic project, task, and agent workflow features inside it using Bugfixer's concepts. Do not copy files, operational data, or credentials from the private Bugfixer repository.
 - Keep project, task, run, and reference data in an app-owned SQLite `workspace.db`; retain Whiteboard reviews in `review-api.db` and link them through the Review API's returned `reviewId`. This is the user's selected data-boundary option A.
 - Use a native Code OSS project window with the dashboard, editable project files, and Whiteboard review canvas in its editor tabs. Preserve the existing read-only source navigator for pinned review material. This is the user's selected project-window option A.
+- Give each project its own native window. The project switcher focuses an existing window or opens that project's window, and each window restores its own tabs and task context. This is the user's selected multi-project option A.
 - Keep project conventions as versioned, readable documents in app settings. An agent may draft from selected reference snapshots and a separate agent run checks the draft; people review source links and examples, edit, and explicitly apply a version before it becomes an agent instruction. This is the user's selected convention option B with its requested agent-assisted workflow.
 - Use posco-mds as the visual theme reference: a simple project dashboard, clear tabs and navigation, restrained accents, and first-class light and dark modes. Reuse the visual principles and suitable generic interaction patterns, not laboratory-specific product content.
 - Build for macOS first and support Windows x86 in a later phase. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
@@ -37,7 +38,7 @@ Account selection in this product must bind an immutable account reference to ea
 
 ## Product requirements to preserve
 
-1. Keep multiple code projects available in one desktop app, each with its own task board and conventions. The app must expose editable project files and agent-produced changes; Whiteboard's review mode does not currently promise that workflow. The selected native tab layout applies within a project window; cross-project switching and window restoration still need a decision.
+1. Keep multiple code projects available in one desktop app, each with its own native window, task board, and conventions. Switching projects focuses or opens the target project's window; tabs and task context remain with their owning project. The app must expose editable project files and agent-produced changes; Whiteboard's review mode does not currently promise that workflow.
 2. Create, organize, and dispatch tasks to agents directly from the board, with an explicit target repository/worktree, visible progress, logs, cancellation, and durable run history.
 3. Coordinate subagents under a parent task/run and retain each subagent's status, result, and produced artifacts.
 4. Select Claude, Codex, or Antigravity and an account for each run; support concurrent runs without one run changing another run's credentials.
@@ -63,7 +64,7 @@ The current Review source navigator is not the editable project surface required
 - The connector package, permission, and credential contracts, including how logged-in website content is captured.
 - The Antigravity subscription-account scope, provider credential-isolation smoke tests, run recovery contract, Docker boundary, and Windows equivalents.
 - Whether “Windows x86” means 32-bit x86 or x86-64. Whiteboard currently packages `win32-x64`; the target architecture must not assume that settles the user's requested platform.
-- The exact project bootstrap and multi-project switching behavior within the selected native project-window design. The dashboard/editor/review tab integration and project-aware review-open routing still need implementation and runtime verification.
+- The exact project bootstrap, dashboard/editor/review tab integration, per-project window restoration, and project-aware review-open routing still need implementation and runtime verification; the one-window-per-project behavior is selected.
 - Public distribution must retain applicable Whiteboard/Code OSS license and third-party notices.
 
 ## Evidence checked
