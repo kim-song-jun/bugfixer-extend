@@ -90,6 +90,12 @@ For websites, a public URL can be fetched with its origin and retrieval time rec
 
 The connector proof is one Slack item, one Notion page, one website page, and one installed test connector producing the same snapshot shape; after an upstream edit, old task evidence must still display the original bytes and the refresh as a new version. A test connector denied a declared permission must fail to reach that resource. Revoking a connection stops future fetches without silently deleting snapshots that a task already cites; explicit deletion remains a separate user action. The installation format, browser capture path, provider scopes, and platform packaging still require design and source validation.
 
+## Frontend E2E evidence on macOS
+
+A task can request an Ego Lite browser check against an explicit target URL and expected scenario. The task/run record fixes the target, checkout revision, environment identity, scenario steps, and the agent that requested the check before the browser opens. The app owns the browser task-space lifecycle: create a task space and persist its ID, run the scenario, save screenshots plus console/network findings and a pass/fail result, then call `task.finish({ keep: [] })` even when the scenario fails or is cancelled. A cleanup failure is recorded visibly and retried by its owning run supervisor using the saved task-space ID; a missing cleanup confirmation is never displayed as a fully finished check.
+
+E2E evidence links to the exact task, run, target, and artifact hashes in `workspace.db`; images and larger logs remain app-owned artifacts. When a project server runs in Docker, the preflight verifies that the browser on macOS can reach the published target URL. The first proof covers a passing page flow, a page failure with screenshot and console/network evidence, and a cancelled check whose task space is closed. Ego Lite's browser app is macOS-specific today, so this contract does not claim a Windows browser implementation; the later Windows phase needs its own verified adapter.
+
 ## Minimal first slice
 
 The first implementation slice needs projects, checkout bindings, tasks, outgoing review requests, and review links. These records are enough to prove project selection, a task created on the board, and a task-linked review. The next slice adds runs and run events together with a real agent dispatch path, so the board never presents an inert run as a working agent. Reference snapshots, conventions, connectors, and E2E evidence extend this same app-owned model in later slices; they do not move into Whiteboard's review store.
@@ -103,6 +109,6 @@ The slice is accepted only when:
 
 ## Next design boundary
 
-Antigravity account scope, connector packaging and browser capture, Docker execution, and E2E evidence still need their own contracts. Provider-specific native instruction loading and delivery verification are part of the account/adapter section; the app-managed convention lifecycle above is selected.
+Antigravity account scope, connector packaging and browser capture, and Docker execution still need their own contracts. Provider-specific native instruction loading and delivery verification are part of the account/adapter section; the app-managed convention lifecycle above is selected.
 
 Source evidence and remaining product decisions are recorded in [discovery.md](discovery.md).
