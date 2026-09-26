@@ -13,4 +13,4 @@ Mobius의 계정 전환과 ego-lite의 브라우저 E2E도 이 워크스페이�
 
 첫 제품은 macOS에서 사용하고, Windows x86 지원은 이후 단계에서 진행합니다.
 
-현재 기능과 새 제품에서 구현할 범위는 [발견 기록](docs/discovery.md)에, 확정한 데이터 경계는 [아키텍처](docs/architecture.md)에 정리했습니다.
+현재 기능과 새 제품에서 구현할 범위는 [발견 기록](docs/discovery.md)에, 확정한 데이터 경계는 [아키텍처](docs/architecture.md)에 정리했습니다. 프로젝트 창·작업 보드·리뷰 연결을 먼저 검증하는 [첫 구현 검토안](docs/first-slice-spec.md)은 아직 승인·구현 전입니다.
