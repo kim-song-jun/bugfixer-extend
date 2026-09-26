@@ -1,0 +1,26 @@
+{
+  "name": "@dev.fast/pi-whiteboard",
+  "version": "0.1.1",
+  "description": "Connect Pi or oh-my-pi to dev.fast Whiteboard",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devdotfast/review.git",
+    "directory": "packages/agent-plugins/pi"
+  },
+  "files": [
+    "LICENSE",
+    "skills"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  }
+}

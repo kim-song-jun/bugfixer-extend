@@ -1,6 +1,6 @@
 # Internal foundation checkpoint: project, task, and review
 
-Status: **internal implementation checkpoint draft**, not a user-facing release or approval to import source or implement product code. The user selected [C for the first macOS task experience](first-macos-task-scope.md): archive, manual order, multiple reviews, deletion, and real agent-driven state handling must also work before that experience is accepted. This narrower checkpoint proves the selected foundation, app-owned database, per-project native windows, and dashboard/file/review tabs before the C capabilities are added. The dashboard's detailed arrangement remains a separate A/B/C choice shown in the local `dashboard-layout-decision.html` comparison. The provisional controls below are checkpoint scaffolding, not a substitute for the selected C scope.
+Status: **internal implementation checkpoint draft**, not a user-facing release or approval to implement project-mode product code. The user approved importing the complete pinned Whiteboard source under `whiteboard/` on 2026-09-26. The user selected [C for the first macOS task experience](first-macos-task-scope.md): archive, manual order, multiple reviews, deletion, and real agent-driven state handling must also work before that experience is accepted. This narrower checkpoint proves the selected foundation, app-owned database, per-project native windows, and dashboard/file/review tabs before the C capabilities are added. The dashboard's detailed arrangement remains a separate A/B/C choice shown in the local `dashboard-layout-decision.html` comparison. The provisional controls below are checkpoint scaffolding, not a substitute for the selected C scope.
 
 ## Checkpoint behavior
 
@@ -43,7 +43,7 @@ The [architecture write contract](architecture.md#review-link-write-contract) is
 3. Split Review Home-only contributions from canvas services. Move the single Review control stream and Review token/URL use into the main-process gateway, including all native renderer consumers. Preserve Review Home and the read-only source navigator.
 4. Add the dashboard editor input and selected layout, then real project/task controls. Connect Review registration, idempotent create, correct-window tab open, and restart recovery. The next internal stage adds the selected C controls and real run service before the first macOS task experience is accepted.
 
-These steps are implementation dependencies, not a claim that a build or product UI exists today. Import, dependency install, build, and product edits wait for review of the complete C design and an implementation plan. Passing this checkpoint alone is not completion of the user-selected first macOS task scope.
+These steps are implementation dependencies, not a claim that a build or product UI exists today. The pinned source import and baseline verification are approved; project-mode product edits still require the remaining design decisions and an implementation plan. Passing this checkpoint alone is not completion of the user-selected first macOS task scope.
 
 ## Acceptance evidence
 

@@ -8,6 +8,8 @@ Whiteboard's [pinned manifest](https://github.com/devdotfast/whiteboard/blob/4ec
 
 On macOS arm64, all five downloaded bundled VSIX files matched the manifest's SHA-256 on 2026-09-26. Each contained a root extension license file. These checks establish exact package identity and license-file presence, not complete third-party notice coverage or final packaged-app contents. The temporary VSIX files were deleted after inspection.
 
+The pinned Code OSS tree also contains 60 local extension manifests selected by its [local-extension packaging path](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/code-oss/build/lib/extensions.ts#L416-L439). Its [extension build task](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/code-oss/build/gulpfile.extensions.ts#L259-L264) and [app copy step](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/code-oss/build/gulpfile.vscode.ts#L248-L250) place these in the app separately from the curated VSIX. The package task also selects Code OSS's root license, `ThirdPartyNotices.txt`, and `licenses/` files. This source-level selection still needs comparison against the built app's actual extension directories and retained notices.
+
 ## Five release-bundled packages
 
 | Exact Open VSX package | Declared package license and observed payload | Release check still required |

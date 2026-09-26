@@ -1,0 +1,425 @@
+import { describe, expect, it } from "vitest";
+
+import { sanitizeUiTelemetryEvent } from "./ui-telemetry-events";
+
+describe("sanitizeUiTelemetryEvent", () => {
+  it("preserves privacy-safe Review authoring error dimensions", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "client_error",
+        properties: {
+          error_source: "document",
+          error_process: "canvas",
+          error_name: "ZodError",
+          component: "SequenceDiagram",
+        },
+      }),
+    ).toEqual({
+      event: "review_client_error",
+      properties: {
+        error_source: "document",
+        error_process: "canvas",
+        error_name: "ZodError",
+        component: "SequenceDiagram",
+      },
+    });
+  });
+
+  it("drops raw error text under any property name", () => {
+    const sanitized = sanitizeUiTelemetryEvent({
+      name: "client_error",
+      properties: {
+        error_source: "renderer_unexpected",
+        error_message: "Cannot read /Users/alice/secret-repo/plan.md",
+        error_stack: "at boom (/Users/alice/secret-repo/plan.ts:1:1)",
+        message: "Cannot read /Users/alice/secret-repo/plan.md",
+      },
+    });
+
+    expect(sanitized).toEqual({
+      event: "review_client_error",
+      properties: { error_source: "renderer_unexpected" },
+    });
+    expect(JSON.stringify(sanitized)).not.toContain("alice");
+  });
+
+  it("accepts a message only when the cleaner finished the job", () => {
+    const message = (value: string) =>
+      sanitizeUiTelemetryEvent({
+        name: "client_error",
+        properties: { error_source: "window", message: value },
+      })?.properties.message;
+
+    expect(message("Cannot read properties of undefined (reading 'uri')")).toBe(
+      "Cannot read properties of undefined (reading 'uri')",
+    );
+    expect(message("failed to load <REDACTED: user-file-path>")).toBe(
+      "failed to load <REDACTED: user-file-path>",
+    );
+
+    // A surviving path shape means the cleaner missed one. Fail closed.
+    expect(
+      message("Cannot read /Users/alice/secret-repo/plan.md"),
+    ).toBeUndefined();
+    expect(
+      message("C:\\Users\\alice\\secret\\plan.md is missing"),
+    ).toBeUndefined();
+    // The secret and address shapes are re-checked here, not merely upstream.
+    expect(message("see https://github.example/alice/secret")).toBeUndefined();
+    expect(message("no account for alice@example.com")).toBeUndefined();
+    expect(message("x".repeat(301))).toBeUndefined();
+    expect(message("")).toBeUndefined();
+  });
+
+  it("keeps only stack frames that resolve inside the shipped bundle", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "client_error",
+        properties: {
+          error_source: "main_unexpected",
+          frames: [
+            "vs/review/browser/workbench.js:456:12",
+            "Users/alice/secret-repo/plan.ts:1:1",
+            "../../../etc/passwd:1:1",
+            "assets/canvas-a1b2c3.js:1:284712",
+          ].join("|"),
+        },
+      })?.properties.frames,
+    ).toBe(
+      "vs/review/browser/workbench.js:456:12|assets/canvas-a1b2c3.js:1:284712",
+    );
+  });
+
+  it("drops a frame list with nothing reportable in it", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "client_error",
+        properties: {
+          error_source: "window",
+          frames: "/Users/alice/secret-repo/plan.ts:1:1",
+        },
+      }),
+    ).toEqual({
+      event: "review_client_error",
+      properties: { error_source: "window" },
+    });
+  });
+
+  it("requires a message hash to be a truncated hex digest", () => {
+    const hashed = (message_hash: string) =>
+      sanitizeUiTelemetryEvent({
+        name: "client_error",
+        properties: { error_source: "window", message_hash },
+      })?.properties.message_hash;
+
+    expect(hashed("0123456789abcdef")).toBe("0123456789abcdef");
+    expect(hashed("0123456789ABCDEF")).toBeUndefined();
+    expect(hashed("not-a-digest")).toBeUndefined();
+    expect(hashed("Cannot read plan")).toBeUndefined();
+  });
+
+  it("allows enum properties and a private app session id", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "review_dismissed",
+        properties: {
+          via: "home",
+          app_session_id: "session-1234567890",
+          review_text: "private",
+        },
+      }),
+    ).toEqual({
+      event: "review_review_dismissed",
+      properties: {
+        via: "home",
+        app_session_id: "session-1234567890",
+      },
+    });
+  });
+
+  it("drops out-of-enum language values", () => {
+    const output = sanitizeUiTelemetryEvent({
+      name: "lsp_used",
+      properties: {
+        feature: "hover",
+        via: "mouse",
+        language: "brainfuck",
+        editor_kind: "files_tab",
+      },
+    });
+
+    expect(output?.event).toBe("review_lsp_used");
+    expect(output?.properties).toEqual({
+      feature: "hover",
+      via: "mouse",
+      editor_kind: "files_tab",
+    });
+  });
+
+  it("drops unknown extension ids", () => {
+    const output = sanitizeUiTelemetryEvent({
+      name: "extension_installed",
+      properties: { extension_id: "evil.extension", trigger: "user" },
+    });
+
+    expect(output?.properties).toEqual({ trigger: "user" });
+  });
+
+  it("rejects unknown events", () => {
+    expect(sanitizeUiTelemetryEvent({ name: "made_up" })).toBeNull();
+  });
+
+  it("allows the three update lifecycle events", () => {
+    const update_attempt_id = "12345678-1234-1234-1234-123456789abc";
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "update_started",
+        properties: { update_attempt_id, target_version: "0.0.27" },
+      }),
+    ).toEqual({
+      event: "review_update_started",
+      properties: { update_attempt_id, target_version: "0.0.27" },
+    });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "update_completed",
+        properties: {
+          update_attempt_id,
+          target_version: "0.0.27-beta.1",
+          duration_ms: 1234,
+        },
+      }),
+    ).toEqual({
+      event: "review_update_completed",
+      properties: {
+        update_attempt_id,
+        target_version: "0.0.27-beta.1",
+        duration_ms: 1234,
+      },
+    });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "update_failed",
+        properties: {
+          phase: "install",
+          message_source: "shipit",
+          update_attempt_id,
+          target_version: "0.0.27",
+          duration_ms: 2345,
+          error_name: "UpdateInstallError",
+          message: "Failed to copy <REDACTED: user-file-path>",
+          message_hash: "0123456789abcdef",
+        },
+      }),
+    ).toEqual({
+      event: "review_update_failed",
+      properties: {
+        phase: "install",
+        message_source: "shipit",
+        update_attempt_id,
+        target_version: "0.0.27",
+        duration_ms: 2345,
+        error_name: "UpdateInstallError",
+        message: "Failed to copy <REDACTED: user-file-path>",
+        message_hash: "0123456789abcdef",
+      },
+    });
+  });
+
+  it("rejects invalid update dimensions and raw update errors", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "update_failed",
+        properties: {
+          phase: "restart",
+          message_source: "raw_log",
+          target_version: "private version",
+          message: "Failed at /Users/alice/private/Review.app",
+        },
+      }),
+    ).toEqual({ event: "review_update_failed", properties: {} });
+  });
+
+  it("drops unknown property keys", () => {
+    const output = sanitizeUiTelemetryEvent({
+      name: "lsp_used",
+      properties: {
+        feature: "hover",
+        via: "mouse",
+        language: "rust",
+        editor_kind: "diff",
+        file_path: "/etc/passwd",
+      },
+    });
+
+    expect(output?.properties).not.toHaveProperty("file_path");
+  });
+
+  it("allowlists the session lifecycle events", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "session_started",
+        properties: { app_session_id: "abcdefghij" },
+      }),
+    ).toEqual({
+      event: "review_session_started",
+      properties: { app_session_id: "abcdefghij" },
+    });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "session_ended",
+        properties: {
+          outcome: "app_quit",
+          duration_ms: 1500,
+          reviewUuid: "leak",
+        },
+      }),
+    ).toEqual({
+      event: "review_session_ended",
+      properties: { outcome: "app_quit", duration_ms: 1500 },
+    });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "session_ended",
+        properties: { outcome: "rage_quit" },
+      }),
+    ).toEqual({ event: "review_session_ended", properties: {} });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "review_presented",
+        properties: { load_ms: 240 },
+      }),
+    ).toEqual({
+      event: "review_review_presented",
+      properties: { load_ms: 240 },
+    });
+  });
+
+  it("allowlists source_kind and agent_kind on session_started, dropping invalid values", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "session_started",
+        properties: { source_kind: "commits", agent_kind: "claude" },
+      }),
+    ).toEqual({
+      event: "review_session_started",
+      properties: { source_kind: "commits", agent_kind: "claude" },
+    });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "session_started",
+        properties: { source_kind: "not-a-kind", agent_kind: "not-an-agent" },
+      }),
+    ).toEqual({ event: "review_session_started", properties: {} });
+  });
+});
+
+describe("reliability and engagement events", () => {
+  it("accepts a live renderer crash", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "crash",
+        properties: {
+          process: "renderer",
+          reason: "oom",
+          exit_code: -1,
+          uptime_ms: 1234,
+          source: "live",
+        },
+      }),
+    ).toEqual({
+      event: "review_crash",
+      properties: {
+        process: "renderer",
+        reason: "oom",
+        exit_code: -1,
+        uptime_ms: 1234,
+        source: "live",
+      },
+    });
+  });
+
+  it("drops a crash reason that is not an identifier", () => {
+    const sanitized = sanitizeUiTelemetryEvent({
+      name: "crash",
+      properties: {
+        process: "server",
+        reason: "died at /Users/alice/x",
+        exit_code: 1,
+        source: "live",
+      },
+    });
+
+    expect(sanitized?.properties).toEqual({
+      process: "server",
+      exit_code: 1,
+      source: "live",
+    });
+  });
+
+  it("accepts the new engagement events", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "peek_opened",
+        properties: { via: "call_stack_frame" },
+      })?.properties,
+    ).toEqual({ via: "call_stack_frame" });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "peek_resolve_failed",
+        properties: { root_kind: "range" },
+      })?.event,
+    ).toBe("review_peek_resolve_failed");
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "diff_opened",
+        properties: { kind: "structural", via: "lens" },
+      })?.properties,
+    ).toEqual({ kind: "structural", via: "lens" });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "discord_clicked",
+        properties: { via: "dialog" },
+      })?.event,
+    ).toBe("review_discord_clicked");
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "setting_changed",
+        properties: { setting: "theme", value: "dark" },
+      })?.properties,
+    ).toEqual({ setting: "theme", value: "dark" });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "error_burst",
+        properties: { message_hash: "0123456789abcdef", suppressed: 1 },
+      })?.event,
+    ).toBe("review_error_burst");
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "client_error",
+        properties: {
+          error_source: "server_unexpected",
+          error_process: "server",
+        },
+      })?.properties,
+    ).toEqual({ error_source: "server_unexpected", error_process: "server" });
+    expect(
+      sanitizeUiTelemetryEvent({ name: "review_shared", properties: {} }),
+    ).toEqual({ event: "review_review_shared", properties: {} });
+  });
+
+  it("keeps setting values and diff kinds to their closed enums", () => {
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "setting_changed",
+        properties: { setting: "theme", value: "solarized" },
+      })?.properties,
+    ).toEqual({ setting: "theme" });
+    expect(
+      sanitizeUiTelemetryEvent({
+        name: "diff_opened",
+        properties: { kind: "src/app.ts", via: "topbar" },
+      })?.properties,
+    ).toEqual({ via: "topbar" });
+  });
+});

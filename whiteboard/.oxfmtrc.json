@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "useTabs": false,
+  "tabWidth": 2,
+  "printWidth": 80,
+  "singleQuote": false,
+  "jsxSingleQuote": false,
+  "quoteProps": "as-needed",
+  "trailingComma": "all",
+  "semi": true,
+  "arrowParens": "always",
+  "bracketSameLine": false,
+  "bracketSpacing": true,
+  "sortImports": {
+    "newlinesBetween": true,
+    "sortSideEffects": false,
+    "partitionByComment": false,
+    "partitionByNewline": false
+  },
+  "ignorePatterns": [
+    ".vite/**",
+    "dist/**",
+    "**/dist/**",
+    "**/.claude/**",
+    "**/.vite/**",
+    "apps/review-desktop/code-oss/**",
+    ".agent/**",
+    ".agents/**",
+    ".claude/**",
+    ".codex/**",
+    ".continue/**",
+    ".cursor/**",
+    ".gemini/**",
+    ".opencode/**",
+    ".pi/**",
+    ".roo/**",
+    ".windsurf/**",
+    "tools/oxlint/anti-slop/**"
+  ]
+}

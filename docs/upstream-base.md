@@ -1,6 +1,6 @@
 # Whiteboard source boundary
 
-Status: source inventory for the selected desktop foundation. No Whiteboard code has been imported into this repository yet.
+Status: the user selected the complete pinned source under `whiteboard/` on 2026-09-26. The source snapshot is present; Bugfixer Extend project mode and a build from this repository are separate proofs.
 
 ## Pinned source and notices
 
@@ -12,9 +12,15 @@ Status: source inventory for the selected desktop foundation. No Whiteboard code
 
 At the pinned commit, the source tree object is `300cc9004c2a5b6cf43386d551c8dcfa68705a22`. It has 7,449 tracked blobs: 7,409 regular files (`100644`) and 40 executable files (`100755`), with no tracked symlink or submodule. The tracked blob payload is 108,912,698 bytes (about 104 MiB); the local checkout occupies about 176 MB including roughly 55 MB of `.git` data. These are source-snapshot measurements, not an estimate of installed dependencies or a packaged app.
 
-For a direct source import, preserve every tracked relative path, file content, and executable bit while excluding the source `.git` directory and local build products. Compare the imported tree against the pinned `git ls-tree` entries, not just the file count, and review tracked contents for credentials or private project material before the first public push. At the current Bugfixer Extend root, the only direct tracked-path collision is `README.md`; merging at the root would still require reconciling workspace and build behavior, while a nested import keeps the source's root contract together. The import layout is awaiting the user's choice.
+The selected nested import keeps the source's root `package.json`, `pnpm-workspace.yaml`, lockfiles, scripts, README, and licenses under `whiteboard/`, with the Bugfixer Extend README and design documents at the outer root. It excludes the source `.git` directory and local build products. The import was compared against every pinned `git ls-tree` entry by relative path, file content, and executable bit; the complete result is recorded below. The only path that would have collided in a root merge was `README.md`.
 
-A targeted pre-import scan of all 7,449 tracked files on 2026-09-26 found no case-insensitive `molcube`, `bugfixer`, or `posco-mds` content matches. Probes for common AWS, GitHub, Slack, OpenAI, and Notion key formats and private-key headers flagged only a GitHub-token-shaped value used by error-redaction tests and an OpenSSH key-header regex in the agent-host parser; both were reviewed in context. This finite pattern scan is not a complete credentials audit. Repeat content screening and review findings against the exact imported tree before a public push.
+A targeted post-import scan of all 7,449 files on 2026-09-26 found no case-insensitive `molcube`, `bugfixer`, or `posco-mds` content matches; no AWS, Slack, OpenAI, or Notion key-pattern hits; and no Git LFS pointers. Two files contained a synthetic GitHub-token-shaped fixture in error-redaction tests, and one agent-host source file contained a private-key-header detection expression; these were reviewed in context. This finite pattern scan is not a complete credentials audit.
+
+## Nested import result
+
+The source was exported at the exact pinned commit with `git archive` and moved as one staged directory into `whiteboard/`. All 7,449 relative paths and file hashes matched the pinned tree; 7,409 entries have mode `100644` and 40 have mode `100755`, with 108,912,698 tracked bytes in total. The imported tree contains no Git LFS pointer file. Its internal pnpm workspace and notices remain together, while the outer README and `docs/` remain separate. These are source-integrity checks, not a new-product build or a release-license clearance.
+
+The pinned `.gitignore` itself ignores one tracked test image under `packages/review/app/.vitest-attachments/`, so that exact file was staged explicitly. This machine's Git text filters also changed 26 staged blob IDs on ordinary `git add`; their original raw blob IDs were restored in the index without changing the working files. A second comparison of the complete staged `whiteboard/` tree against the pinned `git ls-tree` found 7,449 paths and zero path, blob, or mode differences. Fresh checkouts should be compared at the commit-tree level because text attributes can affect working-copy line endings.
 
 ## Buildable source boundary
 
@@ -42,7 +48,7 @@ On 2026-09-26, a disposable `git archive` of the pinned commit built and launche
 
 An initial development launch failed before server startup because the temporary user-data path made Code OSS's IPC socket path 126 bytes long, above its 103-character warning threshold. With a short temporary state path, the same built app launched and `/health` returned HTTP 200 with `ok: true` and `desktopAttached: true`. The final isolated launch also set `DEV_REVIEW_IMPORT_FROM=none` and `DEV_FAST_REVIEW_SHARED_DATA_DIR` to a temporary directory so it neither imported the user's VS Code settings nor selected the default shared storage path. The app and its child processes exited after `TERM`, and its Review port closed. These environment controls should be retained in later disposable-profile checks; raw run logs include an ephemeral server token and must not be committed.
 
-This rehearsal proves only the unmodified upstream development build and launch. It does not prove a build from Bugfixer Extend's future imported commit, a packaged app, or any new project-mode behavior.
+This rehearsal proves only the unmodified upstream development build and launch. It does not prove a build from Bugfixer Extend's imported commit, a packaged app, or any new project-mode behavior.
 
 ## First-slice source seams
 
@@ -68,4 +74,4 @@ The app-owned `workspace.db` and typed main-process API described in [architectu
 4. Reassess the [fork's security-backport applicability notes](https://github.com/devdotfast/whiteboard/blob/4ecc5704cb19d1dc04304ae6956200227d483e27/apps/review-desktop/UPSTREAM) before enabling any Code OSS chat, browser, extension, or agent path that Review currently leaves inert. In particular, three agent-network-filter fixes were deliberately omitted because their enforcement paths are inactive in Review; if the new app enables agent network requests through those paths, resync that module from its patched upstream and verify the relevant denial behavior first.
 5. Before distributing a renamed product, complete the [curated-extension package and notice inventory](extension-distribution.md), then replace Whiteboard's product identity, bundle IDs, URL protocol, data folder, and `update.dev.fast` endpoint. The imported MIT source status does not establish rights for every downloaded VSIX or make the inherited update configuration suitable for Bugfixer Extend.
 
-This inventory establishes what must travel together. It does not claim the new product builds or that a copied source tree is already present.
+This inventory establishes what traveled together in the imported source tree. It does not claim the new product builds or that a packaged app exists.

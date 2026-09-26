@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "whiteboard": {
+      "command": "./bin/whiteboard-mcp",
+      "cwd": "."
+    }
+  }
+}

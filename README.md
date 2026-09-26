@@ -4,6 +4,8 @@
 
 선택한 기반은 Whiteboard의 Code OSS 데스크톱 앱입니다. 프로젝트별 작업 보드와 에이전트 실행은 Bugfixer의 개념을 참고해 앱 안에 범용 기능으로 새로 설계합니다. 비공개 Bugfixer 저장소의 파일·데이터를 그대로 복사하지 않습니다. 프로젝트·작업 데이터는 앱의 별도 `workspace.db`에 저장하고 Whiteboard 리뷰는 반환된 리뷰 ID로 연결하는 설계를 선택했습니다.
 
+Whiteboard 공개 소스는 [고정 커밋 `4ecc5704`](https://github.com/devdotfast/whiteboard/tree/4ecc5704cb19d1dc04304ae6956200227d483e27)의 추적 파일 전체를 [whiteboard/](whiteboard/)에 편입했습니다. 내부 pnpm 작업공간과 라이선스·고지는 그 안에 보존하고 이 README와 설계 문서는 바깥 루트에 둡니다. 파일 검증과 macOS 기준 빌드 상태는 [소스 기반 기록](docs/upstream-base.md)에 구분해 적었습니다.
+
 첫 화면은 posco-mds의 라이트·다크 테마 원칙을 참고한 간결한 프로젝트 대시보드입니다. 편집 가능한 Code OSS 프로젝트 창에서 대시보드·파일·Whiteboard 리뷰를 같은 창의 탭으로 여는 설계를 선택했습니다.
 여러 프로젝트는 프로젝트마다 네이티브 창을 두고, 전환할 때 해당 창을 앞으로 가져오거나 새로 엽니다. 탭과 선택한 작업은 각 프로젝트 창에 남습니다.
 

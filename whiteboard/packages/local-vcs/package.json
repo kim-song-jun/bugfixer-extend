@@ -1,0 +1,38 @@
+{
+  "name": "@dev.fast/local-vcs",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "prepack": "pnpm run build",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "pnpm -w exec tsc -p packages/local-vcs/tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "git-url-parse": "16.1.0",
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "@types/proper-lockfile": "4.1.4",
+    "tsdown": "^0.22.3",
+    "typescript": "6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
