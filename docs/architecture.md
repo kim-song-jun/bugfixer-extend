@@ -109,6 +109,6 @@ The slice is accepted only when:
 
 ## Next design boundary
 
-Antigravity account scope, connector packaging and browser capture, and Docker execution still need their own contracts. Provider-specific native instruction loading and delivery verification are part of the account/adapter section; the app-managed convention lifecycle above is selected.
+Antigravity account scope, connector packaging and browser capture, and Docker execution still need their own contracts. [Provider adapter research](provider-adapters.md) details native instruction loading, prompt delivery, event parsing, and the required account-isolation proof; the app-managed convention lifecycle above is selected.
 
 Source evidence and remaining product decisions are recorded in [discovery.md](discovery.md).
