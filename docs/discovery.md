@@ -5,6 +5,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 ## Confirmed direction
 
 - Use the Whiteboard/Code OSS desktop shell and its review capability as the foundation. Build generic project, task, and agent workflow features inside it using Bugfixer's concepts. Do not copy files, operational data, or credentials from the private Bugfixer repository.
+- Keep project, task, run, and reference data in an app-owned SQLite `workspace.db`; retain Whiteboard reviews in `review-api.db` and link them through the Review API's returned `reviewId`. This is the user's selected data-boundary option A.
 - Use posco-mds as the visual theme reference: a simple project dashboard, clear tabs and navigation, restrained accents, and first-class light and dark modes. Reuse the visual principles and suitable generic interaction patterns, not laboratory-specific product content.
 - Build for macOS first and support Windows x86 in a later phase. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
 - Allow conventions to be supplied per project and attached to agent work.
@@ -45,7 +46,6 @@ The current Review source navigator is not the editable project surface required
 
 ## Decisions still open
 
-- The exact ownership and placement of project/task data relative to Whiteboard review data. A separate app-owned workspace database with Review API ID references is the leading proposal and awaits confirmation; extending the review DB or using a Docker-hosted workspace service are alternatives.
 - How project convention sources are selected, ordered, snapshotted, and shown to the user before an agent run.
 - The connector package, permission, and credential contracts, including how logged-in website content is captured.
 - The provider-specific account isolation mechanism, run recovery contract, Docker boundary, and Windows equivalents.
@@ -60,3 +60,5 @@ The current Review source navigator is not the editable project surface required
 - Mobius: `README.md` documents Claude/Codex support, live CLI credential writes during switching, and a Codex session reverting a switch when it refreshes its token.
 - Ego Lite: `AGENTS.md` distinguishes the harness from the closed-source browser app; `README.md` documents macOS availability and agent spaces; `skills/ego-browser/SKILL.md` documents `taskSpace` and browser automation.
 - posco-mds: `frontend/.impeccable.md` describes its design principles and semantic token hierarchy; `frontend/src/styles/app.css` and `dark.css` contain the current light/dark values; `frontend/src/components/DocumentTabStrip.tsx` and `frontend/src/pages/Dashboard.tsx` show tab and dashboard patterns.
+
+The approved workspace/review ownership and first-slice proof are detailed in [architecture.md](architecture.md).
