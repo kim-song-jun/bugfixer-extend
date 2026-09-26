@@ -14,6 +14,8 @@ At the pinned commit, the source tree object is `300cc9004c2a5b6cf43386d551c8dcf
 
 For a direct source import, preserve every tracked relative path, file content, and executable bit while excluding the source `.git` directory and local build products. Compare the imported tree against the pinned `git ls-tree` entries, not just the file count, and review tracked contents for credentials or private project material before the first public push. At the current Bugfixer Extend root, the only direct tracked-path collision is `README.md`; merging at the root would still require reconciling workspace and build behavior, while a nested import keeps the source's root contract together. The import layout is awaiting the user's choice.
 
+A targeted pre-import scan of all 7,449 tracked files on 2026-09-26 found no case-insensitive `molcube`, `bugfixer`, or `posco-mds` content matches. Probes for common AWS, GitHub, Slack, OpenAI, and Notion key formats and private-key headers flagged only a GitHub-token-shaped value used by error-redaction tests and an OpenSSH key-header regex in the agent-host parser; both were reviewed in context. This finite pattern scan is not a complete credentials audit. Repeat content screening and review findings against the exact imported tree before a public push.
+
 ## Buildable source boundary
 
 `apps/review-desktop/code-oss/` is a tracked fork, about 100 MB in the local checkout. Its review UI also depends on the surrounding pnpm workspace. The desktop's `scripts/run.sh` requires the built Review server at `packages/review/dist/server/desktop-host.js`; copying the Code OSS folder alone would leave that runtime missing.
