@@ -1,0 +1,101 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) dev.fast. All rights reserved.
+ *  Licensed under the MIT License. See LICENSE in the repository root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import type { ProviderRunRequest } from './providerRunTypes.js';
+import { createClaudeProviderCommand, parseClaudeProviderEvent } from './providerClaudeAdapter.js';
+
+function request(overrides: Partial<ProviderRunRequest> = {}): ProviderRunRequest {
+	return {
+		providerId: 'claude',
+		attemptId: 'attempt-claude-test',
+		cwd: '/workspace/project',
+		prompt: 'review this change; do not edit files',
+		profileDirectory: '/profile/claude',
+		permissionPolicy: { mode: 'read-only', approval: 'never' },
+		preflight: async () => ({ allowed: true, cwdIdentity: 'directory-proof', policyProof: 'read-only-proof' }),
+		...overrides,
+	};
+}
+
+test('builds a shell-free Claude command with isolated profile and enforced plan permissions', () => {
+	const command = createClaudeProviderCommand(request(), '/opt/claude');
+	assert.equal(command.executable, '/opt/claude');
+	assert.deepEqual(command.args, [
+		'--print', '--input-format', 'stream-json',
+		'--output-format', 'stream-json', '--verbose', '--restricted',
+		'--permission-mode', 'plan', '--permission-prompts', 'none',
+	]);
+	assert.equal(command.stdin, JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'review this change; do not edit files' }] } }) + '\n');
+	assert.deepEqual(command.env, { CLAUDE_CONFIG_DIR: '/profile/claude' });
+});
+
+test('Claude task mode accepts project edits while denying tools that need a prompt broker', () => {
+	const command = createClaudeProviderCommand(request({
+		permissionPolicy: { mode: 'mutating', approval: 'on-request' },
+	}));
+	assert.deepEqual(command.args, [
+		'--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--restricted',
+		'--permission-mode', 'acceptEdits', '--permission-prompts', 'none',
+	]);
+	assert.equal(command.args.includes('bypassPermissions'), false);
+	assert.throws(() => createClaudeProviderCommand(request({ permissionPolicy: { mode: 'mutating', approval: 'never' } })), /on-request/);
+	assert.throws(() => createClaudeProviderCommand(request({
+		permissionPolicy: { mode: 'read-only', approval: 'on-request' },
+	})), /read-only runs require no approval/);
+});
+
+test('convention agent mode disables all Claude tools so it can use only supplied snapshots', () => {
+	const command = createClaudeProviderCommand(request({ captureFinalText: true }));
+	assert.ok(command.args.includes('--tools'));
+	assert.equal(command.args[command.args.indexOf('--tools') + 1], '');
+	assert.equal(command.args.includes('bypassPermissions'), false);
+});
+
+test('Claude task runs retain restricted file tools while capturing the final result', () => {
+	const command = createClaudeProviderCommand(request({
+		captureFinalText: true,
+		permissionPolicy: { mode: 'mutating', approval: 'on-request' },
+	}));
+	assert.equal(command.args.includes('--tools'), false);
+	assert.ok(command.args.includes('--restricted'));
+	assert.ok(command.args.includes('--permission-mode'));
+	assert.equal(command.args[command.args.indexOf('--permission-mode') + 1], 'acceptEdits');
+	assert.equal(command.args[command.args.indexOf('--permission-prompts') + 1], 'none');
+	assert.deepEqual(command.env, { CLAUDE_CONFIG_DIR: '/profile/claude' });
+	assert.equal(parseClaudeProviderEvent(JSON.stringify({
+		type: 'result', subtype: 'success', is_error: false, result: 'task result',
+	}), 'stdout').finalText, 'task result');
+});
+
+test('emits only bounded lifecycle metadata and derives success from the terminal result', () => {
+	assert.deepEqual(parseClaudeProviderEvent(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'session_123' }), 'stdout'), {
+		event: { type: 'session.started', providerSessionId: 'session_123' },
+	});
+	assert.deepEqual(parseClaudeProviderEvent(JSON.stringify({
+		type: 'result', subtype: 'success', is_error: false, num_turns: 2, duration_ms: 42, result: 'private answer',
+	}), 'stdout'), {
+		event: { type: 'turn.completed', metadata: { subtype: 'success', numTurns: 2, durationMs: 42 } },
+		terminalState: 'succeeded',
+		finalText: 'private answer',
+	});
+	assert.equal(parseClaudeProviderEvent(JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, result: 'secret' }), 'stdout').terminalState, 'failed');
+	assert.deepEqual(parseClaudeProviderEvent(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'bad/session' }), 'stdout'), {
+		event: { type: 'session.started' },
+	});
+	assert.deepEqual(parseClaudeProviderEvent(JSON.stringify({ type: 'result', subtype: 'success', result: 'ignored' }), 'stderr'), {});
+	assert.deepEqual(parseClaudeProviderEvent('x'.repeat(1024 * 1024 + 1), 'stdout'), {});
+	assert.deepEqual(parseClaudeProviderEvent('not json', 'stdout'), {});
+});
+
+test('rejects invalid profile paths and omits unknown result subtype metadata', () => {
+	assert.throws(() => createClaudeProviderCommand(request({ profileDirectory: '' })), /absolute profile directory/);
+	assert.throws(() => createClaudeProviderCommand(request({ profileDirectory: 'relative/profile' })), /absolute profile directory/);
+	assert.deepEqual(parseClaudeProviderEvent(JSON.stringify({ type: 'result', subtype: 'credential_dump', is_error: true }), 'stdout'), {
+		event: { type: 'turn.completed', metadata: {} },
+		terminalState: 'failed',
+	});
+});

@@ -1,0 +1,1 @@
+import './projectDashboardEditor.contribution.js';

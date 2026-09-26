@@ -1,0 +1,168 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) dev.fast. All rights reserved.
+ *  Licensed under the MIT License. See LICENSE in the repository root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import type { WebContents } from 'electron';
+import { URI } from '../../base/common/uri.js';
+import type { ICodeWindow } from '../../platform/window/electron-main/window.js';
+import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
+import type { ConventionAgentPreviewDTO } from '../common/workspaceConventionAgentProtocol.js';
+import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
+import { WorkspaceDatabase } from './workspaceDatabase.js';
+import { WorkspaceConventionAgentChannel } from './workspaceConventionAgentChannel.js';
+
+async function withChannel(run: (context: {
+	channel: WorkspaceConventionAgentChannel;
+	database: WorkspaceDatabase;
+	projectId: string;
+	taskId: string;
+	sender: WebContents;
+	otherSender: WebContents;
+}) => Promise<void>): Promise<void> {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-convention-agent-'));
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	const descriptor = URI.file(join(directory, 'project.code-workspace')).toString();
+	const project = database.createProjectWorkspace('Convention project', directory, descriptor);
+	const task = database.createTask({ projectId: project.project.id, bindingId: project.binding.id, title: 'Document review practices' });
+	const sender = {} as WebContents;
+	const otherSender = {} as WebContents;
+	const window = {
+		config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } },
+		openedWorkspace: { configPath: URI.parse(descriptor) },
+	} as unknown as ICodeWindow;
+	const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? window : undefined } as IWindowsMainService;
+	const dashboard = new WorkspaceDashboardChannel(database, windows);
+	const logger = { error() { /* Agent subprocesses are never started by these preview boundary tests. */ } } as never;
+	const channel = new WorkspaceConventionAgentChannel(database, dashboard, logger);
+	try { await run({ channel, database, projectId: project.project.id, taskId: task.id, sender, otherSender }); }
+	finally { await channel.shutdown(); database.close(); rmSync(directory, { recursive: true, force: true }); }
+}
+
+test('draft preview is project-window scoped and binds the selected immutable source snapshot', async () => {
+	await withChannel(async ({ channel, database, projectId, taskId, sender, otherSender }) => {
+		const source = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'policy-source',
+			title: 'Review notes', contentType: 'application/vnd.bugfixer.notion-source+json',
+			content: Buffer.from('{"block":"RAW JSON MUST STAY OUT OF PROMPT"}'), derivedText: 'Review the test first. Prefer small changes.',
+		});
+		const request = { projectId, taskId, providerId: 'codex' as const, sourceSnapshotIds: [source.id] };
+		const preview = await channel.call<ConventionAgentPreviewDTO>(sender, 'previewDraft', request);
+		assert.equal(preview.operation, 'draft');
+		assert.deepEqual(preview.references.map(item => ({ id: item.id, version: item.version, hash: item.contentSha256, content: item.content })), [
+			{ id: source.id, version: 1, hash: source.contentSha256, content: 'Review the test first. Prefer small changes.' },
+		]);
+		assert.match(preview.prompt, /## Principles/);
+		assert.match(preview.prompt, /## Examples/);
+		assert.match(preview.prompt, new RegExp(source.id));
+		assert.match(preview.prompt, new RegExp(source.contentSha256));
+		assert.doesNotMatch(preview.prompt, /RAW JSON MUST STAY OUT OF PROMPT/);
+		assert.equal(preview.allowed, false);
+		assert.match(preview.blockedReason ?? '', /Codex cannot currently guarantee reads are limited/);
+		await assert.rejects(channel.call(otherSender, 'previewDraft', request), /open project window/);
+		const otherProject = database.createProjectWorkspace('Other project', process.cwd(), URI.file(join(process.cwd(), 'other.code-workspace')).toString());
+		const foreign = database.knowledge.importReference({
+			projectId: otherProject.project.id, connectorId: 'manual-text', connectorVersion: '1', externalId: 'foreign',
+			title: 'Foreign', contentType: 'text/plain; charset=utf-8', content: Buffer.from('Must not cross project boundary.'),
+		});
+		await assert.rejects(channel.call(sender, 'previewDraft', { ...request, sourceSnapshotIds: [foreign.id] }), /unavailable in this project/);
+		await assert.rejects(channel.call(sender, 'draft', { ...request, digest: preview.digest }), /Codex cannot currently guarantee reads are limited/);
+		assert.deepEqual(database.listProviderAttempts(taskId), []);
+	});
+});
+
+test('draft preview digest changes when the selected immutable snapshot changes', async () => {
+	await withChannel(async ({ channel, database, projectId, taskId, sender }) => {
+		const first = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'mutable-source',
+			title: 'Policy', contentType: 'text/plain; charset=utf-8', content: Buffer.from('First source revision.'),
+		});
+		const second = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'mutable-source',
+			title: 'Policy v2', contentType: 'text/plain; charset=utf-8', content: Buffer.from('Second source revision.'),
+		});
+		const base = { projectId, taskId, providerId: 'claude' as const };
+		const one = await channel.call<ConventionAgentPreviewDTO>(sender, 'previewDraft', { ...base, sourceSnapshotIds: [first.id] });
+		const two = await channel.call<ConventionAgentPreviewDTO>(sender, 'previewDraft', { ...base, sourceSnapshotIds: [second.id] });
+		assert.equal(one.references[0].content, 'First source revision.');
+		assert.equal(two.references[0].content, 'Second source revision.');
+		assert.notEqual(one.digest, two.digest);
+		await assert.rejects(channel.call(sender, 'draft', { ...base, sourceSnapshotIds: [second.id], digest: one.digest }), /changed after preview/);
+		assert.deepEqual(database.listProviderAttempts(taskId), []);
+	});
+});
+
+test('check preview pins the exact convention version and never applies it', async () => {
+	await withChannel(async ({ channel, database, projectId, taskId, sender, otherSender }) => {
+		const source = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'check-source',
+			title: 'Source', contentType: 'text/plain; charset=utf-8', content: Buffer.from('Use plain language.'),
+		});
+		const version = database.knowledge.createConventionVersion({
+			projectId, markdown: '# Project conventions\n\n## Principles\nPrefer plain language.', sourceSnapshotIds: [source.id], authoredBy: 'person',
+		});
+		const request = { projectId, taskId, providerId: 'claude' as const, versionId: version.id };
+		const preview = await channel.call<ConventionAgentPreviewDTO>(sender, 'previewCheck', request);
+		assert.equal(preview.operation, 'check');
+		assert.deepEqual(preview.references.map(item => item.id), [source.id]);
+		assert.equal(preview.convention?.id, version.id);
+		assert.equal(preview.convention?.markdown, version.markdown);
+		assert.match(preview.prompt, /Return one JSON object only/);
+		await assert.rejects(channel.call(otherSender, 'previewCheck', request), /open project window/);
+		assert.equal(database.knowledge.activeConvention(projectId), undefined);
+		assert.deepEqual(database.listProviderAttempts(taskId), []);
+	});
+});
+
+test('atomic draft save failure leaves a failed cleaned attempt and no orphan success', async () => {
+	await withChannel(async ({ channel, database, projectId, taskId }) => {
+		const task = database.getTask(taskId)!;
+		const source = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'draft-atomic-source',
+			title: 'Draft source', contentType: 'text/plain; charset=utf-8', content: Buffer.from('Ground the document in this source.'),
+		});
+		const attempt = database.createProviderAttempt({
+			taskId, provider: 'claude', purpose: 'connectionTest', profileRef: 'local-default-claude',
+			folderIdentity: 'test-folder', cwd: process.cwd(), mode: 'convention-draft', prompt: 'draft', refSnapshotIds: [source.id],
+		});
+		database.setProviderAttemptRunning(attempt.attemptId, task.revision, process.pid);
+		const context = { operation: 'draft', projectId, providerId: 'claude', sourceSnapshotIds: ['00000000-0000-4000-8000-000000000000'] };
+		const validMarkdown = `# Project conventions
+
+## Principles
+Prefer precise language that states the action and its reason.
+
+## Do
+Describe the smallest useful change and name its expected result.
+
+## Avoid
+Avoid vague requests that leave the intended behavior unclear.
+
+## Examples
+### Example 1
+Good: State which behavior needs to change.
+
+### Example 2
+Avoid: Make it better.`;
+		const result = {
+			attemptId: attempt.attemptId, providerId: 'claude', state: 'succeeded', cleanupVerified: true,
+			exitCode: 0, signal: null, finalText: validMarkdown,
+		};
+		type StoredAttempt = typeof attempt;
+		type ProviderResult = typeof result;
+		const internal = channel as unknown as {
+			finishAttempt(context: unknown, attempt: StoredAttempt, sessionId: string | null, result: ProviderResult): Promise<void>;
+		};
+		await internal.finishAttempt(context, attempt, null, result);
+		const persisted = database.getProviderAttempt(attempt.attemptId)!;
+		assert.equal(persisted.state, 'failed');
+		assert.equal(persisted.cleanupVerified, true);
+		assert.match(persisted.errorSummary ?? '', /Convention output was not saved/);
+		assert.equal(database.knowledge.listConventions(projectId).some(version => version.authorAttemptId === attempt.attemptId), false);
+	});
+});
