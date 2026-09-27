@@ -26,6 +26,7 @@ const secondCommandId = '999dc74d-58ba-4b6d-9923-df3bb7d9ce97';
 function withBridge(run: (context: {
 	bridge: WorkspaceReviewBridgeChannel;
 	database: WorkspaceDatabase;
+	restart: () => { bridge: WorkspaceReviewBridgeChannel; database: WorkspaceDatabase };
 	projectId: string;
 	taskId: string;
 	otherProjectId: string;
@@ -37,7 +38,8 @@ function withBridge(run: (context: {
 	const unresolvedRoot = join(directory, 'repository');
 	mkdirSync(unresolvedRoot);
 	const root = realpathSync(unresolvedRoot);
-	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	const databasePath = join(directory, 'workspace.db');
+	let database = WorkspaceDatabase.open(databasePath);
 	const descriptorUri = URI.file(join(directory, 'project.code-workspace')).toString();
 	const workspace = database.createProjectWorkspace('Bridge project', root, descriptorUri);
 	database.updateFolderBinding(workspace.binding.id, { expectedPath: root, vcsKind: 'git', vcsRoot: root });
@@ -49,7 +51,6 @@ function withBridge(run: (context: {
 	} as unknown as ICodeWindow;
 	const sender = {} as WebContents;
 	const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
-	const dashboard = new WorkspaceDashboardChannel(database, windows);
 	const connection: ReviewDesktopConnection = {
 		version: 3, url: 'http://127.0.0.1:43119', token: 'main-only-token', instanceId: 'instance', appSessionId: 'session',
 	};
@@ -106,8 +107,18 @@ function withBridge(run: (context: {
 		if (options.loseFirstCommandResponse && commandRequests === 1) { throw new Error('connection dropped after server commit'); }
 		return Response.json(result);
 	};
-	const bridge = new WorkspaceReviewBridgeChannel(database, dashboard, host, fakeFetch);
-	const runResult = run({ bridge, database, projectId: workspace.project.id, taskId: task.id, otherProjectId: other.project.id, sender, root, commandBodies });
+	const createBridge = (currentDatabase: WorkspaceDatabase) => {
+		const dashboard = new WorkspaceDashboardChannel(currentDatabase, windows);
+		return new WorkspaceReviewBridgeChannel(currentDatabase, dashboard, host, fakeFetch);
+	};
+	let bridge = createBridge(database);
+	const restart = () => {
+		database.close();
+		database = WorkspaceDatabase.open(databasePath);
+		bridge = createBridge(database);
+		return { bridge, database };
+	};
+	const runResult = run({ bridge, database, restart, projectId: workspace.project.id, taskId: task.id, otherProjectId: other.project.id, sender, root, commandBodies });
 	return runResult.finally(() => {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
@@ -115,7 +126,7 @@ function withBridge(run: (context: {
 }
 
 test('task review retries the durable command ID after a lost response and persists the receipt', async () => {
-	await withBridge(async ({ bridge, database, projectId, taskId, sender, commandBodies }) => {
+	await withBridge(async ({ bridge, database, restart, projectId, taskId, sender, commandBodies }) => {
 		const request = { projectId, taskId, commandId: createCommandId };
 		await assert.rejects(bridge.call(sender, 'createTaskReview', request), /connection dropped/);
 		assert.equal(database.getReviewCommand(createCommandId)?.status, 'failed');
@@ -123,6 +134,9 @@ test('task review retries the durable command ID after a lost response and persi
 		assert.deepEqual(pending.pendingCreates.map(item => [item.commandId, item.status]), [[createCommandId, 'failed']]);
 		const task = database.getTask(taskId)!;
 		database.updateTask(taskId, task.revision, { title: 'Renamed after request was sent' });
+		({ bridge, database } = restart());
+		const retryBody = database.getReviewCommand(createCommandId)?.body;
+		assert.equal(retryBody, commandBodies[0]);
 		const result = await bridge.call<{ command: { reviewId: string; status: string }; reviews: Array<{ reviewId: string; isPrimary: boolean }> }>(sender, 'createTaskReview', request);
 		assert.equal(result.command.reviewId, 'review-one');
 		assert.equal(result.command.status, 'complete');
@@ -130,6 +144,9 @@ test('task review retries the durable command ID after a lost response and persi
 		assert.equal(commandBodies[0], commandBodies[1]);
 		assert.deepEqual(result.reviews.map(review => [review.reviewId, review.isPrimary]), [['review-one', true]]);
 		assert.equal(database.getReviewCommand(createCommandId)?.status, 'complete');
+		({ database } = restart());
+		assert.equal(database.getReviewCommand(createCommandId)?.reviewId, 'review-one');
+		assert.deepEqual(database.listTaskReviews(taskId).map(review => [review.reviewId, review.isPrimary]), [['review-one', true]]);
 	}, { loseFirstCommandResponse: true });
 });
 
