@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { join } from '../common/path.js';
+import * as path from 'node:path';
 import { promises } from 'fs';
 import { mark } from '../common/performance.js';
 import { ILanguagePacks, INLSConfiguration } from '../../nls.js';
@@ -53,8 +54,24 @@ export async function resolveNLSConfiguration({ userLocale, osLocale, userDataPa
 	}
 
 	try {
-		const languagePacks = await getLanguagePackConfigurations(userDataPath);
-		if (!languagePacks) {
+		const languagePacks = await getLanguagePackConfigurations(userDataPath) ?? {};
+		const configuredLanguage = resolveLanguagePackLanguage(languagePacks, userLocale);
+		const configuredPack = configuredLanguage ? languagePacks[configuredLanguage] : undefined;
+		const configuredCorePath = configuredPack?.translations?.['vscode'];
+		const configuredCoreIsValid = typeof configuredPack?.hash === 'string'
+			&& typeof configuredCorePath === 'string'
+			&& await Promises.exists(configuredCorePath);
+
+		// NLS starts before extension scanning writes languagepacks.json on a new profile.
+		if (isKoreanLocale(userLocale) && !configuredCoreIsValid) {
+			if (configuredLanguage) delete languagePacks[configuredLanguage];
+			const bundledKoreanPack = await getBundledKoreanLanguagePack(nlsMetadataPath);
+			if (bundledKoreanPack) {
+				languagePacks['ko'] = bundledKoreanPack;
+			}
+		}
+
+		if (Object.keys(languagePacks).length === 0) {
 			return defaultNLSConfiguration(userLocale, osLocale, nlsMetadataPath);
 		}
 
@@ -172,8 +189,63 @@ async function getLanguagePackConfigurations(userDataPath: string): Promise<ILan
 	const configFile = join(userDataPath, 'languagepacks.json');
 	try {
 		return JSON.parse(await promises.readFile(configFile, 'utf-8'));
-	} catch (err) {
-		return undefined; // Do nothing. If we can't read the file we have no language pack config.
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+			console.error('Reading language pack configuration failed.', error);
+		}
+		return undefined;
+	}
+}
+
+function isKoreanLocale(locale: string): boolean {
+	return locale.toLowerCase() === 'ko' || locale.toLowerCase().startsWith('ko-');
+}
+
+async function getBundledKoreanLanguagePack(nlsMetadataPath: string): Promise<ILanguagePacks['ko']> {
+	const extensionDirectory = path.resolve(nlsMetadataPath, '../extensions/ms-ceintl.vscode-language-pack-ko');
+	const packageFile = path.join(extensionDirectory, 'package.json');
+	try {
+		const extension = JSON.parse(await promises.readFile(packageFile, 'utf-8')) as {
+			name?: unknown;
+			publisher?: unknown;
+			version?: unknown;
+			contributes?: { localizations?: Array<{ languageId?: unknown; translations?: Array<{ id?: unknown; path?: unknown }> }> };
+		};
+		if (extension.name !== 'vscode-language-pack-ko' || String(extension.publisher).toLowerCase() !== 'ms-ceintl' || typeof extension.version !== 'string') {
+			throw new Error(`Invalid Korean language pack metadata in ${packageFile}`);
+		}
+
+		const localization = extension.contributes?.localizations?.find(entry => entry.languageId === 'ko');
+		if (!Array.isArray(localization?.translations)) {
+			throw new Error(`Korean core translation is missing from ${packageFile}`);
+		}
+
+		const translations: Record<string, string> = {};
+		for (const translation of localization.translations) {
+			const { id, path: relativePath } = translation;
+			if (typeof id !== 'string' || typeof relativePath !== 'string') {
+				throw new Error(`Invalid translation path for ${id} in ${packageFile}`);
+			}
+			const translationPath = path.resolve(extensionDirectory, relativePath);
+			const fromExtension = path.relative(extensionDirectory, translationPath);
+			if (fromExtension.startsWith('..') || path.isAbsolute(fromExtension) || !(await Promises.exists(translationPath))) {
+				throw new Error(`Invalid or missing translation file for ${id}: ${translationPath}`);
+			}
+			translations[id] = translationPath;
+		}
+		if (!translations['vscode']) {
+			throw new Error(`Korean core translation is missing from ${packageFile}`);
+		}
+
+		return {
+			hash: `bundled-${extension.version}`,
+			label: '한국어',
+			extensions: [{ extensionIdentifier: { id: 'ms-ceintl.vscode-language-pack-ko' }, version: extension.version }],
+			translations
+		};
+	} catch (error) {
+		console.error('Loading bundled Korean language pack failed.', error);
+		return undefined;
 	}
 }
 

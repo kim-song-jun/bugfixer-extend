@@ -561,6 +561,13 @@ export function copyCuratedExtensions({
       recursive: true,
       preserveTimestamps: true,
     });
+    if (extension.notice) {
+      const notice = path.join(APP_DIR, extension.notice);
+      if (!fs.existsSync(notice)) {
+        throw new Error(`${extension.id}: required notice is missing at ${notice}`);
+      }
+      fs.copyFileSync(notice, path.join(destination, "LICENSE.txt"));
+    }
     ensureExecutables(destination, extension, targetKey);
     console.log(`staged ${extension.id} -> ${destination}`);
   }

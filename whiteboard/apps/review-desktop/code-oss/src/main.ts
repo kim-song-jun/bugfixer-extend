@@ -154,28 +154,20 @@ protocol.registerSchemesAsPrivileged([
 // Global app listeners
 registerListeners();
 
-/**
- * We can resolve the NLS configuration early if it is defined
- * in argv.json before `app.ready` event. Otherwise we can only
- * resolve NLS after `app.ready` event to resolve the OS locale.
- */
-let nlsConfigurationPromise: Promise<INLSConfiguration> | undefined = undefined;
-
 // Use the most preferred OS language for language recommendation.
 // The API might return an empty array on Linux, such as when
 // the 'C' locale is the user's only configured locale.
 // No matter the OS, if the array is empty, default back to 'en'.
 const osLocale = processZhLocale((app.getPreferredSystemLanguages()?.[0] ?? 'en').toLowerCase());
-const userLocale = getUserDefinedLocale(argvConfig);
-if (userLocale) {
-	nlsConfigurationPromise = resolveNLSConfiguration({
-		userLocale,
-		osLocale,
-		commit: product.commit,
-		userDataPath,
-		nlsMetadataPath: import.meta.dirname
-	});
-}
+// Bugfixer ships Korean UI; explicit CLI and argv.json choices still win.
+const userLocale = getUserDefinedLocale(argvConfig) ?? 'ko';
+const nlsConfigurationPromise = resolveNLSConfiguration({
+	userLocale,
+	osLocale,
+	commit: product.commit,
+	userDataPath,
+	nlsMetadataPath: import.meta.dirname
+});
 
 // Pass in the locale to Electron so that the
 // Windows Control Overlay is rendered correctly on Windows.
@@ -724,43 +716,7 @@ function processZhLocale(appLocale: string): string {
  * Resolve the NLS configuration
  */
 async function resolveNlsConfiguration(): Promise<INLSConfiguration> {
-
-	// First, we need to test a user defined locale.
-	// If it fails we try the app locale.
-	// If that fails we fall back to English.
-
-	const nlsConfiguration = nlsConfigurationPromise ? await nlsConfigurationPromise : undefined;
-	if (nlsConfiguration) {
-		return nlsConfiguration;
-	}
-
-	// Try to use the app locale which is only valid
-	// after the app ready event has been fired.
-
-	let userLocale = app.getLocale();
-	if (!userLocale) {
-		return {
-			userLocale: 'en',
-			osLocale,
-			resolvedLanguage: 'en',
-			defaultMessagesFile: path.join(import.meta.dirname, 'nls.messages.json'),
-
-			// NLS: below 2 are a relic from old times only used by vscode-nls and deprecated
-			locale: 'en',
-			availableLanguages: {}
-		};
-	}
-
-	// See above the comment about the loader and case sensitiveness
-	userLocale = processZhLocale(userLocale.toLowerCase());
-
-	return resolveNLSConfiguration({
-		userLocale,
-		osLocale,
-		commit: product.commit,
-		userDataPath,
-		nlsMetadataPath: import.meta.dirname
-	});
+	return nlsConfigurationPromise;
 }
 
 /**

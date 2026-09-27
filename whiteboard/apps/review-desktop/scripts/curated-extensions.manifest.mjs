@@ -293,6 +293,27 @@ export const curatedExtensions = Object.freeze([
     executables: [],
     stripExtensionPack: false,
   },
+  {
+    id: "ms-ceintl.vscode-language-pack-ko",
+    tier: "bundled",
+    role: "support",
+    namespace: "MS-CEINTL",
+    name: "vscode-language-pack-ko",
+    version: "1.129.0",
+    group: "korean",
+    label: "Korean language pack",
+    notice: "licenses/vscode-language-pack-ko.txt",
+    targets: {
+      universal: {
+        url: "https://open-vsx.org/api/MS-CEINTL/vscode-language-pack-ko/1.129.0/file/MS-CEINTL.vscode-language-pack-ko-1.129.0.vsix",
+        sha256:
+          "43123e9352af40c286d61db8813a3ebd68812aab6a60c3aa4162b501a8e8c2ca",
+        size: 651724,
+      },
+    },
+    executables: [],
+    stripExtensionPack: false,
+  },
 ]);
 
 /** Build targets Review knows how to materialize platform-specific VSIXes for. */
@@ -309,6 +330,7 @@ export const curatedGroups = Object.freeze([
   "csharp",
   "python",
   "go",
+  "korean",
   "vim",
   "emacs",
 ]);
