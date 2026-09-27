@@ -10,22 +10,24 @@ import { apiSourceUri } from "../common/reviewSourceView.js";
 import { REVIEW_LANGUAGE_SOURCE_SCHEME } from "../common/reviewReadonlySource.js";
 import { ReviewCanvasEditorTabsService } from "./reviewCanvasEditorTabsService.js";
 import { ReviewEditorResolverService } from "./reviewEditorResolverService.js";
+import type { ReviewDesktopRequest } from "../common/reviewDesktopGateway.js";
 
 test("source tree, selected code, definitions and diffs hand off before creating a Review editor group", async (t) => {
 	const requests: URL[] = [];
 	const windows: { openables: IWindowOpenable[]; options: IOpenWindowOptions }[] = [];
 	let fail = false;
-	t.mock.method(globalThis, "fetch", async (url: string) => {
-		const request = new URL(url);
-		requests.push(request);
-		if (fail) return Response.json({ error: "Checkout unavailable" }, { status: 409 });
-		const side = request.searchParams.get("side");
-		const file = request.searchParams.get("file");
-		return Response.json({ workspacePath: `/navigator/${side}.code-workspace`, filePath: file ? `/navigator/${side}/${file}` : undefined });
-	});
 	const tabs = new ReviewCanvasEditorTabsService(
 		{} as never, { onDidCloseEditor: Event.None } as never, {} as never,
-		{ async getConnection() { return { serverUrl: "http://localhost", token: "test" }; } } as never,
+		{ async request<T>(request: ReviewDesktopRequest): Promise<T> {
+			assert.equal(request.method, "POST");
+			const url = new URL(request.path, "http://localhost");
+			assert.equal(url.pathname, "/reviews-api/review-a/navigator");
+			requests.push(url);
+			if (fail) throw new Error("Checkout unavailable");
+			const side = url.searchParams.get("side");
+			const file = url.searchParams.get("file");
+			return { workspacePath: `/navigator/${side}.code-workspace`, filePath: file ? `/navigator/${side}/${file}` : undefined } as T;
+		} } as never,
 		{ async openWindow(openables: IWindowOpenable[], options: IOpenWindowOptions) { windows.push({ openables, options }); } } as never,
 		{ warn() {} } as never,
 	);

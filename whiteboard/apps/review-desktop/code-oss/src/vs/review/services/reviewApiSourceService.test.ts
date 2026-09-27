@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { URI } from "../../base/common/uri.js";
 import type { ITextModelContentProvider } from "../../editor/common/services/resolverService.js";
+import { requestReviewDesktopServer, type ReviewDesktopRequest } from "../common/reviewDesktopGateway.js";
 import { apiSourceUri, ReviewApiSourceService } from "./reviewApiSourceService.js";
 import type { ReviewDiffViewSource } from "./reviewDiffViewService.js";
 import { resolveReviewSourceView, reviewSourceAnchor, reviewSourceComparison } from "../common/reviewProtocol.js";
@@ -20,11 +21,11 @@ function setup() {
 	const registered: string[] = [];
 	const service = new ReviewApiSourceService(
 		{
-			request: async ({ path }: { path: string }) => {
-				const response = await fetch(`http://localhost:5570${path}`, { headers: { "x-review-token": "secret" } });
-				if (!response.ok) throw new Error(`request failed (${response.status})`);
-				return response.json();
-			},
+			request: (request: ReviewDesktopRequest) => requestReviewDesktopServer({
+				url: "http://127.0.0.1:5570",
+				token: "secret",
+				appSessionId: "test-session",
+			} as never, request),
 		} as never,
 		{
 			registerTextModelContentProvider: (scheme: string, value: ITextModelContentProvider) => {
