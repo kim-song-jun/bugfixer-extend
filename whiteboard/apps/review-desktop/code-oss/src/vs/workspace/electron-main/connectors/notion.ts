@@ -148,25 +148,28 @@ async function hydratePaginatedProperties(
 	omissions: string[],
 ): Promise<void> {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) { return; }
+	let propertyPagesFetched = 0;
 	for (const [name, propertyValue] of Object.entries(value as Record<string, unknown>)) {
 		if (!propertyValue || typeof propertyValue !== 'object' || Array.isArray(propertyValue)) { continue; }
 		const property = propertyValue as Record<string, unknown>;
-		if (property.has_more !== true) { continue; }
-		if (typeof property.id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(property.id)) {
-			omissions.push(`Notion property “${name}” has more values, but no valid property ID was returned; remaining values were omitted.`);
+		const type = typeof property.type === 'string' ? property.type : '';
+		if (type === 'relation' && property.has_more !== true) { continue; }
+		if (!['relation', 'people', 'title', 'rich_text'].includes(type)) {
+			if (property.has_more === true) {
+				omissions.push(`Notion property “${name}” (${type || 'unknown type'}) has more values, but this property type cannot be paginated by the importer; remaining values were omitted.`);
+			}
 			continue;
 		}
-		const type = typeof property.type === 'string' ? property.type : '';
-		if (!['relation', 'people', 'title', 'rich_text'].includes(type)) {
-			omissions.push(`Notion property “${name}” (${type || 'unknown type'}) has more values, but this property type cannot be paginated by the importer; remaining values were omitted.`);
+		if (typeof property.id !== 'string' || !isSafeNotionPropertyId(property.id)) {
+			omissions.push(`Notion property “${name}” (${type}) has no valid property ID; its full value could not be verified and remaining values, if any, were omitted.`);
 			continue;
 		}
 		const entries: unknown[] = [];
 		let cursor: string | undefined;
-		let fetched = 0;
 		let incomplete = false;
+		const initiallyTruncated = property.has_more === true;
 		do {
-			if (fetched >= maxPropertyPages) { incomplete = true; break; }
+			if (propertyPagesFetched >= maxPropertyPages) { incomplete = true; break; }
 			const query = new URLSearchParams({ page_size: '100' });
 			if (cursor) { query.set('start_cursor', cursor); }
 			const path = `pages/${pageId}/properties/${property.id}?${query}`;
@@ -177,7 +180,7 @@ async function hydratePaginatedProperties(
 				throw error;
 			}
 			if (!Array.isArray(response.results)) { throw new Error('Notion returned an invalid property response.'); }
-			fetched++;
+			propertyPagesFetched++;
 			for (const item of response.results) {
 				if (!item || typeof item !== 'object' || Array.isArray(item)) { continue; }
 				const record = item as Record<string, unknown>;
@@ -186,12 +189,19 @@ async function hydratePaginatedProperties(
 			cursor = response.has_more === true && typeof response.next_cursor === 'string' && response.next_cursor ? response.next_cursor : undefined;
 			if (response.has_more === true && !cursor) { incomplete = true; break; }
 		} while (cursor);
+		if (entries.length === 0 && initiallyTruncated) { incomplete = true; }
 		if (entries.length > 0) { property[type] = entries; }
 		property.has_more = incomplete;
 		if (incomplete) {
 			omissions.push(`Notion property “${name}” (${type}) still has values that could not be retrieved; remaining values were omitted.`);
 		}
 	}
+}
+
+function isSafeNotionPropertyId(value: string): boolean {
+	return value.length <= 200
+		&& /^(?:[A-Za-z0-9_-]|%[A-Fa-f0-9]{2}){1,200}$/.test(value)
+		&& !/%(?:2f|3f|23|2e)/i.test(value);
 }
 
 function throwIfNotionTokenRejected(response: Response): void {
@@ -247,7 +257,9 @@ function extractPageProperties(properties: unknown, omissions: string[]): string
 			case 'rollup': text = rollupText(field); break;
 			case 'relation': case 'people': case 'files':
 				text = Array.isArray(field) ? field.map(itemNameOrId).filter(Boolean).join(', ') : '';
-				omissions.push(`Notion ${type} property “${name}” is represented by names or IDs; full linked content is preserved only in the source artifact.`);
+				omissions.push(type === 'relation'
+					? `Notion relation property “${name}” is represented by names or IDs; linked page content was not imported.`
+					: `Notion ${type} property “${name}” is represented by names or IDs; linked content was not imported.`);
 				break;
 			default:
 				omissions.push(`Notion property “${name}” (${type || 'unknown type'}) is preserved only in the source artifact.`);
@@ -256,6 +268,9 @@ function extractPageProperties(properties: unknown, omissions: string[]): string
 		if (text) { lines.push(`${name}: ${text}`); }
 		else if (!['relation', 'people', 'files'].includes(type) && type) {
 			omissions.push(`Notion property “${name}” (${type}) has no readable value; it is preserved only in the source artifact.`);
+		}
+		if ((type === 'formula' || type === 'rollup') && field !== undefined && field !== null) {
+			omissions.push(`Notion ${type} property “${name}” may depend on values omitted by Notion’s calculation limits; its displayed result may be incomplete.`);
 		}
 	}
 	return lines;

@@ -54,11 +54,14 @@ test('Notion import walks page blocks with the pinned API version and caps pagin
 					has_more: true, next_cursor: 'next',
 				});
 			}
-			return Response.json({ object: 'page', properties: { Name: { type: 'title', title: [{ plain_text: 'Project notes' }] } } });
+			if (url.pathname.endsWith('/properties/title-property')) {
+				return Response.json({ object: 'list', results: [{ object: 'property_item', type: 'title', title: { plain_text: 'Project notes' } }], has_more: false });
+			}
+			return Response.json({ object: 'page', properties: { Name: { id: 'title-property', type: 'title', title: [{ plain_text: 'Project notes' }] } } });
 		},
 	};
 	const result = await importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, transport);
-	assert.equal(requests.length, 21);
+	assert.equal(requests.length, 22);
 	assert.ok(requests.every(({ url }) => url.origin === 'https://api.notion.com'));
 	assert.ok(requests.every(({ init }) => (init?.headers as Record<string, string>)['Notion-Version'] === '2026-03-11'));
 	assert.equal(requests.some(({ url }) => url.toString().includes('test-secret-token')), false);
@@ -81,7 +84,9 @@ test('Notion renders non-title properties, caption links, and equations and repo
 			Name: { type: 'title', title: [{ plain_text: 'Research notes' }] },
 			Source: { type: 'url', url: 'https://example.com/research' },
 			Priority: { type: 'select', select: { name: 'High' } },
-			Related: { type: 'relation', relation: [{ id: 'dddddddd-dddd-dddd-dddd-dddddddddddd' }] },
+			Related: { id: 'related-property', type: 'relation', relation: [{ id: 'dddddddd-dddd-dddd-dddd-dddddddddddd' }] },
+			Estimate: { type: 'formula', formula: { number: 5 } },
+			Total: { type: 'rollup', rollup: { number: 10 } },
 		} });
 	} };
 	const result = await importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, transport);
@@ -90,7 +95,9 @@ test('Notion renders non-title properties, caption links, and equations and repo
 	assert.match(result.derivedText, /https:\/\/example\.com\/image-info/);
 	assert.match(result.derivedText, /x \+ y = 2/);
 	assert.doesNotMatch(result.derivedText, /private-image/);
-	assert.ok(result.omissions.some(item => /relation property.*full linked content/.test(item)));
+	assert.ok(result.omissions.some(item => /relation property.*linked page content was not imported/.test(item)));
+	assert.ok(result.omissions.some(item => /formula property.*displayed result may be incomplete/.test(item)));
+	assert.ok(result.omissions.some(item => /rollup property.*displayed result may be incomplete/.test(item)));
 	assert.ok(result.omissions.some(item => /image payload.*caption/.test(item)));
 });
 
@@ -101,20 +108,53 @@ test('Notion retrieves every page of a truncated relation property', async () =>
 		const url = new URL(String(input));
 		requests.push(url);
 		if (url.pathname.endsWith('/children')) { return Response.json({ results: [], has_more: false }); }
-		if (url.pathname.endsWith('/properties/related-property')) {
+		if (url.pathname.endsWith('/properties/f%5C%5C%3Ap')) {
 			return url.searchParams.has('start_cursor')
 				? Response.json({ object: 'list', results: [{ object: 'property_item', type: 'relation', relation: { id: 'ffffffff-ffff-ffff-ffff-ffffffffffff' } }], has_more: false })
 				: Response.json({ object: 'list', results: firstRelations.map(relation => ({ object: 'property_item', type: 'relation', relation })), has_more: true, next_cursor: 'next-property-page' });
 		}
 		return Response.json({ object: 'page', properties: {
 			Name: { type: 'title', title: [{ plain_text: 'Relations' }] },
-			Related: { id: 'related-property', type: 'relation', relation: firstRelations, has_more: true },
+			Related: { id: 'f%5C%5C%3Ap', type: 'relation', relation: firstRelations, has_more: true },
 		} });
 	} };
 	const result = await importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, transport);
-	assert.ok(requests.some(url => url.pathname.endsWith('/properties/related-property') && url.searchParams.get('start_cursor') === 'next-property-page'));
+	assert.ok(requests.some(url => url.pathname.endsWith('/properties/f%5C%5C%3Ap') && url.searchParams.get('start_cursor') === 'next-property-page'));
+	assert.match(result.derivedText, /00000000-0000-0000-0000-000000000001/);
 	assert.match(result.derivedText, /ffffffff-ffff-ffff-ffff-ffffffffffff/);
 	assert.equal(result.omissions.some(item => /still has values that could not be retrieved/.test(item)), false);
+});
+
+test('Notion retrieves people and rich text properties that can truncate without has_more', async () => {
+	const requests: URL[] = [];
+	const people = Array.from({ length: 25 }, (_, index) => ({ id: `00000000-0000-0000-0000-${String(index + 1).padStart(12, '0')}`, name: `Person ${index + 1}` }));
+	const richText = Array.from({ length: 25 }, (_, index) => ({ plain_text: `Mention ${index + 1}` }));
+	const transport: ConnectorTransport = { fetch: async input => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (url.pathname.endsWith('/children')) { return Response.json({ results: [], has_more: false }); }
+		if (url.pathname.endsWith('/properties/people-property')) {
+			return Response.json({ object: 'list', results: [...people, { id: 'ffffffff-ffff-ffff-ffff-ffffffffffff', name: 'Person 26' }].map(person => ({ object: 'property_item', type: 'people', people: person })), has_more: false });
+		}
+		if (url.pathname.endsWith('/properties/text-property')) {
+			return Response.json({ object: 'list', results: [...richText, { plain_text: 'Mention 26' }].map(item => ({ object: 'property_item', type: 'rich_text', rich_text: item })), has_more: false });
+		}
+		if (url.pathname.endsWith('/properties/title-property')) {
+			return Response.json({ object: 'list', results: [{ object: 'property_item', type: 'title', title: { plain_text: 'Mention page' } }], has_more: false });
+		}
+		return Response.json({ object: 'page', properties: {
+			Name: { id: 'title-property', type: 'title', title: [{ plain_text: 'Mention page' }] },
+			Reviewers: { id: 'people-property', type: 'people', people },
+			Notes: { id: 'text-property', type: 'rich_text', rich_text: richText },
+		} });
+	} };
+	const result = await importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, transport);
+	assert.ok(requests.some(url => url.pathname.endsWith('/properties/people-property')));
+	assert.ok(requests.some(url => url.pathname.endsWith('/properties/text-property')));
+	assert.match(result.derivedText, /Person 1/);
+	assert.match(result.derivedText, /Person 26/);
+	assert.match(result.derivedText, /Mention 1/);
+	assert.match(result.derivedText, /Mention 26/);
 });
 
 test('Slack selected message follows bounded thread cursors and retains reply context', async () => {
