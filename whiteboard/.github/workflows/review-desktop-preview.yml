@@ -440,6 +440,10 @@ jobs:
             --content-type application/x-apple-diskimage \
             --content-disposition "$DMG_DISPOSITION"
 
+          aws s3 cp "$DIST/extension-notice-index.json" \
+            "${RELEASE_PREFIX}/extension-notice-index.json" \
+            --content-type application/json
+
           aws s3 cp "$DIST/latest.json" \
             "s3://${R2_BUCKET}/update/preview/darwin-arm64/latest.json" \
             --content-type application/json
@@ -479,7 +483,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: review-desktop-preview-${{ env.RELEASE_VERSION }}-dmg
-          path: apps/review-desktop/dist/Whiteboard-darwin-arm64-${{ env.RELEASE_VERSION }}.dmg
+          path: |
+            apps/review-desktop/dist/Whiteboard-darwin-arm64-${{ env.RELEASE_VERSION }}.dmg
+            apps/review-desktop/dist/extension-notice-index.json
           retention-days: 3
           compression-level: 0
 

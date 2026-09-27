@@ -595,6 +595,14 @@ jobs:
           node apps/review-desktop/scripts/smoke-telemetry-delivery.mjs --app "$APP"
           node apps/review-desktop/scripts/smoke-error-telemetry.mjs --app "$APP"
 
+      - name: Upload release notice index artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-desktop-release-${{ env.RELEASE_VERSION }}-extension-notice-index
+          path: apps/review-desktop/dist/extension-notice-index.json
+          retention-days: 3
+          compression-level: 0
+
       # Payloads first, manifest last: a client must never see a latest.json
       # whose zip is not yet downloadable.
       - name: Upload release to R2
@@ -624,6 +632,10 @@ jobs:
             "s3://${R2_BUCKET}/releases/latest/darwin-arm64/Whiteboard.dmg" \
             --content-type application/x-apple-diskimage \
             --content-disposition "$DMG_DISPOSITION"
+
+          aws s3 cp "$DIST/extension-notice-index.json" \
+            "${RELEASE_PREFIX}/extension-notice-index.json" \
+            --content-type application/json
 
           aws s3 cp "$DIST/latest.json" \
             "s3://${R2_BUCKET}/update/stable/darwin-arm64/latest.json" \
@@ -667,7 +679,8 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
-            "apps/review-desktop/dist/Whiteboard-darwin-arm64-${RELEASE_VERSION}.dmg"
+            "apps/review-desktop/dist/Whiteboard-darwin-arm64-${RELEASE_VERSION}.dmg" \
+            "apps/review-desktop/dist/extension-notice-index.json"
 
       - name: Remove signing credentials
         if: always()

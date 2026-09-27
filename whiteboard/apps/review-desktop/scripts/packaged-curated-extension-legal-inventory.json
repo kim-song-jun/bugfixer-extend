@@ -1,0 +1,55 @@
+{
+  "astral-sh.ty": [
+    "LICENSE.txt",
+    "bundled/libs/ty-0.0.63.dist-info/licenses/LICENSE"
+  ],
+  "charliermarsh.ruff": [
+    "LICENSE.txt",
+    "bundled/libs/attrs-25.3.0.dist-info/licenses/LICENSE",
+    "bundled/libs/cattrs-24.1.3.dist-info/licenses/LICENSE",
+    "bundled/libs/exceptiongroup-1.3.1.dist-info/licenses/LICENSE",
+    "bundled/libs/lsprotocol-2023.0.1.dist-info/LICENSE",
+    "bundled/libs/packaging-26.2.dist-info/licenses/LICENSE",
+    "bundled/libs/packaging-26.2.dist-info/licenses/LICENSE.APACHE",
+    "bundled/libs/packaging-26.2.dist-info/licenses/LICENSE.BSD",
+    "bundled/libs/pygls-1.3.1.dist-info/LICENSE.txt",
+    "bundled/libs/ruff-0.16.0.dist-info/licenses/LICENSE",
+    "bundled/libs/ruff_lsp-0.0.62.dist-info/licenses/LICENSE",
+    "bundled/libs/typing_extensions-4.13.2.dist-info/licenses/LICENSE"
+  ],
+  "ms-ceintl.vscode-language-pack-ko": [
+    "LICENSE.txt"
+  ],
+  "ms-python.python": [
+    "LICENSE.txt",
+    "ThirdPartyNotices-Repository.txt",
+    "python_files/lib/jedilsp/attrs-25.3.0.dist-info/licenses/LICENSE",
+    "python_files/lib/jedilsp/cattrs-25.2.0.dist-info/licenses/LICENSE",
+    "python_files/lib/jedilsp/docstring_to_markdown-0.17.dist-info/licenses/LICENSE",
+    "python_files/lib/jedilsp/exceptiongroup-1.3.0.dist-info/licenses/LICENSE",
+    "python_files/lib/jedilsp/importlib_metadata-8.7.0.dist-info/licenses/LICENSE",
+    "python_files/lib/jedilsp/jedi-0.19.2.dist-info/LICENSE.txt",
+    "python_files/lib/jedilsp/jedi/third_party/django-stubs/LICENSE.txt",
+    "python_files/lib/jedilsp/jedi/third_party/typeshed/LICENSE",
+    "python_files/lib/jedilsp/jedi_language_server-0.45.1.dist-info/LICENSE",
+    "python_files/lib/jedilsp/lsprotocol-2023.0.1.dist-info/LICENSE",
+    "python_files/lib/jedilsp/parso-0.8.5.dist-info/licenses/LICENSE.txt",
+    "python_files/lib/jedilsp/pygls-1.3.1.dist-info/LICENSE.txt",
+    "python_files/lib/jedilsp/typing_extensions-4.15.0.dist-info/licenses/LICENSE",
+    "python_files/lib/jedilsp/zipp-3.23.0.dist-info/licenses/LICENSE",
+    "python_files/lib/python/importlib_metadata-8.7.1.dist-info/licenses/LICENSE",
+    "python_files/lib/python/microvenv-2025.0.dist-info/licenses/LICENSE",
+    "python_files/lib/python/packaging-26.0.dist-info/licenses/LICENSE",
+    "python_files/lib/python/packaging-26.0.dist-info/licenses/LICENSE.APACHE",
+    "python_files/lib/python/packaging-26.0.dist-info/licenses/LICENSE.BSD",
+    "python_files/lib/python/tomli-2.4.0.dist-info/licenses/LICENSE",
+    "python_files/lib/python/typing_extensions-4.15.0.dist-info/licenses/LICENSE",
+    "python_files/lib/python/zipp-3.21.0.dist-info/LICENSE"
+  ],
+  "tuttieee.emacs-mcx": [
+    "LICENSE.txt"
+  ],
+  "vscodevim.vim": [
+    "LICENSE.txt"
+  ]
+}
