@@ -12,7 +12,7 @@ import type { ReorderWorkspaceDashboardTasksRequest, TrashWorkspaceDashboardTask
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import type { OrdinaryFolderMutationGrantDTO, ProviderAttemptDTO, ProviderAttemptEventDTO, ProviderId, ProviderRunPreviewDTO } from '../../../workspace/common/workspaceProviderRunProtocol.js';
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../../workspace/common/workspaceProviderRunProtocol.js';
-import type { WorkspaceKnowledgeDTO, WorkspaceReferenceDTO } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
+import type { WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_WEBSITE_CHANNEL, type WorkspaceWebsitePreviewDTO } from '../../../workspace/common/workspaceWebsiteProtocol.js';
 import type { PreviewNotionPageRequest, PreviewSlackConversationRequest, WorkspaceConnectorAccountDTO, WorkspaceConnectorId, WorkspaceConnectorPreviewDTO } from '../../../workspace/common/workspaceConnectorProtocol.js';
@@ -150,6 +150,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private knowledgeLoading = false;
 	private knowledgeError: string | undefined;
 	private knowledgeMessage: string | undefined;
+	private referenceViewerId: string | undefined;
+	private referenceViewer: WorkspaceReferenceContentDTO | undefined;
+	private referenceViewerLoading = false;
+	private referenceViewerError: string | undefined;
+	private referenceViewerGeneration = 0;
+	private preservedReferenceViewerElement: HTMLElement | undefined;
+	private referenceViewerPage = 0;
+	private referenceViewerPageStarts: readonly number[] = [0];
 	private knowledgeView: KnowledgeView = 'references';
 	private activeSection: 'dashboard' | KnowledgeView = 'dashboard';
 	private pendingSectionNavigation: 'dashboard' | KnowledgeView | undefined;
@@ -268,6 +276,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	navigateToSection(section: 'dashboard' | KnowledgeView): void {
+		if (section !== 'references') this.closeReferenceViewer(false);
 		if (this.activeSection === 'dashboard' && this.taskView === 'board') {
 			this.boardScrollPosition = Math.min(10_000_000, Math.max(0, Math.floor(this.root?.scrollTop ?? 0)));
 		}
@@ -326,6 +335,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.knowledgeLoading = false;
 		this.knowledgeError = undefined;
 		this.knowledgeMessage = undefined;
+		this.closeReferenceViewer(false);
 		this.websiteUrlDraft = '';
 		this.websiteBusy = false;
 		this.websiteError = undefined;
@@ -1339,10 +1349,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			tab.type = 'button'; tab.id = `knowledge-tab-${view}`; tab.setAttribute('role', 'tab');
 			tab.setAttribute('aria-selected', String(this.knowledgeView === view)); tab.setAttribute('aria-controls', 'project-knowledge-panel');
 			tab.tabIndex = this.knowledgeView === view ? 0 : -1; tab.textContent = label; tab.dataset.focusKey = `knowledge-tab:${view}`;
-			tab.addEventListener('click', () => { this.activeSection = view; this.knowledgeView = view; setProjectSidebarSection(view); this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${view}`)?.focus({ preventScroll: true }); });
+			tab.addEventListener('click', () => { if (view !== 'references') this.closeReferenceViewer(false); this.activeSection = view; this.knowledgeView = view; setProjectSidebarSection(view); this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${view}`)?.focus({ preventScroll: true }); });
 			tab.addEventListener('keydown', event => {
 				if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
 				event.preventDefault(); this.knowledgeView = this.knowledgeView === 'references' ? 'conventions' : 'references'; this.activeSection = this.knowledgeView;
+				if (this.knowledgeView !== 'references') this.closeReferenceViewer(false);
 				setProjectSidebarSection(this.knowledgeView);
 				this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${this.knowledgeView}`)?.focus({ preventScroll: true });
 			});
@@ -1457,12 +1468,20 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const list = panel.appendChild($('.project-dashboard__knowledge-list'));
 			for (const reference of knowledge.references) {
 				const row = list.appendChild($('.project-dashboard__knowledge-card'));
+				if (this.referenceViewerId === reference.id) row.classList.add('project-dashboard__knowledge-card--expanded');
 				const main = row.appendChild($('.project-dashboard__knowledge-card-main'));
 				const name = main.appendChild($('h4')); name.textContent = reference.title;
-				const sourceName = reference.connectorId === 'public-website' ? '웹페이지' : reference.connectorId === 'slack' ? 'Slack' : reference.connectorId === 'notion' ? 'Notion' : reference.connectorId;
+				const sourceName = reference.connectorId === 'public-website' ? '웹페이지' : reference.connectorId === 'slack' ? 'Slack' : reference.connectorId === 'notion' ? 'Notion' : reference.connectorId === 'manual-text' ? '직접 입력' : reference.connectorId;
 				const meta = main.appendChild($('p')); meta.textContent = `${sourceName} · ${reference.version}번째 버전 · 추가일 ${new Date(reference.retrievedAt).toLocaleDateString()}`;
 				const linked = Object.entries(knowledge.taskReferences).filter(([, refs]) => refs.some(item => item.id === reference.id)).map(([taskId]) => this.dashboard?.tasks.find(task => task.id === taskId)?.title).filter((value): value is string => !!value);
 				const linkedTo = main.appendChild($('p')); linkedTo.className = 'project-dashboard__knowledge-linked'; linkedTo.textContent = linked.length ? `연결된 작업: ${linked.join(', ')}` : '작업에 연결되지 않음';
+				const view = row.appendChild(createElement('button', 'project-dashboard__secondary')); view.type = 'button'; view.textContent = this.referenceViewerId === reference.id ? '내용 닫기' : '내용 보기';
+				view.dataset.focusKey = `reference-view:${reference.id}`;
+				if (this.referenceViewerId === reference.id) view.setAttribute('aria-controls', `reference-viewer-${reference.id}`);
+				view.setAttribute('aria-expanded', String(this.referenceViewerId === reference.id));
+				view.setAttribute('aria-label', `${reference.title} ${reference.version}번째 버전의 저장된 내용 ${this.referenceViewerId === reference.id ? '닫기' : '보기'}`);
+				view.addEventListener('click', () => this.referenceViewerId === reference.id ? this.closeReferenceViewer() : void this.openReferenceViewer(reference));
+				if (this.referenceViewerId === reference.id) this.renderReferenceViewer(row);
 				if (reference.sourceUri) { const uri = main.appendChild($('a') as HTMLAnchorElement); uri.href = reference.sourceUri; uri.target = '_blank'; uri.rel = 'noreferrer'; uri.textContent = reference.connectorId === 'public-website' ? `요청 URL: ${reference.sourceUri}` : reference.sourceUri; uri.className = 'project-dashboard__knowledge-uri'; }
 				if (reference.connectorId === 'public-website' && reference.externalId && reference.externalId !== reference.sourceUri) { const finalUri = main.appendChild($('a') as HTMLAnchorElement); finalUri.href = reference.externalId; finalUri.target = '_blank'; finalUri.rel = 'noreferrer'; finalUri.textContent = `최종 URL: ${reference.externalId}`; finalUri.className = 'project-dashboard__knowledge-uri'; }
 				if (reference.connectorId === 'public-website' && reference.sourceUri) {
@@ -1621,6 +1640,118 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				apply.addEventListener('click', () => { if (this.projectId) void this.mutateKnowledge(() => ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'applyConvention', { projectId: this.projectId, versionId: convention.id }), `작업 규칙 v${convention.version}을 적용했습니다.`); });
 			}
 		}
+	}
+
+	private async openReferenceViewer(reference: WorkspaceReferenceDTO): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId) return;
+		const generation = ++this.referenceViewerGeneration;
+		this.preservedReferenceViewerElement = undefined;
+		this.referenceViewerId = reference.id;
+		this.referenceViewer = undefined;
+		this.referenceViewerLoading = true;
+		this.referenceViewerError = undefined;
+		this.referenceViewerPage = 0;
+		this.referenceViewerPageStarts = [0];
+		this.render();
+		this.root?.querySelector<HTMLElement>('.project-dashboard__reference-viewer')?.scrollIntoView({ block: 'nearest' });
+		this.root?.querySelector<HTMLElement>('[data-focus-key="reference-viewer-close"]')?.focus({ preventScroll: true });
+		try {
+			const result = await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'getReference', { projectId, snapshotId: reference.id }) as WorkspaceReferenceContentDTO;
+			if (generation !== this.referenceViewerGeneration || this.projectId !== projectId || this.referenceViewerId !== reference.id) return;
+			if (result.id !== reference.id || result.projectId !== projectId) throw new Error('불러온 자료 버전이 요청한 프로젝트와 일치하지 않습니다.');
+			this.referenceViewer = result;
+			this.referenceViewerPageStarts = this.referencePageStarts(result.content);
+		} catch (error) {
+			if (generation !== this.referenceViewerGeneration || this.projectId !== projectId || this.referenceViewerId !== reference.id) return;
+			this.referenceViewerError = this.errorMessage(error, '저장된 자료를 불러오지 못했습니다.');
+		} finally {
+			if (generation === this.referenceViewerGeneration && this.projectId === projectId && this.referenceViewerId === reference.id) {
+				this.referenceViewerLoading = false;
+				this.render();
+				this.root?.querySelector<HTMLElement>('[data-focus-key="reference-viewer-close"]')?.focus({ preventScroll: true });
+			}
+		}
+	}
+
+	private closeReferenceViewer(returnFocus = true): void {
+		if (!this.referenceViewerId) return;
+		const snapshotId = this.referenceViewerId;
+		++this.referenceViewerGeneration;
+		this.referenceViewerId = undefined;
+		this.referenceViewer = undefined;
+		this.referenceViewerLoading = false;
+		this.referenceViewerError = undefined;
+		this.referenceViewerPage = 0;
+		this.referenceViewerPageStarts = [0];
+		if (returnFocus && this.inputActive) {
+			this.render();
+			this.root?.querySelector<HTMLElement>(`[data-focus-key="reference-view:${CSS.escape(snapshotId)}"]`)?.focus({ preventScroll: true });
+		}
+	}
+
+	private renderReferenceViewer(panel: HTMLElement): void {
+		const preserved = this.preservedReferenceViewerElement;
+		if (preserved && preserved.dataset.referenceId === this.referenceViewerId && Number(preserved.dataset.referencePage) === this.referenceViewerPage) {
+			panel.appendChild(preserved);
+			this.preservedReferenceViewerElement = undefined;
+			return;
+		}
+		this.preservedReferenceViewerElement = undefined;
+		const dialog = panel.appendChild(createElement('section', 'project-dashboard__reference-viewer'));
+		dialog.dataset.referenceId = this.referenceViewerId ?? '';
+		dialog.dataset.referencePage = String(this.referenceViewerPage);
+		dialog.id = `reference-viewer-${this.referenceViewerId}`;
+		dialog.setAttribute('role', 'region');
+		dialog.setAttribute('aria-labelledby', 'reference-viewer-title');
+		dialog.addEventListener('keydown', event => {
+			if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); this.closeReferenceViewer(); }
+		});
+		const headingRow = dialog.appendChild(createElement('div', 'project-dashboard__reference-viewer-heading'));
+		const title = headingRow.appendChild($('h3')); title.id = 'reference-viewer-title'; title.textContent = this.referenceViewer ? `${this.referenceViewer.title} · v${this.referenceViewer.version}` : '저장된 자료';
+		const close = headingRow.appendChild(createElement('button', 'project-dashboard__secondary')); close.type = 'button'; close.textContent = '닫기'; close.dataset.focusKey = 'reference-viewer-close';
+		close.setAttribute('aria-label', '저장된 자료 보기 닫기'); close.addEventListener('click', () => this.closeReferenceViewer());
+		if (this.referenceViewerLoading) { const status = dialog.appendChild($('p')); status.setAttribute('role', 'status'); status.textContent = '저장된 자료를 불러오는 중…'; return; }
+		if (this.referenceViewerError) { const error = dialog.appendChild($('p')); error.className = 'project-dashboard__reference-viewer-error'; error.setAttribute('role', 'alert'); error.textContent = this.referenceViewerError; return; }
+		const reference = this.referenceViewer;
+		if (!reference) return;
+		const metadata = dialog.appendChild(createElement('dl', 'project-dashboard__reference-viewer-meta'));
+		const addMetadata = (label: string, value: string) => { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; };
+		addMetadata('출처', reference.sourceUri ?? reference.connectorId);
+		addMetadata('가져온 시각', new Date(reference.retrievedAt).toLocaleString());
+		addMetadata('SHA-256', reference.contentSha256);
+		if (reference.omissions.length) addMetadata('텍스트에서 제외된 항목', reference.omissions.join(' · '));
+		const pageStart = this.referenceViewerPageStarts[this.referenceViewerPage] ?? 0;
+		const pageEnd = this.referenceViewerPageStarts[this.referenceViewerPage + 1] ?? reference.content.length;
+		const content = dialog.appendChild(createElement('pre', 'project-dashboard__reference-viewer-content')); content.tabIndex = 0; content.dataset.focusKey = 'reference-viewer-content'; content.textContent = reference.content.slice(pageStart, pageEnd);
+		const pagination = dialog.appendChild(createElement('div', 'project-dashboard__reference-viewer-pagination'));
+		const previous = pagination.appendChild(createElement('button', 'project-dashboard__secondary')); previous.type = 'button'; previous.textContent = '이전'; previous.disabled = this.referenceViewerPage === 0; previous.dataset.focusKey = 'reference-viewer-page-prev';
+		previous.addEventListener('click', () => this.changeReferenceViewerPage(this.referenceViewerPage - 1));
+		const pageCount = Math.max(1, this.referenceViewerPageStarts.length - 1);
+		const pageStatus = pagination.appendChild($('p')); pageStatus.setAttribute('aria-live', 'polite'); pageStatus.textContent = `${this.referenceViewerPage + 1} / ${pageCount}쪽`;
+		const next = pagination.appendChild(createElement('button', 'project-dashboard__secondary')); next.type = 'button'; next.textContent = '다음'; next.disabled = this.referenceViewerPage >= pageCount - 1; next.dataset.focusKey = 'reference-viewer-page-next';
+		next.addEventListener('click', () => this.changeReferenceViewerPage(this.referenceViewerPage + 1));
+	}
+
+	private referencePageStarts(content: string): number[] {
+		const starts = [0];
+		let start = 0;
+		while (start < content.length) {
+			let end = Math.min(content.length, start + 65_536);
+			const lastCodeUnit = content.charCodeAt(end - 1);
+			if (end < content.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end--;
+			starts.push(end);
+			start = end;
+		}
+		return starts;
+	}
+
+	private changeReferenceViewerPage(page: number): void {
+		if (page < 0 || page >= this.referenceViewerPageStarts.length - 1 || page === this.referenceViewerPage) return;
+		this.referenceViewerPage = page;
+		this.preservedReferenceViewerElement = undefined;
+		this.render();
+		this.root?.querySelector<HTMLElement>('[data-focus-key="reference-viewer-content"]')?.focus({ preventScroll: true });
 	}
 
 	private selectConventionForCheck(convention: WorkspaceKnowledgeDTO['conventions'][number]): void {
@@ -2218,6 +2349,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private render(): void {
 		if (!this.root) return;
+		if (this.referenceViewerId && this.referenceViewer && !this.referenceViewerLoading && !this.referenceViewerError) {
+			const existingViewer = this.root.querySelector<HTMLElement>('.project-dashboard__reference-viewer');
+			if (existingViewer?.dataset.referenceId === this.referenceViewerId && Number(existingViewer.dataset.referencePage) === this.referenceViewerPage) this.preservedReferenceViewerElement = existingViewer;
+		}
 		const activeElement = this.root.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
 		const focusId = activeElement?.id;
 		const focusKey = activeElement?.dataset.focusKey ?? (document.activeElement === document.body ? this.lastFocusKey : undefined);
@@ -2273,6 +2408,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if (target && !('disabled' in target && target.disabled)) target.focus({ preventScroll: true });
 		};
 		clearNode(this.root);
+		this.preservedReferenceViewerElement?.remove();
 		const shell = this.root.appendChild($('.project-dashboard__shell'));
 		const heading = shell.appendChild($('.project-dashboard__heading'));
 		const headingCopy = heading.appendChild($('.project-dashboard__heading-copy'));
@@ -3196,7 +3332,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	layout(dimension: Dimension): void {
 		if (this.root) { this.root.style.width = `${dimension.width}px`; this.root.style.height = `${dimension.height}px`; }
 	}
-	override clearInput(): void { this.inputActive = false; void this.flushDashboardState(); this.stopPolling(); this.clearWebsitePreview(); this.clearPackagePreview(); this.selectedTaskId = undefined; this.preview = undefined; this.attempts = []; this.subagentTaskId = undefined; this.subagentParentAttemptId = undefined; this.subagentPreview = undefined; this.subagentScopeDraft = ''; this.subagentFormOpen = false; this.expandedSubagentRootId = undefined; this.subagentEvents = {}; this.subagentError = undefined; this.subagentEventsError = undefined; if (this.root) clearNode(this.root); super.clearInput(); }
+	override clearInput(): void { this.inputActive = false; this.closeReferenceViewer(false); void this.flushDashboardState(); this.stopPolling(); this.clearWebsitePreview(); this.clearPackagePreview(); this.selectedTaskId = undefined; this.preview = undefined; this.attempts = []; this.subagentTaskId = undefined; this.subagentParentAttemptId = undefined; this.subagentPreview = undefined; this.subagentScopeDraft = ''; this.subagentFormOpen = false; this.expandedSubagentRootId = undefined; this.subagentEvents = {}; this.subagentError = undefined; this.subagentEventsError = undefined; if (this.root) clearNode(this.root); super.clearInput(); }
 	override dispose(): void {
 		this.inputActive = false;
 		void this.closeEgoCapture();
