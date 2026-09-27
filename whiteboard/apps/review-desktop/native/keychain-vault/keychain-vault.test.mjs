@@ -78,6 +78,7 @@ test("synthetic Keychain item round trips and is deleted", { skip: process.platf
     assert.match(missing.stderr.toString(), /credential was not found/);
 
     const connectorPut = await run(binary, ["put", "declarative-package", account], fixture);
+
     if (connectorPut.pid) pids.add(connectorPut.pid);
     assert.equal(connectorPut.code, 0, connectorPut.stderr.toString());
     const connectorGet = await invoke("get", "declarative-package", account);
