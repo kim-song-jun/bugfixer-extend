@@ -1,16 +1,18 @@
 import { type ReactElement, useRef, useState } from "react";
 
 import { useReviewActions, useReviewState } from "./review-context";
+import { isKoreanReviewUi } from "./review-locale";
 import { useTutorial } from "./tutorial-context";
 import { useTooltip } from "./use-tooltip";
 import { useTopbarPopover } from "./use-topbar-popover";
 
 export function ReviewCornerAction(): ReactElement | null {
+  const korean = isKoreanReviewUi();
   const { dismissReview } = useReviewActions();
   const { submissionOutcome } = useReviewState();
   const tutorial = useTutorial();
 
-  const closeTooltip = useTooltip("Close tutorial");
+  const closeTooltip = useTooltip(korean ? "안내 닫기" : "Close tutorial");
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const control = useRef<HTMLDivElement>(null);
@@ -32,7 +34,7 @@ export function ReviewCornerAction(): ReactElement | null {
           onClick={tutorial.close}
         >
           <ArchiveIcon />
-          <span>Close</span>
+          <span>{korean ? "닫기" : "Close"}</span>
         </button>
       </div>
     );
@@ -62,7 +64,7 @@ export function ReviewCornerAction(): ReactElement | null {
         onClick={() => void dismiss()}
       >
         <ArchiveIcon />
-        <span>Dismiss</span>
+        <span>{korean ? "목록에서 숨기기" : "Dismiss"}</span>
       </button>
       {failed && (
         <span
@@ -71,7 +73,7 @@ export function ReviewCornerAction(): ReactElement | null {
           className="review-corner-error"
           role="alert"
         >
-          Could not dismiss the review. Try again.
+          {korean ? "리뷰를 숨기지 못했습니다. 다시 시도해 주세요." : "Could not dismiss the review. Try again."}
         </span>
       )}
     </div>

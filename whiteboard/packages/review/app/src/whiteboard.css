@@ -1251,9 +1251,15 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 
 .diff-sidebar-heading {
   padding: 10px 14px 6px 16px;
-  color: var(--ink-faint);
-  font-size: 11px;
-  letter-spacing: var(--wb-caps);
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.diff-lens-hint {
+  color: var(--ink-muted);
 }
 
 .diff-lens-section {
