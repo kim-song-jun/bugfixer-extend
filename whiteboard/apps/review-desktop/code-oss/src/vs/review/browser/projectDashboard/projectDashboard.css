@@ -218,13 +218,14 @@
 .project-dashboard__knowledge-card p { margin: 4px 0 0; color: var(--dashboard-muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .project-dashboard__knowledge-card .project-dashboard__knowledge-linked { color: var(--dashboard-ink); }
 .project-dashboard__knowledge-uri { display: inline-block; max-width: 100%; margin-top: 5px; color: var(--dashboard-accent); font-size: 12px; overflow-wrap: anywhere; }
-.project-dashboard__reference-viewer { display: grid; gap: 10px; margin: 14px 0; padding: 14px; border: 1px solid var(--dashboard-accent); border-radius: 8px; background: var(--dashboard-card); box-shadow: 0 3px 12px color-mix(in srgb, var(--dashboard-ink) 8%, transparent); }
+.project-dashboard__reference-viewer { display: grid; gap: 10px; margin: 14px 0; padding: 14px; border: 1px solid var(--dashboard-line); border-radius: 8px; background: var(--dashboard-card); }
 .project-dashboard__knowledge-card--expanded > .project-dashboard__reference-viewer { flex: 1 0 100%; min-width: 0; box-sizing: border-box; }
 .project-dashboard__reference-viewer-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .project-dashboard__reference-viewer-heading h3 { min-width: 0; margin: 0; font-size: 14px; overflow-wrap: anywhere; }
 .project-dashboard__reference-viewer-meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12px; }
 .project-dashboard__reference-viewer-meta dt { color: var(--dashboard-muted); }
 .project-dashboard__reference-viewer-meta dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.project-dashboard__reference-viewer-meta .project-dashboard__reference-viewer-hash { max-width: 32ch; font-family: var(--monaco-monospace-font, monospace); font-size: 11px; overflow-wrap: anywhere; }
 .project-dashboard__reference-viewer-content { box-sizing: border-box; max-height: min(60vh, 560px); min-height: 96px; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--dashboard-line); border-radius: 6px; color: var(--dashboard-ink); background: var(--dashboard-page); font: inherit; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .project-dashboard__reference-viewer-content:focus-visible { outline: 2px solid #5B9FF5; outline-offset: 2px; }
 .project-dashboard__reference-viewer-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px; }

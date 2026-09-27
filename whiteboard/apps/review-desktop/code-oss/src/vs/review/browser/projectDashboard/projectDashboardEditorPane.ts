@@ -1471,7 +1471,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				if (this.referenceViewerId === reference.id) row.classList.add('project-dashboard__knowledge-card--expanded');
 				const main = row.appendChild($('.project-dashboard__knowledge-card-main'));
 				const name = main.appendChild($('h4')); name.textContent = reference.title;
-				const sourceName = reference.connectorId === 'public-website' ? '웹페이지' : reference.connectorId === 'slack' ? 'Slack' : reference.connectorId === 'notion' ? 'Notion' : reference.connectorId === 'manual-text' ? '직접 입력' : reference.connectorId;
+				const sourceName = this.referenceSourceLabel(reference.connectorId);
 				const meta = main.appendChild($('p')); meta.textContent = `${sourceName} · ${reference.version}번째 버전 · 추가일 ${new Date(reference.retrievedAt).toLocaleDateString()}`;
 				const linked = Object.entries(knowledge.taskReferences).filter(([, refs]) => refs.some(item => item.id === reference.id)).map(([taskId]) => this.dashboard?.tasks.find(task => task.id === taskId)?.title).filter((value): value is string => !!value);
 				const linkedTo = main.appendChild($('p')); linkedTo.className = 'project-dashboard__knowledge-linked'; linkedTo.textContent = linked.length ? `연결된 작업: ${linked.join(', ')}` : '작업에 연결되지 않음';
@@ -1716,10 +1716,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const reference = this.referenceViewer;
 		if (!reference) return;
 		const metadata = dialog.appendChild(createElement('dl', 'project-dashboard__reference-viewer-meta'));
-		const addMetadata = (label: string, value: string) => { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; };
-		addMetadata('출처', reference.sourceUri ?? reference.connectorId);
+		const addMetadata = (label: string, value: string) => { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; return detail; };
+		addMetadata('출처', reference.sourceUri ?? this.referenceSourceLabel(reference.connectorId));
 		addMetadata('가져온 시각', new Date(reference.retrievedAt).toLocaleString());
-		addMetadata('SHA-256', reference.contentSha256);
+		addMetadata('SHA-256', reference.contentSha256).className = 'project-dashboard__reference-viewer-hash';
 		if (reference.omissions.length) addMetadata('텍스트에서 제외된 항목', reference.omissions.join(' · '));
 		const pageStart = this.referenceViewerPageStarts[this.referenceViewerPage] ?? 0;
 		const pageEnd = this.referenceViewerPageStarts[this.referenceViewerPage + 1] ?? reference.content.length;
@@ -1732,6 +1732,16 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const next = pagination.appendChild(createElement('button', 'project-dashboard__secondary')); next.type = 'button'; next.textContent = '다음'; next.disabled = this.referenceViewerPage >= pageCount - 1; next.dataset.focusKey = 'reference-viewer-page-next';
 		next.addEventListener('click', () => this.changeReferenceViewerPage(this.referenceViewerPage + 1));
 		dialog.dataset.referenceLoaded = 'true';
+	}
+
+	private referenceSourceLabel(connectorId: string): string {
+		switch (connectorId) {
+			case 'public-website': return '웹페이지';
+			case 'manual-text': return '직접 입력';
+			case 'slack': return 'Slack';
+			case 'notion': return 'Notion';
+			default: return connectorId;
+		}
 	}
 
 	private referencePageStarts(content: string): number[] {
