@@ -4,9 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test, { type TestContext } from "node:test";
+import { REVIEW_CONTROL_CONNECTION_CHANNEL } from "../common/reviewControlDispatch.js";
 
-const ipcRenderer = { invoke: async (_channel: string, _command: string, _arg?: { path: string; method?: string; body?: unknown }): Promise<unknown> => undefined };
+const ipcRenderer = Object.assign(new EventEmitter(), {
+	invoke: async (_channel: string, _command: string, _arg?: { path: string; method?: string; body?: unknown }): Promise<unknown> => undefined,
+});
 Object.assign(globalThis, { vscode: { ipcRenderer } });
 const { ReviewDesktopConnectionService } = await import("./reviewDesktopConnectionService.js");
 
@@ -54,6 +58,21 @@ function mockFetch(t: TestContext, handler: typeof fetch): void {
 		return body;
 	});
 }
+
+test("control connection updates notify subscribers and stop after disposal", () => {
+	const listenersBefore = ipcRenderer.listenerCount(REVIEW_CONTROL_CONNECTION_CHANNEL);
+	const service = serviceWith();
+	let changes = 0;
+	service.onDidChangeConnection(() => { changes += 1; });
+	assert.equal(ipcRenderer.listenerCount(REVIEW_CONTROL_CONNECTION_CHANNEL), listenersBefore + 1);
+
+	ipcRenderer.emit(REVIEW_CONTROL_CONNECTION_CHANNEL);
+	assert.equal(changes, 1);
+	service.dispose();
+	assert.equal(ipcRenderer.listenerCount(REVIEW_CONTROL_CONNECTION_CHANNEL), listenersBefore);
+	ipcRenderer.emit(REVIEW_CONTROL_CONNECTION_CHANNEL);
+	assert.equal(changes, 1);
+});
 
 test("install status shares concurrent scans and refreshes on subsequent checks", async (t) => {
 	const service = serviceWith();
@@ -155,6 +174,7 @@ test("tutorial deletion suppresses auto-prepare across restarts until explicit o
 
 test("passes automatic command updates to the server without enabling optional integrations", async (t) => {
 	const service = serviceWith();
+	t.after(() => service.dispose());
 	let requestBody: unknown;
 	mockFetch(t, async (_url, init) => {
 		requestBody = JSON.parse(String(init?.body));
