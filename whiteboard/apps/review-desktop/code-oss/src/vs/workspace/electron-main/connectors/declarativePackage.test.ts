@@ -253,6 +253,25 @@ test('pinned HTTPS transport uses the exact allowlisted host for TLS SNI and hos
 		executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from('{"echo":"\\u0073ynthetic-token"}') }),
 	});
 	await assert.rejects(escapedEchoTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'synthetic-token'), /echoed its bearer credential/i);
+	const shortTokenTransport = new PinnedDeclarativePackageTransport({
+		resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
+		executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from('{"data":[],"description":"data available"}') }),
+	});
+	assert.deepEqual(await shortTokenTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'a'), {
+		data: [], description: 'data available',
+	});
+	const shortEchoes = [
+		'{"echo":"Bearer a"}',
+		'{"echo":"token=a"}',
+		'{"echo":"Bearer \\u0061"}',
+	];
+	for (const body of shortEchoes) {
+		const transportWithEcho = new PinnedDeclarativePackageTransport({
+			resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
+			executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from(body) }),
+		});
+		await assert.rejects(transportWithEcho.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'a'), /echoed its bearer credential/i);
+	}
 });
 
 test('address classifier blocks private, reserved, and literal address ranges', () => {

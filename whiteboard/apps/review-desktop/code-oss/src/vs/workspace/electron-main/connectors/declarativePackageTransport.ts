@@ -12,6 +12,7 @@ import { isIP } from 'node:net';
 
 export const maxDeclarativePackageResponseBytes = 2 * 1024 * 1024;
 export const maxDeclarativePackageRequestMs = 15_000;
+const minimumCredentialSubstringLength = 16;
 
 export interface ResolvedNetworkAddress {
 	readonly address: string;
@@ -87,7 +88,8 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 		if (response.body.byteLength > maxDeclarativePackageResponseBytes) {
 			throw new Error('Declarative connector response exceeded the 2 MiB limit.');
 		}
-		if (bearerToken && Buffer.from(response.body).includes(Buffer.from(bearerToken, 'ascii'))) {
+		if (bearerToken && bearerToken.length >= minimumCredentialSubstringLength
+			&& Buffer.from(response.body).includes(Buffer.from(bearerToken, 'ascii'))) {
 			throw new Error('Declarative connector response echoed its bearer credential.');
 		}
 		let value: unknown;
@@ -127,15 +129,30 @@ function containsCredential(root: unknown, credential: string): boolean {
 	while (pending.length) {
 		const value = pending.pop();
 		if (typeof value === 'string') {
-			if (value.includes(credential)) { return true; }
+			if (credentialEchoMatch(value, credential)) { return true; }
 		} else if (Array.isArray(value)) {
 			for (const child of value) { pending.push(child); }
 		} else if (value && typeof value === 'object') {
 			for (const [key, child] of Object.entries(value)) {
-				if (key.includes(credential)) { return true; }
+				if (credentialEchoMatch(key, credential)) { return true; }
 				pending.push(child);
 			}
 		}
+	}
+	return false;
+}
+
+function credentialEchoMatch(value: string, credential: string): boolean {
+	if (credential.length >= minimumCredentialSubstringLength) { return value.includes(credential); }
+	const startsWithWordCharacter = /[A-Za-z0-9]/.test(credential[0]);
+	const endsWithWordCharacter = /[A-Za-z0-9]/.test(credential[credential.length - 1]);
+	let offset = 0;
+	while ((offset = value.indexOf(credential, offset)) !== -1) {
+		const leftBoundary = !startsWithWordCharacter || offset === 0 || !/[A-Za-z0-9]/.test(value[offset - 1]);
+		const end = offset + credential.length;
+		const rightBoundary = !endsWithWordCharacter || end === value.length || !/[A-Za-z0-9]/.test(value[end]);
+		if (leftBoundary && rightBoundary) { return true; }
+		offset++;
 	}
 	return false;
 }
