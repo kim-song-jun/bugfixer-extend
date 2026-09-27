@@ -1,7 +1,7 @@
 {
 	"name": "review-themes",
-	"displayName": "Whiteboard Themes",
-	"description": "Themes for /dev/fast Whiteboard.",
+	"displayName": "Bugfixer Extend Themes",
+	"description": "Themes for Bugfixer Extend.",
 	"categories": [
 		"Themes"
 	],
@@ -15,13 +15,13 @@
 		"themes": [
 			{
 				"id": "Review Dark",
-				"label": "Whiteboard Dark",
+				"label": "Bugfixer Dark",
 				"uiTheme": "vs-dark",
 				"path": "./themes/review-dark.json"
 			},
 			{
 				"id": "Review Light",
-				"label": "Whiteboard Light",
+				"label": "Bugfixer Light",
 				"uiTheme": "vs",
 				"path": "./themes/review-light.json"
 			}
