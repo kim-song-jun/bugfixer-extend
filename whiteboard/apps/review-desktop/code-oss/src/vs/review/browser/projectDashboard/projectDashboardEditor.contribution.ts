@@ -60,9 +60,11 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 			this.notificationService.error(error);
 		}
-		const existing = this.editorGroupsService.groups.flatMap(group => group.editors).find(editor =>
-			editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
-		const input = existing ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);
+		const existing = this.editorGroupsService.groups
+			.flatMap(group => group.editors.map(editor => ({ editor, group })))
+			.find(({ editor }) => editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
+		const input = existing?.editor ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);
+		const targetGroup = existing?.group ?? this.editorGroupsService.activeGroup;
 		const activeEditor = this.editorGroupsService.activeGroup.activeEditor;
 		const preserveActiveEditor = !activate && activeEditor !== null && !(activeEditor instanceof ProjectDashboardEditorInput);
 		const pane = await this.editorService.openEditor(input, {
@@ -70,7 +72,7 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 			revealIfVisible: true,
 			index: 0,
 			...(preserveActiveEditor ? { inactive: true, preserveFocus: true } : {})
-		});
+		}, targetGroup);
 		if (pane instanceof ProjectDashboardEditorPane) {
 			if (createTask) pane.startTaskCreation();
 			else if (section) pane.navigateToSection(section);
