@@ -39,15 +39,15 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 	) {
 		super();
 		this._register(onDidRequestProjectSection(section => {
-			void this.openProjectDashboard(section).catch(error => this.notificationService.error(error));
+			void this.openProjectDashboard(section, false, true).catch(error => this.notificationService.error(error));
 		}));
 		this._register(onDidRequestNewTask(() => {
-			void this.openProjectDashboard(undefined, true).catch(error => this.notificationService.error(error));
+			void this.openProjectDashboard(undefined, true, true).catch(error => this.notificationService.error(error));
 		}));
 		void this.openProjectDashboard().catch(error => this.notificationService.error(error));
 	}
 
-	private async openProjectDashboard(section?: ProjectSidebarSection, createTask = false): Promise<void> {
+	private async openProjectDashboard(section?: ProjectSidebarSection, createTask = false, activate = false): Promise<void> {
 		const launch = this.environment.reviewWindowLaunch;
 		if (launch.kind !== 'project') return;
 
@@ -63,7 +63,14 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		const existing = this.editorGroupsService.groups.flatMap(group => group.editors).find(editor =>
 			editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
 		const input = existing ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);
-		const pane = await this.editorService.openEditor(input, { pinned: true, revealIfVisible: true });
+		const activeEditor = this.editorGroupsService.activeGroup.activeEditor;
+		const preserveActiveEditor = !activate && activeEditor !== null && !(activeEditor instanceof ProjectDashboardEditorInput);
+		const pane = await this.editorService.openEditor(input, {
+			pinned: true,
+			revealIfVisible: true,
+			index: 0,
+			...(preserveActiveEditor ? { inactive: true, preserveFocus: true } : {})
+		});
 		if (pane instanceof ProjectDashboardEditorPane) {
 			if (createTask) pane.startTaskCreation();
 			else if (section) pane.navigateToSection(section);

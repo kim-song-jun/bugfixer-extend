@@ -1971,6 +1971,15 @@ export class WorkspaceDatabase {
 		}));
 	}
 
+	listProjectIdsForReview(reviewId: string): string[] {
+		this.assertOpen();
+		return this.db.prepare(`SELECT DISTINCT tasks.project_id AS project_id
+			FROM task_review_links
+			JOIN tasks ON tasks.id = task_review_links.task_id
+			WHERE task_review_links.review_id = ?
+			ORDER BY tasks.project_id`).all(reviewId).map(row => String(row.project_id));
+	}
+
 	setTaskReviewAvailability(taskId: string, reviewId: string, state: TaskReviewLink['state']): TaskReviewLink | undefined {
 		this.assertOpen();
 		this.db.prepare('UPDATE task_review_links SET state = ? WHERE task_id = ? AND review_id = ?').run(state, taskId, reviewId);

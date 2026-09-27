@@ -170,6 +170,31 @@ test('failed review completion rolls back the outbox status and link together', 
 	});
 });
 
+test('review owner lookup returns distinct project IDs in stable order, including archived task links', () => {
+	withDatabase((_path, database) => {
+		assert.deepEqual(database.listProjectIdsForReview('review-without-owners'), []);
+
+		const firstProject = database.createProject('First owner');
+		const firstBinding = database.createFolderBinding({ projectId: firstProject.id, path: '/shared/repository' });
+		const firstTask = database.createTask({ projectId: firstProject.id, bindingId: firstBinding.id, title: 'Archived owner' });
+		const firstCommand = database.enqueueReviewRequest({ commandId: 'owner-lookup-first', taskId: firstTask.id, body: '{}' });
+		database.completeReviewRequest(firstCommand.commandId, 'shared-review');
+		database.archiveTask(firstTask.id, firstTask.revision);
+		assert.deepEqual(database.listProjectIdsForReview('shared-review'), [firstProject.id]);
+
+		const secondProject = database.createProject('Second owner');
+		const secondBinding = database.createFolderBinding({ projectId: secondProject.id, path: '/shared/repository' });
+		const secondTask = database.createTask({ projectId: secondProject.id, bindingId: secondBinding.id, title: 'Second owner' });
+		const secondCommand = database.enqueueReviewRequest({ commandId: 'owner-lookup-second', taskId: secondTask.id, body: '{}' });
+		database.completeReviewRequest(secondCommand.commandId, 'shared-review');
+
+		const duplicateTask = database.createTask({ projectId: secondProject.id, bindingId: secondBinding.id, title: 'Same project owner' });
+		const duplicateCommand = database.enqueueReviewRequest({ commandId: 'owner-lookup-third', taskId: duplicateTask.id, body: '{}' });
+		database.completeReviewRequest(duplicateCommand.commandId, 'shared-review');
+		assert.deepEqual(database.listProjectIdsForReview('shared-review'), [firstProject.id, secondProject.id].sort());
+	});
+});
+
 test('review outbox retries are idempotent and reject command ID reuse with a changed body', () => {
 	withDatabase((_path, database) => {
 		const { task } = createProjectAndTask(database);
