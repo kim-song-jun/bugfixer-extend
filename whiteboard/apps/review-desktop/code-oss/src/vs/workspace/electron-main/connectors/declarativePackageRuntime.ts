@@ -7,7 +7,7 @@ import {
 	assertApprovedDeclarativePackage, type ApprovedDeclarativePackage,
 } from './declarativePackage.js';
 import {
-	PinnedDeclarativePackageTransport, type DeclarativePackageTransport,
+	type DeclarativePackageTransport,
 } from './declarativePackageTransport.js';
 
 const maxPages = 20;

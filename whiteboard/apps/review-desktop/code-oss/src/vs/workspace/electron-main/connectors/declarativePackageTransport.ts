@@ -60,6 +60,9 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 		if (!addresses.length || addresses.length > 32 || addresses.some(address => !isPublicAddress(address))) {
 			throw new Error('Declarative connector domain resolved to a private or reserved network address.');
 		}
+		const authHeaders: Readonly<Record<string, string>> = bearerToken === undefined
+			? Object.freeze({})
+			: Object.freeze({ Authorization: `Bearer ${bearerToken}` });
 		const request: PinnedHttpsRequest = Object.freeze({
 			hostname: allowedDomain,
 			servername: allowedDomain,
@@ -67,7 +70,7 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 			hostHeader: allowedDomain,
 			method: 'GET',
 			path: `${url.pathname}${url.search}`,
-			headers: Object.freeze(bearerToken === undefined ? {} : { Authorization: `Bearer ${bearerToken}` }),
+			headers: authHeaders,
 			addresses: Object.freeze([...addresses]),
 			lookup: createPinnedLookup(allowedDomain, addresses),
 		});
@@ -93,6 +96,9 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 		if (!value || typeof value !== 'object' || Array.isArray(value)) {
 			throw new Error('Declarative connector returned an invalid JSON object.');
 		}
+		if (bearerToken && containsCredential(value, bearerToken)) {
+			throw new Error('Declarative connector response echoed its bearer credential.');
+		}
 		return value as Record<string, unknown>;
 	}
 
@@ -114,6 +120,24 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 	private executePinnedRequest(request: PinnedHttpsRequest): Promise<PinnedHttpsResponse> {
 		return this.testHooks?.executePinnedRequest(request) ?? executePinnedHttpsRequest(request);
 	}
+}
+
+function containsCredential(root: unknown, credential: string): boolean {
+	const pending: unknown[] = [root];
+	while (pending.length) {
+		const value = pending.pop();
+		if (typeof value === 'string') {
+			if (value.includes(credential)) { return true; }
+		} else if (Array.isArray(value)) {
+			for (const child of value) { pending.push(child); }
+		} else if (value && typeof value === 'object') {
+			for (const [key, child] of Object.entries(value)) {
+				if (key.includes(credential)) { return true; }
+				pending.push(child);
+			}
+		}
+	}
+	return false;
 }
 
 async function executePinnedHttpsRequest(request: PinnedHttpsRequest): Promise<PinnedHttpsResponse> {
