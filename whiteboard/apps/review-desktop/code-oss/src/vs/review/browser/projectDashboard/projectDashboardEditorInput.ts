@@ -19,8 +19,8 @@ export class ProjectDashboardEditorInput extends EditorInput {
 	override get capabilities(): EditorInputCapabilities {
 		return EditorInputCapabilities.Readonly | EditorInputCapabilities.Singleton | EditorInputCapabilities.ForceReveal;
 	}
-	override getName(): string { return 'Project'; }
-	override getIcon(): ThemeIcon { return Codicon.folder; }
+	override getName(): string { return '대시보드'; }
+	override getIcon(): ThemeIcon { return Codicon.dashboard; }
 	override matches(other: EditorInput | IUntypedEditorInput): boolean {
 		return super.matches(other) || other instanceof ProjectDashboardEditorInput && other.projectId === this.projectId;
 	}

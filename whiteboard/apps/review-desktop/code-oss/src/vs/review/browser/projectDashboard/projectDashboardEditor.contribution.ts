@@ -7,6 +7,7 @@ import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase 
 import { EditorExtensions, type IEditorFactoryRegistry } from '../../../workbench/common/editor.js';
 import { IEditorService } from '../../../workbench/services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../../workbench/services/editor/common/editorGroupsService.js';
+import { IWorkbenchLayoutService, Parts } from '../../../workbench/services/layout/browser/layoutService.js';
 import { INativeWorkbenchEnvironmentService } from '../../../workbench/services/environment/electron-browser/environmentService.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
 import { ProjectDashboardEditorPane } from './projectDashboardEditorPane.js';
@@ -16,7 +17,7 @@ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEdit
 	ProjectDashboardEditorInput.ID, ProjectDashboardEditorSerializer,
 );
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
-	EditorPaneDescriptor.create(ProjectDashboardEditorPane, ProjectDashboardEditorPane.ID, 'Project Dashboard'),
+	EditorPaneDescriptor.create(ProjectDashboardEditorPane, ProjectDashboardEditorPane.ID, '프로젝트 대시보드'),
 	[new SyncDescriptor(ProjectDashboardEditorInput)],
 );
 
@@ -27,6 +28,7 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		@INativeWorkbenchEnvironmentService private readonly environment: INativeWorkbenchEnvironmentService,
 		@IEditorService private readonly editorService: IEditorService,
 		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
@@ -38,6 +40,7 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		if (launch.kind !== 'project') return;
 
 		await this.editorGroupsService.whenRestored;
+		this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 		const existing = this.editorGroupsService.groups.flatMap(group => group.editors).find(editor =>
 			editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
 		const input = existing ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);

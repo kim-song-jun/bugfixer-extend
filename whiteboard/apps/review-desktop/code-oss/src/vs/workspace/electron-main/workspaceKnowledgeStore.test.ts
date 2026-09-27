@@ -161,6 +161,20 @@ test('reference attachments and convention sources cannot cross project boundari
 	});
 });
 
+test('reference import and task attachment roll back together when the task is archived', () => {
+	withDatabase(database => {
+		const { project, task } = createProjectAndTask(database, 'Atomic reference task');
+		database.archiveTask(task.id, task.revision);
+		assert.throws(() => database.knowledge.importReferenceWithTask({
+			projectId: project.id, connectorId: 'public-website', connectorVersion: '1', externalId: 'https://example.org/article',
+			sourceUri: 'https://example.org/article', title: 'Public page', contentType: 'text/html; charset=utf-8',
+			content: Buffer.from('<p>Readable page</p>'), derivedText: 'Readable page',
+		}, task.id), /same project/);
+		assert.deepEqual(database.knowledge.listProjectReferences(project.id), []);
+		assert.deepEqual(database.knowledge.listTaskReferences(task.id), []);
+	});
+});
+
 test('convention drafts, apply history, and provider attempt snapshots are durable', () => {
 	withDatabase(database => {
 		const { project, task } = createProjectAndTask(database, 'Conventions');

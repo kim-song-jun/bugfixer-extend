@@ -150,6 +150,8 @@ import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/work
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspaceProviderRunProtocol.js';
 import { WorkspaceKnowledgeChannel } from '../../workspace/electron-main/workspaceKnowledgeChannel.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../workspace/common/workspaceKnowledgeProtocol.js';
+import { WorkspaceWebsiteChannel } from '../../workspace/electron-main/workspaceWebsiteChannel.js';
+import { WORKSPACE_WEBSITE_CHANNEL } from '../../workspace/common/workspaceWebsiteProtocol.js';
 import { WorkspaceConnectorChannel } from '../../workspace/electron-main/workspaceConnectorChannel.js';
 import { WORKSPACE_CONNECTOR_CHANNEL } from '../../workspace/common/workspaceConnectorProtocol.js';
 import { KeychainVault, resolveKeychainVaultHelper } from '../../workspace/electron-main/keychainVault.js';
@@ -1375,6 +1377,9 @@ export class CodeApplication extends Disposable {
 			const knowledgeChannel = new WorkspaceKnowledgeChannel(this.workspaceDatabase, dashboardChannel);
 			validatedIpcMain.handle(WORKSPACE_KNOWLEDGE_CHANNEL, (event, command: string, arg: unknown) => knowledgeChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_KNOWLEDGE_CHANNEL)));
+			const websiteChannel = new WorkspaceWebsiteChannel(this.workspaceDatabase, dashboardChannel);
+			validatedIpcMain.handle(WORKSPACE_WEBSITE_CHANNEL, (event, command: string, arg: unknown) => websiteChannel.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_WEBSITE_CHANNEL)));
 			const connectorChannel = new WorkspaceConnectorChannel(
 				this.workspaceDatabase, dashboardChannel,
 				() => new KeychainVault(resolveKeychainVaultHelper(app.isPackaged, process.resourcesPath)),

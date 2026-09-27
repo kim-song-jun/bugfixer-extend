@@ -76,6 +76,16 @@ export class WorkspaceKnowledgeStore {
 		});
 	}
 
+	/** Saves a reference and its optional task link as one transaction. Failed links leave no snapshot version. */
+	importReferenceWithTask(input: ImportReferenceInput, taskId?: string): ReferenceSnapshot {
+		this.assertOpen();
+		return this.transaction(() => {
+			const snapshot = this.importReference(input);
+			if (taskId !== undefined) { this.attachReferenceToTask(taskId, snapshot.id); }
+			return snapshot;
+		});
+	}
+
 	readReference(id: string): ReferenceSnapshot | undefined {
 		this.assertOpen();
 		const row = this.db.prepare(`SELECT s.id, s.source_id, r.project_id, r.connector_id, r.external_id, r.account_ref,
