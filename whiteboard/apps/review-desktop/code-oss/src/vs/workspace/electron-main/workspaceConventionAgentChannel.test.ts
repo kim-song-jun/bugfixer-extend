@@ -135,15 +135,14 @@ Situation: Evidence is incomplete. Preferred response: state the gap and request
 		assert.ok(saved.markdown.includes('URI: `"https://docs.example.test/policy?q=[draft]"`'));
 		assert.ok(saved.markdown.includes('snapshot ID: `"' + withUri.id + '"`; version: ' + withUri.version + '; SHA-256: `"' + withUri.contentSha256 + '"`'));
 		assert.ok(saved.markdown.includes('Title: `' + JSON.stringify(withoutUri.title) + '`; URI: unavailable; snapshot ID: `"' + withoutUri.id + '"`; version: ' + withoutUri.version + ';'));
-		assert.doesNotMatch(saved.markdown, /Molcube/i);
 
 		const unsupportedAttempt = makeAttempt('unsupported draft');
 		await internal.finishAttempt(context, unsupportedAttempt, null, {
 			attemptId: unsupportedAttempt.attemptId, providerId: 'claude', state: 'succeeded', cleanupVerified: true, exitCode: 0, signal: null,
-			finalText: validMarkdown.replace('Prefer precise guidance grounded in the selected source snapshots.', 'Use Molcube for every review.'),
+			finalText: validMarkdown.replace('Prefer precise guidance grounded in the selected source snapshots.', 'Use the internal-only review policy for every change.'),
 		});
 		const unsupported = database.knowledge.listConventions(projectId).find(version => version.authorAttemptId === unsupportedAttempt.attemptId)!;
-		assert.match(unsupported.markdown, /Use Molcube for every review/);
+		assert.match(unsupported.markdown, /Use the internal-only review policy for every change/);
 		assert.match(unsupported.markdown, /## Input snapshots/);
 		assert.throws(() => database.knowledge.applyConventionVersion(projectId, unsupported.id), /requires a passing check/);
 

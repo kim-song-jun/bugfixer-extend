@@ -14,7 +14,7 @@ At the pinned commit, the source tree object is `300cc9004c2a5b6cf43386d551c8dcf
 
 The selected nested import keeps the source's root `package.json`, `pnpm-workspace.yaml`, lockfiles, scripts, README, and licenses under `whiteboard/`, with the Bugfixer Extend README and design documents at the outer root. It excludes the source `.git` directory and local build products. The import was compared against every pinned `git ls-tree` entry by relative path, file content, and executable bit; the complete result is recorded below. The only path that would have collided in a root merge was `README.md`.
 
-A targeted post-import scan of all 7,449 files on 2026-09-26 found no case-insensitive `molcube`, `bugfixer`, or `posco-mds` content matches; no AWS, Slack, OpenAI, or Notion key-pattern hits; and no Git LFS pointers. Two files contained a synthetic GitHub-token-shaped fixture in error-redaction tests, and one agent-host source file contained a private-key-header detection expression; these were reviewed in context. This finite pattern scan is not a complete credentials audit.
+A targeted post-import scan of all 7,449 files on 2026-09-26 found no case-insensitive matches for the former private company name, `bugfixer`, or `posco-mds`; no AWS, Slack, OpenAI, or Notion key-pattern hits; and no Git LFS pointers. Two files contained a synthetic GitHub-token-shaped fixture in error-redaction tests, and one agent-host source file contained a private-key-header detection expression; these were reviewed in context. This finite pattern scan is not a complete credentials audit.
 
 ## Nested import result
 
