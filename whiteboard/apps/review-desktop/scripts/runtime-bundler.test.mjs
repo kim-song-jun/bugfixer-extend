@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -132,6 +133,13 @@ test("final package verification requires the CLI and rechecks archives outside 
 
       if (artifact === path.join(runtime, "node_modules")) {
         await mkdir(artifact);
+      } else if (
+        artifact === path.join(runtime, "bin/bound-checkout") ||
+        artifact === path.join(runtime, "bin/keychain-vault")
+      ) {
+        await writeFile(artifact, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      } else if (artifact === path.join(runtime, "bin/node")) {
+        await copyFile(process.execPath, artifact);
       } else {
         await writeFile(artifact, artifact.endsWith(".json") ? "{}\n" : "");
       }

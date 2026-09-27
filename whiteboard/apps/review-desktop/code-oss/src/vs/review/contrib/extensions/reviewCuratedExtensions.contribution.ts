@@ -49,9 +49,9 @@ import {
 } from './reviewOptionalExtensionManagement.js';
 
 /**
- * The curated bundled extensions Review materializes, mirroring
- * apps/review-desktop/scripts/curated-extensions.manifest.mjs. A test in
- * curated-extensions.test.mjs keeps the two lists in step.
+ * Bundled development extensions users can enable or disable here. The app
+ * also bundles a Korean language pack, but the app locale manages it
+ * separately, so it does not belong in this picker.
  *
  * Only bundled extensions that are installed show up as individual rows.
  * Optional groups always show so the user can consent to their download.

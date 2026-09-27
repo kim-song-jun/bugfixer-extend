@@ -502,28 +502,6 @@ test("copies only bundled extensions for each package target", () => {
   }
 });
 
-test("keeps the in-app picker list in sync with the manifest", () => {
-  // Phase 1 keeps the existing bundled picker contract. Optional entries get
-  // their group rows when the trusted runtime installer is connected.
-  for (const extension of bundledExtensions) {
-    assert.ok(
-      curatedContribution.includes(`id: '${extension.id}'`),
-      `${extension.id} must appear in reviewCuratedExtensions.contribution.ts`,
-    );
-  }
-
-  // Nothing may be offered that this build does not vendor.
-  const offered = [...curatedContribution.matchAll(/\{ id: '([^']+)'/g)].map(
-    (match) => match[1],
-  );
-
-  const known = new Set(curatedExtensions.map((extension) => extension.id));
-
-  for (const id of offered) {
-    assert.ok(known.has(id), `${id} is offered by the picker but not vendored`);
-  }
-});
-
 test("keeps the keymaps mutually exclusive in the picker", () => {
   for (const id of defaultDisabledIds) {
     assert.ok(

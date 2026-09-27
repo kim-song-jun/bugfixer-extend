@@ -119,29 +119,47 @@ export async function assertPackagedArtifacts(packagedRoot) {
   if (resolvedPackagedApp(packagedRoot)) {
     const runtimeRoot = runtimeRootForPackagedRoot(packagedRoot);
 
-    for (const name of [BOUND_CHECKOUT_HELPER, KEYCHAIN_VAULT_HELPER, NODE_RUNTIME]) {
+    for (const name of [
+      BOUND_CHECKOUT_HELPER,
+      KEYCHAIN_VAULT_HELPER,
+      NODE_RUNTIME,
+    ]) {
       const helper = path.join(runtimeRoot, name);
       const helperStat = await stat(helper);
 
       if (!helperStat.isFile() || (helperStat.mode & 0o111) === 0) {
-        throw new Error(`The Review Desktop package has no executable native helper at ${helper}.`);
+        throw new Error(
+          `The Review Desktop package has no executable native helper at ${helper}.`,
+        );
       }
     }
 
-    const nodeBinary = path.join(runtimeRoot, NODE_RUNTIME);
+    // The macOS runtime can be inspected and executed only on a macOS host.
+    // Other hosts still verify every shipped helper exists and is executable.
+    if (process.platform === "darwin") {
+      const nodeBinary = path.join(runtimeRoot, NODE_RUNTIME);
 
-    const nodeArchitectures = (await execFileAsync("lipo", ["-archs", nodeBinary])).stdout
-      .trim()
-      .split(/\s+/);
+      const nodeArchitectures = (
+        await execFileAsync("lipo", ["-archs", nodeBinary])
+      ).stdout
+        .trim()
+        .split(/\s+/);
 
-    if (!nodeArchitectures.includes(process.arch)) {
-      throw new Error(`The packaged Node runtime does not contain ${process.arch}.`);
-    }
+      if (!nodeArchitectures.includes(process.arch)) {
+        throw new Error(
+          `The packaged Node runtime does not contain ${process.arch}.`,
+        );
+      }
 
-    const nodeVersion = (await execFileAsync(nodeBinary, ["--version"])).stdout.trim();
+      const nodeVersion = (
+        await execFileAsync(nodeBinary, ["--version"])
+      ).stdout.trim();
 
-    if (!/^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(nodeVersion)) {
-      throw new Error(`The packaged Node runtime returned an invalid version: ${nodeVersion}`);
+      if (!/^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(nodeVersion)) {
+        throw new Error(
+          `The packaged Node runtime returned an invalid version: ${nodeVersion}`,
+        );
+      }
     }
   }
 }
@@ -269,7 +287,14 @@ export async function stageBoundCheckoutHelper(
   const destination = path.join(runtimeRoot, BOUND_CHECKOUT_HELPER);
   await mkdir(path.dirname(destination), { recursive: true });
   await execFileAsync("clang", [
-    "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", source, "-o", destination,
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-O2",
+    source,
+    "-o",
+    destination,
   ]);
   await chmod(destination, 0o755);
 
@@ -291,18 +316,25 @@ export async function stageKeychainVaultHelper(
   const destination = path.join(runtimeRoot, KEYCHAIN_VAULT_HELPER);
   await mkdir(path.dirname(destination), { recursive: true });
   await execFileAsync("clang", [
-    "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", source, "-o", destination,
-    "-framework", "CoreFoundation", "-framework", "Security",
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-O2",
+    source,
+    "-o",
+    destination,
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "Security",
   ]);
   await chmod(destination, 0o755);
 
   return destination;
 }
 
-export async function stageNodeRuntime(
-  runtimeRoot,
-  source = process.execPath,
-) {
+export async function stageNodeRuntime(runtimeRoot, source = process.execPath) {
   if (process.platform !== "darwin") {
     throw new Error("The standalone Node runtime can only be staged on macOS.");
   }
@@ -311,24 +343,38 @@ export async function stageNodeRuntime(
   const sourceStat = await stat(resolvedSource);
 
   if (!sourceStat.isFile() || (sourceStat.mode & 0o111) === 0) {
-    throw new Error(`The Node runtime source is not an executable file: ${resolvedSource}`);
+    throw new Error(
+      `The Node runtime source is not an executable file: ${resolvedSource}`,
+    );
   }
 
-  const architectures = (await execFileAsync("lipo", ["-archs", resolvedSource])).stdout
+  const architectures = (
+    await execFileAsync("lipo", ["-archs", resolvedSource])
+  ).stdout
     .trim()
     .split(/\s+/);
 
   if (!architectures.includes(process.arch)) {
-    throw new Error(`The Node runtime does not contain ${process.arch}: ${resolvedSource}`);
+    throw new Error(
+      `The Node runtime does not contain ${process.arch}: ${resolvedSource}`,
+    );
   }
 
-  const sourceVersion = (await execFileAsync(resolvedSource, ["--version"])).stdout.trim();
+  const sourceVersion = (
+    await execFileAsync(resolvedSource, ["--version"])
+  ).stdout.trim();
 
   if (!/^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(sourceVersion)) {
-    throw new Error(`The Node runtime returned an invalid version: ${sourceVersion}`);
+    throw new Error(
+      `The Node runtime returned an invalid version: ${sourceVersion}`,
+    );
   }
 
-  const licenseSource = path.resolve(path.dirname(resolvedSource), "..", "LICENSE");
+  const licenseSource = path.resolve(
+    path.dirname(resolvedSource),
+    "..",
+    "LICENSE",
+  );
 
   if (!(await stat(licenseSource).catch(() => null))?.isFile()) {
     throw new Error(`The Node runtime license is missing: ${licenseSource}`);
@@ -342,10 +388,14 @@ export async function stageNodeRuntime(
   await chmod(destination, 0o755);
   await copyFile(licenseSource, licenseDestination);
 
-  const stagedVersion = (await execFileAsync(destination, ["--version"])).stdout.trim();
+  const stagedVersion = (
+    await execFileAsync(destination, ["--version"])
+  ).stdout.trim();
 
   if (stagedVersion !== sourceVersion) {
-    throw new Error(`The staged Node runtime version differs (${stagedVersion} != ${sourceVersion}).`);
+    throw new Error(
+      `The staged Node runtime version differs (${stagedVersion} != ${sourceVersion}).`,
+    );
   }
 
   return destination;

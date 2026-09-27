@@ -322,6 +322,7 @@ const excludedExtensions = [
 	'astral-sh.ty',
 	'charliermarsh.ruff',
 	'golang.go',
+	'ms-ceintl.vscode-language-pack-ko',
 ];
 
 const marketplaceWebExtensionsExclude = new Set([
