@@ -1,5 +1,5 @@
 .project-sidebar {
-	--project-sidebar-bg: #F7F9FB;
+	--project-sidebar-bg: #F2F4F6;
 	--project-sidebar-fg: #191F28;
 	--project-sidebar-muted: #4E5968;
 	--project-sidebar-border: #DDE2E8;
@@ -15,7 +15,7 @@
 
 .vs-dark .project-sidebar,
 .hc-black .project-sidebar {
-	--project-sidebar-bg: #272B34;
+	--project-sidebar-bg: #17171C;
 	--project-sidebar-fg: #ECECEC;
 	--project-sidebar-muted: #A0A3A8;
 	--project-sidebar-border: #3A3E47;
@@ -133,16 +133,16 @@
 	min-height: 38px;
 	gap: 8px;
 	margin-top: 12px;
-	border: 1px solid var(--project-sidebar-accent);
+	border: 1px solid var(--project-sidebar-border);
 	border-radius: 8px;
-	color: var(--project-sidebar-accent);
+	color: inherit;
 	background: transparent;
 	font: inherit;
 	font-weight: 650;
 	cursor: pointer;
 }
 
-.project-sidebar__create:hover { background: var(--project-sidebar-selected); }
+.project-sidebar__create:hover { border-color: var(--project-sidebar-accent); background: var(--project-sidebar-selected); }
 
 .project-sidebar__item {
 	display: flex;
