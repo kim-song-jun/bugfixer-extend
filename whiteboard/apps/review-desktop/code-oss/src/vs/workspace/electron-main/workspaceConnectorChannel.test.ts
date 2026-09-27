@@ -159,9 +159,13 @@ test('Notion previews stay in the main process until the reviewed snapshot is im
 			delete: async (_provider: 'slack' | 'notion', id: string) => { secrets.delete(id); },
 		};
 		const pageId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-		const transport: ConnectorTransport = { fetch: async input => {
+		const credentialShapedId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+		const transport: ConnectorTransport = { fetch: async (input, init) => {
 			const url = new URL(String(input));
 			if (url.pathname === '/v1/users/me') {
+				if (new Headers(init?.headers).get('Authorization') === `Bearer ${credentialShapedId}`) {
+					return Response.json({ object: 'user', id: credentialShapedId, type: 'bot', name: 'Compromised identity' });
+				}
 				return Response.json({ object: 'user', id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', type: 'bot', name: 'Project Notion Bot' });
 			}
 			if (url.pathname === `/v1/pages/${pageId}`) {
@@ -186,7 +190,20 @@ test('Notion previews stay in the main process until the reviewed snapshot is im
 		await assert.rejects(channel.call(sender, 'connectAccount', {
 			projectId: project.project.id, provider: 'notion', token: 'another-secret-notion-token', accountLabel: '  ',
 		}), /label for this Notion connection/);
-		assert.equal((await channel.call<WorkspaceConnectorAccountDTO[]>(sender, 'listAccounts', project.project.id)).length, 2);
+		const credentialInLabel = 'Third-Secret-Notion-Token';
+		await assert.rejects(channel.call(sender, 'connectAccount', {
+			projectId: project.project.id, provider: 'notion', token: credentialInLabel,
+			accountLabel: `Workspace ${credentialInLabel.toLowerCase()}`,
+		}), /연결 라벨에 개인 액세스 토큰을 포함할 수 없습니다/);
+		assert.equal(secrets.has(credentialInLabel), false);
+		await assert.rejects(channel.call(sender, 'connectAccount', {
+			projectId: project.project.id, provider: 'notion', token: credentialShapedId,
+			accountLabel: 'Credential shaped identity',
+		}), /account ID containing the personal access token/);
+		const visibleAccounts = await channel.call<WorkspaceConnectorAccountDTO[]>(sender, 'listAccounts', project.project.id);
+		assert.equal(visibleAccounts.length, 2, 'unsafe labels and identities must not create connector accounts');
+		assert.equal(JSON.stringify(visibleAccounts).includes(credentialInLabel), false);
+		assert.equal(JSON.stringify(visibleAccounts).includes(credentialShapedId), false);
 		const preview = await channel.call<WorkspaceConnectorPreviewDTO>(sender, 'previewNotionPage', {
 			projectId: project.project.id, accountId: account.id, pageId,
 		});
@@ -210,6 +227,8 @@ test('Notion previews stay in the main process until the reviewed snapshot is im
 			const bytes = readFileSync(join(directory, databaseFile));
 			assert.equal(bytes.includes(Buffer.from('secret-notion-token')), false, `${databaseFile} contains a Notion credential`);
 			assert.equal(bytes.includes(Buffer.from('another-secret-notion-token')), false, `${databaseFile} contains another Notion credential`);
+			assert.equal(bytes.includes(Buffer.from(credentialInLabel)), false, `${databaseFile} contains a token rejected in the label`);
+			assert.equal(bytes.includes(Buffer.from(credentialShapedId)), false, `${databaseFile} contains a token returned as an identity`);
 		}
 	} finally {
 		database.close();

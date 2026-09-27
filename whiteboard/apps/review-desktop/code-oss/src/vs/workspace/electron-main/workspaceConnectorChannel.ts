@@ -293,6 +293,9 @@ export class WorkspaceConnectorChannel {
 		if (record.provider === 'notion' && (typeof record.accountLabel !== 'string' || !record.accountLabel.trim())) {
 			throw new Error('Enter a label for this Notion connection.');
 		}
+		if (record.provider === 'notion' && (record.accountLabel as string).toLowerCase().includes(record.token.toLowerCase())) {
+			throw new Error('연결 라벨에 개인 액세스 토큰을 포함할 수 없습니다.');
+		}
 		return record as unknown as ConnectWorkspaceConnectorRequest;
 	}
 

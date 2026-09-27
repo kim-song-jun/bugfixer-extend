@@ -50,6 +50,9 @@ export async function validateNotionToken(token: string, transport: ConnectorTra
 		|| (payload.type !== 'person' && payload.type !== 'bot')) {
 		throw new Error('Notion could not validate this account token.');
 	}
+	if (payload.id.toLowerCase().includes(credential.toLowerCase())) {
+		throw new Error('Notion returned an account ID containing the personal access token; this account cannot be saved safely.');
+	}
 	const name = safeLabel(payload.name, credential);
 	return { remoteId: `notion:${payload.id.toLowerCase()}`, label: name || `Notion ${payload.id.slice(0, 8)}` };
 }
