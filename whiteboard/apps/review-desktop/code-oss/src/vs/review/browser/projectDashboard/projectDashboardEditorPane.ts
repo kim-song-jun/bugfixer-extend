@@ -1669,7 +1669,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if (generation === this.referenceViewerGeneration && this.projectId === projectId && this.referenceViewerId === reference.id) {
 				this.referenceViewerLoading = false;
 				this.render();
-				this.root?.querySelector<HTMLElement>('[data-focus-key="reference-viewer-close"]')?.focus({ preventScroll: true });
 			}
 		}
 	}
