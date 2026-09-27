@@ -248,6 +248,11 @@
 .project-dashboard__connector-account-main strong { font-size: 12px; overflow-wrap: anywhere; }
 .project-dashboard__connector-account-main span { color: var(--dashboard-muted); font-size: 12px; overflow-wrap: anywhere; }
 .project-dashboard__connector-connect, .project-dashboard__connector-import { display: grid; gap: 7px; max-width: 620px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dashboard-line); }
+.project-dashboard__connector-notion-label { display: grid; gap: 7px; }
+.project-dashboard__connector-notion-label[hidden], .project-dashboard__connector-notion-disclosure[hidden] { display: none; }
+.project-dashboard__connector-notion-disclosure { margin-bottom: 0; }
+.project-dashboard__connector-connect a { color: var(--dashboard-accent); text-underline-offset: 2px; }
+.project-dashboard__connector-connect a:focus-visible { outline: 2px solid var(--dashboard-accent); outline-offset: 2px; }
 .project-dashboard__connector-connect h4, .project-dashboard__connector-import h4 { margin: 0 0 2px; font-size: 12px; }
 .project-dashboard__connector-connect label, .project-dashboard__connector-import label { font-size: 12px; font-weight: 600; }
 .project-dashboard__connector-connect input, .project-dashboard__connector-connect select, .project-dashboard__connector-import input, .project-dashboard__connector-import select { box-sizing: border-box; width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid var(--dashboard-input-border); border-radius: 6px; color: var(--dashboard-ink); background: var(--dashboard-card); font: inherit; font-size: 12px; }

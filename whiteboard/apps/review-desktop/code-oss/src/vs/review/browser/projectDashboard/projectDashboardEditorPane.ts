@@ -60,6 +60,14 @@ function packageTokenValidationMessage(value: string): string {
 	return value.length > 0 && value.length < 16 ? '토큰은 공백 없는 ASCII 출력 가능 문자 16자 이상이어야 합니다.' : '';
 }
 
+function notionAccountLabelValidationMessage(value: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) return 'Notion 연결 이름을 입력해 주세요.';
+	if (trimmed.length > 80) return 'Notion 연결 이름은 공백을 제외하고 80자 이하여야 합니다.';
+	if (/[\r\n\t\x00-\x1f\x7f]/.test(value)) return 'Notion 연결 이름에는 제어 문자를 사용할 수 없습니다.';
+	return '';
+}
+
 export class ProjectDashboardEditorPane extends EditorPane {
 	static readonly ID = ProjectDashboardEditorInput.EDITOR_ID;
 	private root: HTMLElement | undefined;
@@ -191,6 +199,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private connectorMessage: string | undefined;
 	private connectorProvider: WorkspaceConnectorId = 'slack';
 	private connectorTokenDraft = '';
+	private connectorAccountLabelDraft = '';
 	private connectorImportAccountId = '';
 	private connectorImportIdDraft = '';
 	private connectorImportTitleDraft = '';
@@ -327,6 +336,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.connectorBusy = false;
 		this.connectorPreviewLoading = false;
 		this.connectorTokenDraft = '';
+		this.connectorAccountLabelDraft = '';
 		this.connectorImportIdDraft = '';
 		this.connectorImportTitleDraft = '';
 		this.connectorImportMessageTsDraft = '';
@@ -565,6 +575,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const details = row.appendChild($('.project-dashboard__connector-account-main'));
 			const label = details.appendChild($('strong')); label.textContent = `${account.provider === 'slack' ? 'Slack' : 'Notion'} · ${account.label}`;
 			const meta = details.appendChild($('span')); meta.textContent = `${account.remoteIdentity} · ${account.state === 'active' ? '연결됨' : '키체인 정리 대기 중'}`;
+			if (account.provider === 'notion') {
+				const lifecycleNote = details.appendChild($('p')); lifecycleNote.className = 'project-dashboard__connector-note project-dashboard__connector-account-disclosure';
+				lifecycleNote.textContent = '이 앱에서 연결을 해제하면 로컬 키체인 자격 증명만 삭제됩니다. Notion의 토큰이나 연결은 폐기되지 않습니다.';
+			}
 			const action = row.appendChild(createElement('button', 'project-dashboard__secondary')); action.type = 'button'; action.disabled = this.connectorBusy;
 			action.textContent = account.state === 'active' ? '연결 해제' : '정리 다시 시도';
 			action.addEventListener('click', () => { if (!projectId) return; if (account.id === this.connectorPreviewAccountId) { this.clearConnectorPreview(); } void this.runConnectorAction(() => ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, account.state === 'active' ? 'disconnectAccount' : 'retryAccountCleanup', { projectId, accountId: account.id }), account.state === 'active' ? '계정 연결을 해제했습니다.' : '키체인 정리를 완료했습니다.'); });
@@ -574,14 +588,69 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const providerLabel = form.appendChild(createElement('label')); providerLabel.htmlFor = 'connector-provider'; providerLabel.textContent = '서비스';
 		const provider = form.appendChild(createElement('select')); provider.id = 'connector-provider'; provider.disabled = this.connectorBusy;
 		for (const [value, text] of [['slack', 'Slack'], ['notion', 'Notion']] as const) { const option = provider.appendChild($('option') as HTMLOptionElement); option.value = value; option.textContent = text; }
-		provider.value = this.connectorProvider; provider.addEventListener('change', () => { this.connectorProvider = provider.value as WorkspaceConnectorId; clearReview(); });
-		const tokenLabel = form.appendChild(createElement('label')); tokenLabel.htmlFor = 'connector-token'; tokenLabel.textContent = '액세스 토큰';
+		provider.value = this.connectorProvider;
+		const notionLabelField = form.appendChild(createElement('div', 'project-dashboard__connector-notion-label'));
+		const notionLabel = notionLabelField.appendChild(createElement('label')); notionLabel.htmlFor = 'connector-notion-label'; notionLabel.textContent = '연결 이름 (워크스페이스/용도)';
+		const notionLabelInput = notionLabelField.appendChild(createElement('input')); notionLabelInput.id = 'connector-notion-label'; notionLabelInput.type = 'text'; notionLabelInput.required = this.connectorProvider === 'notion'; notionLabelInput.value = this.connectorAccountLabelDraft; notionLabelInput.disabled = this.connectorBusy; notionLabelInput.dataset.focusKey = 'connector-notion-label';
+		const notionLabelHint = notionLabelField.appendChild($('p')); notionLabelHint.id = 'connector-notion-label-hint'; notionLabelHint.className = 'project-dashboard__connector-note'; notionLabelHint.textContent = '앞뒤 공백은 저장할 때 제거됩니다. 1–80자 이름을 입력하세요.';
+		notionLabelInput.setAttribute('aria-describedby', notionLabelHint.id);
+		notionLabelInput.addEventListener('input', () => {
+			this.connectorAccountLabelDraft = notionLabelInput.value;
+			const message = notionAccountLabelValidationMessage(notionLabelInput.value);
+			notionLabelInput.setCustomValidity(this.connectorProvider === 'notion' ? message : '');
+			if (this.connectorProvider === 'notion' && message) notionLabelInput.setAttribute('aria-invalid', 'true');
+			else notionLabelInput.removeAttribute('aria-invalid');
+		});
+		notionLabelField.hidden = this.connectorProvider !== 'notion';
+		const tokenLabel = form.appendChild(createElement('label')); tokenLabel.htmlFor = 'connector-token'; tokenLabel.textContent = this.connectorProvider === 'notion' ? 'Notion 개인 액세스 토큰' : '액세스 토큰';
 		const token = form.appendChild(createElement('input')); token.id = 'connector-token'; token.type = 'password'; token.autocomplete = 'off'; token.spellcheck = false; token.required = true; token.value = this.connectorTokenDraft; token.disabled = this.connectorBusy; token.dataset.focusKey = 'connector-token';
 		token.addEventListener('input', () => { this.connectorTokenDraft = token.value; });
-		const tokenHelp = form.appendChild($('p')); tokenHelp.className = 'project-dashboard__connector-note'; tokenHelp.textContent = 'Slack 사용자 토큰(xoxp-) 또는 Notion 통합 토큰을 붙여넣으세요. 제출하면 입력란이 비워집니다.';
+		const tokenHelp = form.appendChild($('p')); tokenHelp.className = 'project-dashboard__connector-note';
+		const notionDisclosure = form.appendChild($('p')); notionDisclosure.className = 'project-dashboard__connector-note project-dashboard__connector-notion-disclosure'; notionDisclosure.hidden = this.connectorProvider !== 'notion';
+		notionDisclosure.textContent = '이 토큰은 연결을 만든 사용자의 Notion 계정으로 동작합니다. 앱은 그 사용자가 접근할 수 있고 해당 연결에 공유된 페이지에 읽기 요청만 보냅니다. 앱은 토큰에 설정된 권한(capabilities)을 조회하거나 강제하지 않으므로, 읽기 전용 권한을 선택할 수 있다면 그렇게 설정하세요.';
+		const updateProviderFields = () => {
+			const isNotion = provider.value === 'notion';
+			this.connectorProvider = provider.value as WorkspaceConnectorId;
+			notionLabelField.hidden = !isNotion;
+			notionLabelInput.required = isNotion;
+			const labelError = isNotion ? notionAccountLabelValidationMessage(notionLabelInput.value) : '';
+			notionLabelInput.setCustomValidity(labelError);
+			if (labelError) notionLabelInput.setAttribute('aria-invalid', 'true');
+			else notionLabelInput.removeAttribute('aria-invalid');
+			tokenLabel.textContent = isNotion ? 'Notion 개인 액세스 토큰' : '액세스 토큰';
+			tokenHelp.replaceChildren();
+			if (isNotion) {
+				tokenHelp.append('Notion에서 토큰을 만들고 붙여넣으세요. ');
+				const setupLink = tokenHelp.appendChild(createElement('a'));
+				setupLink.href = 'https://www.notion.com/help/create-integrations-with-the-notion-api'; setupLink.target = '_blank'; setupLink.rel = 'noreferrer'; setupLink.textContent = 'Notion 개인 액세스 토큰 설정 방법';
+				tokenHelp.append(' 제출하면 입력란이 비워집니다.');
+				notionDisclosure.hidden = false;
+			} else {
+				tokenHelp.textContent = 'Slack 사용자 토큰(xoxp-) 또는 Notion 통합 토큰을 붙여넣으세요. 제출하면 입력란이 비워집니다.';
+				notionDisclosure.hidden = true;
+			}
+		};
+		provider.addEventListener('change', () => { updateProviderFields(); clearReview(); });
+		updateProviderFields();
 		const connectActions = form.appendChild($('.project-dashboard__form-actions'));
 		const connect = connectActions.appendChild(createElement('button', 'project-dashboard__primary')); connect.type = 'submit'; connect.disabled = this.connectorBusy; connect.textContent = this.connectorBusy ? '연결 중…' : '연결';
-		form.addEventListener('submit', event => { event.preventDefault(); const tokenValue = token.value; if (!projectId || !tokenValue) return; token.value = ''; this.connectorTokenDraft = ''; void this.runConnectorAction(() => ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'connectAccount', { projectId, provider: this.connectorProvider, token: tokenValue }), '계정을 연결했습니다.'); });
+		form.addEventListener('submit', event => {
+			event.preventDefault();
+			const tokenValue = token.value;
+			const connectionProvider = this.connectorProvider;
+			const accountLabel = connectionProvider === 'notion' ? notionLabelInput.value.trim() : undefined;
+			if (connectionProvider === 'notion') {
+				const labelError = notionAccountLabelValidationMessage(notionLabelInput.value);
+				notionLabelInput.setCustomValidity(labelError);
+				if (labelError) { notionLabelInput.setAttribute('aria-invalid', 'true'); notionLabelInput.reportValidity(); return; }
+			}
+			if (!projectId || !tokenValue) return;
+			token.value = ''; this.connectorTokenDraft = '';
+			void this.runConnectorAction(async () => {
+				await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'connectAccount', { projectId, provider: connectionProvider, token: tokenValue, ...(accountLabel ? { accountLabel } : {}) });
+				if (connectionProvider === 'notion') this.connectorAccountLabelDraft = '';
+			}, '계정을 연결했습니다.');
+		});
 		const importForm = section.appendChild(createElement('form', 'project-dashboard__connector-import'));
 		const previewRegion = section.appendChild($('.project-dashboard__connector-preview-region'));
 		const clearReview = () => {
@@ -3060,6 +3129,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (normalized.includes('being completed') && normalized.includes('capture')) return 'Ego 가져오기가 진행 중입니다. 잠시 기다린 뒤 다시 시도해 주세요.';
 		if (normalized.includes('native bound-checkout helper') || normalized.includes('trusted node runtime')) return '안전한 에이전트 실행에 필요한 로컬 도구를 사용할 수 없습니다. 설치 상태를 확인해 주세요.';
 		if (normalized.includes('provider did not return') || normalized.includes('provider returned an empty')) return '에이전트가 결과를 반환하지 않았습니다. 실행 기록을 확인하고 다시 시도해 주세요.';
+		if (normalized.includes('this notion token was rejected') || normalized.includes('reconnect with a new personal access token')) return 'Notion 토큰이 거부되었습니다. 만료되었거나 폐기되었을 수 있으니 새 개인 액세스 토큰으로 다시 연결해 주세요.';
 		if (normalized.includes('review and approve the exact connector package')) return '설치 전에 검토한 패키지의 설치를 승인해 주세요.';
 		if (normalized.includes('connector source and selected resource id are required')) return '자료 출처와 원격 자료 ID를 입력해 주세요.';
 		if (normalized.includes('valid project id is required')) return '프로젝트 정보가 유효하지 않습니다. 프로젝트를 다시 열어 주세요.';
