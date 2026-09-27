@@ -2492,14 +2492,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			.flatMap(state => this.dashboard!.tasks.filter(task => task.state === state).sort((left, right) => left.createdAt.localeCompare(right.createdAt)))[0];
 		const kicker = nextCopy.appendChild($('.project-dashboard__kicker')); kicker.textContent = nextTask ? '다음 작업' : '프로젝트 작업';
 		const allTasksDone = this.dashboard.tasks.length > 0 && this.dashboard.tasks.every(task => task.state === 'done');
-		const nextTitle = nextCopy.appendChild($('h2')); nextTitle.textContent = nextTask?.title ?? (allTasksDone ? '모든 작업을 마쳤어요' : '아직 작업이 없어요');
+		const nextTitle = nextCopy.appendChild($('h2')); nextTitle.textContent = nextTask?.title ?? (allTasksDone ? '모든 작업 완료' : '작업이 없습니다');
 		const nextDescription = nextCopy.appendChild($('p'));
 		const nextReason = nextAction && recommended?.id === nextAction.taskId
-			? { attention: '확인이 필요한 실행이 있어요', review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과와 함께 검토하세요' : '결과를 검토하세요', running: '작업 진행 중', ready: '시작할 준비가 됐어요' }[nextAction.kind]
+			? { attention: '실행 확인 필요', review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과와 함께 검토' : '결과 검토 필요', running: '작업 진행 중', ready: '시작 준비 완료' }[nextAction.kind]
 			: nextTask ? columns.find(column => column.state === nextTask.state)?.label : undefined;
-		nextDescription.textContent = nextTask ? `${nextReason} · 선택하면 작업 상세 정보를 볼 수 있어요.` : allTasksDone
-			? '모든 작업을 마쳤어요. 새 작업을 추가해 계속 진행할 수 있어요.'
-			: '첫 작업을 만들면 대기·진행·검토·완료 단계별로 관리할 수 있어요.';
+		nextDescription.textContent = nextTask ? `${nextReason} · 상세에서 진행 상태를 확인하세요.` : allTasksDone
+			? '새 작업을 추가해 계속 진행하세요.'
+			: '작업을 만들면 보드에서 진행 상태를 관리할 수 있습니다.';
 		const nextActions = next.appendChild(createElement('div', 'project-dashboard__next-actions'));
 		const taskDetailLabel = !nextTask ? '작업 만들기'
 			: nextAction?.taskId === nextTask.id && nextAction.kind === 'attention' ? '확인할 작업 보기'
