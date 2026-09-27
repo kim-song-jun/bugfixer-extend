@@ -4,12 +4,18 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { WebContents } from 'electron';
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { accessSync, constants, lstatSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { isUUID } from '../../base/common/uuid.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
-import { WorkspaceDatabase, type WorkspaceTask } from './workspaceDatabase.js';
-import type { CreateWorkspaceDashboardTaskRequest, ReorderWorkspaceDashboardTasksRequest, TrashWorkspaceDashboardTaskRequest, UpdateWorkspaceDashboardStateRequest, UpdateWorkspaceDashboardTaskRequest, WorkspaceDashboardDTO, WorkspaceDashboardNextActionDTO, WorkspaceDashboardTaskDTO, WorkspaceDashboardTaskLifecycleRequest, WorkspaceDashboardViewDTO } from '../common/workspaceDashboardProtocol.js';
+import { WorkspaceDatabase, type ProviderAttempt, type WorkspaceFolderBinding, type WorkspaceTask } from './workspaceDatabase.js';
+import type { CreateWorkspaceDashboardTaskRequest, OpenObservedOrdinaryFolderChangeRequest, ReorderWorkspaceDashboardTasksRequest, TrashWorkspaceDashboardTaskRequest, UpdateWorkspaceDashboardStateRequest, UpdateWorkspaceDashboardTaskRequest, WorkspaceDashboardDTO, WorkspaceDashboardInspectFileDTO, WorkspaceDashboardNextActionDTO, WorkspaceDashboardTaskDTO, WorkspaceDashboardTaskLifecycleRequest, WorkspaceDashboardViewDTO } from '../common/workspaceDashboardProtocol.js';
+import { parseOrdinaryFolderChangeReport } from './providerRuns/ordinaryFolderInventory.js';
 
 const maximumDashboardPositionPixels = 10_000_000;
+const maximumInspectFileBytes = 1024 * 1024;
 
 export interface TaskDeletionCoordinator {
 	deleteTask(projectId: string, taskId: string, expectedRevision: number, requestId: string): Promise<WorkspaceTask>;
@@ -22,12 +28,18 @@ export class WorkspaceDashboardChannel {
 		private readonly database: WorkspaceDatabase,
 		private readonly windowsMainService: IWindowsMainService,
 		private readonly taskDeletionCoordinator?: TaskDeletionCoordinator,
+		private readonly boundCheckoutHelper?: string,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
 		const window = this.requireAuthorizedWindow(sender);
 
 		switch (command) {
+			case 'openObservedOrdinaryFolderChange': {
+				const request = this.parseOpenOrdinaryChangeRequest(arg);
+				this.requireProjectWindow(window, request.projectId);
+				return await this.openObservedOrdinaryFolderChange(request) as T;
+			}
 			case 'getDashboard': {
 				if (typeof arg !== 'string' || !isUUID(arg)) { throw new Error('A valid project ID is required.'); }
 				if (window.config?.reviewWindowLaunch.kind !== 'project' || window.config.reviewWindowLaunch.projectId !== arg) {
@@ -105,6 +117,95 @@ export class WorkspaceDashboardChannel {
 		}
 	}
 
+	private async openObservedOrdinaryFolderChange(request: OpenObservedOrdinaryFolderChangeRequest): Promise<WorkspaceDashboardInspectFileDTO> {
+		const task = this.requireTaskInProject(request.taskId, request.projectId);
+		if (task.state !== 'review') { throw new Error('Changed files are available only while this task is in Review.'); }
+		const binding = this.database.listFolderBindings(request.projectId).find(candidate => candidate.id === task.bindingId);
+		if (!binding || binding.vcsKind !== null) { throw new Error('This task is not bound to an ordinary folder.'); }
+		const attempt = this.database.getProviderAttempt(request.attemptId);
+		if (!attempt || attempt.taskId !== task.id || attempt.parentAttemptId !== null || attempt.purpose !== 'task' || attempt.state !== 'succeeded') {
+			throw new Error('A successful task run is required to inspect changed files.');
+		}
+		const changeEvent = this.database.listProviderAttemptEvents(attempt.attemptId).reverse().find(event => event.type === 'ordinaryFolderChanges');
+		const report = changeEvent && typeof changeEvent.metadata.report === 'string' ? parseOrdinaryFolderChangeReport(changeEvent.metadata.report) : undefined;
+		if (!report || report.status !== 'observed') { throw new Error('This run has no verified ordinary-folder change report.'); }
+		if (!attempt.cleanupVerified) { throw new Error('Run cleanup has not been verified; changed files are not available yet.'); }
+		const changed = report.changes.find(change => change.path === request.relativePath && /^[a-f0-9]{64}$/u.test(change.after ?? ''));
+		if (!changed) { throw new Error('The requested file is not an openable path in this run\'s persisted report.'); }
+
+		const { rootPath, dev, ino } = this.resolveOrdinaryReportRoot(binding, attempt);
+		const content = await this.readOrdinaryReportFile(rootPath, dev, ino, request.relativePath, changed.after!);
+		return { relativePath: request.relativePath, content };
+	}
+
+	private resolveOrdinaryReportRoot(binding: WorkspaceFolderBinding, attempt: ProviderAttempt): { rootPath: string; dev: string; ino: string } {
+		let rootPath: string;
+		try {
+			const rootEntry = lstatSync(binding.path);
+			if (!rootEntry.isDirectory() || rootEntry.isSymbolicLink()) { throw new Error('The bound folder is not a regular directory.'); }
+			rootPath = realpathSync(binding.path);
+			const rootStats = statSync(rootPath, { bigint: true });
+			const dev = rootStats.dev.toString();
+			const ino = rootStats.ino.toString();
+			const currentIdentity = `${binding.id}:${rootPath}:${dev}:${ino}`;
+			if (attempt.cwd !== rootPath || attempt.folderIdentity !== currentIdentity) {
+				throw new Error('The bound folder identity changed after the report was recorded.');
+			}
+			return { rootPath, dev, ino };
+		} catch (error) {
+			throw new Error(`The bound folder is unavailable or changed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async readOrdinaryReportFile(rootPath: string, dev: string, ino: string, relativePath: string, expectedHash: string): Promise<string> {
+		if (!this.isSafeReportRelativePath(relativePath)) {
+			throw new Error('A safe relative report path is required.');
+		}
+		const helper = this.boundCheckoutHelper ?? this.boundHelperExecutable();
+		if (!helper) { throw new Error('The native bound-checkout helper is unavailable; Inspect is disabled.'); }
+		const bytes = await new Promise<Buffer>((resolve, reject) => {
+			execFile(helper, ['--root', rootPath, '--dev', dev, '--ino', ino, 'read', relativePath], {
+				encoding: 'buffer', maxBuffer: maximumInspectFileBytes + 1, timeout: 10_000,
+			}, (error, stdout) => {
+				if (error) { reject(error); }
+				else { resolve(stdout); }
+			});
+		}).catch((error: unknown) => {
+			const code = error instanceof Error && 'code' in error ? error.code : undefined;
+			if (code === 'ENOBUFS' || code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+				throw new Error('The reported file exceeds the 1 MiB Inspect limit.');
+			}
+			if (code === 'ETIMEDOUT') { throw new Error('Reading the reported file timed out.'); }
+			throw new Error(`The reported file could not be read safely: ${error instanceof Error ? error.message : String(error)}`);
+		});
+		if (bytes.byteLength > maximumInspectFileBytes) { throw new Error('The reported file exceeds the 1 MiB Inspect limit.'); }
+		if (createHash('sha256').update(bytes).digest('hex') !== expectedHash) {
+			throw new Error('The reported file changed after the observed report was recorded.');
+		}
+		try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+		catch (error) {
+			if (error instanceof TypeError) { throw new Error('The reported file is not valid UTF-8 text.'); }
+			throw error;
+		}
+	}
+
+	private isSafeReportRelativePath(relativePath: string): boolean {
+		if (!relativePath || relativePath.startsWith('/') || relativePath.includes('\\') || Buffer.byteLength(relativePath, 'utf8') > 4096) { return false; }
+		return relativePath.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..');
+	}
+
+	private boundHelperExecutable(): string | undefined {
+		const resourcesPath = process.resourcesPath;
+		const candidate = process.env['VSCODE_DEV']
+			? process.env['DEV_FAST_REVIEW_BOUND_CHECKOUT_HELPER']
+			: resourcesPath ? join(resourcesPath, 'app', 'review-runtime', 'bin', 'bound-checkout') : undefined;
+		if (!candidate) { return undefined; }
+		try {
+			accessSync(candidate, constants.X_OK);
+			return candidate;
+		} catch { return undefined; }
+	}
+
 	private requireAuthorizedWindow(sender: WebContents) {
 		if (!sender || typeof sender !== 'object') { throw new Error('A valid IPC sender is required.'); }
 		const window = this.windowsMainService.getWindowByWebContents(sender);
@@ -148,9 +249,25 @@ export class WorkspaceDashboardChannel {
 		if (needsAttention) { return { taskId: needsAttention.id, kind: 'attention', primaryReviewId: null, hasPassedE2eEvidence: false }; }
 		const review = oldestFirst.find(task => task.state === 'review');
 		if (review) {
+			const binding = this.database.listFolderBindings(review.projectId).find(candidate => candidate.id === review.bindingId);
+			const inspectAttempt = binding?.vcsKind === null ? [...this.database.listProviderAttempts(review.id)].reverse().find(attempt => {
+				if (attempt.parentAttemptId !== null || attempt.purpose !== 'task' || attempt.state !== 'succeeded' || !attempt.cleanupVerified) { return false; }
+				const event = this.database.listProviderAttemptEvents(attempt.attemptId).reverse().find(candidate => candidate.type === 'ordinaryFolderChanges');
+				const report = event && typeof event.metadata.report === 'string' ? parseOrdinaryFolderChangeReport(event.metadata.report) : undefined;
+				if (report?.status !== 'observed') { return false; }
+				try { this.resolveOrdinaryReportRoot(binding, attempt); }
+				catch (error) {
+					if (error instanceof Error) { return false; }
+					throw error;
+				}
+				return report.changes.some(change => {
+					if (change.change === 'deleted' || change.change === 'symlink changed' || !/^[a-f0-9]{64}$/u.test(change.after ?? '')) { return false; }
+					return this.isSafeReportRelativePath(change.path);
+				});
+			}) : undefined;
 			const primaryReviewId = this.database.listTaskReviews(review.id).find(link => link.isPrimary && link.state === 'available')?.reviewId ?? null;
 			const hasPassedE2eEvidence = this.database.listWorkspaceE2eEvidence(review.id).some(evidence => evidence.state === 'passed');
-			return { taskId: review.id, kind: 'review', primaryReviewId, hasPassedE2eEvidence };
+			return { taskId: review.id, kind: inspectAttempt ? 'inspectChanges' : 'review', primaryReviewId, hasPassedE2eEvidence };
 		}
 		const running = inProgress[0];
 		if (running) { return { taskId: running.id, kind: 'running', primaryReviewId: null, hasPassedE2eEvidence: false }; }
@@ -214,9 +331,20 @@ export class WorkspaceDashboardChannel {
 		if (window.config?.reviewWindowLaunch.kind !== 'project' || window.config.reviewWindowLaunch.projectId !== projectId) { throw new Error('The requested project does not match this window.'); }
 	}
 
-	private requireTaskInProject(taskId: string, projectId: string): void {
+	private requireTaskInProject(taskId: string, projectId: string): WorkspaceTask {
 		const task = this.database.getTask(taskId);
 		if (!task || task.projectId !== projectId) { throw new Error('The task does not belong to this project.'); }
+		return task;
+	}
+
+	private parseOpenOrdinaryChangeRequest(value: unknown): OpenObservedOrdinaryFolderChangeRequest {
+		if (typeof value !== 'object' || value === null || Array.isArray(value)) { throw new Error('An ordinary-folder change request is required.'); }
+		const request = value as Record<string, unknown>;
+		for (const field of ['projectId', 'taskId', 'attemptId'] as const) {
+			if (typeof request[field] !== 'string' || !isUUID(request[field] as string)) { throw new Error(`A valid ${field} is required.`); }
+		}
+		if (typeof request.relativePath !== 'string' || request.relativePath.length > 4096) { throw new Error('A valid report-relative path is required.'); }
+		return { projectId: request.projectId as string, taskId: request.taskId as string, attemptId: request.attemptId as string, relativePath: request.relativePath };
 	}
 
 	private async updateDashboardState(request: UpdateWorkspaceDashboardStateRequest, descriptorUri: string): Promise<WorkspaceDashboardViewDTO> {

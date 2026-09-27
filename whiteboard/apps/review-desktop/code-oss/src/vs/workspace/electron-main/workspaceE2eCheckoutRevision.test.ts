@@ -34,7 +34,7 @@ test('E2E checkout snapshot reads the exact checked-out Git commit and identifie
 			if (priorGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
 			else process.env.GIT_WORK_TREE = priorGitWorkTree;
 		}
-		assert.deepEqual(await readWorkspaceE2eCheckoutRevision({ vcsKind: null, vcsRoot: null }), { revision: null, unavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' });
+		assert.deepEqual(await readWorkspaceE2eCheckoutRevision({ vcsKind: null, vcsRoot: null }), { revision: null, unavailableReason: '이 작업은 Git 또는 jj 버전 이력이 없는 일반 폴더에서 진행됩니다.' });
 		await assert.rejects(readWorkspaceE2eCheckoutRevision({ vcsKind: 'svn', vcsRoot: root } as never), /unsupported version control kind/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });

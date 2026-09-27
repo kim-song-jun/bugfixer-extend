@@ -57,7 +57,7 @@ export interface WorkspaceDashboardDTO {
 
 export interface WorkspaceDashboardNextActionDTO {
 	readonly taskId: string;
-	readonly kind: 'attention' | 'review' | 'running' | 'ready';
+	readonly kind: 'attention' | 'inspectChanges' | 'review' | 'running' | 'ready';
 	readonly primaryReviewId: string | null;
 	readonly hasPassedE2eEvidence: boolean;
 }
@@ -100,6 +100,19 @@ export interface UpdateWorkspaceDashboardStateRequest {
 	readonly dashboardPosition: string | null;
 }
 
+export interface OpenObservedOrdinaryFolderChangeRequest {
+	readonly projectId: string;
+	readonly taskId: string;
+	readonly attemptId: string;
+	/** A relative path copied from that attempt's persisted observed report. */
+	readonly relativePath: string;
+}
+
+export interface WorkspaceDashboardInspectFileDTO {
+	readonly relativePath: string;
+	readonly content: string;
+}
+
 export interface WorkspaceDashboardTaskDTO {
 	readonly project: WorkspaceDashboardProjectDTO;
 	readonly folder: WorkspaceDashboardFolderDTO;
@@ -119,4 +132,5 @@ export interface IWorkspaceDashboardService {
 	trashTask(request: TrashWorkspaceDashboardTaskRequest): Promise<WorkspaceDashboardTaskItemDTO>;
 	restoreTrashedTask(request: WorkspaceDashboardTaskLifecycleRequest): Promise<WorkspaceDashboardTaskItemDTO>;
 	updateDashboardState(request: UpdateWorkspaceDashboardStateRequest): Promise<WorkspaceDashboardViewDTO>;
+	openObservedOrdinaryFolderChange(request: OpenObservedOrdinaryFolderChangeRequest): Promise<WorkspaceDashboardInspectFileDTO>;
 }

@@ -1,4 +1,4 @@
-import { Disposable } from '../../../base/common/lifecycle.js';
+import { Disposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { SyncDescriptor } from '../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../platform/notification/common/notification.js';
@@ -12,6 +12,7 @@ import { IEditorGroupsService } from '../../../workbench/services/editor/common/
 import { IWorkbenchLayoutService, Parts } from '../../../workbench/services/layout/browser/layoutService.js';
 import { INativeWorkbenchEnvironmentService } from '../../../workbench/services/environment/electron-browser/environmentService.js';
 import { IPaneCompositePartService } from '../../../workbench/services/panecomposite/browser/panecomposite.js';
+import { IProjectInspectSnapshotService } from '../../services/projectInspectSnapshotService.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
 import { ProjectDashboardEditorPane } from './projectDashboardEditorPane.js';
 import { ProjectDashboardEditorSerializer } from './projectDashboardEditorSerializer.js';
@@ -23,6 +24,21 @@ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEdit
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
 	EditorPaneDescriptor.create(ProjectDashboardEditorPane, ProjectDashboardEditorPane.ID, '프로젝트 대시보드'),
 	[new SyncDescriptor(ProjectDashboardEditorInput)],
+);
+
+class ProjectInspectSnapshotContribution implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.devfast.projectInspectSnapshot';
+
+	constructor(@IProjectInspectSnapshotService inspectSnapshots: IProjectInspectSnapshotService) {
+		// Restored file tabs resolve before the dashboard editor pane is created.
+		void inspectSnapshots;
+	}
+}
+
+registerWorkbenchContribution2(
+	ProjectInspectSnapshotContribution.ID,
+	ProjectInspectSnapshotContribution,
+	WorkbenchPhase.BlockRestore,
 );
 
 class ProjectDashboardContribution extends Disposable implements IWorkbenchContribution {
@@ -38,6 +54,17 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
+		let wasCompact = window.innerWidth <= 980;
+		const collapseNavigationOnNarrowResize = () => {
+			const compact = window.innerWidth <= 980;
+			if (compact && !wasCompact && this.environment.reviewWindowLaunch.kind === 'project') {
+				this.layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
+				this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+			}
+			wasCompact = compact;
+		};
+		window.addEventListener('resize', collapseNavigationOnNarrowResize);
+		this._register(toDisposable(() => window.removeEventListener('resize', collapseNavigationOnNarrowResize)));
 		this._register(onDidRequestProjectSection(section => {
 			void this.openProjectDashboard(section, false, true).catch(error => this.notificationService.error(error));
 		}));
@@ -52,13 +79,19 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		if (launch.kind !== 'project') return;
 
 		await this.editorGroupsService.whenRestored;
-		try {
-			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
-			const sidebar = await this.paneCompositeService.openPaneComposite(PROJECT_SIDEBAR_CONTAINER_ID, ViewContainerLocation.Sidebar);
-			if (!sidebar) throw new Error('프로젝트 탐색을 열지 못했습니다.');
-		} catch (error) {
+		const compactInitialWindow = !section && !createTask && !activate && window.innerWidth <= 980;
+		if (compactInitialWindow) {
+			this.layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
 			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
-			this.notificationService.error(error);
+		} else {
+			try {
+				this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
+				const sidebar = await this.paneCompositeService.openPaneComposite(PROJECT_SIDEBAR_CONTAINER_ID, ViewContainerLocation.Sidebar);
+				if (!sidebar) throw new Error('프로젝트 탐색을 열지 못했습니다.');
+			} catch (error) {
+				this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+				this.notificationService.error(error);
+			}
 		}
 		const existing = this.editorGroupsService.groups
 			.flatMap(group => group.editors.map(editor => ({ editor, group })))

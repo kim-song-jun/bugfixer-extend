@@ -688,6 +688,7 @@ export class WorkspaceProviderRunsChannel {
 			finishedAt: attempt.finishedAt,
 			sessionId: attempt.providerSessionId,
 			errorSummary: attempt.errorSummary,
+			cleanupVerified: attempt.cleanupVerified,
 			ordinaryFolderChanges,
 			parentAttemptId: attempt.parentAttemptId,
 			childScope: attempt.childScope,

@@ -5,9 +5,12 @@ import { IStorageService } from '../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../platform/theme/common/themeService.js';
 import { EditorPane } from '../../../workbench/browser/parts/editor/editorPane.js';
+import { ViewContainerLocation } from '../../../workbench/common/views.js';
 import type { IEditorGroup } from '../../../workbench/services/editor/common/editorGroupsService.js';
 import type { IEditorOpenContext } from '../../../workbench/common/editor.js';
 import { INativeWorkbenchEnvironmentService } from '../../../workbench/services/environment/electron-browser/environmentService.js';
+import { IWorkbenchLayoutService, Parts } from '../../../workbench/services/layout/browser/layoutService.js';
+import { IPaneCompositePartService } from '../../../workbench/services/panecomposite/browser/panecomposite.js';
 import type { ReorderWorkspaceDashboardTasksRequest, TrashWorkspaceDashboardTaskRequest, UpdateWorkspaceDashboardStateRequest, UpdateWorkspaceDashboardTaskRequest, WorkspaceDashboardDTO, WorkspaceDashboardTaskDTO, WorkspaceDashboardTaskItemDTO, WorkspaceDashboardTaskLifecycleRequest } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import type { OrdinaryFolderMutationGrantDTO, ProviderAttemptDTO, ProviderAttemptEventDTO, ProviderId, ProviderRunPreviewDTO } from '../../../workspace/common/workspaceProviderRunProtocol.js';
@@ -24,10 +27,11 @@ import { WORKSPACE_E2E_CHANNEL, type WorkspaceE2eEvidenceDTO, type WorkspaceE2eS
 import { WORKSPACE_CONVENTION_AGENT_CHANNEL, type ConventionAgentPreviewDTO, type ConventionAgentResultDTO } from '../../../workspace/common/workspaceConventionAgentProtocol.js';
 import { WORKSPACE_REVIEW_BRIDGE_CHANNEL, type WorkspaceTaskReviewLink, type TaskReviewAvailability, type TaskReviewOpenResult } from '../../../workspace/common/workspaceReviewBridgeProtocol.js';
 import { IReviewCanvasEditorTabsService } from '../../services/reviewCanvasEditorTabsService.js';
+import { IProjectInspectSnapshotService } from '../../services/projectInspectSnapshotService.js';
 import { parseNotionPageInput } from './notionPageInput.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
 import { getPackageRefreshCandidates, type PackageRefreshCandidate } from './packageRefreshCandidates.js';
-import { setProjectSidebarSection } from './projectSidebar.contribution.js';
+import { PROJECT_SIDEBAR_CONTAINER_ID, setProjectSidebarSection } from './projectSidebar.contribution.js';
 
 import './projectDashboard.css';
 
@@ -69,6 +73,24 @@ function notionAccountLabelValidationMessage(value: string): string {
 	return '';
 }
 
+function e2eEnvironmentLabel(identity: string): string {
+	return identity === 'local macOS' ? '로컬 macOS' : identity;
+}
+
+function e2eRevisionLabel(evidence: WorkspaceE2eEvidenceDTO): string {
+	if (evidence.checkoutRevision) return evidence.checkoutRevision;
+	const reason = evidence.checkoutRevisionUnavailableReason;
+	return reason === 'This task uses an ordinary folder without Git or jj revision history.'
+		? '이 작업은 Git 또는 jj 버전 이력이 없는 일반 폴더에서 진행됩니다.'
+		: reason ?? '정보 없음';
+}
+
+function e2eFailureLabel(failure: string): string {
+	return /^page\.waitForFunction timed out after \d+ms/.test(failure)
+		? '기대한 텍스트가 정해진 시간 안에 나타나지 않았습니다. 선택자와 기대 텍스트를 확인해 주세요.'
+		: '브라우저 확인에 실패했습니다. 증거 파일 정보에서 기술 오류를 확인해 주세요.';
+}
+
 export class ProjectDashboardEditorPane extends EditorPane {
 	static readonly ID = ProjectDashboardEditorInput.EDITOR_ID;
 	private root: HTMLElement | undefined;
@@ -79,6 +101,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private draggingTaskId: string | undefined;
 	private loading = false;
 	private error: string | undefined;
+	private navigationError: string | undefined;
 	private creating = false;
 	private createFormOpen = false;
 	private pendingCreateTaskFocus = false;
@@ -109,10 +132,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private e2eAttemptChosenByUser = false;
 	private e2eFormOpen = false;
 	private e2eUrlDraft = '';
-	private e2eEnvironmentDraft = 'local macOS';
+	private e2eEnvironmentDraft = '로컬 macOS';
 	private e2eScenarioDraft: { type: WorkspaceE2eStep['type']; selector: string; value: string }[] = [{ type: 'assertText', selector: 'h1', value: '' }];
 	private providerError: string | undefined;
-	private providerErrorKind: 'operation' | 'history' | undefined;
+	private providerErrorKind: 'operation' | 'history' | 'inspect' | undefined;
 	private providerBusy = false;
 	private folderMutationGrant: OrdinaryFolderMutationGrantDTO | undefined;
 	private editingTaskId: string | undefined;
@@ -262,8 +285,30 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
 		@INativeWorkbenchEnvironmentService private readonly environment: INativeWorkbenchEnvironmentService,
-		@IReviewCanvasEditorTabsService private readonly reviewTabs: IReviewCanvasEditorTabsService) {
+		@IReviewCanvasEditorTabsService private readonly reviewTabs: IReviewCanvasEditorTabsService,
+		@IProjectInspectSnapshotService private readonly inspectSnapshots: IProjectInspectSnapshotService,
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
+		@IPaneCompositePartService private readonly paneCompositeService: IPaneCompositePartService) {
 		super(ProjectDashboardEditorPane.ID, group, telemetryService, themeService, storageService);
+		this._register(this.layoutService.onDidChangePartVisibility(event => {
+			if (event.partId !== Parts.SIDEBAR_PART) return;
+			const navigation = this.root?.querySelector<HTMLButtonElement>('.project-dashboard__navigation');
+			if (navigation) navigation.hidden = event.visible;
+		}));
+	}
+
+	private async openProjectNavigation(): Promise<void> {
+		this.navigationError = undefined;
+		try {
+			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
+			const sidebar = await this.paneCompositeService.openPaneComposite(PROJECT_SIDEBAR_CONTAINER_ID, ViewContainerLocation.Sidebar, true);
+			if (!sidebar) throw new Error('프로젝트 메뉴를 열지 못했습니다.');
+			this.root?.querySelector('.project-dashboard__navigation-error')?.remove();
+		} catch (error) {
+			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+			this.navigationError = this.errorMessage(error, '프로젝트 메뉴를 열지 못했습니다.');
+			this.render();
+		}
 	}
 
 	protected createEditor(parent: HTMLElement): void {
@@ -2406,14 +2451,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				focusKey ? [...this.root.querySelectorAll<HTMLElement>('[data-focus-key]')].find(element => element.dataset.focusKey === focusKey) :
 				focusSignature ? this.findFocusTarget(focusSignature) : undefined;
 			if (this.focusTaskDetailOnRender) {
-				const shouldFocusTaskDetail = this.root.clientWidth <= 1100;
 				this.focusTaskDetailOnRender = false;
-				if (!shouldFocusTaskDetail) {
-					if (target && !('disabled' in target && target.disabled)) target.focus({ preventScroll: true });
-					return;
-				}
 				const detail = this.root.querySelector<HTMLElement>('.project-dashboard__detail');
-				if (detail) { detail.focus({ preventScroll: true }); detail.scrollIntoView({ block: 'start' }); return; }
+				const detailTitle = detail?.querySelector<HTMLHeadingElement>('h2');
+				if (detail && detailTitle) { detailTitle.focus({ preventScroll: true }); detail.scrollIntoView({ block: 'start' }); return; }
 			}
 			if (target && !('disabled' in target && target.disabled)) target.focus({ preventScroll: true });
 		};
@@ -2434,8 +2475,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			location.textContent = `작업 ${tasks.length}개 · 리뷰 대기 ${tasks.filter(task => task.state === 'review').length}개 · 실행 중 ${tasks.filter(task => task.state === 'inProgress').length}개`;
 			location.title = this.dashboard.folder.path;
 		} else location.textContent = '프로젝트 정보 불러오는 중';
+		const headingActions = heading.appendChild($('.project-dashboard__heading-actions'));
+		const navigation = headingActions.appendChild(createElement('button', 'project-dashboard__secondary project-dashboard__navigation'));
+		navigation.type = 'button'; navigation.textContent = '프로젝트 메뉴';
+		navigation.hidden = this.layoutService.isVisible(Parts.SIDEBAR_PART);
+		navigation.dataset.focusKey = 'project-navigation';
+		navigation.addEventListener('click', () => void this.openProjectNavigation());
 		if (this.dashboard?.tasks.length) {
-			const create = heading.appendChild(createElement('button', 'project-dashboard__primary project-dashboard__header-create'));
+			const create = headingActions.appendChild(createElement('button', 'project-dashboard__primary project-dashboard__header-create'));
 			create.type = 'button'; create.textContent = '새 작업'; create.disabled = !!this.taskMutationBusy;
 			create.dataset.focusKey = 'header-create';
 			create.addEventListener('click', () => this.openCreateTaskForm());
@@ -2447,6 +2494,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const retry = banner.appendChild(createElement('button', 'project-dashboard__retry'));
 			retry.dataset.focusKey = 'dashboard-retry';
 			retry.type = 'button'; retry.textContent = '다시 시도'; retry.addEventListener('click', () => void this.load());
+		}
+		if (this.navigationError) {
+			const banner = shell.appendChild(createElement('div', 'project-dashboard__error project-dashboard__navigation-error'));
+			banner.setAttribute('role', 'alert');
+			const message = banner.appendChild($('span')); message.textContent = this.navigationError;
+			const retry = banner.appendChild(createElement('button', 'project-dashboard__retry'));
+			retry.type = 'button'; retry.textContent = '프로젝트 메뉴 다시 열기';
+			retry.addEventListener('click', () => void this.openProjectNavigation());
 		}
 		if (this.dashboardStateError) {
 			const banner = shell.appendChild($('.project-dashboard__error'));
@@ -2486,7 +2541,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const nextCopy = next.appendChild($('.project-dashboard__next-copy'));
 		const nextAction = this.dashboard.nextAction;
 		const recommended = nextAction && this.dashboard.tasks.find(task => task.id === nextAction.taskId &&
-			(nextAction.kind === 'review' ? task.state === 'review' : nextAction.kind === 'ready' ? task.state === 'ready' : task.state === 'inProgress'));
+			(nextAction.kind === 'review' || nextAction.kind === 'inspectChanges' ? task.state === 'review' : nextAction.kind === 'ready' ? task.state === 'ready' : task.state === 'inProgress'));
 		const nextTask = recommended ?? (['review', 'inProgress', 'ready'] as const)
 			.flatMap(state => this.dashboard!.tasks.filter(task => task.state === state).sort((left, right) => left.createdAt.localeCompare(right.createdAt)))[0];
 		const kicker = nextCopy.appendChild($('.project-dashboard__kicker')); kicker.textContent = nextTask ? '다음 작업' : '프로젝트 작업';
@@ -2494,7 +2549,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const nextTitle = nextCopy.appendChild($('h2')); nextTitle.textContent = nextTask?.title ?? (allTasksDone ? '모든 작업 완료' : '작업이 없습니다');
 		const nextDescription = nextCopy.appendChild($('p'));
 		const nextReason = nextAction && recommended?.id === nextAction.taskId
-			? { attention: '실행 확인 필요', review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과와 함께 검토' : '결과 검토 필요', running: '작업 진행 중', ready: '시작 준비 완료' }[nextAction.kind]
+			? { attention: '실행 확인 필요', inspectChanges: '변경 내용 확인 필요', review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과와 함께 검토' : '결과 검토 필요', running: '작업 진행 중', ready: '시작 준비 완료' }[nextAction.kind]
 			: nextTask ? columns.find(column => column.state === nextTask.state)?.label : undefined;
 		nextDescription.textContent = nextTask ? `${nextReason} · 상세에서 진행 상태를 확인하세요.` : allTasksDone
 			? '새 작업을 추가해 계속 진행하세요.'
@@ -2502,6 +2557,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const nextActions = next.appendChild(createElement('div', 'project-dashboard__next-actions'));
 		const taskDetailLabel = !nextTask ? '작업 만들기'
 			: nextAction?.taskId === nextTask.id && nextAction.kind === 'attention' ? '확인할 작업 보기'
+			: nextAction?.taskId === nextTask.id && nextAction.kind === 'inspectChanges' ? '변경 내용 살펴보기'
 			: nextTask.state === 'review' ? '검토할 작업 보기'
 			: nextTask.state === 'inProgress' ? '진행 중 작업 보기'
 			: '대기 작업 보기';
@@ -2543,9 +2599,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 		if (detail) {
 			const panel = workArea.appendChild($('.project-dashboard__detail'));
-			panel.tabIndex = -1;
 			const detailHeader = panel.appendChild($('.project-dashboard__detail-header'));
 			const detailTitle = detailHeader.appendChild($('h2')); detailTitle.textContent = detail.title;
+			detailTitle.tabIndex = -1; detailTitle.dataset.focusKey = 'selected-task-detail';
 			if (this.editingTaskId !== detail.id) {
 				const edit = detailHeader.appendChild(createElement('button', 'project-dashboard__secondary'));
 				edit.type = 'button'; edit.textContent = '작업 수정'; edit.disabled = !!this.taskMutationBusy; edit.dataset.focusKey = 'task-edit';
@@ -2705,7 +2761,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (this.e2eLoading && this.e2eLoadedTaskId !== task.id) latestSummary.textContent = '최근 확인 결과 불러오는 중…';
 		else if (latestEvidence) {
 			const result = latestEvidence.state === 'passed' ? '통과' : latestEvidence.state === 'failed' ? '실패' : latestEvidence.state === 'running' ? '확인 중' : latestEvidence.state === 'cleanupFailed' ? '정리 확인 필요' : '취소됨';
-			latestSummary.textContent = `최근 결과: ${result} · ${new Date(latestEvidence.createdAt).toLocaleString()} · ${latestEvidence.environmentIdentity}`;
+			latestSummary.textContent = `최근 결과: ${result} · ${new Date(latestEvidence.createdAt).toLocaleString()} · ${e2eEnvironmentLabel(latestEvidence.environmentIdentity)}`;
 		} else latestSummary.textContent = this.e2eLoadedTaskId === task.id ? '아직 확인 결과가 없습니다.' : '최근 확인 상태가 여기에 표시됩니다.';
 		const formDisclosure = section.appendChild(createElement('details', 'project-dashboard__e2e-disclosure'));
 		formDisclosure.open = this.e2eFormOpen;
@@ -2751,24 +2807,28 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity()) return; this.e2eDraftAttemptId = attemptSelect.value; this.e2eUrlDraft = url.value; this.e2eEnvironmentDraft = env.value; void this.startWorkspaceE2e(task); });
 		const listHeader = section.appendChild($('.project-dashboard__flow-actions'));
 		const refresh = listHeader.appendChild(createElement('button', 'project-dashboard__secondary')); refresh.type = 'button'; refresh.textContent = this.e2eLoading ? '새로고침 중…' : '증거 새로고침'; refresh.disabled = this.e2eBusy || this.e2eLoading; refresh.addEventListener('click', () => void this.loadWorkspaceE2e(task.id, true));
-		for (const evidence of visibleEvidence) {
+		for (const evidence of [...visibleEvidence].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))) {
 			const row = section.appendChild($('.project-dashboard__review-link'));
 			const result = evidence.state === 'passed' ? '통과' : evidence.state === 'failed' ? '실패' : evidence.state === 'running' ? '실행 중' : evidence.state === 'cleanupFailed' ? '정리 확인 필요' : '취소됨';
 			const screenshotSaved = !!(evidence.screenshotSha256 && evidence.screenshotPath);
 			const logSaved = !!(evidence.logSha256 && evidence.logPath);
-			const info = row.appendChild($('span')); info.textContent = `${result} · ${new Date(evidence.createdAt).toLocaleString()} · ${evidence.environmentIdentity} · ${evidence.targetUrl}`;
+			const info = row.appendChild($('span')); info.textContent = `${result} · ${new Date(evidence.createdAt).toLocaleString()} · ${e2eEnvironmentLabel(evidence.environmentIdentity)} · ${evidence.targetUrl}`;
 			const artifactStatus = row.appendChild(createElement('span', 'project-dashboard__e2e-artifacts'));
 			artifactStatus.textContent = evidence.state === 'running' ? '확인이 끝나면 스크린샷과 로그를 볼 수 있습니다.' : `스크린샷 ${screenshotSaved ? '저장됨' : '저장되지 않음'} · 로그 ${logSaved ? '저장됨' : '저장되지 않음'}`;
 			const audit = row.appendChild(createElement('details', 'project-dashboard__e2e-audit'));
 			const auditSummary = audit.appendChild(createElement('summary')); auditSummary.textContent = '증거 파일 정보';
 			const auditList = audit.appendChild($('dl'));
 			for (const [label, value] of [
-				['확인 시작 시 커밋 (전체 리비전)', evidence.checkoutRevision ?? evidence.checkoutRevisionUnavailableReason ?? '정보 없음'],
+				['확인 시작 시 커밋 (전체 리비전)', e2eRevisionLabel(evidence)],
 				['스크린샷 SHA-256', evidence.screenshotSha256 ?? '정보 없음'], ['스크린샷 경로', evidence.screenshotPath ?? '정보 없음'],
 				['로그 SHA-256', evidence.logSha256 ?? '정보 없음'], ['로그 경로', evidence.logPath ?? '정보 없음'],
 			] as const) { const term = auditList.appendChild($('dt')); term.textContent = label; const detail = auditList.appendChild($('dd')); detail.textContent = value; }
-			if (evidence.failure) { const failure = row.appendChild($('.project-dashboard__provider-error')); failure.setAttribute('role', 'status'); failure.textContent = this.errorMessage(new Error(evidence.failure), '브라우저 확인에 실패했습니다.'); }
-			if (evidence.cleanupError) { const cleanup = row.appendChild($('.project-dashboard__error')); cleanup.setAttribute('role', 'alert'); cleanup.textContent = `정리를 확인해 주세요: ${this.errorMessage(new Error(evidence.cleanupError), '정리를 완료하지 못했습니다.')}`; }
+			if (evidence.failure) {
+				const term = auditList.appendChild($('dt')); term.textContent = '기술 오류';
+				const detail = auditList.appendChild($('dd')); detail.textContent = evidence.failure;
+				const failure = row.appendChild($('.project-dashboard__provider-error')); failure.setAttribute('role', 'status'); failure.textContent = e2eFailureLabel(evidence.failure);
+			}
+			if (evidence.cleanupError) { const cleanup = row.appendChild($('.project-dashboard__error')); cleanup.setAttribute('role', 'alert'); cleanup.textContent = `정리를 확인해 주세요: ${this.errorMessage(new Error(evidence.cleanupError), '정리를 완료하지 못했습니다.', false)}`; }
 			const rowActions = row.appendChild($('.project-dashboard__flow-actions'));
 			if (evidence.state === 'running') { const cancel = rowActions.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = '취소'; cancel.disabled = this.e2eBusy; cancel.addEventListener('click', () => void this.mutateWorkspaceE2e(task, evidence, 'cancel')); }
 			if (evidence.state === 'cleanupFailed') { const retry = rowActions.appendChild(createElement('button', 'project-dashboard__secondary')); retry.type = 'button'; retry.textContent = '정리 다시 시도'; retry.disabled = this.e2eBusy; retry.addEventListener('click', () => void this.mutateWorkspaceE2e(task, evidence, 'retryCleanup')); }
@@ -2887,7 +2947,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const referenceContent = snapshot.appendChild(createElement('pre', 'project-dashboard__run-context')); referenceContent.textContent = reference.content;
 			}
 			if (this.preview.permission.blockedReason) {
-				const blocked = preview.appendChild($('.project-dashboard__run-blocked')); blocked.setAttribute('role', 'alert'); blocked.textContent = this.errorMessage(new Error(this.preview.permission.blockedReason), '현재 권한 설정으로는 실행할 수 없습니다. 폴더 권한을 확인하세요.');
+				const blocked = preview.appendChild($('.project-dashboard__run-blocked')); blocked.setAttribute('role', 'alert'); blocked.textContent = this.errorMessage(new Error(this.preview.permission.blockedReason), '현재 권한 설정으로는 실행할 수 없습니다. 폴더 권한을 확인하세요.', false);
 			}
 			const promptLabel = preview.appendChild(createElement('h4')); promptLabel.textContent = '프롬프트';
 			const prompt = preview.appendChild(createElement('pre', 'project-dashboard__prompt')); prompt.textContent = this.preview.prompt;
@@ -2914,7 +2974,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const detail = item.appendChild($('.project-dashboard__attempt-detail')); detail.textContent = `${attempt.mode === 'mutating' ? '파일 수정 실행' : '읽기 전용 연결 확인'} · ${attempt.accountLabel} · ${attempt.cwd}`;
 				if (attempt.orchestrationPhase === 'waiting') { const waiting = item.appendChild($('.project-dashboard__attempt-detail')); waiting.textContent = this.attempts.some(child => child.parentAttemptId === attempt.id) ? '하위 에이전트와 정리가 끝날 때까지 리뷰를 기다리는 중입니다.' : '실행 정리가 끝날 때까지 리뷰를 기다리는 중입니다.'; }
 				if (attempt.sessionId) { const session = item.appendChild($('.project-dashboard__attempt-detail')); session.textContent = `세션 ${attempt.sessionId}`; }
-				if (attempt.errorSummary) { const failure = item.appendChild($('.project-dashboard__attempt-error')); failure.textContent = this.errorMessage(new Error(attempt.errorSummary), '실행이 완료되지 않았습니다. 자세한 내용은 오류 로그를 확인해 주세요.'); }
+				if (attempt.errorSummary) { const failure = item.appendChild($('.project-dashboard__attempt-error')); failure.textContent = this.errorMessage(new Error(attempt.errorSummary), '실행이 완료되지 않았습니다. 자세한 내용은 오류 로그를 확인해 주세요.', false); }
 				if (attempt.resultText) { const result = item.appendChild(createElement('pre', 'project-dashboard__subagent-result')); result.textContent = attempt.resultText; }
 				if (attempt.ordinaryFolderChanges) {
 					const report = attempt.ordinaryFolderChanges;
@@ -2922,8 +2982,29 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					changes.setAttribute('role', 'status');
 					const count = report.changes.length;
 					changes.textContent = report.status === 'unverified'
-						? `일반 폴더의 변경 사항을 확인하지 못했습니다. ${report.summary}`
-						: `일반 폴더 변경 ${count}건을 확인했습니다${report.truncated ? ' (보고서 일부 생략)' : ''}. ${report.summary}${count ? ` ${report.changes.map(change => `${change.change}: ${change.path}`).join('; ')}` : ''}`;
+						? '일반 폴더의 변경 사항을 확인하지 못했습니다. 실행 기록을 확인해 주세요.'
+						: `일반 폴더 변경 ${count}건을 확인했습니다${report.truncated ? ' (보고서 일부 생략)' : ''}.`;
+					if (task.state === 'review' && attempt.parentAttemptId === null && attempt.purpose === 'task' && attempt.mode === 'mutating'
+						&& attempt.state === 'succeeded' && attempt.cleanupVerified && report.status === 'observed') {
+						const fileList = item.appendChild(createElement('ul', 'project-dashboard__ordinary-change-files'));
+						fileList.tabIndex = -1;
+						for (const change of report.changes) {
+							const nonRegularAfter = ['directory', 'symlink', 'special'].includes(change.after ?? '') || change.after?.startsWith('link:') === true;
+							const unavailable = change.change === 'deleted' || change.change === 'symlink changed' || nonRegularAfter || !change.after;
+							const row = fileList.appendChild(createElement('li', `project-dashboard__ordinary-change-file${unavailable ? ' project-dashboard__ordinary-change-file--inactive' : ''}`));
+							const label = row.appendChild(createElement('span'));
+								label.textContent = `${change.change === 'created' ? '추가' : change.change === 'modified' ? '수정' : change.change === 'deleted' ? '삭제됨' : change.change === 'symlink changed' ? '심볼릭 링크 변경 · 대상 확인 안 됨' : '파일 종류 변경'} · ${change.path}`;
+							if (unavailable) {
+								label.setAttribute('aria-disabled', 'true');
+								if (nonRegularAfter) { label.textContent = `일반 파일이 아님 · ${change.path}`; }
+								continue;
+							}
+							const open = row.appendChild(createElement('button', 'project-dashboard__secondary'));
+							open.type = 'button'; open.textContent = '파일 열기'; open.setAttribute('aria-label', `${change.path} 파일 열기`);
+							open.addEventListener('click', () => void this.openOrdinaryFolderChange(task, attempt, change.path));
+						}
+					}
+					if (report.truncated) { const note = item.appendChild(createElement('p', 'project-dashboard__provider-note')); note.textContent = '보고서에 포함된 경로만 열 수 있습니다. 생략된 변경 내용은 확인되지 않았습니다.'; }
 				}
 				this.renderSubagentHistory(item, task, attempt);
 				const hasActiveChildren = this.attempts.some(child => child.parentAttemptId === attempt.id && this.isActive(child.state));
@@ -2933,6 +3014,22 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					cancel.addEventListener('click', () => void this.cancelRun(attempt));
 				}
 			}
+		}
+	}
+
+	private async openOrdinaryFolderChange(task: WorkspaceDashboardTaskItemDTO, attempt: ProviderAttemptDTO, relativePath: string): Promise<void> {
+		if (!this.projectId || task.state !== 'review' || attempt.state !== 'succeeded') { return; }
+		try {
+			await this.inspectSnapshots.openSnapshot(this.projectId, task.id, attempt.id, relativePath, this.group);
+			if (this.providerErrorKind === 'inspect') {
+				this.providerError = undefined;
+				this.providerErrorKind = undefined;
+				this.render();
+			}
+		} catch (error) {
+			this.providerError = this.errorMessage(error, '변경 파일을 열지 못했습니다. 폴더 또는 파일 상태를 다시 확인해 주세요.');
+			this.providerErrorKind = 'inspect';
+			this.render();
 		}
 	}
 
@@ -3001,7 +3098,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			}
 			const prompt = preview.appendChild(createElement('pre', 'project-dashboard__run-context')); prompt.textContent = this.subagentPreview.prompt;
 			if (this.subagentPreview.permission.blockedReason) {
-				const blocked = preview.appendChild($('.project-dashboard__run-blocked')); blocked.setAttribute('role', 'alert'); blocked.textContent = this.errorMessage(new Error(this.subagentPreview.permission.blockedReason), '현재 권한 설정으로는 하위 에이전트를 실행할 수 없습니다. 폴더 권한을 확인하세요.');
+				const blocked = preview.appendChild($('.project-dashboard__run-blocked')); blocked.setAttribute('role', 'alert'); blocked.textContent = this.errorMessage(new Error(this.subagentPreview.permission.blockedReason), '현재 권한 설정으로는 하위 에이전트를 실행할 수 없습니다. 폴더 권한을 확인하세요.', false);
 			}
 			const start = preview.appendChild(createElement('button', 'project-dashboard__primary')); start.type = 'button'; start.textContent = this.providerBusy ? '시작 중…' : '하위 에이전트 시작';
 			start.disabled = this.providerBusy || !this.subagentPreview.permission.allowed;
@@ -3037,7 +3134,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const title = row.appendChild($('strong')); title.textContent = `${child.providerId === 'codex' ? 'Codex' : 'Claude'} · ${this.stateLabel(child.state)}`;
 			const when = row.appendChild(createElement('time')); when.dateTime = child.updatedAt; when.textContent = new Date(child.updatedAt).toLocaleString();
 			const scope = row.appendChild($('p')); scope.textContent = this.subagentScopeText(child.childScope ?? null);
-			if (child.errorSummary) { const error = row.appendChild($('.project-dashboard__attempt-error')); error.textContent = this.errorMessage(new Error(child.errorSummary), '하위 에이전트 실행이 완료되지 않았습니다. 자세한 내용은 오류 로그를 확인해 주세요.'); }
+			if (child.errorSummary) { const error = row.appendChild($('.project-dashboard__attempt-error')); error.textContent = this.errorMessage(new Error(child.errorSummary), '하위 에이전트 실행이 완료되지 않았습니다. 자세한 내용은 오류 로그를 확인해 주세요.', false); }
 			if (child.resultText !== null && child.resultText !== undefined) {
 				const result = row.appendChild(createElement('pre', 'project-dashboard__subagent-result')); result.textContent = child.resultText || '하위 에이전트가 완료되었지만 작성된 결과가 없습니다.';
 			}
@@ -3284,10 +3381,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private stateLabel(state: ProviderAttemptDTO['state']): string { return ({ queued: '대기 중', preflight: '접근 확인 중', running: '실행 중', succeeded: '성공', failed: '실패', cancelled: '취소됨', interrupted: '중단됨' })[state]; }
 	private conventionVerdictLabel(verdict: NonNullable<ConventionAgentResultDTO['verdict']>): string { return ({ pass: '통과', concerns: '확인 필요', fail: '실패' })[verdict]; }
 	private rawErrorMessage(error: unknown): string { return error instanceof Error ? error.message : ''; }
-	private errorMessage(error: unknown, fallback: string): string {
+	private errorMessage(error: unknown, fallback: string, log = true): string {
 		const raw = this.rawErrorMessage(error).trim();
 		if (!raw) return fallback;
-		console.error('Project dashboard operation failed:', error);
+		if (log) console.error('Project dashboard operation failed:', error);
 		if (/[가-힣]/.test(raw)) return raw;
 		const normalized = raw.toLowerCase();
 		if (normalized.includes('changed since revision')) return '다른 곳에서 작업이 변경되었습니다. 최신 내용을 불러왔으니 다시 확인해 주세요.';

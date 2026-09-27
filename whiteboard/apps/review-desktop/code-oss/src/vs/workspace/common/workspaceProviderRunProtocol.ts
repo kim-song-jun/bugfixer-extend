@@ -94,6 +94,7 @@ export interface ProviderAttemptDTO {
 	readonly finishedAt: string | null;
 	readonly sessionId: string | null;
 	readonly errorSummary: string | null;
+	readonly cleanupVerified: boolean;
 	readonly ordinaryFolderChanges?: OrdinaryFolderChangeReportDTO | null;
 	readonly parentAttemptId?: string | null;
 	readonly childScope?: string | null;

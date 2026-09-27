@@ -18,7 +18,7 @@ export interface WorkspaceE2eCheckoutRevision {
 /** Reads the full commit currently checked out before an E2E TaskSpace is opened. */
 export async function readWorkspaceE2eCheckoutRevision(binding: Pick<WorkspaceFolderBinding, 'vcsKind' | 'vcsRoot'>): Promise<WorkspaceE2eCheckoutRevision> {
 	if (binding.vcsKind === null && binding.vcsRoot === null) {
-		return { revision: null, unavailableReason: 'This task uses an ordinary folder without Git or jj revision history.' };
+		return { revision: null, unavailableReason: '이 작업은 Git 또는 jj 버전 이력이 없는 일반 폴더에서 진행됩니다.' };
 	}
 	if (!binding.vcsRoot?.trim()) {
 		throw new Error('The task checkout has incomplete version control metadata; E2E checks cannot capture its revision.');

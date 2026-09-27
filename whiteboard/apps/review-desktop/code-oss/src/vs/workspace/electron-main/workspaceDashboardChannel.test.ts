@@ -4,9 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
+import { mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import type { WebContents } from 'electron';
@@ -33,7 +35,8 @@ function withChannel(run: (channel: WorkspaceDashboardChannel, projectId: string
 	const windows = {
 		getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : candidate === otherSender ? otherWindow : undefined,
 	} as IWindowsMainService;
-	const channel = new WorkspaceDashboardChannel(database, windows, coordinator);
+	const helperPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../.build/dev-fast/bound-checkout');
+	const channel = new WorkspaceDashboardChannel(database, windows, coordinator, helperPath);
 	return run(channel, workspace.project.id, workspace.binding.id, descriptorUri, codeWindow, sender, otherSender, forgedSender, database).finally(() => {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
@@ -57,6 +60,100 @@ test('dashboard reads and task creation are scoped to the live project window', 
 		assert.equal(created.task.description, 'scoped creation');
 		assert.equal(created.view.descriptorUri, descriptorUri);
 		assert.equal(created.task.bindingId, bindingId);
+	});
+});
+
+test('ordinary-folder Inspect opens only persisted observed files under the still-bound root identity', async () => {
+	await withChannel(async (channel, projectId, bindingId, _descriptorUri, _codeWindow, sender, _otherSender, _forgedSender, database) => {
+		const task = database.createTask({ projectId, bindingId, title: 'Inspect ordinary report' });
+		database.updateTask(task.id, task.revision, { state: 'review' });
+		const grant = database.enableOrdinaryFolderMutation(projectId, bindingId);
+		const folderIdentity = `${bindingId}:${grant.canonicalPath}:${grant.dev}:${grant.ino}`;
+		const attempt = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'task', profileRef: 'local-default-claude', folderIdentity, cwd: grant.canonicalPath, mode: 'mutating', prompt: 'Edit.' });
+		const rootFile = join(grant.canonicalPath, 'created.txt');
+		writeFileSync(rootFile, 'observed');
+		const fileHash = createHash('sha256').update('observed').digest('hex');
+		const report = { status: 'observed', summary: '2 changed paths observed.', changes: [
+			{ path: 'created.txt', change: 'created', after: fileHash }, { path: 'vanished.txt', change: 'deleted', before: fileHash },
+		], truncated: false };
+		database.appendProviderAttemptEvent(attempt.attemptId, { type: 'ordinaryFolderInventoryStarted' });
+		database.appendProviderAttemptEvent(attempt.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify(report) } });
+		database.finishProviderAttempt(attempt.attemptId, 'succeeded', null, database.getTask(task.id)!.revision, null, true);
+		database.revokeOrdinaryFolderMutation(projectId, bindingId);
+		assert.equal((await channel.call<{ nextAction: { taskId: string; kind: string } | null }>(sender, 'getDashboard', projectId)).nextAction?.kind, 'inspectChanges');
+		const request = (relativePath: string) => ({ projectId, taskId: task.id, attemptId: attempt.attemptId, relativePath });
+		const snapshot = await channel.call<{ relativePath: string; content: string }>(sender, 'openObservedOrdinaryFolderChange', request('created.txt'));
+		assert.deepEqual(snapshot, { relativePath: 'created.txt', content: 'observed' });
+		const snapshotOutsidePath = join(tmpdir(), `ordinary-report-snapshot-outside-${Date.now()}.txt`);
+		try {
+			writeFileSync(snapshotOutsidePath, 'outside snapshot target');
+			unlinkSync(rootFile);
+			symlinkSync(snapshotOutsidePath, rootFile);
+			assert.equal(snapshot.content, 'observed', 'the delivered content snapshot must remain unchanged after the path is retargeted');
+			await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('created.txt')), /could not be read safely/u);
+		} finally {
+			rmSync(rootFile, { force: true });
+			rmSync(snapshotOutsidePath, { force: true });
+		}
+		writeFileSync(rootFile, 'observed');
+		writeFileSync(rootFile, 'modified after the report');
+		assert.equal((await channel.call<{ nextAction: { kind: string } | null }>(sender, 'getDashboard', projectId)).nextAction?.kind, 'inspectChanges');
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('created.txt')), /changed after the observed report/u);
+		writeFileSync(rootFile, 'observed');
+		const cleanupUnverified = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'task', profileRef: 'local-default-claude', folderIdentity, cwd: grant.canonicalPath, mode: 'mutating', prompt: 'Edit.' });
+		database.appendProviderAttemptEvent(cleanupUnverified.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify(report) } });
+		database.finishProviderAttempt(cleanupUnverified.attemptId, 'succeeded', null, database.getTask(task.id)!.revision, null, false);
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', { ...request('created.txt'), attemptId: cleanupUnverified.attemptId }), /cleanup has not been verified/u);
+		const supersededReport = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'task', profileRef: 'local-default-claude', folderIdentity, cwd: grant.canonicalPath, mode: 'mutating', prompt: 'Edit.' });
+		database.appendProviderAttemptEvent(supersededReport.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify(report) } });
+		database.appendProviderAttemptEvent(supersededReport.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify({ status: 'unverified', summary: 'Final inventory failed.', changes: [], truncated: false }) } });
+		database.finishProviderAttempt(supersededReport.attemptId, 'succeeded', null, database.getTask(task.id)!.revision, null, true);
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', { ...request('created.txt'), attemptId: supersededReport.attemptId }), /no verified ordinary-folder change report/u);
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('../outside.txt')), /not an openable path|escapes/u);
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('vanished.txt')), /not an openable path/u);
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('missing.txt')), /not an openable path/u);
+		unlinkSync(rootFile);
+		await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('created.txt')), /could not be read safely/u);
+		writeFileSync(rootFile, 'observed again');
+
+		const outsidePath = join(tmpdir(), `ordinary-report-outside-${Date.now()}.txt`);
+		const outsideDirectory = mkdtempSync(join(tmpdir(), 'ordinary-report-outside-dir-'));
+		try {
+			writeFileSync(outsidePath, 'outside');
+			writeFileSync(join(outsideDirectory, 'nested.txt'), 'outside nested target');
+			symlinkSync(outsidePath, join(grant.canonicalPath, 'linked.txt'));
+			const symlinkReport = { ...report, summary: '1 changed path observed.', changes: [{ path: 'linked.txt', change: 'created', after: fileHash }] };
+			const symlinkAttempt = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'task', profileRef: 'local-default-claude', folderIdentity, cwd: grant.canonicalPath, mode: 'mutating', prompt: 'Edit.' });
+			database.appendProviderAttemptEvent(symlinkAttempt.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify(symlinkReport) } });
+			database.finishProviderAttempt(symlinkAttempt.attemptId, 'succeeded', null, database.getTask(task.id)!.revision, null, true);
+			await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', { ...request('linked.txt'), attemptId: symlinkAttempt.attemptId }), /could not be read safely/u);
+			unlinkSync(join(grant.canonicalPath, 'linked.txt'));
+			symlinkSync(outsideDirectory, join(grant.canonicalPath, 'linked-dir'), 'dir');
+			const nestedReport = { ...report, summary: '1 changed path observed.', changes: [{ path: 'linked-dir/nested.txt', change: 'created', after: fileHash }] };
+			const nestedSymlinkAttempt = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'task', profileRef: 'local-default-claude', folderIdentity, cwd: grant.canonicalPath, mode: 'mutating', prompt: 'Edit.' });
+			database.appendProviderAttemptEvent(nestedSymlinkAttempt.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify(nestedReport) } });
+			database.finishProviderAttempt(nestedSymlinkAttempt.attemptId, 'succeeded', null, database.getTask(task.id)!.revision, null, true);
+			await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', { ...request('linked-dir/nested.txt'), attemptId: nestedSymlinkAttempt.attemptId }), /could not be read safely/u);
+			unlinkSync(join(grant.canonicalPath, 'linked-dir'));
+			writeFileSync(join(grant.canonicalPath, 'linked.txt'), 'now a regular file');
+			const linkReport = { ...report, summary: '1 changed path observed.', changes: [{ path: 'linked.txt', change: 'created', after: 'link:/outside' }] };
+			const changedSinceReport = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'task', profileRef: 'local-default-claude', folderIdentity, cwd: grant.canonicalPath, mode: 'mutating', prompt: 'Edit.' });
+			database.appendProviderAttemptEvent(changedSinceReport.attemptId, { type: 'ordinaryFolderChanges', metadata: { report: JSON.stringify(linkReport) } });
+			database.finishProviderAttempt(changedSinceReport.attemptId, 'succeeded', null, database.getTask(task.id)!.revision, null, true);
+			await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', { ...request('linked.txt'), attemptId: changedSinceReport.attemptId }), /not an openable path/u);
+		} finally {
+			rmSync(join(grant.canonicalPath, 'linked.txt'), { force: true });
+			rmSync(join(grant.canonicalPath, 'linked-dir'), { force: true });
+			rmSync(outsidePath, { force: true });
+			rmSync(outsideDirectory, { recursive: true, force: true });
+		}
+
+		const replacement = mkdtempSync(join(tmpdir(), 'ordinary-report-retarget-'));
+		try {
+			writeFileSync(join(replacement, 'created.txt'), 'replacement');
+			database.updateFolderBinding(bindingId, { path: replacement, expectedPath: grant.canonicalPath });
+			await assert.rejects(channel.call(sender, 'openObservedOrdinaryFolderChange', request('created.txt')), /no longer authorized|identity changed/u);
+		} finally { rmSync(replacement, { recursive: true, force: true }); }
 	});
 });
 

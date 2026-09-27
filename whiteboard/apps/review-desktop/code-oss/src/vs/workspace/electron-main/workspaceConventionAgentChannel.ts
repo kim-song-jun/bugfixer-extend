@@ -536,7 +536,7 @@ export class WorkspaceConventionAgentChannel {
 			id: attempt.attemptId, projectId, taskId: attempt.taskId, providerId: attempt.provider, purpose: attempt.purpose,
 			state: attempt.state, mode: 'read-only', accountLabel: this.providerProfile(attempt.provider).label, cwd: attempt.cwd,
 			createdAt: attempt.createdAt, updatedAt: attempt.updatedAt, startedAt: attempt.startedAt, finishedAt: attempt.finishedAt,
-			sessionId: attempt.providerSessionId, errorSummary: attempt.errorSummary,
+			sessionId: attempt.providerSessionId, errorSummary: attempt.errorSummary, cleanupVerified: attempt.cleanupVerified,
 		};
 	}
 

@@ -20,6 +20,7 @@ import { IReviewApiSourceService, ReviewApiSourceService } from './services/revi
 import { IReviewCanvasEditorTabsService, ReviewCanvasEditorTabsService } from './services/reviewCanvasEditorTabsService.js';
 import { IReviewDesktopConnectionService, ReviewDesktopConnectionService } from './services/reviewDesktopConnectionService.js';
 import { IReviewTelemetryService, ReviewTelemetryService } from './services/reviewTelemetryService.js';
+import { IProjectInspectSnapshotService, ProjectInspectSnapshotService } from './services/projectInspectSnapshotService.js';
 
 registerSingleton(IReviewDesktopConnectionService, ReviewDesktopConnectionService, InstantiationType.Eager);
 registerSingleton(IReviewCanvasEditorTabsService, ReviewCanvasEditorTabsService, InstantiationType.Delayed);
@@ -27,5 +28,6 @@ registerSingleton(IReviewApiSourceService, ReviewApiSourceService, Instantiation
 registerSingleton(IReviewApiCatalogService, ReviewApiCatalogService, InstantiationType.Delayed);
 registerSingleton(IReviewVerbsService, ReviewVerbsService, InstantiationType.Delayed);
 registerSingleton(IReviewTelemetryService, ReviewTelemetryService, InstantiationType.Delayed);
+registerSingleton(IProjectInspectSnapshotService, ProjectInspectSnapshotService, InstantiationType.Eager);
 
 export { main } from '../workbench/electron-browser/desktop.main.js';
