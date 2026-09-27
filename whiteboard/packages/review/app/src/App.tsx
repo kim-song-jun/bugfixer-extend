@@ -43,17 +43,17 @@ import {
 import { ReviewCornerAction } from "./review-corner-action";
 import { useReviewDiffFiles } from "./review-diff-files-context";
 import { ReviewDiffFilesProvider } from "./review-diff-files-context";
-import { ReviewDocumentEmptyState } from "./review-document-empty-state";
 import { ReviewDocumentBoundary } from "./review-document-boundary";
+import { ReviewDocumentEmptyState } from "./review-document-empty-state";
 import { reportReviewDocumentRenderError } from "./review-document-error-report";
 import { ReviewUnavailable } from "./review-empty-state";
-import { isKoreanReviewUi } from "./review-locale";
 import {
   type ReviewFindHost,
   ReviewFindProvider,
   useReviewFindRegistration,
 } from "./review-find";
 import { useReviewLenses } from "./review-lenses";
+import { isKoreanReviewUi } from "./review-locale";
 import {
   ReviewPanelProvider,
   useReviewPanel,
@@ -350,8 +350,15 @@ function ReviewLayoutContent({
   useEffect(() => {
     if (scratchpad) captureUiEvent(session, "scratchpad_opened");
   }, [scratchpad, session]);
-  const discordTooltip = useTooltip(korean ? "Discord 커뮤니티 열기" : "Join our Discord community");
-  const sourceTreeTooltip = useTooltip(korean ? "읽기 전용 소스 보기" : "Open full read-only source");
+
+  const discordTooltip = useTooltip(
+    korean ? "Discord 커뮤니티 열기" : "Join our Discord community",
+  );
+
+  const sourceTreeTooltip = useTooltip(
+    korean ? "읽기 전용 소스 보기" : "Open full read-only source",
+  );
+
   const panelStore = useReviewPanelStore();
   useSuppressPanelMotionOnCanvasResume(appRef);
   const activePanel = useReviewPanel((state) => state.active);
@@ -574,9 +581,7 @@ function ReviewLayoutContent({
                     key={view}
                     type="button"
                     aria-label={
-                      view === "map"
-                        ? mapLabel
-                        : reviewViewLabel(view)
+                      view === "map" ? mapLabel : reviewViewLabel(view)
                     }
                     aria-pressed={activeView === view}
                     title={view === "map" ? mapLabel : undefined}
@@ -599,7 +604,13 @@ function ReviewLayoutContent({
                   >
                     {view === "review" ? (
                       <ReviewSurfaceLabel
-                        label={scratchpad ? (korean ? "메모" : "Scratchpad") : reviewViewLabel("review")}
+                        label={
+                          scratchpad
+                            ? korean
+                              ? "메모"
+                              : "Scratchpad"
+                            : reviewViewLabel("review")
+                        }
                         hasContent={
                           documentState.state === "ready" &&
                           documentState.document.empty === false
@@ -667,7 +678,11 @@ function ReviewLayoutContent({
                 type="button"
                 className="review-topbar-icon-button"
                 ref={discordTooltip}
-                aria-label={korean ? "Discord 커뮤니티 열기" : "Join our Discord community"}
+                aria-label={
+                  korean
+                    ? "Discord 커뮤니티 열기"
+                    : "Join our Discord community"
+                }
                 onClick={() => {
                   captureUiEvent(session, "discord_clicked", {
                     via: "topbar",
@@ -739,12 +754,13 @@ function ReviewLayoutContent({
                         persistOverlayTour={viewStateSync.persistOverlayTour}
                       >
                         <documentState.document.render />
-                        {!scratchpad && documentState.document.empty === true && (
-                          <ReviewDocumentEmptyState
-                            hasChangeRange={hasChangeRange}
-                            onOpenDiff={() => applyReviewView("diff")}
-                          />
-                        )}
+                        {!scratchpad &&
+                          documentState.document.empty === true && (
+                            <ReviewDocumentEmptyState
+                              hasChangeRange={hasChangeRange}
+                              onOpenDiff={() => applyReviewView("diff")}
+                            />
+                          )}
                       </ReviewViewStateProvider>
                     </ReviewDocumentBoundary>
                   </article>

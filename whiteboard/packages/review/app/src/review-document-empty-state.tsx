@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+
 import { isKoreanReviewUi } from "./review-locale";
 
 export function ReviewDocumentEmptyState({
@@ -9,6 +10,7 @@ export function ReviewDocumentEmptyState({
   onOpenDiff: () => void;
 }): ReactElement {
   const korean = isKoreanReviewUi();
+
   const copy = korean
     ? {
         label: "리뷰 시작하기",
@@ -34,7 +36,8 @@ export function ReviewDocumentEmptyState({
       <p>{copy.description}</p>
       {hasChangeRange && (
         <button type="button" onClick={onOpenDiff}>
-          {copy.action}<span aria-hidden="true"> →</span>
+          {copy.action}
+          <span aria-hidden="true"> →</span>
         </button>
       )}
     </section>

@@ -636,7 +636,13 @@ button.host-authoring-activity[data-locatable]:focus-visible {
   border: 1px solid var(--rule);
   border-radius: 10px;
   background: var(--well);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-family: var(
+    --vscode-font-family,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif
+  );
 }
 
 .review-document-empty-state__label {
@@ -647,7 +653,13 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 
 .review-document .review-document-empty-state h2 {
   margin: 10px 0 8px;
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-family: var(
+    --vscode-font-family,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif
+  );
   font-size: 20px;
   font-weight: 700;
   line-height: 1.35;
@@ -668,7 +680,13 @@ button.host-authoring-activity[data-locatable]:focus-visible {
   border-radius: 6px;
   background: var(--accent);
   color: var(--on-accent);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-family: var(
+    --vscode-font-family,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif
+  );
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
@@ -1212,7 +1230,14 @@ button.host-authoring-activity[data-locatable]:focus-visible {
     border-bottom: 1px solid var(--rule);
     background: var(--tray);
     color: var(--accent);
-    font: 600 12px var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    font: 600 12px
+      var(
+        --vscode-font-family,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif
+      );
     text-align: left;
   }
 

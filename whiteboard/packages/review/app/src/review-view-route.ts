@@ -1,4 +1,5 @@
 import type { ReviewView } from "@dev.fast/review-protocol";
+
 import { isKoreanReviewUi } from "./review-locale";
 
 export type { ReviewView } from "@dev.fast/review-protocol";
@@ -23,9 +24,13 @@ export function normalizeReviewView(
 export function reviewViewLabel(view: ReviewView): string {
   if (isKoreanReviewUi()) {
     if (view === "map") return "지도";
+
     if (view === "diff") return "변경 비교";
+
     if (view === "commits") return "커밋";
+
     if (view === "trace") return "실행 기록";
+
     return "리뷰";
   }
 

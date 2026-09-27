@@ -11,8 +11,8 @@ import {
 
 import { useReviewSession } from "./host/review-session";
 import { SlidersIcon, SplitLayoutIcon, UnifiedLayoutIcon } from "./icons";
-import { captureClientError, captureUiEvent } from "./ui-telemetry";
 import { isKoreanReviewUi } from "./review-locale";
+import { captureClientError, captureUiEvent } from "./ui-telemetry";
 import { useDismissOnOutside } from "./use-dismiss-on-outside";
 import { useTooltip } from "./use-tooltip";
 import { useTopbarPopover } from "./use-topbar-popover";
@@ -123,12 +123,20 @@ export function DiffLayoutControl(): ReactElement {
                   onClick={() => chooseLayout(option)}
                 >
                   <Icon />
-                  <span>{korean ? (option === "unified" ? "한 열" : "나란히") : label}</span>
+                  <span>
+                    {korean
+                      ? option === "unified"
+                        ? "한 열"
+                        : "나란히"
+                      : label}
+                  </span>
                 </button>
               ))}
             </div>
             <p className="review-diff-settings-note">
-              {korean ? "좁은 창에서는 한 열로 표시됩니다." : "Narrow windows show one code column."}
+              {korean
+                ? "좁은 창에서는 한 열로 표시됩니다."
+                : "Narrow windows show one code column."}
             </p>
           </div>
         </div>

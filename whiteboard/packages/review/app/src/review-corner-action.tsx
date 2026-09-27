@@ -73,7 +73,9 @@ export function ReviewCornerAction(): ReactElement | null {
           className="review-corner-error"
           role="alert"
         >
-          {korean ? "리뷰를 숨기지 못했습니다. 다시 시도해 주세요." : "Could not dismiss the review. Try again."}
+          {korean
+            ? "리뷰를 숨기지 못했습니다. 다시 시도해 주세요."
+            : "Could not dismiss the review. Try again."}
         </span>
       )}
     </div>
