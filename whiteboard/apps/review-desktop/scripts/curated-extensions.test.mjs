@@ -296,11 +296,17 @@ test("carries Darwin curated extensions from Linux compile through release valid
   assert.doesNotMatch(payloadManifest, /rust-lang\.rust-analyzer/);
 });
 
-test("keeps curated extensions out of the gulp packaging stream", () => {
+test("keeps prebuilt extensions out of gulp except the NLS language pack", () => {
   for (const extension of curatedExtensions) {
-    assert.ok(
-      buildExtensions.includes(`'${extension.id}'`),
-      `${extension.id} must be listed in excludedExtensions in build/lib/extensions.ts`,
+    const excluded = buildExtensions.includes(`'${extension.id}'`);
+    const needsNlsRegistration = extension.id === "ms-ceintl.vscode-language-pack-ko";
+
+    assert.equal(
+      excluded,
+      !needsNlsRegistration,
+      needsNlsRegistration
+        ? `${extension.id} must enter gulp so Code OSS registers its NLS descriptor`
+        : `${extension.id} must be listed in excludedExtensions in build/lib/extensions.ts`,
     );
   }
 });

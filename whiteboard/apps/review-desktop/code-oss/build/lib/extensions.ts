@@ -311,6 +311,8 @@ const excludedExtensions = [
 	// them here would run vsce's npm file listing against dependencies they already
 	// bundle; apps/review-desktop/scripts/curated-extensions.mjs stages them into
 	// the packaged app instead.
+	// The Korean language pack is intentionally absent: Code OSS packaging must
+	// register its NLS descriptor before the prebuilt payload is staged.
 	'vscodevim.vim',
 	'tuttieee.emacs-mcx',
 	'rust-lang.rust-analyzer',
