@@ -7,7 +7,7 @@ import {
 	assertApprovedDeclarativePackage, type ApprovedDeclarativePackage,
 } from './declarativePackage.js';
 import {
-	type DeclarativePackageTransport,
+	minimumDeclarativePackageCredentialLength, type DeclarativePackageTransport,
 } from './declarativePackageTransport.js';
 
 const maxPages = 20;
@@ -69,7 +69,8 @@ export async function importDeclarativePackageSource(
 	const requiredScope = source.requiredScope;
 	if (approvedPackage.manifest.accountAccess === 'none') {
 		if (binding.credential !== null || requiredScope !== undefined) { throw new Error('Anonymous connector source received an unexpected credential or scope.'); }
-	} else if (typeof binding.credential !== 'string' || !binding.credential || !requiredScope
+	} else if (typeof binding.credential !== 'string' || binding.credential.length < minimumDeclarativePackageCredentialLength
+		|| !/^[\x21-\x7e]+$/.test(binding.credential) || !requiredScope
 		|| !approvedPackage.manifest.requestedScopes.includes(requiredScope) || !binding.grantedScopes.includes(requiredScope)) {
 		throw new Error('Connector connection is missing its required credential or granted scope.');
 	}

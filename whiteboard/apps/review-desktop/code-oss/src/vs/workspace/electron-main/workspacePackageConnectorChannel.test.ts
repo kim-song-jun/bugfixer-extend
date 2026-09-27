@@ -254,6 +254,7 @@ test('failed package account setup cleans Keychain state or leaves a retryable c
 			credential: 'review-token-71a920', grantedScopes: ['issues:read'],
 		};
 
+		await assert.rejects(channel.call(sender, 'connectPackageConnection', { ...connectRequest, credential: 'short' }), /token.*invalid/i);
 		await assert.rejects(channel.call(sender, 'connectPackageConnection', connectRequest), /injected put failure/);
 		let accounts = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
 			projectId: project.project.id, packageId: review.packageId,

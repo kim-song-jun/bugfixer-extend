@@ -19,7 +19,9 @@ import {
 	approveDeclarativePackage, validateDeclarativePackage, type DeclarativePackageTrustContext, type ValidatedDeclarativePackage,
 } from './connectors/declarativePackage.js';
 import { importDeclarativePackageSource, type DeclarativeImportedReferenceInput } from './connectors/declarativePackageRuntime.js';
-import { PinnedDeclarativePackageTransport, type DeclarativePackageTransport } from './connectors/declarativePackageTransport.js';
+import {
+	minimumDeclarativePackageCredentialLength, PinnedDeclarativePackageTransport, type DeclarativePackageTransport,
+} from './connectors/declarativePackageTransport.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase, type DeclarativePackageConnection, type InstalledConnectorPackage } from './workspaceDatabase.js';
 import type { KeychainVault } from './keychainVault.js';
@@ -306,7 +308,8 @@ export class WorkspacePackageConnectorChannel {
 			throw new Error('This signed package does not allow a bearer account for the selected host.');
 		}
 		if (typeof request.label !== 'string' || !request.label.trim() || request.label.trim().length > 200
-			|| typeof request.credential !== 'string' || !/^[\x21-\x7e]{1,16384}$/.test(request.credential)
+			|| typeof request.credential !== 'string' || request.credential.length < minimumDeclarativePackageCredentialLength
+			|| !/^[\x21-\x7e]{1,16384}$/.test(request.credential)
 			|| !Array.isArray(request.grantedScopes) || request.grantedScopes.some(scope => !manifest.requestedScopes.includes(scope))
 			|| new Set(request.grantedScopes).size !== request.grantedScopes.length) {
 			throw new Error('The package account label, token, or requested scopes are invalid.');

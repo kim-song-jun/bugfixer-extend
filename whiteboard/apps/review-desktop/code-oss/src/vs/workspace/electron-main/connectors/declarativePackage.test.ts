@@ -12,7 +12,7 @@ import {
 } from './declarativePackage.js';
 import { importDeclarativePackageSource } from './declarativePackageRuntime.js';
 import {
-	isPublicAddress, maxDeclarativePackageResponseBytes, PinnedDeclarativePackageTransport,
+	isPublicAddress, maxDeclarativePackageResponseBytes, minimumDeclarativePackageCredentialLength, PinnedDeclarativePackageTransport,
 	type DeclarativePackageTransport, type PinnedHttpsRequest,
 } from './declarativePackageTransport.js';
 
@@ -145,17 +145,18 @@ test('bearer imports require the reviewed package binding, matching host and per
 	const approved = approve(signedEnvelope(bearerManifest).envelope);
 	const connection = {
 		accountRef: '00000000-0000-4000-8000-000000000043', packageId: approved.manifest.packageId,
-		manifestDigest: approved.manifestDigest, host: 'api.example.org', grantedScopes: ['issues:read'], credential: 'synthetic-token',
+		manifestDigest: approved.manifestDigest, host: 'api.example.org', grantedScopes: ['issues:read'], credential: 'review-token-71a920',
 	};
 	let receivedCredential: string | undefined;
 	const transport: DeclarativePackageTransport = { get: async (_url, _host, token) => { receivedCredential = token; return { items: [] }; } };
 	const result = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, connection);
-	assert.equal(receivedCredential, 'synthetic-token');
+	assert.equal(receivedCredential, 'review-token-71a920');
 	assert.equal(result.accountRef, connection.accountRef);
 	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, host: 'evil.example.org' }), /host/i);
 	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, manifestDigest: '0'.repeat(64) }), /bound/i);
 	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, grantedScopes: [] }), /scope/i);
 	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, credential: null }), /credential/i);
+	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, credential: 'short' }), /credential/i);
 	assert.throws(() => validateDeclarativePackage(signedEnvelope({ ...bearerManifest, domains: ['api.example.org', 'other.example.org'] }).envelope), /exactly one/i);
 	assert.throws(() => validateDeclarativePackage(signedEnvelope({ ...bearerManifest, sources: [{ ...bearerManifest.sources[0], requiredScope: 'issues:write' }] }).envelope), /declared requested scope/i);
 });
@@ -244,34 +245,24 @@ test('pinned HTTPS transport uses the exact allowlisted host for TLS SNI and hos
 	let credentialRequest: PinnedHttpsRequest | undefined;
 	const echoingTransport = new PinnedDeclarativePackageTransport({
 		resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
-		executePinnedRequest: async request => { credentialRequest = request; return { statusCode: 200, body: Buffer.from('{"echo":"synthetic-token"}') }; },
+		executePinnedRequest: async request => { credentialRequest = request; return { statusCode: 200, body: Buffer.from('{"echo":"prefix review-token-71a920 suffix"}') }; },
 	});
-	await assert.rejects(echoingTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'synthetic-token'), /echoed its bearer credential/i);
-	assert.deepEqual(credentialRequest?.headers, { Authorization: 'Bearer synthetic-token' });
+	await assert.rejects(echoingTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'review-token-71a920'), /echoed its bearer credential/i);
+	assert.deepEqual(credentialRequest?.headers, { Authorization: 'Bearer review-token-71a920' });
 	const escapedEchoTransport = new PinnedDeclarativePackageTransport({
 		resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
-		executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from('{"echo":"\\u0073ynthetic-token"}') }),
+		executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from('{"echo":"prefix review-\\u0074oken-71a920 suffix"}') }),
 	});
-	await assert.rejects(escapedEchoTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'synthetic-token'), /echoed its bearer credential/i);
+	await assert.rejects(escapedEchoTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'review-token-71a920'), /echoed its bearer credential/i);
 	const shortTokenTransport = new PinnedDeclarativePackageTransport({
 		resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
 		executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from('{"data":[],"description":"data available"}') }),
 	});
-	assert.deepEqual(await shortTokenTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'a'), {
+	assert.deepEqual(await shortTokenTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'connector-token-123'), {
 		data: [], description: 'data available',
 	});
-	const shortEchoes = [
-		'{"echo":"Bearer a"}',
-		'{"echo":"token=a"}',
-		'{"echo":"Bearer \\u0061"}',
-	];
-	for (const body of shortEchoes) {
-		const transportWithEcho = new PinnedDeclarativePackageTransport({
-			resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
-			executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.from(body) }),
-		});
-		await assert.rejects(transportWithEcho.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'a'), /echoed its bearer credential/i);
-	}
+	await assert.rejects(shortTokenTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'a'), /invalid format/i);
+	assert.equal(minimumDeclarativePackageCredentialLength, 16);
 });
 
 test('address classifier blocks private, reserved, and literal address ranges', () => {
