@@ -17,7 +17,7 @@ import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../workspace/common/workspace
 import { WORKSPACE_WEBSITE_CHANNEL, type WorkspaceWebsitePreviewDTO } from '../../../workspace/common/workspaceWebsiteProtocol.js';
 import type { PreviewNotionPageRequest, PreviewSlackConversationRequest, WorkspaceConnectorAccountDTO, WorkspaceConnectorId, WorkspaceConnectorPreviewDTO } from '../../../workspace/common/workspaceConnectorProtocol.js';
 import { WORKSPACE_CONNECTOR_CHANNEL } from '../../../workspace/common/workspaceConnectorProtocol.js';
-import type { WorkspaceInstalledPackageDTO, WorkspacePackagePreviewDTO, WorkspacePackageReviewDTO, WorkspaceSignedPackageEnvelope } from '../../../workspace/common/workspacePackageConnectorProtocol.js';
+import type { WorkspaceInstalledPackageDTO, WorkspacePackageConnectionDTO, WorkspacePackagePreviewDTO, WorkspacePackageReviewDTO, WorkspaceSignedPackageEnvelope } from '../../../workspace/common/workspacePackageConnectorProtocol.js';
 import { WORKSPACE_PACKAGE_CONNECTOR_CHANNEL } from '../../../workspace/common/workspacePackageConnectorProtocol.js';
 import { WORKSPACE_EGO_CAPTURE_CHANNEL, type WorkspaceEgoCaptureRecoveryStatus, type WorkspaceEgoCaptureStatus } from '../../../workspace/common/workspaceBrowserCaptureProtocol.js';
 import { WORKSPACE_E2E_CHANNEL, type WorkspaceE2eEvidenceDTO, type WorkspaceE2eStep } from '../../../workspace/common/workspaceE2eProtocol.js';
@@ -201,6 +201,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private connectorPreviewGeneration = 0;
 	private connectorOperationGeneration = 0;
 	private installedPackages: readonly WorkspaceInstalledPackageDTO[] = [];
+	private packageConnections: readonly WorkspacePackageConnectionDTO[] = [];
+	private readonly packageConnectionIds = new Map<string, string>();
+	private packageConnectionLabel = '';
+	private readonly packageConnectionScopes = new Map<string, Set<string>>();
 	private packageReview: WorkspacePackageReviewDTO | undefined;
 	private packageEnvelope: WorkspaceSignedPackageEnvelope | undefined;
 	private packageBusy = false;
@@ -641,7 +645,18 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.render();
 		try {
 			const packages = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'listPackages', projectId) as readonly WorkspaceInstalledPackageDTO[];
-			if (this.projectId === projectId) this.installedPackages = packages;
+			const connections = (await Promise.all(packages.map(item => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'listPackageConnections', { projectId, packageId: item.packageId })))) as readonly (readonly WorkspacePackageConnectionDTO[])[];
+			if (this.projectId === projectId) {
+				this.installedPackages = packages;
+				this.packageConnections = connections.flat();
+				for (const item of packages) {
+					const available = this.packageConnections.filter(connection => connection.packageId === item.packageId && connection.state === 'active');
+					if (!available.some(connection => connection.connectionId === this.packageConnectionIds.get(item.packageId))) {
+						if (available[0]) this.packageConnectionIds.set(item.packageId, available[0].connectionId);
+						else this.packageConnectionIds.delete(item.packageId);
+					}
+				}
+			}
 		} catch (error) {
 			if (this.projectId === projectId) this.packageError = this.errorMessage(error, '설치된 커넥터 패키지를 불러오지 못했습니다.');
 		} finally {
@@ -655,8 +670,13 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.packagePreviewTaskId = undefined;
 	}
 
+	private selectedPackageConnection(installed: WorkspaceInstalledPackageDTO): WorkspacePackageConnectionDTO | undefined {
+		const id = this.packageConnectionIds.get(installed.packageId);
+		return this.packageConnections.find(connection => connection.packageId === installed.packageId && connection.connectionId === id && connection.state === 'active');
+	}
+
 	private async requestPackagePreview(installed: WorkspaceInstalledPackageDTO, sourceId: string, sourceKey: string): Promise<void> {
-		if (this.packageBusy || !this.projectId) return;
+		if (this.packageBusy || !this.projectId || !this.selectedPackageConnection(installed)) return;
 		const projectId = this.projectId;
 		this.clearPackagePreview();
 		const generation = this.packagePreviewGeneration;
@@ -667,11 +687,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.render();
 		try {
 			const preview = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'previewPackageSource', {
-				projectId, packageId: installed.packageId, sourceId, sourceKey,
+				projectId, packageId: installed.packageId, sourceId, sourceKey, connectionId: this.packageConnectionIds.get(installed.packageId),
 			}) as WorkspacePackagePreviewDTO;
 			if (this.projectId !== projectId || this.packagePreviewGeneration !== generation) return;
 			if (preview.packageId !== installed.packageId || preview.sourceId !== sourceId || preview.sourceKey !== sourceKey
-				|| preview.connectorVersion !== installed.version || !/^[a-f0-9-]{36}$/i.test(preview.previewId)
+				|| preview.connectorVersion !== installed.version || preview.accountRef !== this.selectedPackageConnection(installed)?.accountRef || !/^[a-f0-9-]{36}$/i.test(preview.previewId)
 				|| !/^[a-f0-9]{64}$/.test(preview.contentSha256)
 				|| !Number.isFinite(Date.parse(preview.expiresAt)) || Date.parse(preview.expiresAt) <= Date.now()
 				|| new TextEncoder().encode(preview.content).byteLength > 1024 * 1024) {
@@ -692,6 +712,13 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private async importReviewedPackagePreview(preview: WorkspacePackagePreviewDTO): Promise<void> {
 		if (this.packageBusy || !this.projectId || this.packagePreview?.previewId !== preview.previewId) return;
+		const installed = this.installedPackages.find(item => item.packageId === preview.packageId);
+		if (!installed || preview.accountRef !== this.selectedPackageConnection(installed)?.accountRef) {
+			this.clearPackagePreview();
+			this.packageError = '선택한 계정이 바뀌었습니다. 같은 계정으로 다시 미리보기해 주세요.';
+			this.render();
+			return;
+		}
 		const projectId = this.projectId;
 		if (!Number.isFinite(Date.parse(preview.expiresAt)) || Date.parse(preview.expiresAt) <= Date.now()) {
 			this.clearPackagePreview();
@@ -708,11 +735,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		let importedReference: WorkspaceReferenceDTO | undefined;
 		try {
 			const reference = importedReference = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'importPackagePreview', {
-				projectId, packageId: preview.packageId, previewId: preview.previewId, ...(taskId ? { taskId } : {}),
+				projectId, packageId: preview.packageId, previewId: preview.previewId, connectionId: this.packageConnectionIds.get(preview.packageId), ...(taskId ? { taskId } : {}),
 			}) as WorkspaceReferenceDTO;
 			if (reference.projectId !== projectId || reference.connectorId !== `local:${preview.packageId}`
 				|| reference.connectorVersion !== preview.connectorVersion || reference.externalId !== preview.externalId
-				|| reference.sourceUri !== preview.sourceUri || reference.title !== preview.title
+				|| reference.sourceUri !== preview.sourceUri || reference.title !== preview.title || reference.accountRef !== preview.accountRef
 				|| reference.contentSha256 !== preview.contentSha256) {
 				throw new Error('저장된 자료 정보가 확인한 미리보기와 일치하지 않습니다.');
 			}
@@ -797,7 +824,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const sources = [...installed.sources].sort((left, right) => right.sourceId.length - left.sourceId.length);
 		const latestBySource = new Map<string, PackageRefreshCandidate>();
 		for (const reference of this.knowledge?.references ?? []) {
-			if (reference.connectorId !== `local:${installed.packageId}` || reference.accountRef !== null) continue;
+			if (reference.connectorId !== `local:${installed.packageId}` || reference.accountRef !== this.selectedPackageConnection(installed)?.accountRef) continue;
 			const source = sources.find(item => reference.externalId.startsWith(`${installed.packageId}:${item.sourceId}:`));
 			if (!source) continue;
 			const sourceKey = reference.externalId.slice(`${installed.packageId}:${source.sourceId}:`.length);
@@ -831,12 +858,12 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		let refreshed: WorkspaceReferenceDTO | undefined;
 		try {
 			refreshed = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'refreshPackageSource', {
-				projectId, packageId: installed.packageId, sourceId: latest.sourceId, sourceKey: latest.sourceKey,
+				projectId, packageId: installed.packageId, sourceId: latest.sourceId, sourceKey: latest.sourceKey, connectionId: this.selectedPackageConnection(installed)?.connectionId,
 				previousReferenceId: latest.reference.id,
 			}) as WorkspaceReferenceDTO;
 			if (refreshed.sourceId !== latest.reference.sourceId || refreshed.previousId !== latest.reference.id
 				|| refreshed.connectorId !== latest.reference.connectorId || refreshed.externalId !== latest.reference.externalId
-				|| refreshed.accountRef !== null || refreshed.version <= latest.reference.version) {
+				|| refreshed.accountRef !== this.selectedPackageConnection(installed)?.accountRef || refreshed.version <= latest.reference.version) {
 				throw new Error('새 스냅샷이 선택한 패키지 자료 기록을 이어받지 않았습니다.');
 			}
 			const knowledge = await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'getProjectKnowledge', projectId) as WorkspaceKnowledgeDTO;
@@ -863,6 +890,31 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		}
 	}
 
+	private async connectInstalledPackage(installed: WorkspaceInstalledPackageDTO, label: string, credential: string, grantedScopes: readonly string[]): Promise<void> {
+		if (!this.projectId || this.packageBusy || !credential.trim()) return;
+		const projectId = this.projectId;
+		this.packageBusy = true;
+		this.packageError = undefined;
+		this.packageMessage = undefined;
+		this.clearPackagePreview();
+		this.render();
+		try {
+			const connection = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'connectPackageConnection', {
+				projectId, packageId: installed.packageId, host: installed.domains[0], label: label.trim(), credential, grantedScopes,
+			}) as WorkspacePackageConnectionDTO;
+			if (this.projectId === projectId) {
+				this.packageConnectionIds.set(installed.packageId, connection.connectionId);
+				this.packageMessage = `${connection.label} 연결을 저장했습니다.`;
+				await this.loadInstalledPackages();
+			}
+		} catch (error) {
+			if (this.projectId === projectId) this.packageError = this.errorMessage(error, '패키지 계정을 연결하지 못했습니다.');
+		} finally {
+			this.packageBusy = false;
+			this.render();
+		}
+	}
+
 	private renderPackageConnectors(panel: HTMLElement): void {
 		const projectId = this.projectId;
 		const section = panel.appendChild($('.project-dashboard__package-connectors'));
@@ -886,7 +938,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			for (const [label, value] of [
 				['패키지 ID', this.packageReview.packageId], ['신뢰 상태', this.packageReview.trustStatus],
 				['서명 지문', this.packageReview.fingerprint], ['매니페스트 해시 (SHA-256)', this.packageReview.manifestDigest],
-				['계정 접근', '없음'],
+				['인증 방식', this.packageReview.accountAccess === 'bearer-token' ? '앱이 관리하는 bearer token' : '익명 (계정 정보 없음)'],
+				['요청 권한 (패키지 주장)', this.packageReview.requestedScopes.length ? this.packageReview.requestedScopes.join(', ') : '없음'],
 			] as const) { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; }
 			const domainsTitle = review.appendChild($('h5')); domainsTitle.textContent = '전체 네트워크 도메인';
 			const domains = review.appendChild($('ul')); for (const domain of this.packageReview.domains) { const item = domains.appendChild($('li')); item.textContent = domain; }
@@ -923,6 +976,58 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const card = section.appendChild($('.project-dashboard__package-card'));
 			const packageTitle = card.appendChild($('h4')); packageTitle.textContent = `${installed.name} · v${installed.version}`;
 			const packageMeta = card.appendChild($('p')); packageMeta.textContent = `${installed.packageId} · 키 ${installed.fingerprint} · 업데이트 ${new Date(installed.updatedAt).toLocaleDateString()}`;
+			const auth = card.appendChild(createElement('section', 'project-dashboard__package-auth'));
+			const authTitle = auth.appendChild($('h5')); authTitle.textContent = '계정 연결';
+			const authNote = auth.appendChild($('p')); authNote.className = 'project-dashboard__connector-note';
+			authNote.textContent = installed.accountAccess === 'bearer-token'
+				? `인증 방식: 앱이 관리하는 bearer token · 호스트: ${installed.domains[0]} · 요청 권한(패키지 주장): ${installed.requestedScopes.join(', ')}. 권한은 패키지의 주장으로, 제공자가 검증한 권한이 아닙니다.`
+				: '인증 방식: 익명 · 이 패키지의 안정적인 앱 계정이 자동으로 선택됩니다.';
+			const packageConnections = this.packageConnections.filter(connection => connection.packageId === installed.packageId);
+			if (packageConnections.length) {
+				const accountLabel = auth.appendChild(createElement('label')); accountLabel.htmlFor = `package-account-${installed.packageId}`; accountLabel.textContent = '자료 미리보기와 새로고침에 사용할 계정';
+				const accountSelect = auth.appendChild(document.createElement('select')); accountSelect.id = accountLabel.htmlFor; accountSelect.disabled = this.packageBusy;
+				for (const connection of packageConnections.filter(item => item.state === 'active')) {
+					const option = accountSelect.appendChild(document.createElement('option')); option.value = connection.connectionId;
+					option.textContent = `${connection.label} · ${connection.authKind === 'none' ? '익명' : connection.grantedScopes.join(', ')}`;
+					option.selected = connection.connectionId === this.packageConnectionIds.get(installed.packageId);
+				}
+				accountSelect.addEventListener('change', () => { this.packageConnectionIds.set(installed.packageId, accountSelect.value); this.clearPackagePreview(); this.packageRefreshStates.delete(installed.packageId); this.render(); });
+			}
+			for (const connection of packageConnections) {
+				const connectionRow = auth.appendChild(createElement('div', 'project-dashboard__package-connection'));
+				const connectionInfo = connectionRow.appendChild($('span')); connectionInfo.textContent = `${connection.label} · ${connection.state === 'active' ? '연결됨' : connection.state === 'disconnecting' ? '정리 대기' : connection.state === 'pending' ? '연결 준비 중' : '연결 해제됨'} · 권한(패키지 주장): ${connection.grantedScopes.join(', ') || '없음'}`;
+				if (connection.state === 'active' && connection.authKind === 'bearer-token') {
+					const revoke = connectionRow.appendChild(createElement('button', 'project-dashboard__danger')); revoke.type = 'button'; revoke.disabled = this.packageBusy; revoke.textContent = '연결 해제';
+					revoke.addEventListener('click', () => void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'disconnectPackageConnection', { projectId: this.projectId, packageId: installed.packageId, connectionId: connection.connectionId }), `${connection.label} 연결을 해제했습니다.`));
+				} else if (connection.state === 'disconnecting') {
+					const retryCleanup = connectionRow.appendChild(createElement('button', 'project-dashboard__retry')); retryCleanup.type = 'button'; retryCleanup.disabled = this.packageBusy; retryCleanup.textContent = '정리 다시 시도';
+					retryCleanup.addEventListener('click', () => void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'retryPackageConnectionCleanup', { projectId: this.projectId, packageId: installed.packageId, connectionId: connection.connectionId }), '연결 정보 정리를 다시 시도했습니다.'));
+				}
+			}
+			if (installed.accountAccess === 'bearer-token') {
+				const connect = auth.appendChild(createElement('form', 'project-dashboard__package-connect'));
+				const connectHeading = connect.appendChild($('h5')); connectHeading.textContent = '계정 추가';
+				const label = connect.appendChild(createElement('label')); label.htmlFor = `package-account-label-${installed.packageId}`; label.textContent = '계정 이름';
+				const labelInput = connect.appendChild(document.createElement('input')); labelInput.id = label.htmlFor; labelInput.required = true; labelInput.autocomplete = 'off'; labelInput.value = this.packageConnectionLabel; labelInput.disabled = this.packageBusy;
+				const tokenLabel = connect.appendChild(createElement('label')); tokenLabel.htmlFor = `package-token-${installed.packageId}`; tokenLabel.textContent = 'Bearer token';
+				const tokenInput = connect.appendChild(document.createElement('input')); tokenInput.id = tokenLabel.htmlFor; tokenInput.type = 'password'; tokenInput.required = true; tokenInput.autocomplete = 'new-password'; tokenInput.disabled = this.packageBusy;
+				const scopesHeading = connect.appendChild($('p')); scopesHeading.className = 'project-dashboard__connector-note'; scopesHeading.textContent = '허용할 권한을 확인하세요. 이 목록은 패키지 주장으로, 제공자가 검증하지 않았습니다.';
+				const scopes = connect.appendChild(createElement('div', 'project-dashboard__package-scopes'));
+				const chosenScopes = new Set(this.packageConnectionScopes.get(installed.packageId) ?? installed.requestedScopes);
+				for (const scope of installed.requestedScopes) {
+					const scopeLabel = scopes.appendChild(createElement('label'));
+					const checkbox = scopeLabel.appendChild(document.createElement('input')); checkbox.type = 'checkbox'; checkbox.value = scope; checkbox.checked = chosenScopes.has(scope); checkbox.disabled = this.packageBusy;
+					const scopeName = scopeLabel.appendChild($('span')); scopeName.textContent = scope;
+					checkbox.addEventListener('change', () => { if (checkbox.checked) chosenScopes.add(scope); else chosenScopes.delete(scope); this.packageConnectionScopes.set(installed.packageId, new Set(chosenScopes)); });
+				}
+				connect.addEventListener('submit', event => {
+					event.preventDefault();
+					const credential = tokenInput.value;
+					this.packageConnectionLabel = labelInput.value;
+					tokenInput.value = '';
+					void this.connectInstalledPackage(installed, labelInput.value, credential, [...chosenScopes]);
+				});
+			}
 			const sourceForm = card.appendChild(createElement('form', 'project-dashboard__package-import'));
 			const sourceLabel = sourceForm.appendChild(createElement('label')); sourceLabel.htmlFor = `package-source-${installed.packageId}`; sourceLabel.textContent = '자료';
 			const sourceSelect = sourceForm.appendChild(createElement('select')); sourceSelect.id = `package-source-${installed.packageId}`; sourceSelect.required = true; sourceSelect.disabled = this.packageBusy;
@@ -931,7 +1036,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			sourceSelect.value = this.packageSourceIds.get(installed.packageId) ?? ''; sourceSelect.addEventListener('change', () => { this.packageSourceIds.set(installed.packageId, sourceSelect.value); this.clearPackagePreview(); this.render(); });
 			const keyLabel = sourceForm.appendChild(createElement('label')); keyLabel.htmlFor = `package-source-key-${installed.packageId}`; keyLabel.textContent = '원격 자료 ID';
 			const sourceKey = sourceForm.appendChild(createElement('input')); sourceKey.id = `package-source-key-${installed.packageId}`; sourceKey.required = true; sourceKey.autocomplete = 'off'; sourceKey.placeholder = '자료 식별자를 입력하세요'; sourceKey.value = this.packageSourceKey; sourceKey.disabled = this.packageBusy; sourceKey.dataset.focusKey = 'package-source-key'; sourceKey.addEventListener('input', () => { this.packageSourceKey = sourceKey.value; if (this.packagePreview) { this.clearPackagePreview(); this.render(); } });
-			const importButton = sourceForm.appendChild(createElement('button', 'project-dashboard__secondary')); importButton.type = 'submit'; importButton.disabled = this.packageBusy || !installed.sources.length; importButton.textContent = this.packageBusy ? '미리보기 준비 중…' : '자료 미리보기';
+			const importButton = sourceForm.appendChild(createElement('button', 'project-dashboard__secondary')); importButton.type = 'submit'; importButton.disabled = this.packageBusy || !installed.sources.length || !this.selectedPackageConnection(installed); importButton.textContent = this.packageBusy ? '미리보기 준비 중…' : '자료 미리보기';
 			sourceForm.addEventListener('submit', event => {
 				event.preventDefault();
 				const sourceKeyValue = sourceKey.value.trim(); const sourceId = sourceSelect.value;
