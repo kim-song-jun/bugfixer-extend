@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { isKoreanReviewUi } from "./review-locale";
 
 export function ReviewDocumentEmptyState({
   hasChangeRange,
@@ -7,8 +8,7 @@ export function ReviewDocumentEmptyState({
   hasChangeRange: boolean;
   onOpenDiff: () => void;
 }): ReactElement {
-  const korean = typeof navigator !== "undefined" &&
-    navigator.language.toLowerCase().startsWith("ko");
+  const korean = isKoreanReviewUi();
   const copy = korean
     ? {
         label: "리뷰 시작하기",

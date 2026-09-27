@@ -12,6 +12,7 @@ import {
 import { useReviewSession } from "./host/review-session";
 import { SlidersIcon, SplitLayoutIcon, UnifiedLayoutIcon } from "./icons";
 import { captureClientError, captureUiEvent } from "./ui-telemetry";
+import { isKoreanReviewUi } from "./review-locale";
 import { useDismissOnOutside } from "./use-dismiss-on-outside";
 import { useTooltip } from "./use-tooltip";
 import { useTopbarPopover } from "./use-topbar-popover";
@@ -31,7 +32,9 @@ const LAYOUT_OPTIONS: ReadonlyArray<{
  * that follow it without spending more toolbar width.
  */
 export function DiffLayoutControl(): ReactElement {
-  const tooltip = useTooltip("Diff settings");
+  const korean = isKoreanReviewUi();
+  const settingsLabel = korean ? "변경 비교 설정" : "Diff settings";
+  const tooltip = useTooltip(settingsLabel);
   const session = useReviewSession();
   const bridge = session.bridge;
 
@@ -80,7 +83,7 @@ export function DiffLayoutControl(): ReactElement {
       <button
         type="button"
         className="review-diff-settings-button"
-        aria-label="Diff settings"
+        aria-label={settingsLabel}
         ref={tooltip}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -94,12 +97,12 @@ export function DiffLayoutControl(): ReactElement {
           popover="manual"
           className="review-diff-settings-popover"
           role="dialog"
-          aria-label="Diff settings"
+          aria-label={settingsLabel}
         >
-          <div className="review-diff-settings-title">Diff settings</div>
+          <div className="review-diff-settings-title">{settingsLabel}</div>
           <div className="review-diff-settings-field">
             <span id={layoutLabelId} className="review-diff-settings-label">
-              Layout
+              {korean ? "보기 방식" : "Layout"}
             </span>
             <div
               className="review-segmented review-diff-settings-segmented"
@@ -120,10 +123,13 @@ export function DiffLayoutControl(): ReactElement {
                   onClick={() => chooseLayout(option)}
                 >
                   <Icon />
-                  <span>{label}</span>
+                  <span>{korean ? (option === "unified" ? "한 열" : "나란히") : label}</span>
                 </button>
               ))}
             </div>
+            <p className="review-diff-settings-note">
+              {korean ? "좁은 창에서는 한 열로 표시됩니다." : "Narrow windows show one code column."}
+            </p>
           </div>
         </div>
       ) : null}

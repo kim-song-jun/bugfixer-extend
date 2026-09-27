@@ -28,6 +28,7 @@ import { compactDiffCount } from "./diff-count";
 import { withErasedBlocks } from "./draw-queue";
 import { useMotionPhases } from "./draw-queue-provider";
 import { useReviewSession } from "./host/review-session";
+import { isKoreanReviewUi } from "./review-locale";
 import { useReviewLenses } from "./review-lenses";
 import {
   useBottomSheetResize,
@@ -38,12 +39,15 @@ import { ViewedButton } from "./viewed-button";
 
 export function DiffCounts({ progress }: { progress: CoverageProgress }) {
   const { remaining, total, folded } = progress;
+  const korean = isKoreanReviewUi();
 
   const tooltip = useTooltip<HTMLSpanElement>(
-    `+${remaining.additions} −${remaining.deletions} remaining`,
+    `+${remaining.additions} −${remaining.deletions}${korean ? " 남음" : " remaining"}`,
     {
       instant: true,
-      detail: `of +${total.additions} −${total.deletions} total${folded.additions + folded.deletions ? ` · +${folded.additions} −${folded.deletions} folded` : ""}`,
+      detail: korean
+        ? `전체 +${total.additions} −${total.deletions}${folded.additions + folded.deletions ? ` · 접힘 +${folded.additions} −${folded.deletions}` : ""}`
+        : `of +${total.additions} −${total.deletions} total${folded.additions + folded.deletions ? ` · +${folded.additions} −${folded.deletions} folded` : ""}`,
     },
   );
 
@@ -53,9 +57,9 @@ export function DiffCounts({ progress }: { progress: CoverageProgress }) {
       className={`diff-counts ${progress.state === "viewed" || progress.state === "folded" ? "is-viewed" : ""}`}
     >
       {progress.state === "viewed" ? (
-        "Viewed"
+        korean ? "확인함" : "Viewed"
       ) : progress.state === "folded" ? (
-        "Folded"
+        korean ? "접힘" : "Folded"
       ) : (
         <>
           <span className="diff-count-added">
@@ -78,6 +82,7 @@ export function ReviewDiffView({
   /** The path of a file to scroll to once the diff loads. */
   revealFile?: string;
 }) {
+  const korean = isKoreanReviewUi();
   const workspaceRef = useRef<HTMLDivElement>(null);
   const cabinetsRef = useRef<HTMLDivElement>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -106,7 +111,7 @@ export function ReviewDiffView({
     minWidth: 250,
     maxWidth: 800,
     minMainWidth: 320,
-    label: "Resize diff sidebar",
+    label: korean ? "변경 비교 사이드바 크기 조절" : "Resize diff sidebar",
     containerRef: workspaceRef,
   });
 
@@ -115,7 +120,7 @@ export function ReviewDiffView({
     defaultFraction: 0.45,
     minFraction: 0.2,
     maxFraction: 0.8,
-    label: "Resize lenses and files",
+    label: korean ? "필터와 파일 목록 높이 조절" : "Resize lenses and files",
     containerRef: cabinetsRef,
   });
 
@@ -219,14 +224,14 @@ export function ReviewDiffView({
           <span>
             {lenses.error &&
             !(lenses.progress && lenses.progress.complete !== false) ? (
-              "Counts unavailable"
+              korean ? "변경 수를 가져올 수 없음" : "Counts unavailable"
             ) : (
               <>
-                Remaining{" "}
+                {korean ? "남은 변경" : "Remaining"}{" "}
                 {lenses.progress && lenses.progress.complete !== false ? (
                   <DiffCounts progress={global} />
                 ) : (
-                  <span className="diff-counts" aria-label="Counting changes">
+                  <span className="diff-counts" aria-label={korean ? "변경 수 계산 중" : "Counting changes"}>
                     …
                   </span>
                 )}
@@ -237,11 +242,11 @@ export function ReviewDiffView({
             <span
               className="diff-progress-ring"
               role="progressbar"
-              aria-label="Changed lines viewed"
+              aria-label={korean ? "확인한 변경 줄" : "Changed lines viewed"}
               aria-valuenow={percent}
               aria-valuemin={0}
               aria-valuemax={100}
-              title={`${total - remaining} of ${total} changed lines viewed or folded`}
+              title={korean ? `전체 변경 ${total}줄 중 ${total - remaining}줄 확인 또는 접힘` : `${total - remaining} of ${total} changed lines viewed or folded`}
             >
               <svg width="18" height="18" viewBox="0 0 20 20">
                 <circle cx="10" cy="10" r="7" />
@@ -260,18 +265,19 @@ export function ReviewDiffView({
         <div className="diff-sidebar-cabinets" ref={cabinetsRef}>
           <div
             className="diff-sidebar-lenses"
-            aria-label="Lenses"
+            aria-label={korean ? "변경 필터" : "Lenses"}
             ref={setLensList}
             style={{ flexBasis: `${(1 - cabinetsResize.fraction) * 100}%` }}
           >
-            <div className="diff-sidebar-heading">Lenses</div>
+            <div className="diff-sidebar-heading">{korean ? "변경 필터" : "Lenses"}</div>
             <div className="diff-lens-hint">
-              Click any lens to filter the diff
+              {korean ? "필터를 선택해 변경 내용을 좁혀 보세요" : "Click any lens to filter the diff"}
             </div>
             {rows.items.map((item) => {
               const selected = lens?.id === item.id,
                 stats = lenses.stats(item.sources),
                 phase = rows.phases.get(item.id),
+                itemTitle = korean && item.title === "Uncategorized changes" ? "분류되지 않은 변경" : item.title,
                 // Nothing to filter to, so the row greys out; a lens already
                 // selected can still be cleared.
                 empty = !item.pending && item.fileCount === 0;
@@ -298,11 +304,11 @@ export function ReviewDiffView({
                         className="diff-lens-chip"
                         title={
                           item.unavailable ??
-                          (selected ? "Clear lens filter" : item.title)
+                          (selected ? (korean ? "필터 해제" : "Clear lens filter") : itemTitle)
                         }
                       >
                         <FilterIcon />
-                        <span className="diff-lens-name">{item.title}</span>
+                        <span className="diff-lens-name">{itemTitle}</span>
                         {selected && (
                           <span className="diff-lens-clear" aria-hidden="true">
                             <svg width="10" height="10" viewBox="0 0 10 10">
@@ -314,12 +320,12 @@ export function ReviewDiffView({
                       {item.pending ? (
                         <span
                           className="diff-counts"
-                          aria-label="Counting changes"
+                          aria-label={korean ? "변경 수 계산 중" : "Counting changes"}
                         >
                           …
                         </span>
                       ) : empty ? (
-                        <span className="diff-counts">0 files</span>
+                        <span className="diff-counts">{korean ? "파일 0개" : "0 files"}</span>
                       ) : (
                         <DiffCounts progress={stats} />
                       )}
@@ -329,7 +335,7 @@ export function ReviewDiffView({
                       disabled={
                         lenses.busy || !!item.unavailable || !!item.pending
                       }
-                      label={item.title}
+                      label={itemTitle}
                       onClick={() =>
                         void lenses.mark(
                           item.sources,
@@ -354,7 +360,7 @@ export function ReviewDiffView({
           />
           <div className="diff-sidebar-files">
             <div className="diff-sidebar-heading diff-files-heading">
-              Files <span aria-hidden="true">·</span>{" "}
+              {korean ? "파일" : "Files"} <span aria-hidden="true">·</span>{" "}
               {lenses.progress
                 ? lens
                   ? new Set(
@@ -368,7 +374,7 @@ export function ReviewDiffView({
                                 : file.path),
                           )?.path ?? source.file,
                       ),
-                    ).size + ` of ${lenses.progress.files.length}`
+                    ).size + (korean ? ` / ${lenses.progress.files.length}` : ` of ${lenses.progress.files.length}`)
                   : lenses.progress.files.length
                 : "…"}
             </div>

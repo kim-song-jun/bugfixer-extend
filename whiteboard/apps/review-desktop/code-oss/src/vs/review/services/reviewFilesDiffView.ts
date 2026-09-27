@@ -40,6 +40,7 @@ import { reviewMultiDiffLabelUris, ReviewMultiDiffUIElementFactory } from "./rev
 const FILE_TREE_MINIMUM_WIDTH = 180;
 const DIFF_MINIMUM_WIDTH = 320;
 const FILE_TREE_COLLAPSE_WIDTH = FILE_TREE_MINIMUM_WIDTH + DIFF_MINIMUM_WIDTH;
+const DIFF_SIDE_BY_SIDE_MIN_WIDTH = 720;
 const REVIEW_FILES_DIFF_EDITOR_OPTIONS = {
 	hideUnchangedRegions: { enabled: true },
 	originalEditable: false,
@@ -268,10 +269,11 @@ export class ReviewFilesDiffView extends Disposable {
 		this.widget = this._register(
 			this.reviewInstantiationService.createInstance(MultiDiffEditorWidget, diffContainer, factory, undefined),
 		);
-		// The widget's own switch, not the per-item option refresh: it pins the
-		// width heuristic off, so the chosen layout is what renders at any width.
-		const applyLayout = () => this.widget.setRenderSideBySide(!document && layout.get() === "split");
-		this._register(layout.onDidChange(applyLayout));
+		// Keep the chosen layout in roomy editors; a narrow Review canvas needs
+		// one readable code column even when the saved preference is split.
+		const applyLayout = (width = this.diffContainer.clientWidth) =>
+			this.widget.setRenderSideBySide(!document && layout.get() === "split" && width >= DIFF_SIDE_BY_SIDE_MIN_WIDTH);
+		this._register(layout.onDidChange(() => applyLayout()));
 		applyLayout();
 		if (document) {
 			this._register(this.widget.onDidChangeContentHeight(() => {
@@ -321,6 +323,7 @@ export class ReviewFilesDiffView extends Disposable {
 				element: diffContainer,
 				layout: (width, _offset, height) => {
 					diffContainer.style.width = `${width}px`;
+					applyLayout(width);
 					this.widget.layout(new Dimension(width, height ?? 0));
 				},
 				maximumSize: Number.POSITIVE_INFINITY,

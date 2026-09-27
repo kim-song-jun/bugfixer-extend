@@ -6,6 +6,7 @@ import type { ReviewDiffProgressState, ReviewDiffSection } from "../common/revie
  *--------------------------------------------------------------------------------------------*/
 
 import { Button } from "../../base/browser/ui/button/button.js";
+import { language } from "../../base/common/platform.js";
 import { isEqual } from "../../base/common/resources.js";
 import { URI } from "../../base/common/uri.js";
 import type {
@@ -157,12 +158,13 @@ export class ReviewMultiDiffUIElementFactory
     const openContainer = ownerDocument.createElement("span");
     openContainer.className = "review-multidiff-open-container";
     element.append(openContainer);
+    const openLabel = language.startsWith("ko") ? "파일 열기" : "Open file";
     const open = new Button(openContainer, {
-      ariaLabel: "Open File",
-      title: "Open File",
+      ariaLabel: openLabel,
+      title: openLabel,
       supportIcons: true,
     });
-		open.label = "Open file";
+		open.label = openLabel;
     open.element.classList.add("review-multidiff-open");
 		const countsTooltip = new ReviewTooltip(this.hoverService, counts);
 		const viewed = new ReviewViewedCheckbox(this.hoverService, ownerDocument, () => current?.onToggleViewed?.());

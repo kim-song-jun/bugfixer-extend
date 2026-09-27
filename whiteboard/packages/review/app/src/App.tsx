@@ -47,6 +47,7 @@ import { ReviewDocumentEmptyState } from "./review-document-empty-state";
 import { ReviewDocumentBoundary } from "./review-document-boundary";
 import { reportReviewDocumentRenderError } from "./review-document-error-report";
 import { ReviewUnavailable } from "./review-empty-state";
+import { isKoreanReviewUi } from "./review-locale";
 import {
   type ReviewFindHost,
   ReviewFindProvider,
@@ -341,14 +342,16 @@ function ReviewLayoutContent({
 }): ReactElement {
   const session = useReviewSession();
   const review = useReview();
+  const korean = isKoreanReviewUi();
+  const mapLabel = korean ? "지도 (실험 기능)" : "Map (Experimental)";
   // The scratchpad is a document and nothing else: no source tree to browse,
   // nothing to share, nothing to dismiss.
   const scratchpad = session.review?.kind === "scratchpad";
   useEffect(() => {
     if (scratchpad) captureUiEvent(session, "scratchpad_opened");
   }, [scratchpad, session]);
-  const discordTooltip = useTooltip("Join our Discord community");
-  const sourceTreeTooltip = useTooltip("Open full read-only source");
+  const discordTooltip = useTooltip(korean ? "Discord 커뮤니티 열기" : "Join our Discord community");
+  const sourceTreeTooltip = useTooltip(korean ? "읽기 전용 소스 보기" : "Open full read-only source");
   const panelStore = useReviewPanelStore();
   useSuppressPanelMotionOnCanvasResume(appRef);
   const activePanel = useReviewPanel((state) => state.active);
@@ -564,7 +567,7 @@ function ReviewLayoutContent({
               <div
                 className="review-segmented"
                 role="group"
-                aria-label="Session views"
+                aria-label={korean ? "리뷰 화면" : "Session views"}
               >
                 {reviewViews.map((view) => (
                   <button
@@ -572,11 +575,11 @@ function ReviewLayoutContent({
                     type="button"
                     aria-label={
                       view === "map"
-                        ? "Map (Experimental)"
+                        ? mapLabel
                         : reviewViewLabel(view)
                     }
                     aria-pressed={activeView === view}
-                    title={view === "map" ? "Map (Experimental)" : undefined}
+                    title={view === "map" ? mapLabel : undefined}
                     className={
                       activeView === view
                         ? "review-segment review-segment--active"
@@ -596,7 +599,7 @@ function ReviewLayoutContent({
                   >
                     {view === "review" ? (
                       <ReviewSurfaceLabel
-                        label={scratchpad ? "Scratchpad" : "Whiteboard"}
+                        label={scratchpad ? (korean ? "메모" : "Scratchpad") : reviewViewLabel("review")}
                         hasContent={
                           documentState.state === "ready" &&
                           documentState.document.empty === false
@@ -627,7 +630,7 @@ function ReviewLayoutContent({
                   <button
                     type="button"
                     className="review-open-source-tree"
-                    aria-label="Source tree ↗"
+                    aria-label={korean ? "소스 파일 보기" : "Source tree ↗"}
                     ref={sourceTreeTooltip}
                     onClick={() => {
                       captureUiEvent(session, "source_tree_opened", {
@@ -640,7 +643,7 @@ function ReviewLayoutContent({
                     }}
                   >
                     <span className="review-open-source-tree-label">
-                      Source tree
+                      {korean ? "소스 파일" : "Source tree"}
                     </span>
                     <span aria-hidden="true">↗</span>
                   </button>
@@ -664,7 +667,7 @@ function ReviewLayoutContent({
                 type="button"
                 className="review-topbar-icon-button"
                 ref={discordTooltip}
-                aria-label="Join our Discord community"
+                aria-label={korean ? "Discord 커뮤니티 열기" : "Join our Discord community"}
                 onClick={() => {
                   captureUiEvent(session, "discord_clicked", {
                     via: "topbar",
