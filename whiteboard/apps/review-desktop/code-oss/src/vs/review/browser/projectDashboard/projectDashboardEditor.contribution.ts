@@ -63,6 +63,11 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		const existing = this.editorGroupsService.groups
 			.flatMap(group => group.editors.map(editor => ({ editor, group })))
 			.find(({ editor }) => editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
+		if (existing && !activate) {
+			existing.group.moveEditor(existing.editor, existing.group, { index: 0 });
+			existing.group.pinEditor(existing.editor);
+			return;
+		}
 		const input = existing?.editor ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);
 		const targetGroup = existing?.group ?? this.editorGroupsService.activeGroup;
 		const activeEditor = this.editorGroupsService.activeGroup.activeEditor;
