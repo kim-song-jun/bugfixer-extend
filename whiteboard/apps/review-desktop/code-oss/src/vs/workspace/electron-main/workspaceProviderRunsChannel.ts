@@ -519,8 +519,8 @@ export class WorkspaceProviderRunsChannel {
 			? this.database.getOrdinaryFolderMutationGrant(scope.projectId, binding.id)
 			: undefined;
 		const permissionSummary = scope.providerId === 'codex'
-			? 'Codex workspace-write; --approve-for-me routes approval through automatic review.'
-			: 'Claude acceptEdits; permission prompts are disabled, so tools requiring extra permission are denied.';
+			? 'Codex workspace-write 모드 · --approve-for-me로 승인 요청을 자동 검토합니다.'
+			: 'Claude acceptEdits 모드 · 추가 권한 요청을 받지 않으며 더 높은 권한이 필요한 도구는 거부됩니다.';
 		let blockedReason: string | null = null;
 		if (parentAttemptId ? task.state !== 'inProgress' : task.state !== 'ready') { blockedReason = parentAttemptId ? 'Subagents require a task that remains In Progress.' : 'Task runs can start only while the task is in Ready.'; }
 		else if (process.platform !== 'darwin') { blockedReason = 'Task runs require the macOS native bound-checkout helper.'; }

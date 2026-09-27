@@ -306,8 +306,8 @@ export class WorkspaceConventionAgentChannel {
 		try { cliPath = this.providerExecutable(request.providerId); } catch { /* Surface a blocked preview instead of a path-resolution exception. */ }
 		const nodePath = request.providerId === 'codex' ? this.codexNodeExecutable() : undefined;
 		const permissionSummary = request.providerId === 'codex'
-			? 'Codex read-only sandbox; no automatic approval route is enabled.'
-			: 'Claude plan mode; permission prompts are disabled and edits are not allowed.';
+			? 'Codex 읽기 전용 샌드박스 · 자동 승인 경로를 사용하지 않습니다.'
+			: 'Claude plan 모드 · 권한 요청을 받지 않고 파일 수정도 허용하지 않습니다.';
 		const prompt = this.promptFor(request.providerId, request, task.title, references, convention);
 		let blockedReason: string | null = null;
 		if (request.providerId === 'codex') { blockedReason = 'Codex cannot currently guarantee reads are limited to the selected snapshots; choose Claude for reference-only convention work.'; }
