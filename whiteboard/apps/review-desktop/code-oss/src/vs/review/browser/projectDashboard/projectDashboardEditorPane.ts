@@ -2195,6 +2195,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const focusKey = activeElement?.dataset.focusKey ?? (document.activeElement === document.body ? this.lastFocusKey : undefined);
 		const focusSignature = activeElement && !focusId && !activeElement.dataset.focusKey ? this.focusSignature(activeElement) :
 			(document.activeElement === document.body ? this.lastFocusSignature : undefined);
+		const closedEmptyCreateSummary = activeElement?.tagName === 'SUMMARY' && !!activeElement.closest('.project-dashboard__form') &&
+			this.dashboard?.tasks.length === 0 && !this.createFormOpen && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft;
 		if (activeElement?.dataset.focusKey) this.lastFocusKey = activeElement.dataset.focusKey;
 		else if (activeElement) this.lastFocusKey = undefined;
 		if (focusSignature) this.lastFocusSignature = focusSignature;
@@ -2226,7 +2228,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					return;
 				}
 			}
-			const target = focusId ? this.root.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`) :
+			const target = closedEmptyCreateSummary ? this.root.querySelector<HTMLElement>('[data-focus-key="quick-create"]') :
+				focusId ? this.root.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`) :
 				focusKey ? [...this.root.querySelectorAll<HTMLElement>('[data-focus-key]')].find(element => element.dataset.focusKey === focusKey) :
 				focusSignature ? this.findFocusTarget(focusSignature) : undefined;
 			if (this.focusTaskDetailOnRender) {
@@ -2257,7 +2260,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			location.textContent = `작업 ${tasks.length}개 · 리뷰 대기 ${tasks.filter(task => task.state === 'review').length}개 · 실행 중 ${tasks.filter(task => task.state === 'inProgress').length}개`;
 			location.title = this.dashboard.folder.path;
 		} else location.textContent = '프로젝트 정보 불러오는 중';
-		if (this.dashboard) {
+		if (this.dashboard?.tasks.length) {
 			const create = heading.appendChild(createElement('button', 'project-dashboard__primary project-dashboard__header-create'));
 			create.type = 'button'; create.textContent = '새 작업'; create.disabled = !!this.taskMutationBusy;
 			create.dataset.focusKey = 'header-create';
@@ -2304,6 +2307,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		}
 
 		const next = shell.appendChild($('.project-dashboard__next'));
+		const emptyProject = this.dashboard.tasks.length === 0;
+		if (emptyProject) next.classList.add('project-dashboard__next--empty');
 		const nextCopy = next.appendChild($('.project-dashboard__next-copy'));
 		const nextAction = this.dashboard.nextAction;
 		const recommended = nextAction && this.dashboard.tasks.find(task => task.id === nextAction.taskId &&
@@ -2319,7 +2324,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			: nextTask ? columns.find(column => column.state === nextTask.state)?.label : undefined;
 		nextDescription.textContent = nextTask ? `${nextReason} · 선택하면 작업 상세 정보를 볼 수 있어요.` : allTasksDone
 			? '모든 작업을 마쳤어요. 새 작업을 추가해 계속 진행할 수 있어요.'
-			: '작업을 추가해 이 프로젝트의 진행 상황을 기록해 보세요.';
+			: '첫 작업을 만들면 대기·진행·검토·완료 단계별로 관리할 수 있어요.';
 		const nextActions = next.appendChild(createElement('div', 'project-dashboard__next-actions'));
 		const taskDetailLabel = !nextTask ? '작업 만들기'
 			: nextAction?.taskId === nextTask.id && nextAction.kind === 'attention' ? '확인할 작업 보기'
@@ -2344,7 +2349,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			openReview.addEventListener('click', () => void this.openPrimaryTaskReview(nextTask.id));
 		}
 
-		const emptyProject = this.dashboard.tasks.length === 0;
 		const boardHeader = shell.appendChild($('.project-dashboard__section-heading'));
 		const boardTitle = boardHeader.appendChild($('h2')); boardTitle.textContent = '작업 보드';
 		const count = boardHeader.appendChild($('span')); count.textContent = `작업 ${this.dashboard.tasks.length}개`;
@@ -3141,6 +3145,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	private renderCreateForm(shell: HTMLElement): void {
+		if (this.dashboard?.tasks.length === 0 && !this.createFormOpen && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft) return;
 		const details = shell.appendChild(createElement('details', 'project-dashboard__form'));
 		details.open = this.createFormOpen;
 		details.addEventListener('toggle', () => { this.createFormOpen = details.open; });

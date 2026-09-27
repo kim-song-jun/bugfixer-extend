@@ -425,7 +425,7 @@ const container = Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContai
 const descriptor: IViewDescriptor = {
 	id: 'workbench.view.devfast.projectSidebar.navigation',
 	containerIcon: Codicon.dashboard,
-	name: nls.localize2('projectSidebar.navigation', '프로젝트 탐색'),
+	name: nls.localize2('projectSidebar.navigation', '탐색'),
 	ctorDescriptor: new SyncDescriptor(ProjectSidebarView),
 	canToggleVisibility: false,
 	canMoveView: false,

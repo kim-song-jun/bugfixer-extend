@@ -44,6 +44,9 @@
 .project-dashboard__primary:hover { background: var(--dashboard-accent-hover); }
 .project-dashboard__next-actions > .project-dashboard__primary { border: 1px solid var(--dashboard-accent); color: var(--dashboard-accent); background: var(--dashboard-card); box-shadow: none; }
 .project-dashboard__next-actions > .project-dashboard__primary:hover { background: var(--dashboard-lane); }
+.project-dashboard__next--empty { min-height: 108px; padding: 20px 22px; }
+.project-dashboard__next--empty .project-dashboard__next-actions > .project-dashboard__primary { color: var(--dashboard-on-accent); background: var(--dashboard-accent); box-shadow: 0 1px 2px rgba(20, 55, 100, .14); }
+.project-dashboard__next--empty .project-dashboard__next-actions > .project-dashboard__primary:hover { background: var(--dashboard-accent-hover); }
 .project-dashboard__primary:focus-visible, .project-dashboard__secondary:focus-visible, .project-dashboard__provider-option:focus-visible, .project-dashboard__task:focus-visible, .project-dashboard__retry:focus-visible, .project-dashboard__close:focus-visible, .project-dashboard__form summary:focus-visible { outline: 2px solid #5B9FF5; outline-offset: 2px; }
 .project-dashboard__next-actions > button { min-height: 38px; }
 .project-dashboard__section-heading, .project-dashboard__lane-heading { display: flex; align-items: center; gap: 10px; }
