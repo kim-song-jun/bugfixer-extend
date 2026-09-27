@@ -126,10 +126,13 @@ function bundleESMTask(opts: IBundleESMTaskOpts): NodeJS.ReadWriteStream {
 			const externalOverride: esbuild.Plugin = {
 				name: 'external-override',
 				setup(build) {
-					// We inline selected modules that are we depend on on startup without
-					// a conditional `await import(...)` by hooking into the resolution.
+					// Static imports resolve before bootstrap installs the ASAR module loader.
+					// Inline startup dependencies that otherwise only exist in node_modules.asar.
 					build.onResolve({ filter: /^minimist$/ }, () => {
 						return { path: path.join(REPO_ROOT_PATH, 'node_modules', 'minimist', 'index.js'), external: false };
+					});
+					build.onResolve({ filter: /^eventsource-parser$/ }, () => {
+						return { path: path.join(REPO_ROOT_PATH, 'node_modules', 'eventsource-parser', 'dist', 'index.js'), external: false };
 					});
 				},
 			};
@@ -281,4 +284,3 @@ function getBuildTarget() {
 	const tsconfigPath = path.join(REPO_ROOT_PATH, 'src', 'tsconfig.base.json');
 	return getTargetStringFromTsConfig(tsconfigPath);
 }
-
