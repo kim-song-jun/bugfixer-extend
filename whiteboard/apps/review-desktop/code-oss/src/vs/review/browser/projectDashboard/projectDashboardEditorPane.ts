@@ -2062,20 +2062,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		clearNode(this.root);
 		const shell = this.root.appendChild($('.project-dashboard__shell'));
 		const heading = shell.appendChild($('.project-dashboard__heading'));
-		const headingCopy = heading.appendChild($('.project-dashboard__heading-copy'));
-		const eyebrow = headingCopy.appendChild($('.project-dashboard__eyebrow'));
+		const eyebrow = heading.appendChild($('.project-dashboard__eyebrow'));
 		eyebrow.textContent = '프로젝트 작업 공간';
-		const title = headingCopy.appendChild($('h1'));
+		const title = heading.appendChild($('h1'));
 		title.id = 'project-dashboard-title';
 		title.tabIndex = -1;
 		title.textContent = this.dashboard?.project.name ?? '프로젝트';
-		const location = headingCopy.appendChild($('.project-dashboard__location'));
+		const location = heading.appendChild($('.project-dashboard__location'));
 		location.textContent = this.dashboard?.folder.path ?? '프로젝트 정보 불러오는 중';
-		const createButton = heading.appendChild(createElement('button', 'project-dashboard__primary project-dashboard__heading-create'));
-		createButton.type = 'button'; createButton.textContent = '새 작업';
-		createButton.disabled = this.loading || !this.dashboard || !!this.taskMutationBusy;
-		createButton.addEventListener('click', () => this.openCreateTaskForm());
-
 		if (this.error) {
 			const banner = shell.appendChild($('.project-dashboard__error'));
 			banner.setAttribute('role', 'alert');
@@ -2135,7 +2129,12 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			? '모든 작업을 마쳤어요. 새 작업을 추가해 계속 진행할 수 있어요.'
 			: '작업을 추가해 이 프로젝트의 진행 상황을 기록해 보세요.';
 		const nextActions = next.appendChild(createElement('div', 'project-dashboard__next-actions'));
-		const quickButton = nextActions.appendChild(createElement('button', 'project-dashboard__primary')); quickButton.type = 'button'; quickButton.textContent = nextTask ? '작업 열기' : '작업 만들기';
+		const taskDetailLabel = !nextTask ? '작업 만들기'
+			: nextAction?.taskId === nextTask.id && nextAction.kind === 'attention' ? '확인할 작업 보기'
+			: nextTask.state === 'review' ? '검토할 작업 보기'
+			: nextTask.state === 'inProgress' ? '진행 중 작업 보기'
+			: '대기 작업 보기';
+		const quickButton = nextActions.appendChild(createElement('button', 'project-dashboard__primary')); quickButton.type = 'button'; quickButton.textContent = taskDetailLabel;
 		quickButton.disabled = !!this.taskMutationBusy;
 		quickButton.dataset.focusKey = 'quick-create';
 		quickButton.addEventListener('click', () => {
