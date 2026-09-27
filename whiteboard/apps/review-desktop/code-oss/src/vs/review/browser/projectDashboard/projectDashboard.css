@@ -248,6 +248,7 @@
 .project-dashboard__connector-account-main strong { font-size: 12px; overflow-wrap: anywhere; }
 .project-dashboard__connector-account-main span { color: var(--dashboard-muted); font-size: 12px; overflow-wrap: anywhere; }
 .project-dashboard__connector-connect, .project-dashboard__connector-import { display: grid; gap: 7px; max-width: 620px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dashboard-line); }
+.project-dashboard__connector-import > [hidden] { display: none; }
 .project-dashboard__connector-notion-label { display: grid; gap: 7px; }
 .project-dashboard__connector-notion-label[hidden], .project-dashboard__connector-notion-disclosure[hidden] { display: none; }
 .project-dashboard__connector-notion-disclosure { margin-bottom: 0; }

@@ -24,6 +24,7 @@ import { WORKSPACE_E2E_CHANNEL, type WorkspaceE2eEvidenceDTO, type WorkspaceE2eS
 import { WORKSPACE_CONVENTION_AGENT_CHANNEL, type ConventionAgentPreviewDTO, type ConventionAgentResultDTO } from '../../../workspace/common/workspaceConventionAgentProtocol.js';
 import { WORKSPACE_REVIEW_BRIDGE_CHANNEL, type WorkspaceTaskReviewLink, type TaskReviewAvailability, type TaskReviewOpenResult } from '../../../workspace/common/workspaceReviewBridgeProtocol.js';
 import { IReviewCanvasEditorTabsService } from '../../services/reviewCanvasEditorTabsService.js';
+import { parseNotionPageInput } from './notionPageInput.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
 import { getPackageRefreshCandidates, type PackageRefreshCandidate } from './packageRefreshCandidates.js';
 import { setProjectSidebarSection } from './projectSidebar.contribution.js';
@@ -664,25 +665,52 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		for (const account of this.connectorAccounts.filter(item => item.state === 'active')) { const option = accountSelect.appendChild($('option') as HTMLOptionElement); option.value = account.id; option.textContent = `${account.provider === 'slack' ? 'Slack' : 'Notion'} · ${account.label}`; }
 		accountSelect.value = this.connectorImportAccountId;
 		const selectedAccount = () => this.connectorAccounts.find(item => item.id === accountSelect.value && item.state === 'active');
-		accountSelect.addEventListener('change', () => { this.connectorImportAccountId = accountSelect.value; messageTsField.hidden = selectedAccount()?.provider !== 'slack'; clearReview(); });
-		const idLabel = importForm.appendChild(createElement('label')); idLabel.htmlFor = 'connector-remote-id'; idLabel.textContent = 'Slack 채널 ID 또는 Notion 페이지 ID';
-		const remoteId = importForm.appendChild(createElement('input')); remoteId.id = 'connector-remote-id'; remoteId.required = true; remoteId.autocomplete = 'off'; remoteId.placeholder = 'Slack: C… · Notion: 페이지 UUID'; remoteId.value = this.connectorImportIdDraft; remoteId.disabled = this.connectorBusy || !this.connectorAccounts.some(account => account.state === 'active'); remoteId.dataset.focusKey = 'connector-remote-id'; remoteId.addEventListener('input', () => { this.connectorImportIdDraft = remoteId.value; clearReview(); });
+		const idLabel = importForm.appendChild(createElement('label')); idLabel.htmlFor = 'connector-remote-id';
+		const remoteId = importForm.appendChild(createElement('input')); remoteId.id = 'connector-remote-id'; remoteId.required = true; remoteId.autocomplete = 'off'; remoteId.value = this.connectorImportIdDraft; remoteId.disabled = this.connectorBusy || !selectedAccount(); remoteId.dataset.focusKey = 'connector-remote-id'; remoteId.addEventListener('input', () => { this.connectorImportIdDraft = remoteId.value; remoteId.setCustomValidity(''); clearReview(); });
 		const messageTsField = importForm.appendChild(createElement('div')); messageTsField.hidden = selectedAccount()?.provider !== 'slack';
 		const messageTsLabel = messageTsField.appendChild(createElement('label')); messageTsLabel.htmlFor = 'connector-slack-message-ts'; messageTsLabel.textContent = 'Slack 메시지 타임스탬프 (선택)';
 		const messageTs = messageTsField.appendChild(createElement('input')); messageTs.id = 'connector-slack-message-ts'; messageTs.type = 'text'; messageTs.autocomplete = 'off'; messageTs.placeholder = '1712345678.123456'; messageTs.value = this.connectorImportMessageTsDraft; messageTs.disabled = this.connectorBusy; messageTs.dataset.focusKey = 'connector-slack-message-ts'; messageTs.addEventListener('input', () => { this.connectorImportMessageTsDraft = messageTs.value; clearReview(); });
 		const messageTsHelp = messageTsField.appendChild($('p')); messageTsHelp.className = 'project-dashboard__connector-note'; messageTsHelp.textContent = '비워 두면 채널 대화를 가져옵니다. 메시지 타임스탬프를 입력하면 해당 메시지와 스레드 답글을 가져옵니다.';
-		const titleLabel = importForm.appendChild(createElement('label')); titleLabel.htmlFor = 'connector-import-title'; titleLabel.textContent = '제목 (Slack은 선택)';
+		const titleLabel = importForm.appendChild(createElement('label')); titleLabel.htmlFor = 'connector-import-title'; titleLabel.textContent = '제목 (선택)';
 		const remoteTitle = importForm.appendChild(createElement('input')); remoteTitle.id = 'connector-import-title'; remoteTitle.value = this.connectorImportTitleDraft; remoteTitle.disabled = this.connectorBusy; remoteTitle.dataset.focusKey = 'connector-import-title'; remoteTitle.addEventListener('input', () => { this.connectorImportTitleDraft = remoteTitle.value; clearReview(); });
 		const importActions = importForm.appendChild($('.project-dashboard__form-actions'));
-		const doImport = importActions.appendChild(createElement('button', 'project-dashboard__primary')); doImport.type = 'submit'; doImport.disabled = this.connectorBusy || !this.connectorImportAccountId || !this.connectorAccounts.some(account => account.id === this.connectorImportAccountId && account.state === 'active'); doImport.textContent = this.connectorPreviewLoading ? '미리보기 불러오는 중…' : '자료 미리보기';
+		const doImport = importActions.appendChild(createElement('button', 'project-dashboard__primary')); doImport.type = 'submit'; doImport.textContent = this.connectorPreviewLoading ? '미리보기 불러오는 중…' : '자료 미리보기';
+		const updateImportFields = () => {
+			const provider = selectedAccount()?.provider;
+			idLabel.textContent = provider === 'notion' ? 'Notion 페이지 링크 또는 UUID' : provider === 'slack' ? 'Slack 채널 ID' : 'Slack 채널 ID 또는 Notion 페이지 링크';
+			remoteId.placeholder = provider === 'notion' ? 'Notion에서 복사한 페이지 링크 또는 UUID' : 'Slack 채널 ID (C…)';
+			remoteId.disabled = this.connectorBusy || !provider;
+			remoteId.setCustomValidity('');
+			messageTsField.hidden = provider !== 'slack';
+			titleLabel.hidden = provider !== 'slack';
+			remoteTitle.hidden = provider !== 'slack';
+			doImport.disabled = this.connectorBusy || !provider;
+		};
+		accountSelect.addEventListener('change', () => {
+			this.connectorImportAccountId = accountSelect.value;
+			this.connectorImportIdDraft = ''; remoteId.value = '';
+			this.connectorImportMessageTsDraft = ''; messageTs.value = '';
+			this.connectorImportTitleDraft = ''; remoteTitle.value = '';
+			updateImportFields(); clearReview();
+		});
+		updateImportFields();
 		importForm.addEventListener('submit', event => {
 			event.preventDefault();
 			const account = selectedAccount(); const externalId = remoteId.value.trim();
 			if (!projectId || !account || !externalId) return;
-			const messageTimestamp = messageTs.value.trim();
-			const request: ConnectorPreviewRequest = account.provider === 'slack'
-				? { command: 'previewSlackConversation', payload: { projectId, accountId: account.id, channelId: externalId, title: remoteTitle.value.trim() || undefined, ...(messageTimestamp ? { messageTs: messageTimestamp } : {}) } }
-				: { command: 'previewNotionPage', payload: { projectId, accountId: account.id, pageId: externalId } };
+			let request: ConnectorPreviewRequest;
+			if (account.provider === 'notion') {
+				const pageId = parseNotionPageInput(externalId);
+				if (!pageId) {
+					remoteId.setCustomValidity('Notion에서 복사한 페이지 링크 또는 페이지 UUID를 입력해 주세요.');
+					remoteId.reportValidity();
+					return;
+				}
+				request = { command: 'previewNotionPage', payload: { projectId, accountId: account.id, pageId } };
+			} else {
+				const messageTimestamp = messageTs.value.trim();
+				request = { command: 'previewSlackConversation', payload: { projectId, accountId: account.id, channelId: externalId, title: remoteTitle.value.trim() || undefined, ...(messageTimestamp ? { messageTs: messageTimestamp } : {}) } };
+			}
 			void this.requestConnectorPreview(request);
 		});
 		if (this.connectorPreviewLoading) { const loading = previewRegion.appendChild($('.project-dashboard__status')); loading.setAttribute('role', 'status'); loading.textContent = '자료 미리보기 불러오는 중…'; }
