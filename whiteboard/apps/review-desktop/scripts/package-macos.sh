@@ -9,7 +9,52 @@ MONOREPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 APP_DIR="$MONOREPO_ROOT/apps/review-desktop"
 CHECKOUT="$APP_DIR/code-oss"
 PRODUCT_NAME="$(node -p "require('$CHECKOUT/product.json').nameShort")"
-PACKAGED_APP="$APP_DIR/VSCode-darwin-arm64/$PRODUCT_NAME.app"
+PACKAGE_ROOT="$APP_DIR"
+if [[ ${REVIEW_DESKTOP_PACKAGE_ROOT+x} ]]; then
+  if [[ ! "$REVIEW_DESKTOP_PACKAGE_ROOT" = /* ]]; then
+    echo "REVIEW_DESKTOP_PACKAGE_ROOT must be an absolute path" >&2
+    exit 2
+  fi
+  if [[ "${SKIP_NOTARIZE:-0}" != "1" ]]; then
+    echo "REVIEW_DESKTOP_PACKAGE_ROOT requires SKIP_NOTARIZE=1; signing and notarization use the fixed release output" >&2
+    exit 2
+  fi
+  PACKAGE_ROOT="$(node -e '
+    const fs = require("fs");
+    const path = require("path");
+    function canonicalize(candidate) {
+      let current = path.resolve(candidate);
+      const suffix = [];
+      while (!fs.existsSync(current)) {
+        suffix.unshift(path.basename(current));
+        const parent = path.dirname(current);
+        if (parent === current) throw new Error(`No existing parent for ${candidate}`);
+        current = parent;
+      }
+      return path.resolve(fs.realpathSync(current), ...suffix);
+    }
+    function overlaps(left, right) {
+      const inside = (candidate, parent) => {
+        const relative = path.relative(parent, candidate);
+        return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+      };
+      return inside(left, right) || inside(right, left);
+    }
+    const outputRoot = canonicalize(process.argv[1]);
+    const activeOutput = canonicalize(path.join(process.argv[2], "VSCode-darwin-arm64"));
+    const home = canonicalize(process.env.HOME);
+    if (outputRoot === path.parse(outputRoot).root || outputRoot === home) {
+      throw new Error(`REVIEW_DESKTOP_PACKAGE_ROOT is too broad: ${outputRoot}`);
+    }
+    const packageOutput = path.resolve(outputRoot, "VSCode-darwin-arm64");
+    if (overlaps(packageOutput, activeOutput)) {
+      throw new Error(`REVIEW_DESKTOP_PACKAGE_ROOT overlaps the active package output: ${activeOutput}`);
+    }
+    process.stdout.write(outputRoot);
+  ' "$REVIEW_DESKTOP_PACKAGE_ROOT" "$APP_DIR")"
+  export REVIEW_DESKTOP_PACKAGE_ROOT="$PACKAGE_ROOT"
+fi
+PACKAGED_APP="$PACKAGE_ROOT/VSCode-darwin-arm64/$PRODUCT_NAME.app"
 PACKAGED_BINARY="$PACKAGED_APP/Contents/MacOS/$PRODUCT_NAME"
 
 # shellcheck source=darwin-payload-manifest.sh

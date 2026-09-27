@@ -43,6 +43,52 @@ const rcedit = promisify(rceditCallback);
 const root = path.dirname(import.meta.dirname);
 const commit = getVersion(root);
 
+function isSameOrChildPath(candidate: string, parent: string): boolean {
+	const relative = path.relative(parent, candidate);
+	return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function canonicalizePath(candidate: string): string {
+	let current = path.resolve(candidate);
+	const suffix: string[] = [];
+	while (!fs.existsSync(current)) {
+		suffix.unshift(path.basename(current));
+		const parent = path.dirname(current);
+		if (parent === current) {
+			throw new Error(`No existing parent for ${candidate}`);
+		}
+		current = parent;
+	}
+	return path.resolve(fs.realpathSync(current), ...suffix);
+}
+
+function resolvePackageOutputRoot(): string {
+	const configuredRoot = process.env['REVIEW_DESKTOP_PACKAGE_ROOT'];
+	if (configuredRoot === undefined) {
+		return path.dirname(root);
+	}
+	if (!path.isAbsolute(configuredRoot)) {
+		throw new Error('REVIEW_DESKTOP_PACKAGE_ROOT must be an absolute path');
+	}
+
+	const outputRoot = canonicalizePath(configuredRoot);
+	const filesystemRoot = path.parse(outputRoot).root;
+	if (outputRoot === filesystemRoot || outputRoot === canonicalizePath(process.env['HOME'] || '')) {
+		throw new Error(`REVIEW_DESKTOP_PACKAGE_ROOT is too broad: ${outputRoot}`);
+	}
+
+	const defaultDarwinArm64Output = canonicalizePath(path.resolve(path.dirname(root), 'VSCode-darwin-arm64'));
+	const overriddenDarwinArm64Output = canonicalizePath(path.resolve(outputRoot, 'VSCode-darwin-arm64'));
+	if (isSameOrChildPath(overriddenDarwinArm64Output, defaultDarwinArm64Output)
+		|| isSameOrChildPath(defaultDarwinArm64Output, overriddenDarwinArm64Output)) {
+		throw new Error(`REVIEW_DESKTOP_PACKAGE_ROOT must not overlap the active package output: ${defaultDarwinArm64Output}`);
+	}
+
+	return outputRoot;
+}
+
+const packageOutputRoot = resolvePackageOutputRoot();
+
 // Build
 const vscodeEntryPoints = [
 	buildfile.workerEditor,
@@ -218,7 +264,7 @@ function computeChecksum(filename: string): string {
 }
 
 function packageTask(platform: string, arch: string, sourceFolderName: string, destinationFolderName: string, _opts?: { stats?: boolean }) {
-	const destination = path.join(path.dirname(root), destinationFolderName);
+	const destination = path.join(packageOutputRoot, destinationFolderName);
 	platform = platform || process.platform;
 
 	const task = () => {
@@ -596,7 +642,7 @@ function patchWin32DependenciesTask(destinationFolderName: string) {
 	};
 }
 
-const buildRoot = path.dirname(root);
+const buildRoot = packageOutputRoot;
 
 const BUILD_TARGETS = [
 	{ platform: 'win32', arch: 'x64' },
