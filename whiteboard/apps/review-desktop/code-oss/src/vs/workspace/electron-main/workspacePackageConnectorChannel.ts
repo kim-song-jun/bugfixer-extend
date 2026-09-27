@@ -86,15 +86,20 @@ export class WorkspacePackageConnectorChannel {
 					approveDeclarativePackage(validated, request.approval);
 					if (!await this.confirmInstall(sender, review)) { throw new Error('Connector package installation was cancelled.'); }
 					await this.dashboardChannel.call<WorkspaceDashboardDTO>(sender, 'getDashboard', projectId);
+					const existing = this.database.getInstalledConnectorPackage(projectId, validated.manifest.packageId);
+					if (existing && existing.manifestDigest !== validated.manifestDigest) {
+						for (const connection of this.database.listPackageConnections(projectId, existing.packageId)) {
+							if (connection.manifestDigest !== validated.manifestDigest && connection.state !== 'disconnected') {
+								await this.cleanupConnection(connection);
+							}
+						}
+					}
 					const saved = this.database.saveInstalledConnectorPackage({
 						projectId, packageId: validated.manifest.packageId, version: validated.manifest.version, name: validated.manifest.name,
 						fingerprint: validated.fingerprint, manifestDigest: validated.manifestDigest,
 						manifestBytesBase64: request.envelope.manifestBytesBase64,
 						signatureBase64: request.envelope.signatureBase64, publicKeyBase64: request.envelope.publicKeyBase64,
 					});
-					for (const connection of this.database.listPackageConnections(projectId, saved.packageId)) {
-						if (connection.manifestDigest !== saved.manifestDigest && connection.state !== 'disconnected') { await this.cleanupConnection(connection); }
-					}
 					this.ensureAnonymousConnection(projectId, saved, validated);
 					this.invalidatePreviews(projectId, saved.packageId);
 					return this.installedDTO(saved);
@@ -313,8 +318,17 @@ export class WorkspacePackageConnectorChannel {
 			projectId, packageId: request.packageId, manifestDigest: installed.manifestDigest, host: request.host,
 			grantedScopes: request.grantedScopes, label: request.label, authKind: 'bearer-token',
 		});
-		await this.getVault().put('declarative-package', connection.accountRef, request.credential);
-		return this.connectionDTO(this.database.activatePackageConnection(projectId, request.packageId, connection.accountRef));
+		try {
+			await this.getVault().put('declarative-package', connection.accountRef, request.credential);
+			return this.connectionDTO(this.database.activatePackageConnection(projectId, request.packageId, connection.accountRef));
+		} catch (error) {
+			try {
+				await this.cleanupConnection(connection);
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], 'Package account setup failed and Keychain cleanup is pending. Retry cleanup before reconnecting.');
+			}
+			throw error;
+		}
 	}
 
 	private async cleanupConnection(connection: DeclarativePackageConnection): Promise<DeclarativePackageConnection> {

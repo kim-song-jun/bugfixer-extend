@@ -203,3 +203,177 @@ test('signed package install requires native consent, pins updates, and imports 
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+test('failed package account setup cleans Keychain state or leaves a retryable cleanup state', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-package-connection-failure-'));
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	try {
+		const descriptor = URI.file(join(directory, 'one.code-workspace')).toString();
+		const project = database.createProjectWorkspace('One', directory, descriptor);
+		const sender = { id: 11 } as WebContents;
+		const projectWindow = {
+			config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } },
+			openedWorkspace: { configPath: URI.parse(descriptor) },
+		} as unknown as ICodeWindow;
+		const windows = { getWindowByWebContents: () => projectWindow } as unknown as IWindowsMainService;
+		const key = generateKeyPairSync('ed25519');
+		const bytes = Buffer.from(JSON.stringify({
+			schemaVersion: 1, packageId: 'example-private', version: '1.0.0', name: 'Private issues', description: 'Selected private issue records.',
+			domains: ['api.example.org'], accountAccess: 'bearer-token', requestedScopes: ['issues:read'],
+			sources: [{ sourceId: 'issues', label: 'Issues', domain: 'api.example.org', path: '/issues/{sourceKey}', textPaths: ['title'], requiredScope: 'issues:read' }],
+		}));
+		const publicDer = Buffer.from(key.publicKey.export({ type: 'spki', format: 'der' }));
+		const envelope: WorkspaceSignedPackageEnvelope = {
+			manifestBytesBase64: bytes.toString('base64'), signatureBase64: sign(null, bytes, key.privateKey).toString('base64'),
+			publicKeyBase64: publicDer.subarray(-32).toString('base64'),
+		};
+		const secrets = new Map<string, string>();
+		let failPut = true;
+		let failDelete = false;
+		const vault = {
+			put: async (_service: string, accountRef: string, credential: string) => {
+				if (failPut) { throw new Error('injected put failure'); }
+				secrets.set(accountRef, credential);
+			},
+			get: async (_service: string, accountRef: string) => secrets.get(accountRef),
+			delete: async (_service: string, accountRef: string) => {
+				if (failDelete) { throw new Error('injected delete failure'); }
+				secrets.delete(accountRef);
+			},
+		};
+		const channel = new WorkspacePackageConnectorChannel(
+			database, new WorkspaceDashboardChannel(database, windows), async () => true,
+			() => ({ get: async () => ({}) }), Date.now, () => vault, async () => true,
+		);
+		const review = await channel.call<WorkspacePackageReviewDTO>(sender, 'reviewPackage', { projectId: project.project.id, envelope });
+		const approval = { packageId: review.packageId, version: review.version, fingerprint: review.fingerprint, manifestDigest: review.manifestDigest };
+		await channel.call(sender, 'installPackage', { projectId: project.project.id, envelope, approval });
+		const connectRequest = {
+			projectId: project.project.id, packageId: review.packageId, host: 'api.example.org', label: 'Put failure',
+			credential: 'review-token-71a920', grantedScopes: ['issues:read'],
+		};
+
+		await assert.rejects(channel.call(sender, 'connectPackageConnection', connectRequest), /injected put failure/);
+		let accounts = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: review.packageId,
+		});
+		assert.equal(accounts[0].state, 'disconnected', 'a failed Keychain put is followed by successful cleanup');
+		assert.equal(secrets.size, 0);
+
+		failPut = false;
+		const activate = database.activatePackageConnection.bind(database);
+		database.activatePackageConnection = (() => { throw new Error('injected activation failure'); }) as typeof database.activatePackageConnection;
+		try {
+			await assert.rejects(channel.call(sender, 'connectPackageConnection', { ...connectRequest, label: 'Activation failure' }), /injected activation failure/);
+		} finally {
+			database.activatePackageConnection = activate;
+		}
+		accounts = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: review.packageId,
+		});
+		assert.equal(accounts.find(account => account.label === 'Activation failure')?.state, 'disconnected', 'an activation failure removes the already written Keychain item');
+		assert.equal(secrets.size, 0);
+
+		failPut = true;
+		failDelete = true;
+		await assert.rejects(channel.call(sender, 'connectPackageConnection', { ...connectRequest, label: 'Cleanup failure' }), /cleanup is pending/i);
+		accounts = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: review.packageId,
+		});
+		const cleanupPending = accounts.find(account => account.label === 'Cleanup failure')!;
+		assert.equal(cleanupPending.state, 'disconnecting', 'failed cleanup stays visible and retryable');
+		assert.doesNotMatch(JSON.stringify(cleanupPending), /review-token-71a920/);
+		failDelete = false;
+		const recovered = await channel.call<WorkspacePackageConnectionDTO>(sender, 'retryPackageConnectionCleanup', {
+			projectId: project.project.id, packageId: review.packageId, connectionId: cleanupPending.connectionId,
+		});
+		assert.equal(recovered.state, 'disconnected');
+		assert.equal(secrets.size, 0);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('failed old account deletion keeps the previous package manifest installed and permits cleanup retry', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-package-update-failure-'));
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	try {
+		const descriptor = URI.file(join(directory, 'one.code-workspace')).toString();
+		const project = database.createProjectWorkspace('One', directory, descriptor);
+		const sender = { id: 12 } as WebContents;
+		const projectWindow = {
+			config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } },
+			openedWorkspace: { configPath: URI.parse(descriptor) },
+		} as unknown as ICodeWindow;
+		const windows = { getWindowByWebContents: () => projectWindow } as unknown as IWindowsMainService;
+		const key = generateKeyPairSync('ed25519');
+		const envelopeFor = (version: string): WorkspaceSignedPackageEnvelope => {
+			const bytes = Buffer.from(JSON.stringify({
+				schemaVersion: 1, packageId: 'example-private', version, name: 'Private issues', description: 'Selected private issue records.',
+				domains: ['api.example.org'], accountAccess: 'bearer-token', requestedScopes: ['issues:read'],
+				sources: [{ sourceId: 'issues', label: 'Issues', domain: 'api.example.org', path: '/issues/{sourceKey}', textPaths: ['title'], requiredScope: 'issues:read' }],
+			}));
+			const publicDer = Buffer.from(key.publicKey.export({ type: 'spki', format: 'der' }));
+			return {
+				manifestBytesBase64: bytes.toString('base64'), signatureBase64: sign(null, bytes, key.privateKey).toString('base64'),
+				publicKeyBase64: publicDer.subarray(-32).toString('base64'),
+			};
+		};
+		const secrets = new Map<string, string>();
+		let failDeleteFor: string | undefined;
+		const vault = {
+			put: async (_service: string, accountRef: string, credential: string) => { secrets.set(accountRef, credential); },
+			get: async (_service: string, accountRef: string) => secrets.get(accountRef),
+			delete: async (_service: string, accountRef: string) => {
+				if (accountRef === failDeleteFor) { throw new Error('injected account deletion failure'); }
+				secrets.delete(accountRef);
+			},
+		};
+		const channel = new WorkspacePackageConnectorChannel(
+			database, new WorkspaceDashboardChannel(database, windows), async () => true,
+			() => ({ get: async () => ({}) }), Date.now, () => vault, async () => true,
+		);
+		const first = envelopeFor('1.0.0');
+		const firstReview = await channel.call<WorkspacePackageReviewDTO>(sender, 'reviewPackage', { projectId: project.project.id, envelope: first });
+		const firstApproval = { packageId: firstReview.packageId, version: firstReview.version, fingerprint: firstReview.fingerprint, manifestDigest: firstReview.manifestDigest };
+		await channel.call(sender, 'installPackage', { projectId: project.project.id, envelope: first, approval: firstApproval });
+		for (const label of ['Account one', 'Account two']) {
+			await channel.call(sender, 'connectPackageConnection', {
+				projectId: project.project.id, packageId: firstReview.packageId, host: 'api.example.org', label,
+				credential: 'review-token-71a920', grantedScopes: ['issues:read'],
+			});
+		}
+		const connections = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: firstReview.packageId,
+		});
+		assert.equal(connections.length, 2);
+		failDeleteFor = connections[1].connectionId;
+		const next = envelopeFor('2.0.0');
+		const nextReview = await channel.call<WorkspacePackageReviewDTO>(sender, 'reviewPackage', { projectId: project.project.id, envelope: next });
+		const nextApproval = { packageId: nextReview.packageId, version: nextReview.version, fingerprint: nextReview.fingerprint, manifestDigest: nextReview.manifestDigest };
+		await assert.rejects(channel.call(sender, 'installPackage', { projectId: project.project.id, envelope: next, approval: nextApproval }), /injected account deletion failure/);
+		assert.equal(database.getInstalledConnectorPackage(project.project.id, firstReview.packageId)?.version, '1.0.0', 'the new manifest is not persisted before all old credentials are removed');
+		let afterFailure = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: firstReview.packageId,
+		});
+		assert.equal(afterFailure.find(connection => connection.connectionId === connections[0].connectionId)?.state, 'disconnected');
+		assert.equal(afterFailure.find(connection => connection.connectionId === connections[1].connectionId)?.state, 'disconnecting');
+		assert.equal(secrets.size, 1);
+
+		failDeleteFor = undefined;
+		await channel.call(sender, 'retryPackageConnectionCleanup', {
+			projectId: project.project.id, packageId: firstReview.packageId, connectionId: connections[1].connectionId,
+		});
+		await channel.call(sender, 'installPackage', { projectId: project.project.id, envelope: next, approval: nextApproval });
+		assert.equal(database.getInstalledConnectorPackage(project.project.id, firstReview.packageId)?.version, '2.0.0');
+		assert.equal(secrets.size, 0);
+		afterFailure = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: firstReview.packageId,
+		});
+		assert.ok(afterFailure.every(connection => connection.state === 'disconnected'));
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
