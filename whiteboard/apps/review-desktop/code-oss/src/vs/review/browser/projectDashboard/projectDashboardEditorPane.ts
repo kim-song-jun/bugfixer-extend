@@ -124,6 +124,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private stateSaveRunning = false;
 	private stateSavePromise: Promise<void> | undefined;
 	private lastSavedDashboardPosition: string | null = null;
+	private boardScrollPosition = 0;
 	private dashboardStateError: string | undefined;
 	private pendingDashboardPosition: number | undefined;
 	private programmaticScrollTarget: number | undefined;
@@ -139,6 +140,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private knowledgeError: string | undefined;
 	private knowledgeMessage: string | undefined;
 	private knowledgeView: KnowledgeView = 'references';
+	private activeSection: 'dashboard' | KnowledgeView = 'dashboard';
 	private pendingSectionNavigation: 'dashboard' | KnowledgeView | undefined;
 	private connectorManagementOpen = false;
 	private focusTaskDetailOnRender = false;
@@ -218,14 +220,15 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (document.visibilityState === 'visible' && this.selectedTaskId) void this.loadAttempts();
 	};
 	private readonly persistScrollPosition = () => {
-		if (!this.inputActive) return;
+		if (!this.inputActive || this.activeSection !== 'dashboard' || this.taskView !== 'board') return;
 		if (this.programmaticScrollTarget !== undefined) {
 			this.programmaticScrollTarget = undefined;
 			if (this.programmaticScrollTimer) clearTimeout(this.programmaticScrollTimer);
 			this.programmaticScrollTimer = undefined;
 			return;
 		}
-		const position = Math.min(10_000_000, Math.max(0, Math.floor(this.root?.scrollTop ?? 0))).toString();
+		this.boardScrollPosition = Math.min(10_000_000, Math.max(0, Math.floor(this.root?.scrollTop ?? 0)));
+		const position = this.boardScrollPosition.toString();
 		if (position === this.lastSavedDashboardPosition && (!this.pendingDashboardState || this.pendingDashboardState.request.dashboardPosition === position)) return;
 		this.scheduleDashboardStateSave(true);
 	};
@@ -249,7 +252,15 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	navigateToSection(section: 'dashboard' | KnowledgeView): void {
-		if (section !== 'dashboard') this.knowledgeView = section;
+		if (this.activeSection === 'dashboard' && this.taskView === 'board') {
+			this.boardScrollPosition = Math.min(10_000_000, Math.max(0, Math.floor(this.root?.scrollTop ?? 0)));
+		}
+		this.activeSection = section;
+		if (section === 'dashboard') {
+			this.taskView = 'board';
+			this.pendingDashboardPosition = this.boardScrollPosition;
+		}
+		else this.knowledgeView = section;
 		this.pendingCreateTaskFocus = false;
 		setProjectSidebarSection(section);
 		this.pendingSectionNavigation = section;
@@ -258,16 +269,21 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	startTaskCreation(): void {
-		setProjectSidebarSection('dashboard');
 		this.openCreateTaskForm();
 	}
 
 	private openCreateTaskForm(): void {
+		this.activeSection = 'dashboard';
+		setProjectSidebarSection('dashboard');
 		this.createFormOpen = true;
 		this.pendingCreateTaskFocus = true;
 		this.pendingSectionNavigation = undefined;
+		this.pendingDashboardPosition = undefined;
 		if (this.taskView === 'board') this.render();
-		else this.setTaskView('board');
+		else {
+			this.setTaskView('board');
+			this.pendingCreateTaskFocus = true;
+		}
 	}
 
 	override async setInput(input: ProjectDashboardEditorInput, options: unknown, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -284,6 +300,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		await super.setInput(input, options as never, context, token);
 		this.inputActive = true;
 		this.stopPolling();
+		this.activeSection = 'dashboard';
+		setProjectSidebarSection('dashboard');
+		this.boardScrollPosition = 0;
 		this.taskView = 'board';
 		this.dashboard = undefined;
 		this.error = undefined;
@@ -365,7 +384,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const selectedTaskExists = (taskId: string | null | undefined) => !!taskId && this.dashboard!.tasks.some(task => task.id === taskId);
 			if (!selectedTaskExists(this.selectedTaskId)) this.selectedTaskId = selectedTaskExists(this.dashboard.view.selectedTaskId) ? this.dashboard.view.selectedTaskId! : undefined;
 			const savedPosition = this.dashboard.view.dashboardPosition;
-			this.pendingDashboardPosition = savedPosition === null ? undefined : Math.min(10_000_000, Number(savedPosition));
+			this.boardScrollPosition = savedPosition === null ? 0 : Math.min(10_000_000, Number(savedPosition));
+			this.pendingDashboardPosition = this.activeSection === 'dashboard' && this.taskView === 'board' && !this.pendingCreateTaskFocus
+				? this.boardScrollPosition : undefined;
 		} catch (error) {
 			this.error = this.errorMessage(error, '프로젝트를 불러오지 못했습니다. 다시 시도해 주세요.');
 		} finally {
@@ -1097,9 +1118,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const section = shell.appendChild($('.project-dashboard__knowledge'));
 		const heading = section.appendChild($('.project-dashboard__knowledge-heading'));
 		const copy = heading.appendChild($('.project-dashboard__knowledge-copy'));
-		const eyebrow = copy.appendChild($('.project-dashboard__eyebrow')); eyebrow.textContent = '프로젝트 자료';
-		const title = copy.appendChild($('h2')); title.textContent = '참고자료와 작업 규칙';
-		const description = copy.appendChild($('p')); description.textContent = '참고자료와 프로젝트 작업 규칙을 모아두고, 연결한 업무 도구의 자료도 가져오세요.';
+		const eyebrow = copy.appendChild($('.project-dashboard__eyebrow')); eyebrow.textContent = this.knowledgeView === 'references' ? '자료 연결' : '작업 기준';
+		const title = copy.appendChild($('h2')); title.textContent = this.knowledgeView === 'references' ? '참고자료' : '프로젝트 규칙';
+		const description = copy.appendChild($('p')); description.textContent = this.knowledgeView === 'references'
+			? '연결한 서비스에서 자료를 가져오고 작업에 연결하세요.'
+			: '참고자료를 바탕으로 규칙을 작성하고 검수하세요.';
 		const tabs = section.appendChild($('.project-dashboard__knowledge-tabs'));
 		tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '프로젝트 자료');
 		for (const [view, label] of [['references', '참고자료'], ['conventions', '작업 규칙']] as const) {
@@ -1107,10 +1130,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			tab.type = 'button'; tab.id = `knowledge-tab-${view}`; tab.setAttribute('role', 'tab');
 			tab.setAttribute('aria-selected', String(this.knowledgeView === view)); tab.setAttribute('aria-controls', 'project-knowledge-panel');
 			tab.tabIndex = this.knowledgeView === view ? 0 : -1; tab.textContent = label; tab.dataset.focusKey = `knowledge-tab:${view}`;
-			tab.addEventListener('click', () => { this.knowledgeView = view; setProjectSidebarSection(view); this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${view}`)?.focus({ preventScroll: true }); });
+			tab.addEventListener('click', () => { this.activeSection = view; this.knowledgeView = view; setProjectSidebarSection(view); this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${view}`)?.focus({ preventScroll: true }); });
 			tab.addEventListener('keydown', event => {
 				if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-				event.preventDefault(); this.knowledgeView = this.knowledgeView === 'references' ? 'conventions' : 'references';
+				event.preventDefault(); this.knowledgeView = this.knowledgeView === 'references' ? 'conventions' : 'references'; this.activeSection = this.knowledgeView;
 				setProjectSidebarSection(this.knowledgeView);
 				this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${this.knowledgeView}`)?.focus({ preventScroll: true });
 			});
@@ -1472,8 +1495,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			this.reviewLinks = []; this.reviewPendingCreates = []; this.reviewAvailability = 'unavailable'; this.reviewAvailabilityError = undefined;
 		}
 		this.reviewLinksTaskId=taskId;
-		try { const result=await ipcRenderer.invoke(WORKSPACE_REVIEW_BRIDGE_CHANNEL,'listTaskReviews',{projectId:this.projectId,taskId}) as TaskReviewAvailability; if(this.selectedTaskId!==taskId)return; this.reviewLinks=result.reviews; this.reviewPendingCreates=result.pendingCreates; this.reviewAvailability=result.state; this.reviewAvailabilityError=result.error ? this.errorMessage(new Error(result.error), 'Review 연결 정보를 불러오지 못했습니다.') : undefined; this.reviewLinksTaskId=this.selectedTaskId; }
-		catch(error) { this.reviewBridgeError=this.errorMessage(error,'작업 Review를 불러오지 못했습니다.'); }
+		try { const result=await ipcRenderer.invoke(WORKSPACE_REVIEW_BRIDGE_CHANNEL,'listTaskReviews',{projectId:this.projectId,taskId}) as TaskReviewAvailability; if(this.selectedTaskId!==taskId)return; this.reviewLinks=result.reviews; this.reviewPendingCreates=result.pendingCreates; this.reviewAvailability=result.state; this.reviewAvailabilityError=result.error ? this.errorMessage(new Error(result.error), '리뷰 연결 정보를 불러오지 못했습니다.') : undefined; this.reviewLinksTaskId=this.selectedTaskId; }
+		catch(error) { this.reviewBridgeError=this.errorMessage(error,'작업 리뷰를 불러오지 못했습니다.'); }
 		this.render();
 	}
 	private async mutateTaskReview(command: 'createTaskReview'|'choosePrimaryReview', reviewId?: string, retryCommandId?: string): Promise<void> {
@@ -1483,7 +1506,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const expectedRevision = this.dashboard?.tasks.find(task => task.id === taskId)?.revision;
 		if (command === 'choosePrimaryReview' && !reviewId) return;
 		if (command === 'choosePrimaryReview' && expectedRevision === undefined) {
-			this.reviewBridgeError = '대표 Review를 선택하기 전에 작업을 다시 불러오세요.';
+			this.reviewBridgeError = '대표 리뷰를 선택하기 전에 작업을 다시 불러오세요.';
 			this.render();
 			return;
 		}
@@ -1494,9 +1517,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const taskRefreshed = command !== 'choosePrimaryReview' || await this.refreshDashboard(false);
 			const listing=await ipcRenderer.invoke(WORKSPACE_REVIEW_BRIDGE_CHANNEL,'listTaskReviews',{projectId,taskId}) as TaskReviewAvailability;
 			if (this.projectId===projectId && this.selectedTaskId===taskId) {
-				this.reviewLinks=listing.reviews; this.reviewPendingCreates=listing.pendingCreates; this.reviewAvailability=listing.state; this.reviewAvailabilityError=listing.error ? this.errorMessage(new Error(listing.error), 'Review 연결 정보를 불러오지 못했습니다.') : undefined; this.reviewLinksTaskId=taskId;
-				if (taskRefreshed) this.reviewBridgeNotice=command==='createTaskReview'?'Review를 연결했습니다.':'대표 Review를 변경했습니다.';
-				else this.reviewBridgeError='대표 Review를 변경했지만 작업을 다시 불러오지 못했습니다. 다시 변경하기 전에 프로젝트를 다시 여세요.';
+				this.reviewLinks=listing.reviews; this.reviewPendingCreates=listing.pendingCreates; this.reviewAvailability=listing.state; this.reviewAvailabilityError=listing.error ? this.errorMessage(new Error(listing.error), '리뷰 연결 정보를 불러오지 못했습니다.') : undefined; this.reviewLinksTaskId=taskId;
+				if (taskRefreshed) this.reviewBridgeNotice=command==='createTaskReview'?'리뷰를 연결했습니다.':'대표 리뷰를 변경했습니다.';
+				else this.reviewBridgeError='대표 리뷰를 변경했지만 작업을 다시 불러오지 못했습니다. 다시 변경하기 전에 프로젝트를 다시 여세요.';
 			}
 		}
 		catch(error) {
@@ -1504,9 +1527,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const rawMessage = this.rawErrorMessage(error);
 				if (rawMessage.includes('changed since revision')) {
 					this.reviewBridgeError=await this.refreshDashboard(false)
-						? '다른 창에서 작업이 변경되었습니다. 최신 버전을 불러왔습니다. 대표 Review를 다시 선택하세요.'
+						? '다른 창에서 작업이 변경되었습니다. 최신 버전을 불러왔습니다. 대표 리뷰를 다시 선택하세요.'
 						: `다른 창에서 작업이 변경되었지만 최신 내용을 불러오지 못했습니다: ${this.providerError ?? '새로고침 실패'}`;
-				} else this.reviewBridgeError=this.errorMessage(error,'작업 Review를 업데이트하지 못했습니다.');
+				} else this.reviewBridgeError=this.errorMessage(error,'작업 리뷰를 업데이트하지 못했습니다.');
 				await this.loadTaskReviews();
 			}
 		}
@@ -1525,7 +1548,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			await this.reviewTabs.openTaskApiReview(taskId, verified.reviewId, verified.version, verified.title);
 		} catch (error) {
 			if (this.projectId === projectId && this.selectedTaskId === taskId) {
-				this.reviewBridgeError = this.errorMessage(error, '검증된 작업 Review를 열지 못했습니다.');
+				this.reviewBridgeError = this.errorMessage(error, '검증된 작업 리뷰를 열지 못했습니다.');
 				await this.loadTaskReviews();
 			}
 		} finally {
@@ -1545,13 +1568,13 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if (this.projectId !== projectId) return;
 			const primary = listing.reviews.find(link => link.isPrimary);
 			if (!primary || primary.state !== 'available' || listing.state !== 'available') {
-				throw new Error(listing.error || (primary ? '이 프로젝트에서 대표 Review를 사용할 수 없습니다.' : '이 작업에 대표 Review가 없습니다.'));
+				throw new Error(listing.error || (primary ? '이 프로젝트에서 대표 리뷰를 사용할 수 없습니다.' : '이 작업에 대표 리뷰가 없습니다.'));
 			}
 			const verified = await ipcRenderer.invoke(WORKSPACE_REVIEW_BRIDGE_CHANNEL, 'openTaskReview', { projectId, taskId, reviewId: primary.reviewId }) as TaskReviewOpenResult;
 			if (this.projectId !== projectId) return;
 			await this.reviewTabs.openTaskApiReview(taskId, verified.reviewId, verified.version, verified.title);
 		} catch (error) {
-			if (this.projectId === projectId) this.taskMutationError = this.errorMessage(error, '작업의 대표 Review를 열지 못했습니다.');
+			if (this.projectId === projectId) this.taskMutationError = this.errorMessage(error, '작업의 대표 리뷰를 열지 못했습니다.');
 		} finally {
 			this.reviewBridgeBusy = false;
 			this.render();
@@ -1560,7 +1583,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private scheduleDashboardStateSave(debounce = false): void {
 		if (!this.projectId) return;
 		if (this.stateSaveTimer) clearTimeout(this.stateSaveTimer);
-		const position = Math.min(10_000_000, Math.max(0, Math.floor(this.root?.scrollTop ?? 0))).toString();
+		if (this.activeSection === 'dashboard' && this.taskView === 'board') {
+			this.boardScrollPosition = Math.min(10_000_000, Math.max(0, Math.floor(this.root?.scrollTop ?? 0)));
+		}
+		const position = this.boardScrollPosition.toString();
 		const generation = ++this.stateSaveGeneration;
 		this.pendingDashboardState = { generation, request: {
 			projectId: this.projectId,
@@ -1611,7 +1637,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			this.preview = undefined;
 			this.attempts = [];
 			this.lastSavedDashboardPosition = dashboard.view.dashboardPosition;
-			this.pendingDashboardPosition = dashboard.view.dashboardPosition === null ? undefined : Math.min(10_000_000, Number(dashboard.view.dashboardPosition));
+			this.boardScrollPosition = dashboard.view.dashboardPosition === null ? 0 : Math.min(10_000_000, Number(dashboard.view.dashboardPosition));
+			this.pendingDashboardPosition = this.activeSection === 'dashboard' && this.taskView === 'board' && !this.pendingCreateTaskFocus
+				? this.boardScrollPosition : undefined;
 			this.dashboardStateError = `${this.dashboardStateError ?? '대시보드 상태를 저장하지 못했습니다.'} 마지막으로 저장한 보기를 표시합니다. 작업을 선택하거나 스크롤해 다시 시도하세요.`;
 			this.render();
 			if (this.selectedTaskId) void this.loadAttempts();
@@ -2011,8 +2039,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					this.root.querySelector<HTMLElement>(`#knowledge-tab-${section}`);
 				if (target) {
 					this.pendingSectionNavigation = undefined;
-					if (section === 'dashboard') this.root.scrollTop = 0;
-					else this.root.querySelector<HTMLElement>('.project-dashboard__knowledge')?.scrollIntoView({ block: 'start' });
+					if (section !== 'dashboard') this.root.querySelector<HTMLElement>('.project-dashboard__knowledge')?.scrollIntoView({ block: 'start' });
 					target.focus({ preventScroll: true });
 					return;
 				}
@@ -2069,6 +2096,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			return;
 		}
 		if (!this.dashboard) { restorePosition(); return; }
+		if (this.activeSection !== 'dashboard') {
+			this.renderKnowledge(shell);
+			restorePosition();
+			return;
+		}
 		this.renderTaskViewNavigation(shell);
 		if (this.taskMutationError) {
 			const error = shell.appendChild($('.project-dashboard__error')); error.setAttribute('role', 'alert'); error.textContent = this.taskMutationError;
@@ -2081,7 +2113,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		}
 		if (this.taskView !== 'board') {
 			this.renderLifecycleTasks(shell);
-			this.renderKnowledge(shell);
 			restorePosition();
 			return;
 		}
@@ -2098,7 +2129,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const nextTitle = nextCopy.appendChild($('h2')); nextTitle.textContent = nextTask?.title ?? (allTasksDone ? '모든 작업을 마쳤어요' : '아직 작업이 없어요');
 		const nextDescription = nextCopy.appendChild($('p'));
 		const nextReason = nextAction && recommended?.id === nextAction.taskId
-			? { attention: '확인이 필요한 실행이 있어요', review: nextAction.hasPassedE2eEvidence ? 'E2E 결과와 함께 검토하세요' : '결과를 검토하세요', running: '작업 진행 중', ready: '시작할 준비가 됐어요' }[nextAction.kind]
+			? { attention: '확인이 필요한 실행이 있어요', review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과와 함께 검토하세요' : '결과를 검토하세요', running: '작업 진행 중', ready: '시작할 준비가 됐어요' }[nextAction.kind]
 			: nextTask ? columns.find(column => column.state === nextTask.state)?.label : undefined;
 		nextDescription.textContent = nextTask ? `${nextReason} · 선택하면 작업 상세 정보를 볼 수 있어요.` : allTasksDone
 			? '모든 작업을 마쳤어요. 새 작업을 추가해 계속 진행할 수 있어요.'
@@ -2117,8 +2148,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		});
 		if (nextTask && nextAction?.taskId === nextTask.id && nextAction.primaryReviewId) {
 			const openReview = nextActions.appendChild(createElement('button', 'project-dashboard__secondary'));
-			openReview.type = 'button'; openReview.textContent = '대표 Review 열기'; openReview.disabled = !!this.taskMutationBusy || this.reviewBridgeBusy;
-			openReview.setAttribute('aria-label', `${nextTask.title} 작업의 대표 Review 열기`);
+			openReview.type = 'button'; openReview.textContent = '대표 리뷰 열기'; openReview.disabled = !!this.taskMutationBusy || this.reviewBridgeBusy;
+			openReview.setAttribute('aria-label', `${nextTask.title} 작업의 대표 리뷰 열기`);
 			openReview.addEventListener('click', () => void this.openPrimaryTaskReview(nextTask.id));
 		}
 
@@ -2160,23 +2191,23 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			close.disabled = !!this.taskMutationBusy;
 			close.dataset.focusKey = 'detail-close';
 			const reviews = panel.appendChild($('.project-dashboard__flow-card'));
-			const reviewsTitle = reviews.appendChild($('h3')); reviewsTitle.textContent = '작업 Review';
+			const reviewsTitle = reviews.appendChild($('h3')); reviewsTitle.textContent = '작업 리뷰';
 			const reviewsLoaded = this.reviewLinksTaskId === detail.id;
 			const taskReviewLinks = reviewsLoaded ? this.reviewLinks : [];
 			const taskPendingCreates = reviewsLoaded ? this.reviewPendingCreates : [];
 			const reviewActions=reviews.appendChild($('.project-dashboard__flow-actions'));
-			const createReview=reviewActions.appendChild(createElement('button','project-dashboard__secondary')); createReview.type='button'; createReview.textContent=taskReviewLinks.length?'Review 추가':'Review 만들기'; createReview.dataset.focusKey = 'task-review-create'; createReview.disabled=this.reviewBridgeBusy || taskPendingCreates.length > 0 || !reviewsLoaded || this.reviewAvailability !== 'available'; createReview.addEventListener('click',()=>void this.mutateTaskReview('createTaskReview'));
+			const createReview=reviewActions.appendChild(createElement('button','project-dashboard__secondary')); createReview.type='button'; createReview.textContent=taskReviewLinks.length?'리뷰 추가':'리뷰 만들기'; createReview.dataset.focusKey = 'task-review-create'; createReview.disabled=this.reviewBridgeBusy || taskPendingCreates.length > 0 || !reviewsLoaded || this.reviewAvailability !== 'available'; createReview.addEventListener('click',()=>void this.mutateTaskReview('createTaskReview'));
 			const refreshReviews=reviewActions.appendChild(createElement('button','project-dashboard__secondary')); refreshReviews.type='button'; refreshReviews.textContent='연결 다시 확인'; refreshReviews.dataset.focusKey = 'task-review-recheck'; refreshReviews.disabled=this.reviewBridgeBusy; refreshReviews.addEventListener('click',()=>{this.reviewBridgeError=undefined;this.reviewLinksTaskId=undefined;void this.loadTaskReviews();});
 			for (const pending of taskPendingCreates) {
 				const row=reviews.appendChild($('.project-dashboard__review-link'));
-				const info=row.appendChild($('span')); info.textContent=`Review 생성 상태: ${pending.status === 'pending' ? '대기 중' : '실패'} · 요청 시각 ${new Date(pending.createdAt).toLocaleString()}${pending.lastError ? ` · ${this.errorMessage(new Error(pending.lastError), '요청 처리 중 오류가 발생했습니다.')}` : ''}`;
+				const info=row.appendChild($('span')); info.textContent=`리뷰 생성 상태: ${pending.status === 'pending' ? '대기 중' : '실패'} · 요청 시각 ${new Date(pending.createdAt).toLocaleString()}${pending.lastError ? ` · ${this.errorMessage(new Error(pending.lastError), '요청 처리 중 오류가 발생했습니다.')}` : ''}`;
 				const retry=row.appendChild(createElement('button','project-dashboard__secondary')); retry.type='button'; retry.textContent='같은 요청 다시 시도'; retry.disabled=this.reviewBridgeBusy || this.reviewAvailability !== 'available'; retry.addEventListener('click',()=>void this.mutateTaskReview('createTaskReview',undefined,pending.commandId));
 			}
-			if (!taskReviewLinks.length) { const empty=reviews.appendChild($('.project-dashboard__flow-status')); empty.textContent=!reviewsLoaded?'작업 Review 불러오는 중…':this.reviewAvailability==='unavailable'?'Review를 사용할 수 없어요. 시작된 뒤 연결을 다시 확인해 주세요.':'아직 연결된 Review가 없어요.'; }
+			if (!taskReviewLinks.length) { const empty=reviews.appendChild($('.project-dashboard__flow-status')); empty.textContent=!reviewsLoaded?'작업 리뷰 불러오는 중…':this.reviewAvailability==='unavailable'?'리뷰를 사용할 수 없어요. 시작된 뒤 연결을 다시 확인해 주세요.':'아직 연결된 리뷰가 없어요.'; }
 			if (taskReviewLinks.some(link => link.isPrimary && link.state === 'unavailable')) {
 				const repair = reviews.appendChild($('.project-dashboard__flow-status'));
 				repair.setAttribute('role', 'status');
-				repair.textContent = '대표 Review가 없거나 다른 저장소를 가리켜요. 사용할 수 있는 다른 Review를 선택하거나 연결을 수정한 뒤 다시 확인해 주세요.';
+				repair.textContent = '대표 리뷰가 없거나 다른 저장소를 가리켜요. 사용할 수 있는 다른 리뷰를 선택하거나 연결을 수정한 뒤 다시 확인해 주세요.';
 			}
 			for (const link of taskReviewLinks) {
 				const row = reviews.appendChild($('.project-dashboard__review-link'));
@@ -2232,7 +2263,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			this.renderWorkspaceE2e(panel, detail);
 		}
 		this.renderCreateForm(shell);
-		this.renderKnowledge(shell);
 		restorePosition();
 	}
 
@@ -2299,7 +2329,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private renderWorkspaceE2e(panel: HTMLElement, task: WorkspaceDashboardTaskItemDTO): void {
 		const section = panel.appendChild($('.project-dashboard__flow-card'));
-		const heading = section.appendChild($('h3')); heading.textContent = '프런트엔드 E2E 확인';
+		const heading = section.appendChild($('h3')); heading.textContent = '브라우저 확인';
 		const intro = section.appendChild($('p')); intro.textContent = '완료된 에이전트 실행 결과를 대상으로 브라우저 시나리오를 실행합니다.';
 		if (this.e2eError) { const error = section.appendChild($('.project-dashboard__error')); error.setAttribute('role', 'alert'); error.textContent = this.e2eError; }
 		const visibleEvidence = this.e2eLoadedTaskId === task.id ? this.e2eEvidence : [];
@@ -2350,7 +2380,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		});
 		const actions = form.appendChild($('.project-dashboard__flow-actions'));
 		const add = actions.appendChild(createElement('button', 'project-dashboard__secondary')); add.type = 'button'; add.textContent = '단계 추가'; add.disabled = this.e2eBusy || this.e2eScenarioDraft.length >= 12; add.addEventListener('click', () => { this.e2eScenarioDraft.push({ type: 'click', selector: '', value: '' }); this.render(); });
-		const start = actions.appendChild(createElement('button', 'project-dashboard__primary')); start.type = 'submit'; start.textContent = this.e2eBusy ? '시작 중…' : 'E2E 확인 시작'; start.disabled = this.e2eBusy || this.e2eLoading || !attemptSelect.value;
+		const start = actions.appendChild(createElement('button', 'project-dashboard__primary')); start.type = 'submit'; start.textContent = this.e2eBusy ? '시작 중…' : '브라우저 확인 시작'; start.disabled = this.e2eBusy || this.e2eLoading || !attemptSelect.value;
 		form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity()) return; this.e2eDraftAttemptId = attemptSelect.value; this.e2eUrlDraft = url.value; this.e2eEnvironmentDraft = env.value; void this.startWorkspaceE2e(task); });
 		const listHeader = section.appendChild($('.project-dashboard__flow-actions'));
 		const refresh = listHeader.appendChild(createElement('button', 'project-dashboard__secondary')); refresh.type = 'button'; refresh.textContent = this.e2eLoading ? '새로고침 중…' : '증거 새로고침'; refresh.disabled = this.e2eBusy || this.e2eLoading; refresh.addEventListener('click', () => void this.loadWorkspaceE2e(task.id, true));
@@ -2370,7 +2400,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				['스크린샷 SHA-256', evidence.screenshotSha256 ?? '정보 없음'], ['스크린샷 경로', evidence.screenshotPath ?? '정보 없음'],
 				['로그 SHA-256', evidence.logSha256 ?? '정보 없음'], ['로그 경로', evidence.logPath ?? '정보 없음'],
 			] as const) { const term = auditList.appendChild($('dt')); term.textContent = label; const detail = auditList.appendChild($('dd')); detail.textContent = value; }
-			if (evidence.failure) { const failure = row.appendChild($('.project-dashboard__provider-error')); failure.setAttribute('role', 'status'); failure.textContent = this.errorMessage(new Error(evidence.failure), 'E2E 확인에 실패했습니다.'); }
+			if (evidence.failure) { const failure = row.appendChild($('.project-dashboard__provider-error')); failure.setAttribute('role', 'status'); failure.textContent = this.errorMessage(new Error(evidence.failure), '브라우저 확인에 실패했습니다.'); }
 			if (evidence.cleanupError) { const cleanup = row.appendChild($('.project-dashboard__error')); cleanup.setAttribute('role', 'alert'); cleanup.textContent = `정리를 확인해 주세요: ${this.errorMessage(new Error(evidence.cleanupError), '정리를 완료하지 못했습니다.')}`; }
 			const rowActions = row.appendChild($('.project-dashboard__flow-actions'));
 			if (evidence.state === 'running') { const cancel = rowActions.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = '취소'; cancel.disabled = this.e2eBusy; cancel.addEventListener('click', () => void this.mutateWorkspaceE2e(task, evidence, 'cancel')); }
@@ -2393,7 +2423,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const result = await ipcRenderer.invoke(WORKSPACE_E2E_CHANNEL, 'list', { projectId, taskId }) as { evidence: readonly WorkspaceE2eEvidenceDTO[] };
 			if (this.e2eRequestGeneration === requestGeneration && this.projectId === projectId && this.selectedTaskId === taskId) { this.e2eEvidence = result.evidence; this.e2eLoadedTaskId = taskId; this.updatePolling(); }
 		} catch (error) {
-			if (this.e2eRequestGeneration === requestGeneration && this.projectId === projectId && this.selectedTaskId === taskId) this.e2eError = this.errorMessage(error, 'E2E 증거를 불러오지 못했습니다.');
+			if (this.e2eRequestGeneration === requestGeneration && this.projectId === projectId && this.selectedTaskId === taskId) this.e2eError = this.errorMessage(error, '브라우저 확인 기록을 불러오지 못했습니다.');
 		} finally {
 			if (this.e2eRequestGeneration === requestGeneration) {
 				this.e2eLoading = false; this.e2eRequestTaskId = undefined;
@@ -2410,7 +2440,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const scenario: WorkspaceE2eStep[] = this.e2eScenarioDraft.map(step => step.type === 'click' ? { type: 'click', selector: step.selector.trim() } : { type: step.type, selector: step.selector.trim(), value: step.value });
 		this.e2eBusy = true; this.e2eError = undefined; this.render();
 		try { await ipcRenderer.invoke(WORKSPACE_E2E_CHANNEL, 'start', { projectId: this.projectId, taskId: task.id, attemptId: this.e2eDraftAttemptId, targetUrl: this.e2eUrlDraft.trim(), environmentIdentity: this.e2eEnvironmentDraft.trim(), scenario }); this.e2eLoadedTaskId = undefined; await this.loadWorkspaceE2e(task.id, true); }
-		catch (error) { this.e2eError = this.errorMessage(error, 'E2E 확인을 시작하지 못했습니다.'); }
+		catch (error) { this.e2eError = this.errorMessage(error, '브라우저 확인을 시작하지 못했습니다.'); }
 		finally { this.e2eBusy = false; this.render(); }
 	}
 
@@ -2418,7 +2448,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (!this.projectId || this.e2eBusy) return;
 		this.e2eBusy = true; this.e2eError = undefined; this.render();
 		try { await ipcRenderer.invoke(WORKSPACE_E2E_CHANNEL, command, { projectId: this.projectId, taskId: task.id, evidenceId: evidence.id }); this.e2eLoadedTaskId = undefined; await this.loadWorkspaceE2e(task.id, true); }
-		catch (error) { this.e2eError = this.errorMessage(error, command === 'cancel' ? 'E2E 확인을 취소하지 못했습니다.' : 'E2E 정리를 다시 시도하지 못했습니다.'); }
+		catch (error) { this.e2eError = this.errorMessage(error, command === 'cancel' ? '브라우저 확인을 취소하지 못했습니다.' : '브라우저 확인 정리를 다시 시도하지 못했습니다.'); }
 		finally { this.e2eBusy = false; this.render(); }
 	}
 
@@ -2515,7 +2545,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const name = main.appendChild($('strong')); name.textContent = `${attempt.providerId === 'codex' ? 'Codex' : 'Claude'} · ${this.stateLabel(attempt.state)}`;
 				const time = main.appendChild(createElement('time')); time.dateTime = attempt.updatedAt; time.textContent = new Date(attempt.updatedAt).toLocaleString();
 				const detail = item.appendChild($('.project-dashboard__attempt-detail')); detail.textContent = `${attempt.mode === 'mutating' ? '파일 수정 실행' : '읽기 전용 연결 확인'} · ${attempt.accountLabel} · ${attempt.cwd}`;
-				if (attempt.orchestrationPhase === 'waiting') { const waiting = item.appendChild($('.project-dashboard__attempt-detail')); waiting.textContent = this.attempts.some(child => child.parentAttemptId === attempt.id) ? '하위 에이전트와 정리가 끝날 때까지 Review를 기다리는 중입니다.' : '실행 정리가 끝날 때까지 Review를 기다리는 중입니다.'; }
+				if (attempt.orchestrationPhase === 'waiting') { const waiting = item.appendChild($('.project-dashboard__attempt-detail')); waiting.textContent = this.attempts.some(child => child.parentAttemptId === attempt.id) ? '하위 에이전트와 정리가 끝날 때까지 리뷰를 기다리는 중입니다.' : '실행 정리가 끝날 때까지 리뷰를 기다리는 중입니다.'; }
 				if (attempt.sessionId) { const session = item.appendChild($('.project-dashboard__attempt-detail')); session.textContent = `세션 ${attempt.sessionId}`; }
 				if (attempt.errorSummary) { const failure = item.appendChild($('.project-dashboard__attempt-error')); failure.textContent = this.errorMessage(new Error(attempt.errorSummary), '실행이 완료되지 않았습니다. 자세한 내용은 오류 로그를 확인해 주세요.'); }
 				if (attempt.resultText) { const result = item.appendChild(createElement('pre', 'project-dashboard__subagent-result')); result.textContent = attempt.resultText; }

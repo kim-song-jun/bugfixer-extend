@@ -138,7 +138,7 @@ export class ProjectHomeEditorPane extends EditorPane {
 		const title = element('h1');
 		title.textContent = '어떤 프로젝트를 열까요?';
 		const description = element('p', 'project-home__description');
-		description.textContent = '폴더를 선택해 작업을 시작하거나, 최근 프로젝트를 다시 여세요.';
+		description.textContent = '프로젝트 폴더를 선택해 작업을 시작하거나, 최근 프로젝트에서 이어서 작업하세요.';
 		intro.append(eyebrow, title, description);
 		content.append(intro);
 
@@ -147,8 +147,8 @@ export class ProjectHomeEditorPane extends EditorPane {
 		choose.type = 'button';
 		choose.dataset.projectHomeFocus = 'choose';
 		choose.disabled = this.actionBusy;
-		choose.setAttribute('aria-label', '폴더를 선택해 프로젝트 열기');
-		choose.textContent = this.actionBusy ? '여는 중…' : '폴더 열기';
+		choose.setAttribute('aria-label', '프로젝트 폴더를 선택해 작업 시작');
+		choose.textContent = this.actionBusy ? '여는 중…' : '프로젝트 열기';
 		choose.addEventListener('click', () => void this.chooseFolder());
 		actions.append(choose);
 		const reviews = element('button', 'project-home__secondary');
@@ -190,7 +190,7 @@ export class ProjectHomeEditorPane extends EditorPane {
 			const emptyTitle = element('p', 'project-home__empty-title');
 			emptyTitle.textContent = '아직 등록된 프로젝트가 없습니다';
 			const emptyCopy = element('p');
-			emptyCopy.textContent = '폴더 열기를 눌러 첫 프로젝트를 추가하세요.';
+			emptyCopy.textContent = '프로젝트 열기를 눌러 첫 작업 공간을 여세요.';
 			empty.append(emptyTitle, emptyCopy);
 			recent.append(empty);
 		} else {

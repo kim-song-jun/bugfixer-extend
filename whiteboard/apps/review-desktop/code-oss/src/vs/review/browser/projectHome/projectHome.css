@@ -70,7 +70,7 @@
 	cursor: pointer;
 	transition: background-color .15s ease, border-color .15s ease, color .15s ease;
 }
-.project-home__primary { border: 1px solid var(--home-accent); background: var(--home-accent); color: var(--home-on-accent); }
+.project-home__primary { min-width: 184px; border: 1px solid var(--home-accent); background: var(--home-accent); color: var(--home-on-accent); font-size: 14px; }
 .project-home__primary:hover:not(:disabled) { border-color: var(--home-accent-hover); background: var(--home-accent-hover); }
 .project-home__primary:disabled { opacity: .65; cursor: wait; }
 .project-home__secondary { border: 1px solid var(--home-line); background: transparent; color: var(--home-ink); }
