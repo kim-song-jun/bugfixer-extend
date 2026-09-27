@@ -227,7 +227,11 @@ export async function smokeLaunch({
     );
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
+      child.kill("SIGTERM");
+      await Promise.race([closed, sleep(5_000)]);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
     }
 
     await closed;
