@@ -24,6 +24,8 @@ export interface ConnectWorkspaceConnectorRequest {
 	readonly projectId: string;
 	readonly provider: WorkspaceConnectorId;
 	readonly token: string;
+	/** Required for Notion so multiple personal tokens for the same identity remain distinguishable. */
+	readonly accountLabel?: string;
 }
 
 export interface WorkspaceConnectorAccountRequest {

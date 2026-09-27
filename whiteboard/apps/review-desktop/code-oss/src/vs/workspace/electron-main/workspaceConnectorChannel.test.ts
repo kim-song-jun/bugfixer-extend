@@ -173,8 +173,19 @@ test('Notion previews stay in the main process until the reviewed snapshot is im
 		const channel = new WorkspaceConnectorChannel(database, new WorkspaceDashboardChannel(database, windows), () => vault,
 			{ error: () => undefined } as unknown as ILogService, transport);
 		const account = await channel.call<WorkspaceConnectorAccountDTO>(sender, 'connectAccount', {
-			projectId: project.project.id, provider: 'notion', token: 'secret-notion-token',
+			projectId: project.project.id, provider: 'notion', token: 'secret-notion-token', accountLabel: 'Personal workspace',
 		});
+		const sameIdentityAccount = await channel.call<WorkspaceConnectorAccountDTO>(sender, 'connectAccount', {
+			projectId: project.project.id, provider: 'notion', token: 'another-secret-notion-token', accountLabel: 'Client workspace',
+		});
+		assert.equal(account.remoteIdentity, sameIdentityAccount.remoteIdentity);
+		assert.notEqual(account.id, sameIdentityAccount.id);
+		assert.equal(account.label, 'Personal workspace');
+		assert.equal(sameIdentityAccount.label, 'Client workspace');
+		assert.deepEqual((await channel.call<WorkspaceConnectorAccountDTO[]>(sender, 'listAccounts', project.project.id)).map(item => item.label), ['Personal workspace', 'Client workspace']);
+		await assert.rejects(channel.call(sender, 'connectAccount', {
+			projectId: project.project.id, provider: 'notion', token: 'another-secret-notion-token', accountLabel: '  ',
+		}), /Notion connection label/);
 		const preview = await channel.call<WorkspaceConnectorPreviewDTO>(sender, 'previewNotionPage', {
 			projectId: project.project.id, accountId: account.id, pageId,
 		});
@@ -194,6 +205,11 @@ test('Notion previews stay in the main process until the reviewed snapshot is im
 		assert.equal(reference.title, preview.title);
 		assert.equal(reference.contentSha256, preview.contentSha256);
 		assert.equal(database.knowledge.listProjectReferences(project.project.id).length, 1);
+		for (const databaseFile of readdirSync(directory).filter(name => name.startsWith('workspace.db'))) {
+			const bytes = readFileSync(join(directory, databaseFile));
+			assert.equal(bytes.includes(Buffer.from('secret-notion-token')), false, `${databaseFile} contains a Notion credential`);
+			assert.equal(bytes.includes(Buffer.from('another-secret-notion-token')), false, `${databaseFile} contains another Notion credential`);
+		}
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

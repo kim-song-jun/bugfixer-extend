@@ -40,6 +40,7 @@ export async function importNotionPage(
 		const url = new URL(path, notionApiOrigin);
 		if (url.origin !== notionApiHost) { throw new Error('Notion request escaped the official API origin.'); }
 		const response = await transport.fetch(url, { method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(connectorRequestTimeoutMs) });
+		throwIfNotionTokenRejected(response);
 		if (response.status === 429) {
 			const guidance = retryAfterGuidance(response.headers.get('retry-after'));
 			await response.body?.cancel();
@@ -73,6 +74,7 @@ export async function importNotionPage(
 				url.searchParams.set('start_cursor', cursor);
 			}
 			const response = await transport.fetch(url, { method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(connectorRequestTimeoutMs) });
+			throwIfNotionTokenRejected(response);
 			if (response.status === 429) {
 				const guidance = retryAfterGuidance(response.headers.get('retry-after'));
 				await response.body?.cancel();
@@ -135,6 +137,12 @@ export async function importNotionPage(
 		derivedText: new TextDecoder().decode(encodeReferenceText(`${text}${displayedOmissions.length ? `\n\nImport notes: ${displayedOmissions.join(' ')}` : ''}`, omissions)),
 		omissions: boundedOmissions(omissions),
 	};
+}
+
+function throwIfNotionTokenRejected(response: Response): void {
+	if (response.status === 401) {
+		throw new Error('This Notion token was rejected. It may have expired or been revoked; reconnect with a new personal access token.');
+	}
 }
 
 function normalizeNotionId(value: string): string {

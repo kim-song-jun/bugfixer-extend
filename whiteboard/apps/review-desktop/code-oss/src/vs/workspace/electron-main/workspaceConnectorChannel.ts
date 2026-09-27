@@ -114,11 +114,12 @@ export class WorkspaceConnectorChannel {
 	}
 
 	private async connect(projectId: string, request: ConnectWorkspaceConnectorRequest): Promise<WorkspaceConnectorAccountDTO> {
+		const accountLabel = request.provider === 'notion' ? this.notionAccountLabel(request.accountLabel) : undefined;
 		const identity = request.provider === 'slack'
 			? await validateSlackToken(request.token, this.transport)
 			: await validateNotionToken(request.token, this.transport);
 		const account = this.database.createPendingConnectorAccount({
-			projectId, provider: request.provider, label: identity.label, remoteIdentity: identity.remoteId,
+			projectId, provider: request.provider, label: accountLabel ?? identity.label, remoteIdentity: identity.remoteId,
 		});
 		try {
 			await this.getVault().put(account.provider, account.id, request.token);
@@ -285,7 +286,22 @@ export class WorkspaceConnectorChannel {
 			|| !record.token || Buffer.byteLength(record.token, 'utf8') > 16_384 || !/^[\x21-\x7e]+$/.test(record.token)) {
 			throw new Error('A supported connector and valid token are required.');
 		}
+		if (record.accountLabel !== undefined && (typeof record.accountLabel !== 'string' || record.accountLabel.length > 80
+			|| /[\r\n\t\x00-\x1f\x7f]/.test(record.accountLabel))) {
+			throw new Error('The account label must be 1–80 characters without control characters.');
+		}
+		if (record.provider === 'notion' && (typeof record.accountLabel !== 'string' || !record.accountLabel.trim())) {
+			throw new Error('Enter a label for this Notion connection.');
+		}
 		return record as unknown as ConnectWorkspaceConnectorRequest;
+	}
+
+	private notionAccountLabel(value: string | undefined): string {
+		const label = value?.trim();
+		if (!label || label.length > 80 || /[\r\n\t\x00-\x1f\x7f]/.test(label)) {
+			throw new Error('Enter a Notion connection label between 1 and 80 characters.');
+		}
+		return label;
 	}
 
 	private accountRequest(value: unknown): WorkspaceConnectorAccountRequest {

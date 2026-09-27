@@ -42,6 +42,9 @@ export async function validateNotionToken(token: string, transport: ConnectorTra
 		headers: { Authorization: `Bearer ${credential}`, Accept: 'application/json', 'Notion-Version': notionVersion },
 		signal: AbortSignal.timeout(connectorRequestTimeoutMs),
 	});
+	if (response.status === 401) {
+		throw new Error('This Notion token was rejected. It may have expired or been revoked; reconnect with a valid personal access token.');
+	}
 	const payload = await readJsonResponse(response);
 	if (payload.object !== 'user' || typeof payload.id !== 'string' || !isUuid(payload.id)
 		|| (payload.type !== 'person' && payload.type !== 'bot')) {

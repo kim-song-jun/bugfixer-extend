@@ -180,6 +180,15 @@ test('Notion page and block rate limits expose Retry-After guidance in the impor
 	await assert.rejects(importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, blockRateLimit), /Notion rate limit reached\. Retry after 120 seconds\./);
 });
 
+test('Notion reports rejected credentials as reconnectable and leaves page-specific 403 errors distinct', async () => {
+	const resolver: ConnectorCredentialResolver = { resolve: async () => 'notion-pat' };
+	const unauthorized: ConnectorTransport = { fetch: async () => new Response('{}', { status: 401 }) };
+	const forbidden: ConnectorTransport = { fetch: async () => new Response('{}', { status: 403 }) };
+	const request = { pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' };
+	await assert.rejects(importNotionPage(request, resolver, unauthorized), /token was rejected.*expired or been revoked.*reconnect with a new personal access token/i);
+	await assert.rejects(importNotionPage(request, resolver, forbidden), /HTTP 403/);
+});
+
 test('connector source IDs and opaque account references are validated before network access', async () => {
 	let called = false;
 	const transport: ConnectorTransport = { fetch: async () => { called = true; return Response.json({}); } };
