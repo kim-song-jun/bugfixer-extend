@@ -77,6 +77,7 @@ describe("BugReportControl", () => {
       await renderAndOpen();
       await act(async () => sendButton().click());
 
+      await vi.waitFor(() => expect(notify).toHaveBeenCalled());
       expect(notify).toHaveBeenCalledWith({
         kind: status === 200 ? "success" : "error",
         text:
@@ -111,6 +112,12 @@ describe("BugReportControl", () => {
     await act(async () => checkbox("Session").click());
     await act(async () => sendButton().click());
 
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        expect.stringContaining("/telemetry/bug-report"),
+        expect.anything(),
+      ),
+    );
     expect(reportBody()).toMatchObject({
       description: "",
       include_review: false,
@@ -131,6 +138,12 @@ describe("BugReportControl", () => {
 
     await act(async () => sendButton().click());
 
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        expect.stringContaining("/telemetry/bug-report"),
+        expect.anything(),
+      ),
+    );
     expect(reportBody()).toMatchObject({ include_trace: false });
   });
 
@@ -153,6 +166,12 @@ describe("BugReportControl", () => {
     expect(container.querySelector('img[alt="Screenshot preview"]')).toBeNull();
 
     await act(async () => sendButton().click());
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        expect.stringContaining("/telemetry/bug-report"),
+        expect.anything(),
+      ),
+    );
     expect(reportBody()).not.toHaveProperty("screenshot");
   });
 

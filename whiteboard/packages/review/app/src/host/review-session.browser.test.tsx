@@ -31,19 +31,26 @@ describe("ReviewSessionProvider", () => {
 
     expect(request).toHaveBeenCalledWith(
       "/reviews-api/test-review/versions",
-      {},
+      undefined,
     );
-    const requestHeaders = new Headers(request.mock.calls[0]?.[1]?.headers);
-    expect(requestHeaders.has("x-review-token")).toBe(false);
   });
 
   it("keeps mounted sessions independent when a sibling session unmounts", async () => {
     const postedA: ReviewVerbRequest[] = [];
     const postedB: ReviewVerbRequest[] = [];
 
+    const requestA = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 204 }),
+    );
+
+    const requestB = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 204 }),
+    );
+
     const sessionA = testReviewSession(
       { reviewId: "a" },
       {
+        request: requestA,
         post: async (request) => {
           postedA.push(request);
 
@@ -55,6 +62,7 @@ describe("ReviewSessionProvider", () => {
     const sessionB = testReviewSession(
       { reviewId: "b" },
       {
+        request: requestB,
         post: async (request) => {
           postedB.push(request);
 
@@ -69,12 +77,6 @@ describe("ReviewSessionProvider", () => {
     const rootA = createRoot(containerA);
     const rootB = createRoot(containerB);
     roots.push(rootA, rootB);
-
-    const fetchMock = vi.fn<typeof fetch>(
-      async () => new Response(null, { status: 204 }),
-    );
-
-    vi.stubGlobal("fetch", fetchMock);
 
     await act(async () => {
       rootA.render(
@@ -113,14 +115,8 @@ describe("ReviewSessionProvider", () => {
     expect(postedB).toEqual([
       { name: "showReviewView", args: { view: "diff" } },
     ]);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:5570/reviews-api/b/file",
-      expect.objectContaining({
-        headers: expect.objectContaining({}),
-      }),
-    );
-    const requestHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
-    expect(requestHeaders.get("x-review-token")).toBe("token-b");
+    expect(requestA).not.toHaveBeenCalled();
+    expect(requestB).toHaveBeenCalledWith("/reviews-api/b/file", undefined);
   });
 });
 

@@ -364,20 +364,22 @@ describe("block components", () => {
 
         expect(copy).not.toBeNull();
         await act(async () => copy!.click());
-        expect(request).toHaveBeenCalledWith(
-          expect.stringContaining("/copy-context"),
-          expect.objectContaining({
-            method: "POST",
-            body: expect.any(String),
-          }),
-        );
+        await vi.waitFor(() => {
+          expect(request).toHaveBeenCalledWith(
+            expect.stringContaining("/copy-context"),
+            expect.objectContaining({
+              method: "POST",
+              body: expect.any(String),
+            }),
+          );
+          expect(write).toHaveBeenCalledWith(`> ${quote}`);
+        });
         expect(
           JSON.parse(request.mock.lastCall![1]!.body as string),
         ).toMatchObject({
           target: { kind: "text", quote },
           title: quote.slice(0, 100),
         });
-        expect(write).toHaveBeenCalledWith(`> ${quote}`);
       } finally {
         selection.removeAllRanges();
         request.mockRestore();

@@ -49,7 +49,8 @@ it("exposes JSON section and Markdown headings plus imported PR and stack naviga
     validateResource: async () => {},
   });
   const reviewId = randomUUID();
-  await store.importVersion({
+
+  const imported = await store.importVersion({
     reviewId,
     title: "Navigation",
     pins: { repositoryId: "repo", base: "base", head: "head" },
@@ -67,6 +68,7 @@ it("exposes JSON section and Markdown headings plus imported PR and stack naviga
       },
     ],
   });
+
   const app = new Hono();
   app.get("/reviews-api/:id/stack", (c) =>
     c.json({
@@ -111,7 +113,12 @@ it("exposes JSON section and Markdown headings plus imported PR and stack naviga
   const container = document.createElement("div");
   document.body.append(container);
   await act(async () => {
-    canvas = mountReviewCanvas(container, { kind: "api", reviewId, bridge });
+    canvas = mountReviewCanvas(container, {
+      kind: "api",
+      reviewId,
+      version: imported.version,
+      bridge,
+    });
   });
   await act(async () => {
     await vi.waitFor(() =>
