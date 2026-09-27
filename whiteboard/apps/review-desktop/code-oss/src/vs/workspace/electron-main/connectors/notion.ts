@@ -13,6 +13,7 @@ const notionApiOrigin = 'https://api.notion.com/v1/';
 const notionApiHost = new URL(notionApiOrigin).origin;
 const notionVersion = '2026-03-11';
 const maxPages = 20;
+const maxPropertyPages = 20;
 const maxBlocks = 400;
 const maxDepth = 4;
 
@@ -54,8 +55,9 @@ export async function importNotionPage(
 	};
 	const page = await fetchJson(`pages/${pageId}`);
 	if (page.object !== 'page') { throw new Error('Notion returned an invalid page response.'); }
-	const pageTitle = extractPageTitle(page.properties);
 	const omissions: string[] = [];
+	await hydratePaginatedProperties(pageId, page.properties, fetchJson, omissions);
+	const pageTitle = extractPageTitle(page.properties);
 	const propertyLines = extractPageProperties(page.properties, omissions);
 	const lines: string[] = [];
 	let pagesFetched = 0;
@@ -137,6 +139,59 @@ export async function importNotionPage(
 		derivedText: new TextDecoder().decode(encodeReferenceText(`${text}${displayedOmissions.length ? `\n\nImport notes: ${displayedOmissions.join(' ')}` : ''}`, omissions)),
 		omissions: boundedOmissions(omissions),
 	};
+}
+
+async function hydratePaginatedProperties(
+	pageId: string,
+	value: unknown,
+	fetchJson: (path: string) => Promise<Record<string, unknown>>,
+	omissions: string[],
+): Promise<void> {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) { return; }
+	for (const [name, propertyValue] of Object.entries(value as Record<string, unknown>)) {
+		if (!propertyValue || typeof propertyValue !== 'object' || Array.isArray(propertyValue)) { continue; }
+		const property = propertyValue as Record<string, unknown>;
+		if (property.has_more !== true) { continue; }
+		if (typeof property.id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(property.id)) {
+			omissions.push(`Notion property “${name}” has more values, but no valid property ID was returned; remaining values were omitted.`);
+			continue;
+		}
+		const type = typeof property.type === 'string' ? property.type : '';
+		if (!['relation', 'people', 'title', 'rich_text'].includes(type)) {
+			omissions.push(`Notion property “${name}” (${type || 'unknown type'}) has more values, but this property type cannot be paginated by the importer; remaining values were omitted.`);
+			continue;
+		}
+		const entries: unknown[] = [];
+		let cursor: string | undefined;
+		let fetched = 0;
+		let incomplete = false;
+		do {
+			if (fetched >= maxPropertyPages) { incomplete = true; break; }
+			const query = new URLSearchParams({ page_size: '100' });
+			if (cursor) { query.set('start_cursor', cursor); }
+			const path = `pages/${pageId}/properties/${property.id}?${query}`;
+			let response: Record<string, unknown>;
+			try { response = await fetchJson(path); }
+			catch (error) {
+				if (error instanceof SourceArtifactLimitError) { incomplete = true; break; }
+				throw error;
+			}
+			if (!Array.isArray(response.results)) { throw new Error('Notion returned an invalid property response.'); }
+			fetched++;
+			for (const item of response.results) {
+				if (!item || typeof item !== 'object' || Array.isArray(item)) { continue; }
+				const record = item as Record<string, unknown>;
+				entries.push(record.type === type ? record[type] : record);
+			}
+			cursor = response.has_more === true && typeof response.next_cursor === 'string' && response.next_cursor ? response.next_cursor : undefined;
+			if (response.has_more === true && !cursor) { incomplete = true; break; }
+		} while (cursor);
+		if (entries.length > 0) { property[type] = entries; }
+		property.has_more = incomplete;
+		if (incomplete) {
+			omissions.push(`Notion property “${name}” (${type}) still has values that could not be retrieved; remaining values were omitted.`);
+		}
+	}
 }
 
 function throwIfNotionTokenRejected(response: Response): void {

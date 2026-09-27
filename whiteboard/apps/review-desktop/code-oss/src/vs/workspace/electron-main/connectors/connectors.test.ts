@@ -94,6 +94,29 @@ test('Notion renders non-title properties, caption links, and equations and repo
 	assert.ok(result.omissions.some(item => /image payload.*caption/.test(item)));
 });
 
+test('Notion retrieves every page of a truncated relation property', async () => {
+	const requests: URL[] = [];
+	const firstRelations = Array.from({ length: 25 }, (_, index) => ({ id: `00000000-0000-0000-0000-${String(index + 1).padStart(12, '0')}` }));
+	const transport: ConnectorTransport = { fetch: async input => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (url.pathname.endsWith('/children')) { return Response.json({ results: [], has_more: false }); }
+		if (url.pathname.endsWith('/properties/related-property')) {
+			return url.searchParams.has('start_cursor')
+				? Response.json({ object: 'list', results: [{ object: 'property_item', type: 'relation', relation: { id: 'ffffffff-ffff-ffff-ffff-ffffffffffff' } }], has_more: false })
+				: Response.json({ object: 'list', results: firstRelations.map(relation => ({ object: 'property_item', type: 'relation', relation })), has_more: true, next_cursor: 'next-property-page' });
+		}
+		return Response.json({ object: 'page', properties: {
+			Name: { type: 'title', title: [{ plain_text: 'Relations' }] },
+			Related: { id: 'related-property', type: 'relation', relation: firstRelations, has_more: true },
+		} });
+	} };
+	const result = await importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, transport);
+	assert.ok(requests.some(url => url.pathname.endsWith('/properties/related-property') && url.searchParams.get('start_cursor') === 'next-property-page'));
+	assert.match(result.derivedText, /ffffffff-ffff-ffff-ffff-ffffffffffff/);
+	assert.equal(result.omissions.some(item => /still has values that could not be retrieved/.test(item)), false);
+});
+
 test('Slack selected message follows bounded thread cursors and retains reply context', async () => {
 	const requests: URL[] = [];
 	const transport: ConnectorTransport = { fetch: async input => {
