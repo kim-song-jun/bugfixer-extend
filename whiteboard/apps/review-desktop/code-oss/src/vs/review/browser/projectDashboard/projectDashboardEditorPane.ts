@@ -25,6 +25,7 @@ import { WORKSPACE_CONVENTION_AGENT_CHANNEL, type ConventionAgentPreviewDTO, typ
 import { WORKSPACE_REVIEW_BRIDGE_CHANNEL, type WorkspaceTaskReviewLink, type TaskReviewAvailability, type TaskReviewOpenResult } from '../../../workspace/common/workspaceReviewBridgeProtocol.js';
 import { IReviewCanvasEditorTabsService } from '../../services/reviewCanvasEditorTabsService.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
+import { setProjectSidebarSection } from './projectSidebar.contribution.js';
 
 import './projectDashboard.css';
 
@@ -69,6 +70,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private error: string | undefined;
 	private creating = false;
 	private createFormOpen = false;
+	private pendingCreateTaskFocus = false;
 	private createTaskTitleDraft = '';
 	private createTaskDescriptionDraft = '';
 	private providerId: ProviderId = 'codex';
@@ -137,6 +139,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private knowledgeError: string | undefined;
 	private knowledgeMessage: string | undefined;
 	private knowledgeView: KnowledgeView = 'references';
+	private pendingSectionNavigation: 'dashboard' | KnowledgeView | undefined;
 	private connectorManagementOpen = false;
 	private focusTaskDetailOnRender = false;
 	private knowledgeBusy = false;
@@ -240,6 +243,23 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.root.addEventListener('scroll', this.persistScrollPosition, { passive: true });
 		document.addEventListener('visibilitychange', this.refreshOnReturn);
 		window.addEventListener('focus', this.refreshOnReturn);
+	}
+
+	navigateToSection(section: 'dashboard' | KnowledgeView): void {
+		if (section !== 'dashboard') this.knowledgeView = section;
+		this.pendingCreateTaskFocus = false;
+		setProjectSidebarSection(section);
+		this.pendingSectionNavigation = section;
+		this.focusTaskDetailOnRender = false;
+		this.render();
+	}
+
+	private openCreateTaskForm(): void {
+		this.createFormOpen = true;
+		this.pendingCreateTaskFocus = true;
+		this.pendingSectionNavigation = undefined;
+		if (this.taskView === 'board') this.render();
+		else this.setTaskView('board');
 	}
 
 	override async setInput(input: ProjectDashboardEditorInput, options: unknown, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -976,10 +996,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			tab.type = 'button'; tab.id = `knowledge-tab-${view}`; tab.setAttribute('role', 'tab');
 			tab.setAttribute('aria-selected', String(this.knowledgeView === view)); tab.setAttribute('aria-controls', 'project-knowledge-panel');
 			tab.tabIndex = this.knowledgeView === view ? 0 : -1; tab.textContent = label; tab.dataset.focusKey = `knowledge-tab:${view}`;
-			tab.addEventListener('click', () => { this.knowledgeView = view; this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${view}`)?.focus({ preventScroll: true }); });
+			tab.addEventListener('click', () => { this.knowledgeView = view; setProjectSidebarSection(view); this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${view}`)?.focus({ preventScroll: true }); });
 			tab.addEventListener('keydown', event => {
 				if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
 				event.preventDefault(); this.knowledgeView = this.knowledgeView === 'references' ? 'conventions' : 'references';
+				setProjectSidebarSection(this.knowledgeView);
 				this.render(); this.root?.querySelector<HTMLElement>(`#knowledge-tab-${this.knowledgeView}`)?.focus({ preventScroll: true });
 			});
 		}
@@ -1638,6 +1659,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private setTaskView(view: DashboardTaskView): void {
 		this.taskView = view;
+		if (view !== 'board') this.pendingCreateTaskFocus = false;
 		this.lifecycleError = undefined;
 		this.trashConfirmationTaskId = undefined;
 		if (view === 'board') { this.lifecycleLoading = false; this.render(); void this.load(); }
@@ -1858,11 +1880,32 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const scrollTop = this.root.scrollTop;
 		const restorePosition = () => {
 			if (!this.root) return;
+			const createTaskTitle = this.pendingCreateTaskFocus ? this.root.querySelector<HTMLInputElement>('#project-task-title') : undefined;
+			if (createTaskTitle) {
+				this.pendingCreateTaskFocus = false;
+				this.pendingDashboardPosition = undefined;
+				this.root.querySelector<HTMLDetailsElement>('.project-dashboard__form')?.scrollIntoView({ block: 'start' });
+				createTaskTitle.focus({ preventScroll: true });
+				return;
+			}
 			if (this.pendingDashboardPosition !== undefined) {
 				const position = this.pendingDashboardPosition;
 				this.pendingDashboardPosition = undefined;
 				this.restoreDashboardPosition(position);
 			} else this.root.scrollTop = scrollTop;
+			const section = this.pendingSectionNavigation;
+			if (section) {
+				const target = section === 'dashboard' ?
+					this.root.querySelector<HTMLElement>('#project-dashboard-title') :
+					this.root.querySelector<HTMLElement>(`#knowledge-tab-${section}`);
+				if (target) {
+					this.pendingSectionNavigation = undefined;
+					if (section === 'dashboard') this.root.scrollTop = 0;
+					else this.root.querySelector<HTMLElement>('.project-dashboard__knowledge')?.scrollIntoView({ block: 'start' });
+					target.focus({ preventScroll: true });
+					return;
+				}
+			}
 			const target = focusId ? this.root.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`) :
 				focusKey ? [...this.root.querySelectorAll<HTMLElement>('[data-focus-key]')].find(element => element.dataset.focusKey === focusKey) :
 				focusSignature ? this.findFocusTarget(focusSignature) : undefined;
@@ -1881,12 +1924,19 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		clearNode(this.root);
 		const shell = this.root.appendChild($('.project-dashboard__shell'));
 		const heading = shell.appendChild($('.project-dashboard__heading'));
-		const eyebrow = heading.appendChild($('.project-dashboard__eyebrow'));
+		const headingCopy = heading.appendChild($('.project-dashboard__heading-copy'));
+		const eyebrow = headingCopy.appendChild($('.project-dashboard__eyebrow'));
 		eyebrow.textContent = 'BUGFIXER EXTEND · 프로젝트';
-		const title = heading.appendChild($('h1'));
+		const title = headingCopy.appendChild($('h1'));
+		title.id = 'project-dashboard-title';
+		title.tabIndex = -1;
 		title.textContent = this.dashboard?.project.name ?? '프로젝트';
-		const location = heading.appendChild($('.project-dashboard__location'));
+		const location = headingCopy.appendChild($('.project-dashboard__location'));
 		location.textContent = this.dashboard?.folder.path ?? '프로젝트 정보 불러오는 중';
+		const createButton = heading.appendChild(createElement('button', 'project-dashboard__primary project-dashboard__heading-create'));
+		createButton.type = 'button'; createButton.textContent = '새 작업';
+		createButton.disabled = this.loading || !this.dashboard || !!this.taskMutationBusy;
+		createButton.addEventListener('click', () => this.openCreateTaskForm());
 
 		if (this.error) {
 			const banner = shell.appendChild($('.project-dashboard__error'));
@@ -1951,9 +2001,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				this.stopPolling(); this.selectedTaskId = nextTask.id; this.focusTaskDetailOnRender = true; this.e2eDraftAttemptId = ''; this.e2eAttemptChosenByUser = false; this.e2eFormOpen = false; this.preview = undefined; this.providerError = undefined; this.providerErrorKind = undefined; this.attempts = [];
 				this.scheduleDashboardStateSave(); this.render(); void this.loadAttempts();
 			} else {
-				const form = this.root?.querySelector<HTMLDetailsElement>('.project-dashboard__form');
-				if (form) { this.createFormOpen = true; form.open = true; }
-				this.root?.querySelector<HTMLInputElement>('#project-task-title')?.focus();
+				this.openCreateTaskForm();
 			}
 		});
 		if (nextTask && nextAction?.taskId === nextTask.id && nextAction.primaryReviewId) {

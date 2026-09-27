@@ -1,17 +1,21 @@
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { SyncDescriptor } from '../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
+import { INotificationService } from '../../../platform/notification/common/notification.js';
 import { Registry } from '../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../workbench/browser/editor.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../workbench/common/contributions.js';
 import { EditorExtensions, type IEditorFactoryRegistry } from '../../../workbench/common/editor.js';
+import { ViewContainerLocation } from '../../../workbench/common/views.js';
 import { IEditorService } from '../../../workbench/services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../../workbench/services/editor/common/editorGroupsService.js';
 import { IWorkbenchLayoutService, Parts } from '../../../workbench/services/layout/browser/layoutService.js';
 import { INativeWorkbenchEnvironmentService } from '../../../workbench/services/environment/electron-browser/environmentService.js';
+import { IPaneCompositePartService } from '../../../workbench/services/panecomposite/browser/panecomposite.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
 import { ProjectDashboardEditorPane } from './projectDashboardEditorPane.js';
 import { ProjectDashboardEditorSerializer } from './projectDashboardEditorSerializer.js';
+import { onDidRequestProjectSection, PROJECT_SIDEBAR_CONTAINER_ID, type ProjectSidebarSection } from './projectSidebar.contribution.js';
 
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(
 	ProjectDashboardEditorInput.ID, ProjectDashboardEditorSerializer,
@@ -29,22 +33,35 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		@IEditorService private readonly editorService: IEditorService,
 		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
+		@IPaneCompositePartService private readonly paneCompositeService: IPaneCompositePartService,
+		@INotificationService private readonly notificationService: INotificationService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
-		void this.openProjectDashboard();
+		this._register(onDidRequestProjectSection(section => {
+			void this.openProjectDashboard(section).catch(error => this.notificationService.error(error));
+		}));
+		void this.openProjectDashboard().catch(error => this.notificationService.error(error));
 	}
 
-	private async openProjectDashboard(): Promise<void> {
+	private async openProjectDashboard(section?: ProjectSidebarSection): Promise<void> {
 		const launch = this.environment.reviewWindowLaunch;
 		if (launch.kind !== 'project') return;
 
 		await this.editorGroupsService.whenRestored;
-		this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+		try {
+			this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
+			const sidebar = await this.paneCompositeService.openPaneComposite(PROJECT_SIDEBAR_CONTAINER_ID, ViewContainerLocation.Sidebar);
+			if (!sidebar) throw new Error('프로젝트 탐색을 열지 못했습니다.');
+		} catch (error) {
+			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
+			this.notificationService.error(error);
+		}
 		const existing = this.editorGroupsService.groups.flatMap(group => group.editors).find(editor =>
 			editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
 		const input = existing ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);
-		await this.editorService.openEditor(input, { pinned: true, revealIfVisible: true });
+		const pane = await this.editorService.openEditor(input, { pinned: true, revealIfVisible: true });
+		if (section && pane instanceof ProjectDashboardEditorPane) pane.navigateToSection(section);
 	}
 }
 

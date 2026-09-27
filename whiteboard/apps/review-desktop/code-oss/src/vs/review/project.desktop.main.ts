@@ -5,6 +5,9 @@
 
 // Project windows use the native, editable workspace shell and add a project
 // dashboard as an editor tab. The Review Home shell remains a separate entry.
+// Register project navigation before the native Explorer so it is the first
+// sidebar default on the initial layout pass.
+import './browser/projectDashboard/projectSidebar.contribution.js';
 import './navigator.desktop.main.js';
 import './browser/parts/canvas/reviewCanvasEditorRegistration.js';
 import './browser/projectDashboard/index.js';
