@@ -231,7 +231,7 @@ export function parseManifest(value: unknown): DeclarativePackageManifest {
 	const name = boundedString(root.name, 'name', 100);
 	const description = boundedString(root.description, 'description', 500);
 	if (root.accountAccess !== 'none' && root.accountAccess !== 'bearer-token') { throw new Error('Connector package authentication mode is unsupported.'); }
-	const requestedScopes = root.requestedScopes === undefined && root.accountAccess === 'none' ? [] : parseScopes(root.requestedScopes);
+	const requestedScopes = root.requestedScopes === undefined && root.accountAccess === 'none' ? [] : parseScopes(root.requestedScopes, root.accountAccess === 'bearer-token');
 	if (root.accountAccess === 'none' && requestedScopes.length) { throw new Error('Anonymous connector packages may not request scopes.'); }
 	if (root.accountAccess === 'bearer-token' && !requestedScopes.length) { throw new Error('Bearer connector packages must declare requested scopes.'); }
 	if (!Array.isArray(root.domains) || root.domains.length < 1 || root.domains.length > maxDomains) { throw new Error('Connector package must declare between 1 and 8 domains.'); }
@@ -251,9 +251,9 @@ export function parseManifest(value: unknown): DeclarativePackageManifest {
 }
 
 const scopePattern = /^[a-z0-9][a-z0-9:._-]{0,79}$/;
-function parseScopes(value: unknown): string[] {
-	if (!Array.isArray(value) || value.length < 1 || value.length > 32 || value.some(scope => typeof scope !== 'string' || !scopePattern.test(scope))) {
-		throw new Error('Connector requestedScopes must contain between 1 and 32 valid scope labels.');
+function parseScopes(value: unknown, required: boolean): string[] {
+	if (!Array.isArray(value) || value.length > 32 || (required && value.length < 1) || value.some(scope => typeof scope !== 'string' || !scopePattern.test(scope))) {
+		throw new Error(`Connector requestedScopes must contain between ${required ? 1 : 0} and 32 valid scope labels.`);
 	}
 	const scopes = value as string[];
 	if (new Set(scopes).size !== scopes.length) { throw new Error('Connector requestedScopes must be unique.'); }

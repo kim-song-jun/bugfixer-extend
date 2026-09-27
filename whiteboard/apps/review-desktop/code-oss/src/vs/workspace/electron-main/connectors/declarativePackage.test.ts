@@ -109,6 +109,12 @@ test('same key accepts a higher version but rejects key changes, rollbacks, and 
 	assert.throws(() => validateDeclarativePackage(signedEnvelope({ ...manifest, version: '2.0.0' }).envelope, context), /key changed/i);
 });
 
+test('anonymous packages accept empty or omitted requestedScopes for legacy compatibility', () => {
+	const { requestedScopes: _scopes, ...legacyManifest } = manifest;
+	assert.deepEqual(validateDeclarativePackage(signedEnvelope(legacyManifest).envelope).manifest.requestedScopes, []);
+	assert.deepEqual(validateDeclarativePackage(signedEnvelope(manifest).envelope).manifest.requestedScopes, []);
+});
+
 test('strict schema rejects credentials, executable fields, undeclared domains, IPs, and malformed JSON keys', () => {
 	for (const invalid of [
 		{ ...manifest, accountAccess: 'bearer-token' },
