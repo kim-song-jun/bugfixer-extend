@@ -13,7 +13,7 @@ import { toErrorMessage } from '../../base/common/errorMessage.js';
 import { Event } from '../../base/common/event.js';
 import { parse } from '../../base/common/jsonc.js';
 import { getPathLabel } from '../../base/common/labels.js';
-import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, MutableDisposable, toDisposable, type IDisposable } from '../../base/common/lifecycle.js';
 import { Schemas, VSCODE_AUTHORITY } from '../../base/common/network.js';
 import { basename, join, posix } from '../../base/common/path.js';
 import { IProcessEnvironment, isLinux, isLinuxSnap, isMacintosh, isWindows, OS } from '../../base/common/platform.js';
@@ -143,8 +143,10 @@ import { ReviewMenubarMainService } from '../../review/electron-main/reviewMenub
 import { ReviewUpdateDialog } from '../../review/electron-main/reviewUpdateDialog.js';
 import { REVIEW_DESKTOP_CHANNEL, ReviewDesktopChannel } from '../../review/electron-main/reviewDesktopChannel.js';
 import { WorkspaceDatabase } from '../../workspace/electron-main/workspaceDatabase.js';
+import { WorkspaceProjectHomeChannel } from '../../workspace/electron-main/workspaceProjectHomeChannel.js';
+import { WORKSPACE_PROJECT_HOME_CHANNEL } from '../../workspace/common/workspaceProjectHomeProtocol.js';
 import { ProjectWorkspaceService } from '../../workspace/electron-main/projectWorkspaceService.js';
-import { hasProjectWindow, projectIdForWindow, restoreProjectWindows } from './projectWindowRestore.js';
+import { hasProjectWindow, ProjectWindowOpenCoordinator, projectIdForWindow, restoreProjectWindows } from './projectWindowRestore.js';
 import { WorkspaceDashboardChannel } from '../../workspace/electron-main/workspaceDashboardChannel.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../workspace/common/workspaceDashboardProtocol.js';
 import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/workspaceProviderRunsChannel.js';
@@ -734,19 +736,45 @@ export class CodeApplication extends Disposable {
 		}
 		const projectWorkspaces = new ProjectWorkspaceService(workspaceDatabase, this.environmentMainService.userDataPath);
 		const windowsMainService = appInstantiationService.invokeFunction(accessor => accessor.get(IWindowsMainService));
+		const recordedProjectWindowOpenIds = new Set<number>();
 		const recordProjectWindowOpen = (window: ICodeWindow): void => {
 			const projectId = projectIdForWindow(window);
 			if (!projectId) { return; }
 			try {
 				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
+				if (!recordedProjectWindowOpenIds.has(window.id)) {
+					workspaceDatabase.markProjectOpened(projectId);
+					recordedProjectWindowOpenIds.add(window.id);
+				}
 			} catch (error) {
 				this.logService.error(`Could not save open state for project window ${projectId}.`, error);
 				dialog.showErrorBox(localize('projectWindowStateSaveFailed', '프로젝트 창 상태 저장 실패'),
 					localize('projectWindowStateSaveFailedMessage', '프로젝트 창의 열림 상태를 저장하지 못했습니다. 프로젝트를 다시 열어 상태를 복구하고, 자세한 내용은 로그를 확인하세요. (프로젝트 ID: {0})', projectId));
 			}
 		};
-		for (const window of windowsMainService.getWindows()) { recordProjectWindowOpen(window); }
-		this._register(windowsMainService.onDidSignalReadyWindow(recordProjectWindowOpen));
+		const projectFocusListeners = new Map<number, IDisposable>();
+		const watchProjectWindowFocus = (window: ICodeWindow): void => {
+			if (!projectIdForWindow(window) || !window.win || projectFocusListeners.has(window.id)) { return; }
+			const browserWindow = window.win;
+			projectFocusListeners.set(window.id, Event.fromNodeEventEmitter(browserWindow, 'focus', () => window)(focusedWindow => {
+				const projectId = projectIdForWindow(focusedWindow);
+				if (!projectId) { return; }
+				try { workspaceDatabase.markProjectOpened(projectId); }
+				catch (error) { this.logService.error(`Could not save recent project open time for ${projectId}.`, error); }
+			}));
+		};
+		this._register(toDisposable(() => {
+			for (const listener of projectFocusListeners.values()) { listener.dispose(); }
+			projectFocusListeners.clear();
+		}));
+		for (const window of windowsMainService.getWindows()) { recordProjectWindowOpen(window); watchProjectWindowFocus(window); }
+		this._register(windowsMainService.onDidSignalReadyWindow(window => { recordProjectWindowOpen(window); watchProjectWindowFocus(window); }));
+		this._register(windowsMainService.onDidOpenWindow(watchProjectWindowFocus));
+		this._register(windowsMainService.onDidDestroyWindow(window => {
+			recordedProjectWindowOpenIds.delete(window.id);
+			projectFocusListeners.get(window.id)?.dispose();
+			projectFocusListeners.delete(window.id);
+		}));
 		this._register(this.lifecycleMainService.onBeforeCloseWindow(window => {
 			const projectId = projectIdForWindow(window);
 			if (!projectId || this.lifecycleMainService.quitRequested) { return; }
@@ -770,25 +798,33 @@ export class CodeApplication extends Disposable {
 			return { projectId: project.id, projectName: project.name };
 		});
 		this._register(toDisposable(() => windowsMainService.setReviewProjectWorkspaceResolver(undefined)));
+		const projectWindowOpens = new ProjectWindowOpenCoordinator<ICodeWindow[]>();
 		const openProject = async (projectId: string): Promise<void> => {
-			await openProjectWindow(projectId, false);
-		};
-		const openProjectWindow = async (projectId: string, initialStartup: boolean): Promise<ICodeWindow[]> => {
-			const project = projectWorkspaces.ensureDescriptor(projectId);
-			const opened = await windowsMainService.open({
-				context: OpenContext.API,
-				cli: this.environmentMainService.args,
-				urisToOpen: [{ workspaceUri: URI.file(project.descriptorPath) }],
-				forceNewWindow: true,
-				reviewWindowLaunch: { kind: 'project', projectId, projectName: project.project.name },
-				initialStartup,
-			});
+			const pending = projectWindowOpens.get(projectId);
+			if (pending) { await pending; return; }
 			const view = workspaceDatabase.getProjectView(projectId);
 			if (!view) { throw new Error(`Project ${projectId} has no saved workspace view.`); }
-			if (hasProjectWindow(projectId, view.descriptorUri, windowsMainService.getWindows())) {
+			const existing = windowsMainService.getWindows().find(window => hasProjectWindow(projectId, view.descriptorUri, [window]));
+			if (existing) { existing.focus(); workspaceDatabase.markProjectOpened(projectId); return; }
+			await openProjectWindow(projectId, false);
+		};
+		const openProjectWindow = (projectId: string, initialStartup: boolean): Promise<ICodeWindow[]> => {
+			return projectWindowOpens.open(projectId, async (): Promise<ICodeWindow[]> => {
+				const project = projectWorkspaces.ensureDescriptor(projectId);
+				const opened = await windowsMainService.open({
+					context: OpenContext.API,
+					cli: this.environmentMainService.args,
+					urisToOpen: [{ workspaceUri: URI.file(project.descriptorPath) }],
+					forceNewWindow: true,
+					reviewWindowLaunch: { kind: 'project', projectId, projectName: project.project.name },
+					initialStartup,
+				});
+				if (!windowsMainService.getWindows().some(window => projectIdForWindow(window) === projectId)) {
+					throw new Error(`Project window ${projectId} did not open.`);
+				}
 				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
-			}
-			return opened;
+				return opened;
+			});
 		};
 		const startupProjectViews = workspaceDatabase.listProjectViewsOpenAtQuit();
 		this.startupProjectIds = startupProjectViews.map(view => view.projectId);
@@ -807,7 +843,7 @@ export class CodeApplication extends Disposable {
 				});
 				const folderPath = choice.filePaths[0];
 				if (choice.canceled || !folderPath) { return; }
-				const project = projectWorkspaces.createProject(basename(folderPath), folderPath);
+				const project = projectWorkspaces.findProjectByFolder(folderPath) ?? projectWorkspaces.createProject(basename(folderPath), folderPath);
 				await openProject(project.project.id);
 			},
 			listProjects: () => workspaceDatabase.listProjects(),
@@ -832,7 +868,7 @@ export class CodeApplication extends Disposable {
 		this._register(appInstantiationService.createInstance(UserDataProfilesHandler));
 
 		// Init Channels
-		appInstantiationService.invokeFunction(accessor => this.initChannels(accessor, mainProcessElectronServer, sharedProcessClient));
+		appInstantiationService.invokeFunction(accessor => this.initChannels(accessor, mainProcessElectronServer, sharedProcessClient, openProject));
 
 		// Setup Protocol URL Handlers
 		const initialProtocolUrls = await appInstantiationService.invokeFunction(accessor => this.setupProtocolUrlHandlers(accessor, mainProcessElectronServer));
@@ -1397,7 +1433,7 @@ export class CodeApplication extends Disposable {
 		return this.mainInstantiationService.createChild(services);
 	}
 
-	private initChannels(accessor: ServicesAccessor, mainProcessElectronServer: ElectronIPCServer, sharedProcessClient: Promise<MessagePortClient>): void {
+	private initChannels(accessor: ServicesAccessor, mainProcessElectronServer: ElectronIPCServer, sharedProcessClient: Promise<MessagePortClient>, openProject: (projectId: string) => Promise<void>): void {
 
 		// Channels registered to node.js are exposed to second instances
 		// launching because that is the only way the second instance
@@ -1418,6 +1454,23 @@ export class CodeApplication extends Disposable {
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(REVIEW_DESKTOP_CHANNEL)));
 		}
 		if (this.workspaceDatabase) {
+			const projectHomeChannel = new WorkspaceProjectHomeChannel(
+				this.workspaceDatabase,
+				new ProjectWorkspaceService(this.workspaceDatabase, this.environmentMainService.userDataPath),
+				windowsMainService,
+				async sender => {
+					const homeWindow = windowsMainService.getWindowByWebContents(sender);
+					if (!homeWindow?.win) { throw new Error('The project home window is unavailable.'); }
+					const choice = await dialog.showOpenDialog(homeWindow.win, { title: localize('projectChooseFolder', '프로젝트 폴더 선택'), properties: ['openDirectory', 'createDirectory'] });
+					return choice.canceled ? null : choice.filePaths[0] ?? null;
+				},
+				openProject,
+			);
+			validatedIpcMain.handle(WORKSPACE_PROJECT_HOME_CHANNEL, (event, command: string, arg: unknown) => {
+				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Project home IPC is only available to the application main frame.'); }
+				return projectHomeChannel.call(event.sender, command, arg);
+			});
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_PROJECT_HOME_CHANNEL)));
 			const dashboardChannel = new WorkspaceDashboardChannel(this.workspaceDatabase, windowsMainService, {
 				deleteTask: (projectId, taskId, expectedRevision, requestId) => {
 					const providerRuns = this.workspaceProviderRuns;

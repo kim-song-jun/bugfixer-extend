@@ -278,7 +278,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 17;
+const schemaVersion = 18;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -334,6 +334,7 @@ export class WorkspaceDatabase {
 				if (version < 15) { WorkspaceDatabase.migrateV15(db); }
 				if (version < 16) { WorkspaceDatabase.migrateV16(db); }
 				if (version < 17) { WorkspaceDatabase.migrateV17(db); }
+				if (version < 18) { WorkspaceDatabase.migrateV18(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -661,6 +662,13 @@ export class WorkspaceDatabase {
 			ALTER TABLE frontend_e2e_evidence ADD COLUMN checkout_revision TEXT;
 			ALTER TABLE frontend_e2e_evidence ADD COLUMN checkout_revision_unavailable_reason TEXT DEFAULT 'Revision capture was not available when this evidence was recorded.';
 			PRAGMA user_version = 17;
+		`);
+	}
+
+	private static migrateV18(db: DatabaseSync): void {
+		db.exec(`
+			ALTER TABLE project_views ADD COLUMN last_opened_at TEXT;
+			PRAGMA user_version = 18;
 		`);
 	}
 
@@ -1385,6 +1393,20 @@ export class WorkspaceDatabase {
 	listProjects(): WorkspaceProject[] {
 		this.assertOpen();
 		return this.db.prepare('SELECT id, name, created_at FROM projects ORDER BY created_at, id').all().map(row => this.projectFromRow(row));
+	}
+
+	getProjectLastOpenedAt(projectId: string): string | null {
+		this.assertOpen();
+		const row = this.db.prepare('SELECT last_opened_at FROM project_views WHERE project_id = ?').get(projectId);
+		return row ? (row.last_opened_at === null ? null : String(row.last_opened_at)) : null;
+	}
+
+	markProjectOpened(projectId: string, openedAt = new Date().toISOString()): void {
+		this.assertOpen();
+		const previous = this.getProjectLastOpenedAt(projectId);
+		const timestamp = previous && previous >= openedAt ? new Date(Date.parse(previous) + 1).toISOString() : openedAt;
+		const result = this.db.prepare('UPDATE project_views SET last_opened_at = ? WHERE project_id = ?').run(timestamp, projectId);
+		if (Number(result.changes) !== 1) { throw new Error(`Project ${projectId} has no saved workspace view.`); }
 	}
 
 	updateProject(projectId: string, name: string): WorkspaceProject | undefined {

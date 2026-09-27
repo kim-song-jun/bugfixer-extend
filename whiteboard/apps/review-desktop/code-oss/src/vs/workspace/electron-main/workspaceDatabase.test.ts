@@ -68,6 +68,27 @@ test('projects, bindings, tasks, review links and project view persist across da
 	});
 });
 
+test('v17 databases upgrade with project and task data intact and null recent-open time', () => {
+	withDatabase((path, database) => {
+		const { project, task } = createProjectAndTask(database, 'Upgrade');
+		database.setProjectView({ projectId: project.id, descriptorUri: 'file:///profile/projects/upgrade.code-workspace', openAtQuit: true, selectedTaskId: task.id, dashboardPosition: null });
+		database.close();
+
+		const legacy = new DatabaseSync(path);
+		try {
+			legacy.exec('ALTER TABLE project_views DROP COLUMN last_opened_at; PRAGMA user_version = 17;');
+		} finally { legacy.close(); }
+
+		const upgraded = WorkspaceDatabase.open(path);
+		try {
+			assert.deepEqual(upgraded.getProject(project.id), project);
+			assert.deepEqual(upgraded.getTask(task.id), task);
+			assert.equal(upgraded.getProjectView(project.id)?.selectedTaskId, task.id);
+			assert.equal(upgraded.getProjectLastOpenedAt(project.id), null);
+		} finally { upgraded.close(); }
+	});
+});
+
 test('open-at-quit project views are returned in stable project order and exclude closed projects', () => {
 	withDatabase((_path, database) => {
 		const second = database.createProject('Second');

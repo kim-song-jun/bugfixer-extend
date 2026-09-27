@@ -6,7 +6,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { URI } from '../../base/common/uri.js';
-import { hasProjectWindow, restoreProjectWindows, type ProjectWindowIdentity } from './projectWindowRestore.js';
+import { hasProjectWindow, ProjectWindowOpenCoordinator, restoreProjectWindows, type ProjectWindowIdentity } from './projectWindowRestore.js';
+
+test('concurrent project opens share one window creation and allow retry after failure', async () => {
+	const coordinator = new ProjectWindowOpenCoordinator<string>();
+	let resolveWindow!: (value: string) => void;
+	const windowReady = new Promise<string>(resolve => { resolveWindow = resolve; });
+	let starts = 0;
+	const first = coordinator.open('project-one', async () => { starts++; return windowReady; });
+	const second = coordinator.open('project-one', async () => { starts++; return 'duplicate'; });
+	await Promise.resolve();
+	assert.equal(starts, 1);
+	resolveWindow('one window');
+	assert.deepEqual(await Promise.all([first, second]), ['one window', 'one window']);
+	assert.equal(coordinator.get('project-one'), undefined);
+
+	await assert.rejects(coordinator.open('project-two', async () => { throw new Error('folder missing'); }), /folder missing/);
+	assert.equal(coordinator.get('project-two'), undefined);
+	assert.equal(await coordinator.open('project-two', async () => 'reopened'), 'reopened');
+});
 
 test('startup restoration skips already open and duplicate projects, continues after a surfaced failure', async () => {
 	const opened: string[] = [];

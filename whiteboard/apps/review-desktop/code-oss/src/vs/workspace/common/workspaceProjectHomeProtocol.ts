@@ -3,9 +3,12 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import './review.common.main.js';
-import './editor.desktop.main.js';
-import './contrib/update/reviewUpdate.contribution.js';
-import './browser/projectHome/projectHomeEditor.contribution.js';
+export const WORKSPACE_PROJECT_HOME_CHANNEL = 'vscode:workspaceProjectHome';
 
-export { main } from './electron-browser/review.main.js';
+export interface WorkspaceProjectDTO {
+	readonly id: string;
+	readonly name: string;
+	readonly folderPath: string;
+	readonly createdAt: string;
+	readonly lastOpenedAt: string | null;
+}

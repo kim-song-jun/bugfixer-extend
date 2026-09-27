@@ -40,6 +40,16 @@ export class ProjectWorkspaceService {
 		this.descriptorDirectory = join(realpathSync(profileDirectory), 'projects');
 	}
 
+	findProjectByFolder(folderPath: string): ProjectWorkspace | undefined {
+		const canonicalPath = this.requireDirectory(folderPath);
+		for (const project of this.database.listProjects()) {
+			if (this.database.listFolderBindings(project.id).some(binding => binding.path === canonicalPath)) {
+				return this.ensureDescriptor(project.id);
+			}
+		}
+		return undefined;
+	}
+
 	createProject(name: string, folderPath: string): ProjectWorkspace {
 		const projectName = name.trim();
 		if (!projectName) { throw new Error('A project name is required.'); }

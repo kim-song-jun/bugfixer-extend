@@ -24,6 +24,24 @@ export function hasProjectWindow(projectId: string, descriptorUri: string, windo
 	});
 }
 
+/** Share one window creation while menu, Home, and startup restoration race for a project. */
+export class ProjectWindowOpenCoordinator<T> {
+	private readonly inFlight = new Map<string, Promise<T>>();
+
+	get(projectId: string): Promise<T> | undefined {
+		return this.inFlight.get(projectId);
+	}
+
+	open(projectId: string, start: () => Promise<T>): Promise<T> {
+		const pending = this.inFlight.get(projectId);
+		if (pending) { return pending; }
+		const opening = Promise.resolve().then(start);
+		const tracked = opening.finally(() => { this.inFlight.delete(projectId); });
+		this.inFlight.set(projectId, tracked);
+		return tracked;
+	}
+}
+
 export async function restoreProjectWindows(
 	projectIds: readonly string[],
 	alreadyOpenProjectIds: readonly string[],

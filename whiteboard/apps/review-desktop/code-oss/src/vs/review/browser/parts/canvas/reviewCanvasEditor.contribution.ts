@@ -70,7 +70,6 @@ class ReviewCanvasEditorContribution extends Disposable implements IWorkbenchCon
 			}
 		}
 		this.closeRestoredApiTabsMissingFromCatalog();
-		await this.tabsService.openHome(!this.editorService.activeEditor);
 		await this.desktopConnection.initialize();
 		await this.apiCatalog.initialize();
 	}
