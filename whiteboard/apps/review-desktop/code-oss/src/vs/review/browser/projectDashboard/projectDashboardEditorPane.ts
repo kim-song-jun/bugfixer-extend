@@ -25,6 +25,7 @@ import { WORKSPACE_CONVENTION_AGENT_CHANNEL, type ConventionAgentPreviewDTO, typ
 import { WORKSPACE_REVIEW_BRIDGE_CHANNEL, type WorkspaceTaskReviewLink, type TaskReviewAvailability, type TaskReviewOpenResult } from '../../../workspace/common/workspaceReviewBridgeProtocol.js';
 import { IReviewCanvasEditorTabsService } from '../../services/reviewCanvasEditorTabsService.js';
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
+import { getPackageRefreshCandidates, type PackageRefreshCandidate } from './packageRefreshCandidates.js';
 import { setProjectSidebarSection } from './projectSidebar.contribution.js';
 
 import './projectDashboard.css';
@@ -41,12 +42,6 @@ type KnowledgeView = 'references' | 'conventions';
 type ConnectorPreviewRequest =
 	| { readonly command: 'previewSlackConversation'; readonly payload: PreviewSlackConversationRequest }
 	| { readonly command: 'previewNotionPage'; readonly payload: PreviewNotionPageRequest };
-interface PackageRefreshCandidate {
-	readonly reference: WorkspaceReferenceDTO;
-	readonly sourceId: string;
-	readonly sourceKey: string;
-	readonly sourceLabel: string;
-}
 interface PackageRefreshState {
 	readonly state: 'loading' | 'error' | 'success';
 	readonly message: string;
@@ -828,26 +823,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private packageRefreshCandidates(installed: WorkspaceInstalledPackageDTO): PackageRefreshCandidate[] {
 		const accountRef = this.selectedPackageConnection(installed)?.accountRef;
 		if (!accountRef) return [];
-		const sources = installed.sources;
-		const latestBySource = new Map<string, PackageRefreshCandidate>();
-		for (const reference of this.knowledge?.references ?? []) {
-			if (reference.connectorId !== `local:${installed.packageId}` || reference.accountRef !== accountRef) continue;
-			const accountPrefix = `${installed.packageId}:${accountRef}:`;
-			if (!reference.externalId.startsWith(accountPrefix)) continue;
-			const accountScopedExternalId = reference.externalId.slice(accountPrefix.length);
-			const source = sources.find(item => accountScopedExternalId.startsWith(`${item.sourceId}:`));
-			if (!source) continue;
-			const sourceKey = accountScopedExternalId.slice(`${source.sourceId}:`.length);
-			if (!sourceKey) continue;
-			const candidate: PackageRefreshCandidate = { reference, sourceId: source.sourceId, sourceKey, sourceLabel: source.label };
-			const current = latestBySource.get(reference.sourceId);
-			if (!current || reference.version > current.reference.version
-				|| (reference.version === current.reference.version && reference.retrievedAt > current.reference.retrievedAt)) {
-				latestBySource.set(reference.sourceId, candidate);
-			}
-		}
-		return [...latestBySource.values()].sort((left, right) => left.sourceLabel.localeCompare(right.sourceLabel)
-			|| left.sourceKey.localeCompare(right.sourceKey));
+		return getPackageRefreshCandidates(this.knowledge?.references ?? [], installed.packageId, installed.sources, accountRef);
 	}
 
 	private async refreshInstalledPackageSource(installed: WorkspaceInstalledPackageDTO, candidate: PackageRefreshCandidate): Promise<void> {
