@@ -2610,7 +2610,12 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					this.render(); this.root?.querySelector<HTMLInputElement>('#task-edit-title')?.focus({ preventScroll: true });
 				});
 			}
-			const close = detailHeader.appendChild(createElement('button', 'project-dashboard__close')); close.type = 'button'; close.textContent = '닫기'; close.addEventListener('click', () => { this.stopPolling(); this.selectedTaskId = undefined; this.scheduleDashboardStateSave(); this.render(); });
+			const close = detailHeader.appendChild(createElement('button', 'project-dashboard__close')); close.type = 'button'; close.textContent = '닫기'; close.addEventListener('click', () => {
+				this.stopPolling(); this.selectedTaskId = undefined; this.scheduleDashboardStateSave(); this.render();
+				const taskButton = [...(this.root?.querySelectorAll<HTMLElement>('.project-dashboard__task') ?? [])]
+					.find(button => button.dataset.focusKey === `task:${detail.id}`);
+				taskButton?.focus();
+			});
 			close.disabled = !!this.taskMutationBusy;
 			close.dataset.focusKey = 'detail-close';
 			const reviews = panel.appendChild($('.project-dashboard__flow-card'));
