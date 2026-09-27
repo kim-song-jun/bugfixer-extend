@@ -9,7 +9,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isUUID } from '../../base/common/uuid.js';
 
-export type VaultService = 'slack' | 'notion';
+export type VaultService = 'slack' | 'notion' | 'declarative-package';
 
 const maximumSecretBytes = 16 * 1024;
 const vaultTimeoutMs = 120_000;
@@ -51,7 +51,7 @@ export class KeychainVault {
 	}
 
 	private validateScope(service: VaultService, accountId: string): void {
-		if ((service !== 'slack' && service !== 'notion') || !isUUID(accountId)) { throw new Error('A valid connector and account ID are required.'); }
+		if ((service !== 'slack' && service !== 'notion' && service !== 'declarative-package') || !isUUID(accountId)) { throw new Error('A valid connector and account ID are required.'); }
 	}
 
 	private run(operation: 'put' | 'get' | 'delete', service: VaultService, accountId: string, secret?: string): Promise<Buffer | undefined> {

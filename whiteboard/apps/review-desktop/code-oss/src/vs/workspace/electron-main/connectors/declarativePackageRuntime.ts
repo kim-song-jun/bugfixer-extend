@@ -21,13 +21,22 @@ export interface DeclarativePackageImportRequest {
 	readonly sourceKey: string;
 }
 
+export interface DeclarativePackageConnectionBinding {
+	readonly accountRef: string;
+	readonly packageId: string;
+	readonly manifestDigest: string;
+	readonly host: string;
+	readonly grantedScopes: readonly string[];
+	readonly credential: string | null;
+}
+
 /** Store-compatible reference fields, keeping this local connector ID outside the built-in connector union. */
 export interface DeclarativeImportedReferenceInput {
 	readonly connectorId: string;
 	readonly connectorVersion: string;
 	readonly externalId: string;
 	readonly sourceUri: string;
-	readonly accountRef: null;
+	readonly accountRef: string;
 	readonly title: string;
 	readonly contentType: 'text/plain; charset=utf-8';
 	readonly content: Uint8Array;
@@ -37,9 +46,14 @@ export interface DeclarativeImportedReferenceInput {
 export async function importDeclarativePackageSource(
 	approvedPackage: ApprovedDeclarativePackage,
 	request: DeclarativePackageImportRequest,
-	transport: DeclarativePackageTransport = new PinnedDeclarativePackageTransport(),
+	transport: DeclarativePackageTransport,
+	binding: DeclarativePackageConnectionBinding,
 ): Promise<DeclarativeImportedReferenceInput> {
 	assertApprovedDeclarativePackage(approvedPackage);
+	if (!binding || typeof binding !== 'object' || !Array.isArray(binding.grantedScopes) || binding.packageId !== approvedPackage.manifest.packageId
+		|| binding.manifestDigest !== approvedPackage.manifestDigest || typeof binding.accountRef !== 'string' || !binding.accountRef.trim()) {
+		throw new Error('Connector connection is not bound to this approved package and account.');
+	}
 	if (typeof request.sourceId !== 'string' || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(request.sourceId)) {
 		throw new Error('A valid connector source identifier is required.');
 	}
@@ -49,6 +63,16 @@ export async function importDeclarativePackageSource(
 	const manifest = approvedPackage.manifest;
 	const source = manifest.sources.find(candidate => candidate.sourceId === request.sourceId);
 	if (!source) { throw new Error('The selected source is not declared by this connector package.'); }
+	if (binding.host !== source.domain || !approvedPackage.manifest.domains.includes(binding.host)) {
+		throw new Error('Connector connection is not approved for this source host.');
+	}
+	const requiredScope = source.requiredScope;
+	if (approvedPackage.manifest.accountAccess === 'none') {
+		if (binding.credential !== null || requiredScope !== undefined) { throw new Error('Anonymous connector source received an unexpected credential or scope.'); }
+	} else if (typeof binding.credential !== 'string' || !binding.credential || !requiredScope
+		|| !approvedPackage.manifest.requestedScopes.includes(requiredScope) || !binding.grantedScopes.includes(requiredScope)) {
+		throw new Error('Connector connection is missing its required credential or granted scope.');
+	}
 	if (!source.path.includes('{sourceKey}')) { throw new Error('The selected source path does not identify the selected sourceKey.'); }
 
 	const path = source.path.replace('{sourceKey}', encodeURIComponent(request.sourceKey));
@@ -83,7 +107,7 @@ export async function importDeclarativePackageSource(
 	for (let page = 0; page < maxPages; page++) {
 		const url = new URL(path, `https://${source.domain}`);
 		if (cursor && source.cursorParameter) { url.searchParams.set(source.cursorParameter, cursor); }
-		const payload = await transport.get(url, source.domain);
+		const payload = await transport.get(url, source.domain, binding.credential ?? undefined);
 		if (firstResponse) {
 			const pageTitle = source.titlePath ? pathValue(payload, source.titlePath) : undefined;
 			if (typeof pageTitle === 'string' && pageTitle.trim()) { title = pageTitle.trim().slice(0, 500); }
@@ -128,9 +152,9 @@ export async function importDeclarativePackageSource(
 	return {
 		connectorId: `local:${manifest.packageId}`,
 		connectorVersion: manifest.version,
-		externalId: `${manifest.packageId}:${source.sourceId}:${request.sourceKey}`,
+		externalId: `${manifest.packageId}:${binding.accountRef}:${source.sourceId}:${request.sourceKey}`,
 		sourceUri: firstUrl.toString(),
-		accountRef: null,
+		accountRef: binding.accountRef,
 		title: safeTitle(title, source.label),
 		contentType: 'text/plain; charset=utf-8',
 		content,

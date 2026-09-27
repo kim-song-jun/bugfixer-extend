@@ -24,6 +24,7 @@ const manifest: DeclarativePackageManifest = {
 	description: 'Reads selected public issue records.',
 	domains: ['api.example.org'],
 	accountAccess: 'none',
+	requestedScopes: [],
 	sources: [{
 		sourceId: 'issues', label: 'Issue feed', domain: 'api.example.org', path: '/v1/issues/{sourceKey}',
 		recordsPath: 'items', titlePath: 'metadata.title', textPaths: ['number', 'title', 'body'],
@@ -66,6 +67,14 @@ function approve(envelope: SignedDeclarativePackageEnvelope) {
 	});
 }
 
+const anonymousBinding = {
+	accountRef: '00000000-0000-4000-8000-000000000042', packageId: 'public-issues', manifestDigest: '',
+	host: 'api.example.org', grantedScopes: [], credential: null,
+};
+function bindingFor(approved: ReturnType<typeof approve>, overrides: Partial<typeof anonymousBinding> = {}) {
+	return { ...anonymousBinding, manifestDigest: approved.manifestDigest, ...overrides };
+}
+
 test('signature is verified over exact manifest bytes and first install remains explicitly untrusted until approval', async () => {
 	const { envelope, bytes } = signedEnvelope();
 	const validated = validateDeclarativePackage(envelope);
@@ -76,9 +85,9 @@ test('signature is verified over exact manifest bytes and first install remains 
 	assert.equal(validated.review.accountAccess, 'none');
 	assert.deepEqual(validated.review.sourceRules, [{
 		sourceId: 'issues', label: 'Issue feed', domain: 'api.example.org', method: 'GET',
-		path: '/v1/issues/{sourceKey}', fields: ['number', 'title', 'body'], paginated: true,
+		requiredScope: undefined, path: '/v1/issues/{sourceKey}', fields: ['number', 'title', 'body'], paginated: true,
 	}]);
-	await assert.rejects(importDeclarativePackageSource(validated as never, { sourceId: 'issues', sourceKey: 'one' }), /approved/i);
+	await assert.rejects(importDeclarativePackageSource(validated as never, { sourceId: 'issues', sourceKey: 'one' }, undefined as never, anonymousBinding), /approved/i);
 	const byteChange = Buffer.from(bytes);
 	byteChange[byteChange.length - 3] ^= 1;
 	assert.throws(() => validateDeclarativePackage({ ...envelope, manifestBytesBase64: byteChange.toString('base64') }), /signature is invalid/i);
@@ -122,6 +131,29 @@ test('strict schema rejects credentials, executable fields, undeclared domains, 
 	}), /duplicate JSON keys/i);
 });
 
+test('bearer imports require the reviewed package binding, matching host and per-source granted scope', async () => {
+	const bearerManifest = {
+		...manifest, accountAccess: 'bearer-token', requestedScopes: ['issues:read'],
+		sources: [{ ...manifest.sources[0], requiredScope: 'issues:read' }],
+	};
+	const approved = approve(signedEnvelope(bearerManifest).envelope);
+	const connection = {
+		accountRef: '00000000-0000-4000-8000-000000000043', packageId: approved.manifest.packageId,
+		manifestDigest: approved.manifestDigest, host: 'api.example.org', grantedScopes: ['issues:read'], credential: 'synthetic-token',
+	};
+	let receivedCredential: string | undefined;
+	const transport: DeclarativePackageTransport = { get: async (_url, _host, token) => { receivedCredential = token; return { items: [] }; } };
+	const result = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, connection);
+	assert.equal(receivedCredential, 'synthetic-token');
+	assert.equal(result.accountRef, connection.accountRef);
+	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, host: 'evil.example.org' }), /host/i);
+	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, manifestDigest: '0'.repeat(64) }), /bound/i);
+	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, grantedScopes: [] }), /scope/i);
+	await assert.rejects(importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team' }, transport, { ...connection, credential: null }), /credential/i);
+	assert.throws(() => validateDeclarativePackage(signedEnvelope({ ...bearerManifest, domains: ['api.example.org', 'other.example.org'] }).envelope), /exactly one/i);
+	assert.throws(() => validateDeclarativePackage(signedEnvelope({ ...bearerManifest, sources: [{ ...bearerManifest.sources[0], requiredScope: 'issues:write' }] }).envelope), /declared requested scope/i);
+});
+
 test('signed declarative source fetch returns normalized bytes with pagination and bounded output', async () => {
 	const approved = approve(signedEnvelope().envelope);
 	const urls: URL[] = [];
@@ -132,27 +164,27 @@ test('signed declarative source fetch returns normalized bytes with pagination a
 	const transport: DeclarativePackageTransport = {
 		get: async url => { urls.push(url); return pages.shift()!; },
 	};
-	const result = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team_1' }, transport);
+	const result = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team_1' }, transport, bindingFor(approved));
 	assert.equal(urls.length, 2);
 	assert.equal(urls[0].origin, 'https://api.example.org');
 	assert.equal(urls[0].pathname, '/v1/issues/team_1');
 	assert.equal(urls[1].searchParams.get('cursor'), 'cursor 2');
 	assert.equal(result.connectorId, 'local:public-issues');
-	assert.equal(result.externalId, 'public-issues:issues:team_1');
-	assert.equal(result.accountRef, null);
+	assert.equal(result.externalId, `public-issues:${anonymousBinding.accountRef}:issues:team_1`);
+	assert.equal(result.accountRef, anonymousBinding.accountRef);
 	assert.equal(result.title, 'Open issues');
 	assert.match(new TextDecoder().decode(result.content), /Fix the CSV export/);
 	assert.match(new TextDecoder().decode(result.content), /Reduce query time/);
 	const secondResource = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team_2' }, {
 		get: async url => { urls.push(url); return { metadata: {}, items: [{ number: 3, title: 'Third', body: 'Another issue.' }] }; },
-	});
+	}, bindingFor(approved));
 	assert.equal(urls[2].pathname, '/v1/issues/team_2');
 	assert.notEqual(urls[0].toString(), urls[2].toString());
 	assert.equal(secondResource.sourceUri, urls[2].toString());
-	assert.equal(secondResource.externalId, 'public-issues:issues:team_2');
+	assert.equal(secondResource.externalId, `public-issues:${anonymousBinding.accountRef}:issues:team_2`);
 
 	const huge = 'x'.repeat(1024 * 1024 + 32);
-	const bounded = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team_1' }, { get: async () => ({ metadata: { title: 'Big' }, items: [{ number: 3, title: 'Large', body: huge }] }) });
+	const bounded = await importDeclarativePackageSource(approved, { sourceId: 'issues', sourceKey: 'team_1' }, { get: async () => ({ metadata: { title: 'Big' }, items: [{ number: 3, title: 'Large', body: huge }] }) }, bindingFor(approved));
 	assert.ok(bounded.content.byteLength <= 1024 * 1024);
 	assert.ok(bounded.omissions.some(label => /truncated/.test(label)));
 });
@@ -176,6 +208,7 @@ test('pinned HTTPS transport uses the exact allowlisted host for TLS SNI and hos
 	assert.equal(captured?.hostHeader, 'api.example.org');
 	assert.deepEqual(captured?.addresses, [{ address: '93.184.216.34', family: 4 }]);
 	assert.equal(captured?.method, 'GET');
+	assert.deepEqual(captured?.headers, {});
 	const resolvePinned = captured?.lookup as unknown as (hostname: string, options: object, callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void) => void;
 	const pinnedAddress = await new Promise<{ address: string; family: number }>((resolve, reject) => {
 		resolvePinned('api.example.org', {}, (error, address, family) => error ? reject(error) : resolve({ address, family }));
@@ -201,6 +234,14 @@ test('pinned HTTPS transport uses the exact allowlisted host for TLS SNI and hos
 		executePinnedRequest: async () => ({ statusCode: 200, body: Buffer.alloc(maxDeclarativePackageResponseBytes + 1) }),
 	});
 	await assert.rejects(oversizedTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org'), /2 MiB limit/i);
+
+	let credentialRequest: PinnedHttpsRequest | undefined;
+	const echoingTransport = new PinnedDeclarativePackageTransport({
+		resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
+		executePinnedRequest: async request => { credentialRequest = request; return { statusCode: 200, body: Buffer.from('{"echo":"synthetic-token"}') }; },
+	});
+	await assert.rejects(echoingTransport.get(new URL('https://api.example.org/v1/items/1'), 'api.example.org', 'synthetic-token'), /echoed its bearer credential/i);
+	assert.deepEqual(credentialRequest?.headers, { Authorization: 'Bearer synthetic-token' });
 });
 
 test('address classifier blocks private, reserved, and literal address ranges', () => {

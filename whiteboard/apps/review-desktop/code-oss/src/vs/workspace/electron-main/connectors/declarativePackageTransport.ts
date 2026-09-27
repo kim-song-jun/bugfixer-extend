@@ -25,6 +25,7 @@ export interface PinnedHttpsRequest {
 	readonly hostHeader: string;
 	readonly method: 'GET';
 	readonly path: string;
+	readonly headers: Readonly<Record<string, string>>;
 	readonly addresses: readonly ResolvedNetworkAddress[];
 	readonly lookup: NonNullable<RequestOptions['lookup']>;
 }
@@ -36,7 +37,7 @@ export interface PinnedHttpsResponse {
 }
 
 export interface DeclarativePackageTransport {
-	get(url: URL, allowedDomain: string): Promise<Record<string, unknown>>;
+	get(url: URL, allowedDomain: string, bearerToken?: string): Promise<Record<string, unknown>>;
 }
 
 export interface DeclarativePackageTransportTestHooks {
@@ -47,7 +48,10 @@ export interface DeclarativePackageTransportTestHooks {
 export class PinnedDeclarativePackageTransport implements DeclarativePackageTransport {
 	constructor(private readonly testHooks?: DeclarativePackageTransportTestHooks) { }
 
-	async get(url: URL, allowedDomain: string): Promise<Record<string, unknown>> {
+	async get(url: URL, allowedDomain: string, bearerToken?: string): Promise<Record<string, unknown>> {
+		if (bearerToken !== undefined && (Buffer.byteLength(bearerToken, 'utf8') > 16 * 1024 || !/^[\x21-\x7e]+$/.test(bearerToken))) {
+			throw new Error('Declarative connector bearer credential has an invalid format.');
+		}
 		if (url.protocol !== 'https:' || url.hostname !== allowedDomain || url.username || url.password || url.port
 			|| isIP(url.hostname) !== 0 || url.origin !== `https://${allowedDomain}`) {
 			throw new Error('Declarative connector request escaped its HTTPS domain allowlist.');
@@ -63,6 +67,7 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 			hostHeader: allowedDomain,
 			method: 'GET',
 			path: `${url.pathname}${url.search}`,
+			headers: Object.freeze(bearerToken === undefined ? {} : { Authorization: `Bearer ${bearerToken}` }),
 			addresses: Object.freeze([...addresses]),
 			lookup: createPinnedLookup(allowedDomain, addresses),
 		});
@@ -78,6 +83,9 @@ export class PinnedDeclarativePackageTransport implements DeclarativePackageTran
 		}
 		if (response.body.byteLength > maxDeclarativePackageResponseBytes) {
 			throw new Error('Declarative connector response exceeded the 2 MiB limit.');
+		}
+		if (bearerToken && Buffer.from(response.body).includes(Buffer.from(bearerToken, 'ascii'))) {
+			throw new Error('Declarative connector response echoed its bearer credential.');
 		}
 		let value: unknown;
 		try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(response.body)); }
@@ -113,7 +121,7 @@ async function executePinnedHttpsRequest(request: PinnedHttpsRequest): Promise<P
 		method: 'GET',
 		servername: request.servername,
 		rejectUnauthorized: request.rejectUnauthorized,
-		headers: { Accept: 'application/json', Host: request.hostHeader },
+		headers: { Accept: 'application/json', Host: request.hostHeader, ...request.headers },
 		lookup: request.lookup,
 		agent: false,
 		signal: AbortSignal.timeout(maxDeclarativePackageRequestMs),

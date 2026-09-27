@@ -18,9 +18,9 @@ static void zero_bytes(void *memory, size_t length) {
 
 static void usage(void) {
   fprintf(stderr,
-    "usage: keychain-vault put slack|notion UUID < SECRET\n"
-    "       keychain-vault get slack|notion UUID\n"
-    "       keychain-vault delete slack|notion UUID\n");
+    "usage: keychain-vault put slack|notion|declarative-package UUID < SECRET\n"
+    "       keychain-vault get slack|notion|declarative-package UUID\n"
+    "       keychain-vault delete slack|notion|declarative-package UUID\n");
 }
 
 static int is_uuid(const char *value) {
@@ -40,6 +40,7 @@ static int is_uuid(const char *value) {
 static const char *service_name(const char *provider) {
   if (strcmp(provider, "slack") == 0) return "Review Desktop OAuth: slack";
   if (strcmp(provider, "notion") == 0) return "Review Desktop OAuth: notion";
+  if (strcmp(provider, "declarative-package") == 0) return "Review Desktop Declarative Connector Credential";
   return NULL;
 }
 
@@ -205,7 +206,7 @@ int main(int argc, char **argv) {
   const char *operation = argv[1];
   const char *service = service_name(argv[2]);
   if (!service || !is_uuid(argc == 4 ? argv[3] : NULL)) {
-    fprintf(stderr, "keychain-vault: service must be slack or notion and account must be a canonical UUID\n");
+    fprintf(stderr, "keychain-vault: service must be slack, notion, or declarative-package and account must be a canonical UUID\n");
     return 2;
   }
   if ((strcmp(operation, "put") == 0 && argc != 4) ||
@@ -217,7 +218,6 @@ int main(int argc, char **argv) {
   CFStringRef service_string = create_cf_string(service);
   CFStringRef account_string = create_cf_string(argv[3]);
   if (!service_string || !account_string) {
-    if (service_string) CFRelease(service_string);
     if (account_string) CFRelease(account_string);
     fprintf(stderr, "keychain-vault: could not encode Keychain item identity\n");
     return 1;

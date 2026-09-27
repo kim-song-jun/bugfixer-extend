@@ -76,12 +76,27 @@ test("synthetic Keychain item round trips and is deleted", { skip: process.platf
     assert.equal(missing.code, 3);
     assert.deepEqual(missing.stdout, Buffer.alloc(0));
     assert.match(missing.stderr.toString(), /credential was not found/);
+
+    const connectorPut = await run(binary, ["put", "declarative-package", account], fixture);
+    if (connectorPut.pid) pids.add(connectorPut.pid);
+    assert.equal(connectorPut.code, 0, connectorPut.stderr.toString());
+    const connectorGet = await invoke("get", "declarative-package", account);
+    assert.equal(connectorGet.code, 0, connectorGet.stderr.toString());
+    assert.deepEqual(connectorGet.stdout, fixture);
+    const slackStillMissing = await invoke("get", "slack", account);
+    assert.equal(slackStillMissing.code, 3, slackStillMissing.stderr.toString());
+    const connectorDeleted = await invoke("delete", "declarative-package", account);
+    assert.equal(connectorDeleted.code, 0, connectorDeleted.stderr.toString());
     console.log("Synthetic Keychain item deleted; subsequent get returned not found.");
   } finally {
     const cleanup = await invoke("delete", "slack", account);
     assert.ok(cleanup.code === 0 || cleanup.code === 3, cleanup.stderr.toString());
+    const connectorCleanup = await invoke("delete", "declarative-package", account);
+    assert.ok(connectorCleanup.code === 0 || connectorCleanup.code === 3, connectorCleanup.stderr.toString());
     const proof = await invoke("get", "slack", account);
     assert.equal(proof.code, 3, proof.stderr.toString());
+    const connectorProof = await invoke("get", "declarative-package", account);
+    assert.equal(connectorProof.code, 3, connectorProof.stderr.toString());
     await rm(temporaryRoot, { recursive: true, force: true });
     // Every spawned child is awaited by run()'s close event; retain the set as
     // explicit ownership evidence for this focused test's process lifecycle.

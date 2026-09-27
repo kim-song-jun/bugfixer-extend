@@ -31,6 +31,7 @@ export interface DeclarativePackageSource {
 	readonly textPaths: readonly string[];
 	readonly nextCursorPath?: string;
 	readonly cursorParameter?: string;
+	readonly requiredScope?: string;
 }
 
 export interface DeclarativePackageManifest {
@@ -40,7 +41,8 @@ export interface DeclarativePackageManifest {
 	readonly name: string;
 	readonly description: string;
 	readonly domains: readonly string[];
-	readonly accountAccess: 'none';
+	readonly accountAccess: 'none' | 'bearer-token';
+	readonly requestedScopes: readonly string[];
 	readonly sources: readonly DeclarativePackageSource[];
 }
 
@@ -54,12 +56,14 @@ export interface DeclarativePackageReview {
 	readonly fingerprint: string;
 	readonly manifestDigest: string;
 	readonly domains: readonly string[];
-	readonly accountAccess: 'none';
+	readonly accountAccess: 'none' | 'bearer-token';
+	readonly requestedScopes: readonly string[];
 	readonly sourceLabels: readonly string[];
 	readonly sourceRules: readonly {
 		readonly sourceId: string;
 		readonly label: string;
 		readonly domain: string;
+		readonly requiredScope?: string;
 		readonly method: 'GET';
 		readonly path: string;
 		readonly fields: readonly string[];
@@ -126,11 +130,13 @@ export function validateDeclarativePackage(
 			manifestDigest,
 			domains: Object.freeze([...manifest.domains]),
 			accountAccess: manifest.accountAccess,
+			requestedScopes: Object.freeze([...manifest.requestedScopes]),
 			sourceLabels: Object.freeze(manifest.sources.map(source => source.label)),
 			sourceRules: Object.freeze(manifest.sources.map(source => Object.freeze({
 				sourceId: source.sourceId,
 				label: source.label,
 				domain: source.domain,
+				requiredScope: source.requiredScope,
 				method: 'GET' as const,
 				path: source.path,
 				fields: Object.freeze([...source.textPaths]),
@@ -216,7 +222,7 @@ function compareVersions(left: string, right: string): number {
 
 export function parseManifest(value: unknown): DeclarativePackageManifest {
 	const root = record(value, 'manifest');
-	assertExactKeys(root, ['schemaVersion', 'packageId', 'version', 'name', 'description', 'domains', 'accountAccess', 'sources'], 'manifest');
+	assertExactKeys(root, ['schemaVersion', 'packageId', 'version', 'name', 'description', 'domains', 'accountAccess', 'requestedScopes', 'sources'], 'manifest');
 	if (root.schemaVersion !== 1) { throw new Error('Unsupported connector package schema version.'); }
 	const packageId = boundedString(root.packageId, 'packageId', 80);
 	if (!packageIdPattern.test(packageId)) { throw new Error('Connector package ID has an invalid format.'); }
@@ -224,14 +230,34 @@ export function parseManifest(value: unknown): DeclarativePackageManifest {
 	if (!isValidVersion(version)) { throw new Error('Connector package version must use semantic version format.'); }
 	const name = boundedString(root.name, 'name', 100);
 	const description = boundedString(root.description, 'description', 500);
-	if (root.accountAccess !== 'none') { throw new Error('Declarative connector packages may not request account credentials.'); }
+	if (root.accountAccess !== 'none' && root.accountAccess !== 'bearer-token') { throw new Error('Connector package authentication mode is unsupported.'); }
+	const requestedScopes = root.requestedScopes === undefined && root.accountAccess === 'none' ? [] : parseScopes(root.requestedScopes);
+	if (root.accountAccess === 'none' && requestedScopes.length) { throw new Error('Anonymous connector packages may not request scopes.'); }
+	if (root.accountAccess === 'bearer-token' && !requestedScopes.length) { throw new Error('Bearer connector packages must declare requested scopes.'); }
 	if (!Array.isArray(root.domains) || root.domains.length < 1 || root.domains.length > maxDomains) { throw new Error('Connector package must declare between 1 and 8 domains.'); }
 	const domains = root.domains.map(domain => validateDomain(domain));
 	if (new Set(domains).size !== domains.length) { throw new Error('Connector package domains must be unique.'); }
+	if (root.accountAccess === 'bearer-token' && domains.length !== 1) { throw new Error('Bearer connector packages must use exactly one approved HTTPS domain.'); }
 	if (!Array.isArray(root.sources) || root.sources.length < 1 || root.sources.length > maxSources) { throw new Error('Connector package must declare between 1 and 32 sources.'); }
 	const sources = root.sources.map((source, index) => parseSource(source, domains, index));
+	for (const source of sources) {
+		if (root.accountAccess === 'none' && source.requiredScope !== undefined) { throw new Error('Anonymous connector sources may not declare a requiredScope.'); }
+		if (root.accountAccess === 'bearer-token' && (!source.requiredScope || !requestedScopes.includes(source.requiredScope))) {
+			throw new Error('Every bearer connector source must require a declared requested scope.');
+		}
+	}
 	if (new Set(sources.map(source => source.sourceId)).size !== sources.length) { throw new Error('Connector source identifiers must be unique.'); }
-	return { schemaVersion: 1, packageId, version, name, description, domains, accountAccess: 'none', sources };
+	return { schemaVersion: 1, packageId, version, name, description, domains, accountAccess: root.accountAccess, requestedScopes, sources };
+}
+
+const scopePattern = /^[a-z0-9][a-z0-9:._-]{0,79}$/;
+function parseScopes(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length < 1 || value.length > 32 || value.some(scope => typeof scope !== 'string' || !scopePattern.test(scope))) {
+		throw new Error('Connector requestedScopes must contain between 1 and 32 valid scope labels.');
+	}
+	const scopes = value as string[];
+	if (new Set(scopes).size !== scopes.length) { throw new Error('Connector requestedScopes must be unique.'); }
+	return scopes;
 }
 
 function isValidVersion(value: string): boolean {
@@ -240,7 +266,7 @@ function isValidVersion(value: string): boolean {
 
 function parseSource(value: unknown, domains: readonly string[], index: number): DeclarativePackageSource {
 	const source = record(value, `sources[${index}]`);
-	assertExactKeys(source, ['sourceId', 'label', 'domain', 'path', 'recordsPath', 'titlePath', 'textPaths', 'nextCursorPath', 'cursorParameter'], `sources[${index}]`);
+	assertExactKeys(source, ['sourceId', 'label', 'domain', 'path', 'recordsPath', 'titlePath', 'textPaths', 'nextCursorPath', 'cursorParameter', 'requiredScope'], `sources[${index}]`);
 	const sourceId = boundedString(source.sourceId, 'sourceId', 64);
 	if (!sourceIdPattern.test(sourceId)) { throw new Error('Connector source ID has an invalid format.'); }
 	const label = boundedString(source.label, 'source label', 120);
@@ -262,7 +288,8 @@ function parseSource(value: unknown, domains: readonly string[], index: number):
 	const cursorParameter = source.cursorParameter === undefined ? undefined : boundedString(source.cursorParameter, 'cursorParameter', 40);
 	if (!!nextCursorPath !== !!cursorParameter) { throw new Error('Pagination requires both nextCursorPath and cursorParameter.'); }
 	if (cursorParameter && !cursorParameterPattern.test(cursorParameter)) { throw new Error('Pagination parameter has an invalid format.'); }
-	return { sourceId, label, domain, path, recordsPath, titlePath, textPaths, nextCursorPath, cursorParameter };
+	const requiredScope = source.requiredScope === undefined || source.requiredScope === null ? undefined : boundedString(source.requiredScope, 'requiredScope', 80);
+	return { sourceId, label, domain, path, recordsPath, titlePath, textPaths, nextCursorPath, cursorParameter, requiredScope };
 }
 
 function validateDomain(value: unknown): string {
