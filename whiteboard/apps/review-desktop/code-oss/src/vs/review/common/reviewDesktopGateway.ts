@@ -63,7 +63,7 @@ const ROUTES: readonly { readonly method: string; readonly pattern: RegExp }[] =
 export function validateReviewDesktopStreamPath(path: unknown): string {
 	if (typeof path !== "string" || path.length > 4096 || !path.startsWith("/") || path.startsWith("//")) throw new Error("Invalid Review Desktop stream path.");
 	const url = new URL(path, "http://127.0.0.1");
-	if (url.origin !== "http://127.0.0.1" || url.hash || !(url.pathname === "/control" || /^\/reviews-api\/(?:watch|[A-Za-z0-9_-]+\/(?:watch|structural-diff))$/.test(url.pathname)) || /%(?:2f|5c)/i.test(url.pathname)) {
+	if (url.origin !== "http://127.0.0.1" || url.hash || !/^\/reviews-api\/(?:watch|[A-Za-z0-9_-]+\/(?:watch|structural-diff))$/.test(url.pathname) || /%(?:2f|5c)/i.test(url.pathname)) {
 		throw new Error("Review Desktop stream route is not allowed.");
 	}
 	return `${url.pathname}${url.search}`;

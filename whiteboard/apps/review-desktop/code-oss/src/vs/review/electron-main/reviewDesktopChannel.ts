@@ -8,7 +8,6 @@ import type { WebContents } from "electron";
 import { Event } from "../../base/common/event.js";
 import { IServerChannel } from "../../base/parts/ipc/common/ipc.js";
 import { publicReviewDesktopStatus, requestReviewDesktopServer, validateReviewDesktopStreamPath, validatedReviewDesktopOrigin, type ReviewDesktopRequest, type ReviewDesktopStreamEvent } from "../common/reviewDesktopGateway.js";
-import { consumeReviewEventStream } from "../common/reviewEventStream.js";
 import { parseJsonText } from "../common/reviewProtocol.js";
 import type { ReviewDesktopHost } from "./reviewDesktopHost.js";
 
@@ -43,6 +42,7 @@ export class ReviewDesktopChannel implements IServerChannel<WebContents> {
 		}
 		if (command === "request") {
 			if (!isReviewDesktopRequest(arg)) throw new Error("Invalid Review Desktop request.");
+			if (new URL(arg.path, 'http://127.0.0.1').pathname === '/control/result') throw new Error('Review control results are main-process-only.');
 			return requestReviewDesktopServer(await this.host.whenConnected(), arg) as Promise<T>;
 		}
 		if (command === "streamStart") {
@@ -105,16 +105,11 @@ export class ReviewDesktopChannel implements IServerChannel<WebContents> {
 		const urlPath = validateReviewDesktopStreamPath(path);
 		const connection = await this.host.whenConnected();
 		const response = await fetch(new URL(urlPath, validatedReviewDesktopOrigin(connection)), {
-			headers: { "x-review-token": connection.token, accept: path === "/control" ? "text/event-stream" : "application/x-ndjson" },
+			headers: { "x-review-token": connection.token, accept: "application/x-ndjson" },
 			signal,
 			redirect: "error",
 		});
 		if (!response.ok || !response.body) throw new Error(`Review Desktop stream failed (${response.status}).`);
-		if (path === "/control") {
-			if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) throw new Error("Review control stream returned an invalid content type.");
-			await consumeReviewEventStream(response.body, value => emit({ value }), signal);
-			return;
-		}
 		if (!response.headers.get("content-type")?.toLowerCase().includes("application/x-ndjson")) throw new Error("Review watch stream returned an invalid content type.");
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();

@@ -35,6 +35,7 @@ test("Review Desktop gateway permits only bounded first-party API routes", () =>
 	assert.throws(() => validateReviewDesktopRequest({ path: "/tutorial", method: "DELETE", body: { invalid: true } }), /body is invalid/);
 	assert.throws(() => validateReviewDesktopRequest({ path: "/reviews-api/commands", method: "POST", body: { data: "x".repeat(REVIEW_DESKTOP_MAX_REQUEST_BYTES) } }), /too large/);
 	assert.equal(validateReviewDesktopStreamPath("/reviews-api/watch?subscriptions=%5B%5D"), "/reviews-api/watch?subscriptions=%5B%5D");
+	assert.throws(() => validateReviewDesktopStreamPath("/control"), /not allowed/);
 	assert.throws(() => validateReviewDesktopStreamPath("https://evil.example/control"), /path/);
 });
 

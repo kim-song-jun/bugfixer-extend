@@ -142,6 +142,8 @@ import { ReviewDesktopHost } from '../../review/electron-main/reviewDesktopHost.
 import { ReviewMenubarMainService } from '../../review/electron-main/reviewMenubar.js';
 import { ReviewUpdateDialog } from '../../review/electron-main/reviewUpdateDialog.js';
 import { REVIEW_DESKTOP_CHANNEL, ReviewDesktopChannel } from '../../review/electron-main/reviewDesktopChannel.js';
+import { ReviewControlDispatcher } from '../../review/electron-main/reviewControlDispatcher.js';
+import { REVIEW_CONTROL_ACK_CHANNEL } from '../../review/common/reviewControlDispatch.js';
 import { WorkspaceDatabase } from '../../workspace/electron-main/workspaceDatabase.js';
 import { WorkspaceProjectHomeChannel } from '../../workspace/electron-main/workspaceProjectHomeChannel.js';
 import { WORKSPACE_PROJECT_HOME_CHANNEL } from '../../workspace/common/workspaceProjectHomeProtocol.js';
@@ -1469,6 +1471,20 @@ export class CodeApplication extends Disposable {
 		if (this.reviewDesktopHost) {
 			const reviewDesktopChannel = new ReviewDesktopChannel(this.reviewDesktopHost,
 				sender => !!windowsMainService.getWindowByWebContents(sender));
+			const reviewControl = this._register(new ReviewControlDispatcher(
+				this.reviewDesktopHost, windowsMainService, this.workspaceDatabase, openProject,
+				(window, projectId) => {
+					const view = this.workspaceDatabase?.getProjectView(projectId);
+					return !!view && hasProjectWindow(projectId, view.descriptorUri, [window]);
+				},
+				error => this.logService.error('[Whiteboard] Review control channel stopped:', error),
+			));
+			const reviewAckListener = (event: Electron.IpcMainEvent, value: unknown) => {
+				if (event.senderFrame !== event.sender.mainFrame) return;
+				reviewControl.ack(event.sender, value);
+			};
+			validatedIpcMain.on(REVIEW_CONTROL_ACK_CHANNEL, reviewAckListener);
+			this._register(toDisposable(() => validatedIpcMain.removeListener(REVIEW_CONTROL_ACK_CHANNEL, reviewAckListener)));
 			validatedIpcMain.handle(REVIEW_DESKTOP_CHANNEL, (event, command: string, arg: unknown) => {
 				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Review Desktop IPC is only available to the application main frame.'); }
 				return reviewDesktopChannel.call(event.sender, command, arg);

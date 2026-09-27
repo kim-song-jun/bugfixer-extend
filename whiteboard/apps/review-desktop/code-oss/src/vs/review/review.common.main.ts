@@ -20,6 +20,7 @@ import "./contrib/quickaccess/reviewQuickAccess.contribution.js";
 import "./contrib/settings/reviewSettings.contribution.js";
 import "./contrib/telemetry/reviewLspTelemetry.contribution.js";
 import "./contrib/telemetry/reviewTelemetry.contribution.js";
+import "./contrib/verbs/reviewControl.contribution.js";
 // Sessions supplies the native fixed-grid shell; Review replaces its session
 // model, setup flow, and content part and deliberately imports no Agents UI.
 import "../workbench/browser/parts/editor/editorParts.js";

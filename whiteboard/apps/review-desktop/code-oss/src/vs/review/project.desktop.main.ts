@@ -11,6 +11,8 @@ import './browser/projectDashboard/projectSidebar.contribution.js';
 import './navigator.desktop.main.js';
 import './browser/parts/canvas/reviewCanvasEditorRegistration.js';
 import './browser/projectDashboard/index.js';
+import './contrib/extensions/reviewCuratedExtensions.contribution.js';
+import './contrib/verbs/reviewControl.contribution.js';
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IReviewVerbsService, ReviewVerbsService } from './contrib/verbs/reviewVerbs.js';
 import { IReviewApiCatalogService, ReviewApiCatalogService } from './services/reviewApiCatalogService.js';

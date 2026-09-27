@@ -18,7 +18,6 @@ import { TextEditorSelectionSource, type IEditorOptions } from "../../../../plat
 import { IHoverService } from "../../../../platform/hover/browser/hover.js";
 import { createDecorator, IInstantiationService } from "../../../../platform/instantiation/common/instantiation.js";
 import { ILogService } from "../../../../platform/log/common/log.js";
-import { FocusMode } from "../../../../platform/native/common/native.js";
 import { INotificationService } from "../../../../platform/notification/common/notification.js";
 import { IProductService } from "../../../../platform/product/common/productService.js";
 import { IEditorProgressService, LongRunningOperation } from "../../../../platform/progress/common/progress.js";
@@ -66,7 +65,6 @@ import type {
 	TutorialStepId,
 } from "../../../common/reviewProtocol.js";
 import {
-	parseReviewVerbRequest,
 	REVIEW_CANVAS_RESUME_EVENT,
 	REVIEW_TUTORIAL_PROGRESS_STORAGE_KEY,
 	REVIEW_TUTORIAL_STEP_IDS
@@ -298,21 +296,6 @@ export class ReviewCanvasEditorPane extends EditorPane {
 		this.layoutService.getContainer(getWindow(parent)).appendChild(overflowWidgets);
 		this._register(toDisposable(() => overflowWidgets.remove()));
 		this.diffViews.setOverflowWidgetsDomNode(overflowWidgets);
-		this.desktopConnection.attachControl(async (value) => {
-			const request = parseReviewVerbRequest(value);
-			if (request.name === "authoringCapabilities") {
-				return { ok: true, result: { softwareMapEnabled: this.currentSoftwareMapEnabled() } };
-			}
-			if (request.name === "openApiReview") {
-				const response = await this.verbs.dispatch(request);
-				return response.ok ? { ok: true, result: { softwareMapEnabled: this.currentSoftwareMapEnabled() } } : response;
-			}
-			if (request.name === "focusWindow") {
-				await this.hostService.focus(this.targetDocument?.defaultView ?? window, { mode: FocusMode.Force });
-				return { ok: true };
-			}
-			return this.verbs.dispatch(request);
-		});
 		void this.desktopConnection.initialize().catch((error) => this.renderError(error));
 	}
 

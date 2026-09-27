@@ -3,30 +3,29 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Emitter,Event } from "../../base/common/event.js";
+import { Emitter, Event } from "../../base/common/event.js";
 import { Disposable, type IDisposable, toDisposable } from "../../base/common/lifecycle.js";
 import { ipcRenderer } from "../../base/parts/sandbox/electron-browser/globals.js";
 import { createDecorator } from "../../platform/instantiation/common/instantiation.js";
 import { IStorageService,StorageScope,StorageTarget } from "../../platform/storage/common/storage.js";
 import {
-REVIEW_DESKTOP_CHANNEL,
-REVIEW_DESKTOP_CONNECTION_VERSION,
+	REVIEW_DESKTOP_CHANNEL,
+	REVIEW_DESKTOP_CONNECTION_VERSION,
 } from "../common/reviewDesktopBootstrap.js";
 import type { ReviewDesktopRequest, ReviewDesktopStreamEvent } from "../common/reviewDesktopGateway.js";
+import { REVIEW_CONTROL_CONNECTION_CHANNEL } from '../common/reviewControlDispatch.js';
 import {
-type JsonValue,
+	type JsonValue,
 	type ReviewDiffrConfig,
 	type ReviewDiffrSummarizerInput,
 	isJsonObject,
 	parseReviewDiffrConfig,
-parseReviewCliInstallApplyResponse,
-parseReviewCliInstallStatus,
-parseReviewDesktopVerbFrame,
-parseReviewTutorialOpenResponse,
-type ReviewCliInstallApplyResponse,
-type ReviewCliInstallStatus,
-type ReviewTutorialOpenResponse,
-type ReviewVerbResponse
+	parseReviewCliInstallApplyResponse,
+	parseReviewCliInstallStatus,
+	parseReviewTutorialOpenResponse,
+	type ReviewCliInstallApplyResponse,
+	type ReviewCliInstallStatus,
+	type ReviewTutorialOpenResponse,
 } from "../common/reviewProtocol.js";
 import {
 	REVIEW_SERVER_STARTUP_TIMEOUT_MS,
@@ -50,7 +49,7 @@ export interface IReviewDesktopConnectionService {
 	readonly _serviceBrand: undefined;
 	readonly onDidFail: Event<Error>;
 	readonly onDidChangeLists: Event<void>;
-	/** Fires at control-stream connection/disconnection boundaries, before reuse. */
+	/** Fires when the desktop connection is established. */
 	readonly onDidChangeConnection: Event<void>;
 	initialize(): Promise<void>;
 	getAppSessionId(): Promise<string>;
@@ -80,7 +79,6 @@ export interface IReviewDesktopConnectionService {
 	declineCliInstall(): Promise<void>;
 	skipCliInstallPrompts(): Promise<void>;
 	resetCliInstallPrompts(): Promise<void>;
-	attachControl(dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>): void;
 }
 
 export class ReviewDesktopConnectionService extends Disposable implements IReviewDesktopConnectionService {
@@ -97,9 +95,6 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 	private tutorialPreparePromise: Promise<void> | undefined;
 	private tutorialPrepareAttempted = false;
 	private cliInstallStatusPromise: Promise<ReviewCliInstallStatus> | undefined;
-	private readonly controller = new AbortController();
-	private controlAttached = false;
-	private controlDispatch: ((value: JsonValue) => Promise<ReviewVerbResponse>) | undefined;
 	/**
 	 * The main process owns the embedded server's endpoint and credentials and
 	 * publishes them only once it has validated the server's ready event.
@@ -113,6 +108,9 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		@IStorageService private readonly storageService: IStorageService,
 	) {
 		super();
+		const onControlConnection = () => this.connectionChanged.fire();
+		ipcRenderer.on(REVIEW_CONTROL_CONNECTION_CHANNEL, onControlConnection);
+		this._register(toDisposable(() => ipcRenderer.removeListener(REVIEW_CONTROL_CONNECTION_CHANNEL, onControlConnection)));
 	}
 
 	private requireConnection(): ReviewDesktopStatus {
@@ -347,116 +345,26 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		await this.requestDirect({ path: `/install/${verb}`, method: "POST" });
 	}
 
-	attachControl(dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>): void {
-		this.controlDispatch = dispatch;
-		if (this.controlAttached) return;
-		this.controlAttached = true;
-		void this.initializeAndMaintainControl((value) => {
-			const current = this.controlDispatch;
-			return current
-				? current(value)
-				: Promise.resolve({
-						ok: false,
-						error: "Whiteboard control handler is unavailable.",
-					});
-		});
-	}
-
-	override dispose(): void {
-		this.controller.abort();
-		super.dispose();
-	}
-
 	private async initializeGlobalState(): Promise<void> {
-    await this.connect();
-    await this.waitForHealth();
-  }
-
-	private async initializeAndMaintainControl(
-		dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>,
-	): Promise<void> {
-		await reconnectUntilAborted(
-			this.controller.signal,
-			async () => {
-				await this.initialize();
-				await this.maintainControl(dispatch);
-			},
-			{
-				onRetry: (error) => console.error("[Whiteboard] control channel stopped", error),
-			},
-		);
+		await this.connect();
+		await this.waitForHealth();
+		this.connectionChanged.fire();
 	}
 
 	private async waitForHealth(): Promise<void> {
 		const deadline = Date.now() + REVIEW_SERVER_STARTUP_TIMEOUT_MS;
 		while (Date.now() < deadline) {
 			try {
-				const value = await this.requestDirect<{ instanceId?: unknown }>({ path: "/health" });
+				const value = await this.requestDirect<{ instanceId?: unknown }>({ path: '/health' });
 				if (value.instanceId === this.instanceId) return;
 			} catch {
 				// The utility host may still be starting.
 			}
-			await new Promise((resolve) => setTimeout(resolve, 100));
+			await new Promise(resolve => setTimeout(resolve, 100));
 		}
-		throw new Error("The embedded Whiteboard server did not become healthy.");
+		throw new Error('The embedded Whiteboard server did not become healthy.');
 	}
 
-
-	private async maintainControl(dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>): Promise<void> {
-		await reconnectUntilAborted(
-			this.controller.signal,
-			async (onConnected) => {
-				await this.consumeControl(dispatch, onConnected);
-				if (this.controller.signal.aborted) return;
-				throw new Error("The Whiteboard control stream ended.");
-			},
-			{
-				onExhausted: (error) => {
-					throw error;
-				},
-			},
-		);
-	}
-
-	private async consumeControl(
-		dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>,
-		onConnected: () => void,
-	): Promise<void> {
-		this.connectionChanged.fire();
-		onConnected();
-		await new Promise<void>((resolve, reject) => {
-			let subscription: IDisposable | undefined;
-			const onAbort = () => { subscription?.dispose(); resolve(); };
-			this.controller.signal.addEventListener("abort", onAbort, { once: true });
-			subscription = this.follow<JsonValue>("/control", this.controller.signal, async (value) => {
-				const frame = parseReviewDesktopVerbFrame(value);
-				let verbResponse: ReviewVerbResponse;
-				try {
-					verbResponse = await dispatch(frame.request);
-				} catch (error) {
-					verbResponse = {
-						ok: false,
-						error: error instanceof Error ? error.message : String(error),
-					};
-				}
-				await this.requestDirect({
-					path: "/control/result", method: "POST", body: {
-						id: frame.id,
-						response: verbResponse,
-					},
-				});
-			}, (error) => {
-				this.controller.signal.removeEventListener("abort", onAbort);
-				subscription?.dispose();
-				reject(error);
-			}, { reconnect: false, onComplete: () => {
-				this.controller.signal.removeEventListener("abort", onAbort);
-				subscription?.dispose();
-				reject(new Error("The Whiteboard control stream ended."));
-			} });
-		});
-		this.connectionChanged.fire();
-	}
 }
 
 export async function reviewResponseError(response: Response, fallback: string): Promise<Error> {
