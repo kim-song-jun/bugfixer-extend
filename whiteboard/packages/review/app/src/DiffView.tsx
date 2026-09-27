@@ -6,6 +6,7 @@ import type {
 } from "@dev.fast/review-protocol";
 import {
   type CSSProperties,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -79,6 +80,24 @@ export function ReviewDiffView({
 }) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const cabinetsRef = useRef<HTMLDivElement>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+  const sidebarCloseRef = useRef<HTMLButtonElement>(null);
+
+  const closeSidebar = useCallback(() => {
+    setSidebarOpen(false);
+    sidebarToggleRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    sidebarCloseRef.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeSidebar();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [sidebarOpen, closeSidebar]);
 
   const sidebarResize = useRightPanelResize({
     side: "left",
@@ -182,11 +201,20 @@ export function ReviewDiffView({
   const percent = total ? Math.round((100 * (total - remaining)) / total) : 0;
 
   return (
-    <div className="diff-workspace" ref={workspaceRef}>
+    <div className={`diff-workspace${sidebarOpen ? " diff-workspace--sidebar-open" : ""}`} ref={workspaceRef}>
       <aside
+        id="review-diff-sidebar"
         className="diff-workspace-sidebar"
         style={{ width: sidebarResize.width }}
       >
+        <button
+          ref={sidebarCloseRef}
+          type="button"
+          className="diff-sidebar-close"
+          onClick={closeSidebar}
+        >
+          파일 목록 닫기
+        </button>
         <div className="diff-global-progress">
           <span>
             {lenses.error &&
@@ -348,11 +376,13 @@ export function ReviewDiffView({
               className="diff-native-tree"
               ref={setFullTree}
               style={lens ? { display: "none" } : undefined}
+              onClick={closeSidebar}
             />
             <div
               className="diff-native-tree"
               ref={setLensTree}
               style={!lens ? { display: "none" } : undefined}
+              onClick={closeSidebar}
             />
           </div>
         </div>
@@ -361,7 +391,25 @@ export function ReviewDiffView({
         {...sidebarResize.separatorProps}
         className={`side-panel-resizer diff-sidebar-resizer ${sidebarResize.isResizing ? "is-resizing" : ""}`}
       />
+      {sidebarOpen && (
+        <button
+          type="button"
+          className="diff-workspace-backdrop"
+          aria-label="파일 목록 닫기"
+          onClick={closeSidebar}
+        />
+      )}
       <div className="diff-workspace-editor">
+        <button
+          ref={sidebarToggleRef}
+          type="button"
+          className="diff-workspace-compact-toggle"
+          aria-controls="review-diff-sidebar"
+          aria-expanded={sidebarOpen}
+          onClick={() => setSidebarOpen(true)}
+        >
+          파일·필터 보기
+        </button>
         {fullTree && (
           <NativeDiffView
             treeContainer={fullTree}

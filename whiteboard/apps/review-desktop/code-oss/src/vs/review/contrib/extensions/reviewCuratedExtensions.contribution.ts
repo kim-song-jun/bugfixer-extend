@@ -32,6 +32,8 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../platform/
 import { LifecyclePhase } from '../../../workbench/services/lifecycle/common/lifecycle.js';
 import {
 	Extensions as WorkbenchExtensions,
+	WorkbenchPhase,
+	registerWorkbenchContribution2,
 	type IWorkbenchContribution,
 	type IWorkbenchContributionsRegistry
 } from '../../../workbench/common/contributions.js';
@@ -723,10 +725,7 @@ class OptionalExtensionPinUpgrades implements IWorkbenchContribution {
 	}
 }
 
-Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench).registerWorkbenchContribution(
-	CuratedExtensionDefaults,
-	LifecyclePhase.Restored
-);
+registerWorkbenchContribution2('review.curatedExtensionDefaults', CuratedExtensionDefaults, WorkbenchPhase.BlockStartup);
 Registry.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench).registerWorkbenchContribution(
 	OptionalExtensionPinUpgrades,
 	LifecyclePhase.Eventually

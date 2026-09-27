@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { UriComponents } from '../base/common/uri.js';
-import { MainContext } from '../workbench/api/common/extHost.protocol.js';
+import { MainContext, type MainThreadTestingShape } from '../workbench/api/common/extHost.protocol.js';
 import { extHostNamedCustomer, IExtHostContext } from '../workbench/services/extensions/common/extHostCustomers.js';
 
 function unavailable(api: string): Promise<never> {
@@ -59,6 +59,36 @@ export class ReviewMainThreadTerminalService {
 	$sendProcessReady(): void { }
 	$sendProcessProperty(): void { }
 	$sendProcessExit(): void { }
+}
+
+// The extension host creates its Testing proxy before any extension activates.
+// Review has no Test Explorer, so discovery notifications have no destination;
+// requests to run tests or read coverage must fail explicitly.
+@extHostNamedCustomer(MainContext.MainThreadTesting)
+export class ReviewMainThreadTesting implements MainThreadTestingShape {
+	constructor(_context: IExtHostContext) { }
+	dispose(): void { }
+	$registerTestController(): void { }
+	$updateController(): void { }
+	$unregisterTestController(): void { }
+	$subscribeToDiffs(): void { }
+	$unsubscribeFromDiffs(): void { }
+	$publishDiff(): void { }
+	$getCoverageDetails(): Promise<never> { return unavailable('testing coverage'); }
+	$publishTestRunProfile(): void { }
+	$updateTestRunConfig(): void { }
+	$removeTestProfile(): void { }
+	$runTests(): Promise<never> { return unavailable('testing'); }
+	$addTestsToRun(): void { }
+	$updateTestStateInRun(): void { }
+	$appendTestMessagesInRun(): void { }
+	$appendOutputToRun(): void { }
+	$appendCoverage(): void { }
+	$startedTestRunTask(): void { }
+	$finishedTestRunTask(): void { }
+	$startedExtensionTestRun(): void { }
+	$finishedExtensionTestRun(): void { }
+	$markTestRetired(): void { }
 }
 
 @extHostNamedCustomer(MainContext.MainThreadTask)

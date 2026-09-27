@@ -43,6 +43,7 @@ import {
 import { ReviewCornerAction } from "./review-corner-action";
 import { useReviewDiffFiles } from "./review-diff-files-context";
 import { ReviewDiffFilesProvider } from "./review-diff-files-context";
+import { ReviewDocumentEmptyState } from "./review-document-empty-state";
 import { ReviewDocumentBoundary } from "./review-document-boundary";
 import { reportReviewDocumentRenderError } from "./review-document-error-report";
 import { ReviewUnavailable } from "./review-empty-state";
@@ -735,6 +736,12 @@ function ReviewLayoutContent({
                         persistOverlayTour={viewStateSync.persistOverlayTour}
                       >
                         <documentState.document.render />
+                        {!scratchpad && documentState.document.empty === true && (
+                          <ReviewDocumentEmptyState
+                            hasChangeRange={hasChangeRange}
+                            onOpenDiff={() => applyReviewView("diff")}
+                          />
+                        )}
                       </ReviewViewStateProvider>
                     </ReviewDocumentBoundary>
                   </article>

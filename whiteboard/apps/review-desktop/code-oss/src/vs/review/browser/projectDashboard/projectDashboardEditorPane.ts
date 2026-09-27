@@ -2195,8 +2195,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const focusKey = activeElement?.dataset.focusKey ?? (document.activeElement === document.body ? this.lastFocusKey : undefined);
 		const focusSignature = activeElement && !focusId && !activeElement.dataset.focusKey ? this.focusSignature(activeElement) :
 			(document.activeElement === document.body ? this.lastFocusSignature : undefined);
-		const closedEmptyCreateSummary = activeElement?.tagName === 'SUMMARY' && !!activeElement.closest('.project-dashboard__form') &&
-			this.dashboard?.tasks.length === 0 && !this.createFormOpen && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft;
+		const closedCreateSummary = activeElement?.tagName === 'SUMMARY' && !!activeElement.closest('.project-dashboard__form') &&
+			!this.createFormOpen && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft;
 		if (activeElement?.dataset.focusKey) this.lastFocusKey = activeElement.dataset.focusKey;
 		else if (activeElement) this.lastFocusKey = undefined;
 		if (focusSignature) this.lastFocusSignature = focusSignature;
@@ -2228,7 +2228,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					return;
 				}
 			}
-			const target = closedEmptyCreateSummary ? this.root.querySelector<HTMLElement>('[data-focus-key="quick-create"]') :
+			const target = closedCreateSummary ? this.root.querySelector<HTMLElement>('[data-focus-key="quick-create"]') :
 				focusId ? this.root.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`) :
 				focusKey ? [...this.root.querySelectorAll<HTMLElement>('[data-focus-key]')].find(element => element.dataset.focusKey === focusKey) :
 				focusSignature ? this.findFocusTarget(focusSignature) : undefined;
@@ -2357,7 +2357,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const workArea = shell.appendChild($('.project-dashboard__work-area'));
 		if (detail) workArea.classList.add('project-dashboard__work-area--with-detail');
 		const board = workArea.appendChild($('.project-dashboard__board'));
-		if (emptyProject) board.classList.add('project-dashboard__board--empty');
 		for (const column of columns) {
 			const lane = board.appendChild($('.project-dashboard__lane'));
 			lane.dataset.state = column.state;
@@ -2365,9 +2364,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const laneTitle = laneHeader.appendChild($('h3')); laneTitle.textContent = column.label;
 			const tasks = this.dashboard.tasks.filter(task => task.state === column.state);
 			const laneCount = laneHeader.appendChild($('.project-dashboard__count')); laneCount.textContent = String(tasks.length);
-			if (!tasks.length && !emptyProject) {
-				const empty = lane.appendChild($('.project-dashboard__empty')); empty.textContent = '이 단계에 작업이 없어요';
-			}
 			for (const task of tasks) this.renderTask(lane, task);
 		}
 
@@ -3145,10 +3141,13 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	private renderCreateForm(shell: HTMLElement): void {
-		if (this.dashboard?.tasks.length === 0 && !this.createFormOpen && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft) return;
+		if (!this.createFormOpen && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft) return;
 		const details = shell.appendChild(createElement('details', 'project-dashboard__form'));
 		details.open = this.createFormOpen;
-		details.addEventListener('toggle', () => { this.createFormOpen = details.open; });
+		details.addEventListener('toggle', () => {
+			this.createFormOpen = details.open;
+			if (!details.open && !this.createTaskTitleDraft && !this.createTaskDescriptionDraft) this.render();
+		});
 		const summary = details.appendChild(createElement('summary')); summary.textContent = '작업 만들기';
 		const form = details.appendChild(createElement('form', 'project-dashboard__form-content'));
 		const heading = form.appendChild($('h2')); heading.textContent = '새 작업';

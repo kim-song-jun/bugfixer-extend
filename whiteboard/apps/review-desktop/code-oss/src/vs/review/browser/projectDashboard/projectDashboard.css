@@ -56,10 +56,8 @@
 .project-dashboard__section-heading span, .project-dashboard__count { color: var(--dashboard-muted); font-size: 12px; }
 .project-dashboard__work-area { min-width: 0; }
 .project-dashboard__work-area--with-detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); align-items: start; gap: 16px; }
-.project-dashboard__board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: start; }
-.project-dashboard__lane { min-width: 0; min-height: 240px; padding: 10px; border: 1px solid var(--dashboard-lane-line); border-radius: 10px; background: var(--dashboard-lane); }
-.project-dashboard__board--empty .project-dashboard__lane { min-height: 0; }
-.project-dashboard__board--empty .project-dashboard__lane-heading { margin-bottom: 0; }
+.project-dashboard__board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
+.project-dashboard__lane { min-width: 0; padding: 10px; border: 1px solid var(--dashboard-lane-line); border-radius: 10px; background: var(--dashboard-lane); }
 .project-dashboard__lane-heading { min-height: 24px; margin-bottom: 10px; }
 .project-dashboard__lane-heading::before { content: ''; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--dashboard-muted); }
 .project-dashboard__lane[data-state="inProgress"] .project-dashboard__lane-heading::before { background: var(--dashboard-accent); }
@@ -67,7 +65,6 @@
 .project-dashboard__lane[data-state="done"] .project-dashboard__lane-heading::before { background: var(--dashboard-success); }
 .project-dashboard__lane-heading h3 { margin: 0; font-size: 13px; font-weight: 650; }
 .project-dashboard__count { margin-left: auto; min-width: 20px; padding: 2px 5px; border-radius: 10px; color: var(--dashboard-ink); background: rgba(100, 112, 128, .14); text-align: center; }
-.project-dashboard__empty { padding: 12px 3px; color: var(--dashboard-muted); font-size: 13px; }
 .project-dashboard__task-card { margin-top: 9px; }
 .project-dashboard__task-card[draggable="true"] { cursor: grab; }
 .project-dashboard__task-card--dragging { opacity: .55; }
