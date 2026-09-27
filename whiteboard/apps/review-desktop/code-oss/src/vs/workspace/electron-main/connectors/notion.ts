@@ -199,7 +199,7 @@ async function hydratePaginatedProperties(
 }
 
 function isSafeNotionPropertyId(value: string, pageId: string): boolean {
-	if (value.length > 200 || !/^(?:[A-Za-z0-9_-]|%[A-Fa-f0-9]{2}){1,200}$/.test(value)) { return false; }
+	if (value.length > 200 || !/^(?:[A-Za-z0-9._~-]|%[A-Fa-f0-9]{2}){1,200}$/.test(value)) { return false; }
 	const path = `pages/${pageId}/properties/${value}`;
 	const url = new URL(path, notionApiOrigin);
 	return url.origin === notionApiHost && url.pathname === `/v1/${path}` && !url.search && !url.hash;
