@@ -113,8 +113,8 @@ export function WelcomePage({
   if (installed && hasLegacySkills && !replaceInstallStep)
     setReplaceInstallStep(true);
 
-  // Whiteboard cannot see agent configs, so a copied prompt or command is the
-  // closest signal that an agent got connected.
+  // Whiteboard cannot inspect agent configs, so this records copied setup
+  // guidance only; it does not confirm that the agent has been connected.
   const [connectCopied, setConnectCopied] = useState(readConnectCopied);
   const [updateFinished, setUpdateFinished] = useState(false);
   const [connectOpened, setConnectOpened] = useState(false);
@@ -139,31 +139,31 @@ export function WelcomePage({
 
   const installStep: WelcomeStep = {
     title: "Install the whiteboard command",
+    label: "Whiteboard 명령 설치",
     disabled: hasLegacySkills,
     done: installed,
     body: (
       <>
         <p className="review-home-zero-hint">
           {installed ? (
-            `Installed at ${status?.shim.path ?? "~/.local/bin/whiteboard"}.`
+            `${status?.shim.path ?? "~/.local/bin/whiteboard"}에 설치되어 있습니다.`
           ) : cliBuildMissing ? (
             <>
-              CLI build missing. If you’re running from source, run{" "}
-              <code>pnpm --filter @dev.fast/review build</code> from the
-              repository root, then restart Whiteboard. Otherwise, reinstall
-              Whiteboard.
+              CLI 빌드를 찾을 수 없습니다. 소스에서 실행 중이라면 저장소 루트에서{" "}
+              <code>pnpm --filter @dev.fast/review build</code> 명령을 실행한 뒤 Whiteboard를 다시 시작하세요. 소스 실행이 아니라면
+              Whiteboard를 다시 설치하세요.
             </>
           ) : status?.shim.installed ? (
             pathHint(status.shim.path)
           ) : (
             <>
-              The <code>whiteboard</code> CLI lets your agents talk to
-              Whiteboard
+              <code>whiteboard</code> CLI를 설치하면 에이전트가 Whiteboard와
+              연결됩니다.
             </>
           )}
         </p>
         {finishing?.from === "Install the whiteboard command" ? (
-          <StepDoneButton label="Installed" primary />
+          <StepDoneButton label="설치됨" primary />
         ) : null}
         {setupActions && !installed && !cliBuildMissing ? (
           <button
@@ -177,7 +177,7 @@ export function WelcomePage({
               })
             }
           >
-            Install whiteboard in PATH
+            PATH에 whiteboard 설치
           </button>
         ) : null}
         {setupActions &&
@@ -189,7 +189,7 @@ export function WelcomePage({
             disabled={setupBusy}
             onClick={() => void runSetup(refreshInstall)}
           >
-            {setupBusy ? "Refreshing…" : "Refresh"}
+            {setupBusy ? "새로고치는 중…" : "상태 새로고침"}
           </button>
         ) : null}
         {setupError ? (
@@ -215,15 +215,15 @@ export function WelcomePage({
       ? [
           {
             title: "Remove deprecated skills",
-            done: !hasLegacySkills,
             label: hasLegacySkills
-              ? undefined
-              : "Deprecated skills removed successfully",
+              ? "이전 Skills 제거"
+              : "이전 Skills를 제거했습니다",
+            done: !hasLegacySkills,
             body:
               finishing?.from === "Remove deprecated skills" ? (
-                <StepDoneButton label="Removed" />
+                <StepDoneButton label="제거됨" />
               ) : !hasLegacySkills ? (
-                <p role="status">Deprecated skills removed successfully</p>
+                <p role="status">이전 Skills를 제거했습니다.</p>
               ) : (
                 <LegacySkillsRow
                   install={{ ...install, status }}
@@ -246,9 +246,18 @@ export function WelcomePage({
     ...(replaceInstallStep && installed ? [] : [installStep]),
     {
       title: "Connect your agents",
+      label: connectCopied
+        ? "설정 안내 복사"
+        : updateFinished
+          ? "업데이트"
+          : "에이전트 연결",
       disabled: !setupReady,
       done: connectCopied || updateFinished,
-      note: "paste a prompt into each agent",
+      note: connectCopied
+        ? "복사한 설정 안내를 에이전트에 붙여넣거나 설치 명령을 실행해 연결을 마무리하세요."
+        : updateFinished
+          ? "Whiteboard 업데이트를 완료했습니다."
+          : "안내문을 복사해 에이전트에 붙여넣거나 플러그인을 설치하세요.",
       body:
         install && status ? (
           <ConnectCard
@@ -256,7 +265,7 @@ export function WelcomePage({
             onCopied={markConnectCopied}
           />
         ) : (
-          <p className="review-home-empty">Agent setup is unavailable.</p>
+          <p className="review-home-empty">에이전트 설정을 사용할 수 없습니다.</p>
         ),
     },
   ];
@@ -264,6 +273,7 @@ export function WelcomePage({
   if ((updating || showLegacyStep) && install)
     steps.push({
       title: "Continue shipping thoughtful code",
+      label: "Whiteboard 계속 사용하기",
       disabled: !canDismiss,
       done: updateFinished,
       body: (
@@ -273,7 +283,7 @@ export function WelcomePage({
           disabled={setupBusy || !canDismiss}
           onClick={dismissUpdate}
         >
-          Dismiss
+          닫기
         </button>
       ),
     });
@@ -282,19 +292,20 @@ export function WelcomePage({
     steps.push(
       {
         title: "Take the tour",
+        label: "사용법 둘러보기",
         disabled: !setupReady,
         done: tourTotal > 0 && tourChecked >= tourTotal,
         note: onboarding
-          ? `${tourChecked} of ${tourTotal} checks`
-          : "a three-minute sample session",
+          ? `${tourTotal}개 중 ${tourChecked}개 확인`
+          : "3분 샘플 세션",
         body: (
           <>
             <p className="review-home-zero-hint">
-              Explore a sample session in three minutes.
+              3분 동안 샘플 세션을 살펴보며 Whiteboard 사용법을 익혀 보세요.
             </p>
             {onOpenTutorial ? (
               <button type="button" onClick={onOpenTutorial}>
-                {tourChecked > 0 ? "Reopen the tutorial" : "Open the tutorial"}
+                {tourChecked > 0 ? "튜토리얼 다시 열기" : "튜토리얼 열기"}
               </button>
             ) : null}
           </>
@@ -302,9 +313,10 @@ export function WelcomePage({
       },
       {
         title: "Create your first session",
+        label: "첫 세션 만들기",
         disabled: !setupReady,
         done: onboarding?.published ?? false,
-        note: onboarding?.published ? "published" : "your agent writes it",
+        note: onboarding?.published ? "게시됨" : "에이전트가 작성합니다",
         body: <PromptCard />,
       },
     );
@@ -329,28 +341,27 @@ export function WelcomePage({
           <div className="review-onboarding-columns">
             <div className="review-onboarding-intro">
               <span className="review-onboarding-kicker">
-                Welcome to Whiteboard
+                Whiteboard 시작하기
               </span>
               {updating ? (
                 <>
                   <h1 className="review-onboarding-headline">
-                    Whiteboard now connects to your agents over MCP
+                    이제 MCP로 에이전트와 Whiteboard를 연결합니다
                   </h1>
                   <p className="review-onboarding-sub">
-                    Whiteboard (fka. Review) no longer installs skills. Your
-                    agents connect via MCP which makes updating and lifecycle
-                    simpler! To continue using Whiteboard, axe the skills,
-                    install the plugin in your harness of choice, and you're
-                    good to go.
+                    Whiteboard는 더 이상 Skills를 설치하지 않습니다. 대신 MCP로
+                    에이전트를 연결하면 업데이트와 관리가 간편해집니다. 계속
+                    사용하려면 기존 Skills를 제거하고 사용하는 도구에 플러그인을
+                    설치하세요.
                   </p>
                 </>
               ) : (
                 <>
                   <h1 className="review-onboarding-headline">
-                    Your codebase, explained by your agent.
+                    에이전트가 설명하는 내 코드베이스
                   </h1>
                   <p className="review-onboarding-sub">
-                    Install the command then setup the MCP to get started.
+                    먼저 CLI를 설치하고 MCP를 설정하면 시작할 수 있습니다.
                   </p>
                 </>
               )}
@@ -361,7 +372,7 @@ export function WelcomePage({
                   disabled={setupBusy || !canDismiss}
                   onClick={dismissUpdate}
                 >
-                  Dismiss
+                  닫기
                 </button>
               ) : onClose ? (
                 <button
@@ -370,7 +381,7 @@ export function WelcomePage({
                   disabled={setupBusy || !canDismiss}
                   onClick={onClose}
                 >
-                  Close
+                  닫기
                 </button>
               ) : null}
             </div>
@@ -390,7 +401,8 @@ export function WelcomePage({
                       className="review-onboarding-step-header"
                       disabled={step.disabled}
                       aria-expanded={open}
-                      aria-label={`${open ? "Collapse" : "Expand"} ${step.label ?? step.title}`}
+                      aria-label={`${open ? "접기" : "펼치기"} ${step.label ?? step.title}${step.done ? " · 완료" : ""}`}
+                      aria-describedby={step.note ? `review-onboarding-step-note-${index}` : undefined}
                       onClick={() => setOpenStep(open ? undefined : step.title)}
                     >
                       <StepBadge done={step.done} label={String(index + 1)} />
@@ -398,7 +410,10 @@ export function WelcomePage({
                         {step.label ?? step.title}
                       </span>
                       {step.note ? (
-                        <span className="review-onboarding-step-note">
+                        <span
+                          id={`review-onboarding-step-note-${index}`}
+                          className="review-onboarding-step-note"
+                        >
                           {step.note}
                         </span>
                       ) : null}
@@ -416,16 +431,16 @@ export function WelcomePage({
           </div>
           <p className="review-welcome-feedback">
             {updating || showLegacyStep
-              ? "Thoughts on the rename or product direction?"
-              : "Questions about getting started? Suggestions for new features?"}{" "}
-            Ask us on{" "}
+              ? "이름 변경이나 제품 방향에 대한 의견이 있나요?"
+              : "시작하는 데 궁금한 점이나 제안이 있나요?"}{" "}
+            의견은{" "}
             <a
               href={REVIEW_DISCORD_URL}
               {...newTabLinkProps(REVIEW_DISCORD_URL)}
             >
               Discord
             </a>{" "}
-            or ping us at{" "}
+            또는 이메일{" "}
             <a href="mailto:founders@dev.fast">founders@dev.fast</a>.
           </p>
         </div>
@@ -491,8 +506,8 @@ function StepBadge({ done, label }: { done: boolean; label: string }) {
 /** Windows has no shell profile to edit: its user PATH reaches new terminals. */
 function pathHint(shimPath: string): string {
   if (/^[a-z]:[\\/]/i.test(shimPath) || /\.cmd$/i.test(shimPath))
-    return "Open a new terminal, then refresh.";
+    return "새 터미널을 연 뒤 상태를 새로고침하세요.";
   const directory = shimPath.replace(/[\\/][^\\/]*$/, "");
 
-  return `Add ${directory || "~/.local/bin"} to PATH, then refresh.`;
+  return `${directory || "~/.local/bin"}을(를) PATH에 추가한 뒤 상태를 새로고침하세요.`;
 }

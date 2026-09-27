@@ -58,12 +58,12 @@ export class ReviewTelemetryNotice implements IWorkbenchContribution {
 			Severity.Info,
 			localize(
 				'review.telemetry.notice',
-				"Whiteboard sends anonymous usage data. You can change this in Settings.",
+				"Whiteboard는 익명 사용 데이터를 전송합니다. 설정에서 변경할 수 있습니다.",
 			),
 			[{
 				label: localize(
 					'review.telemetry.openSettings',
-					"Open Settings",
+					"설정 열기",
 				),
 				// Review does not register the stock settings editor, so the
 				// Settings canvas tab is where this setting lives.

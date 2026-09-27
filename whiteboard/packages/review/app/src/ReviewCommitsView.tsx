@@ -14,6 +14,7 @@ import { ReviewUnavailable } from "./review-empty-state";
 import { countLabel } from "./review-home-view";
 import { captureUiEvent } from "./ui-telemetry";
 import { useTooltip } from "./use-tooltip";
+import { isKoreanReviewUi } from "./review-locale";
 
 type OpenCommitDiff = (
   commit: ReviewCommitSummary,
@@ -35,11 +36,12 @@ export function ReviewCommitsView({
   range: import("@dev.fast/review-protocol").ReviewCanvasRange;
   onOpenDiff: OpenCommitDiff;
 }) {
+  const korean = isKoreanReviewUi();
   if (range.sourceUnavailable) {
     return (
       <ReviewUnavailable
         role="status"
-        title="Commits unavailable"
+        title={korean ? "커밋을 사용할 수 없습니다" : "Commits unavailable"}
         message={range.sourceUnavailable}
       />
     );
@@ -49,7 +51,7 @@ export function ReviewCommitsView({
     <div className="review-commits-view">
       <div className="review-commits-column">
         <header className="review-commits-range">
-          <strong>{countLabel(commits.length, "commit")}</strong>
+          <strong>{reviewCountLabel(commits.length, "commit")}</strong>
           <span title={`${range.baseCommit}..${range.headCommit}`}>
             {shortRef(range.baseRef || range.baseCommit)} →{" "}
             {shortRef(range.headRef || range.headCommit)}
@@ -76,7 +78,11 @@ function CommitGroups({
         <svg viewBox="0 0 14 14" aria-hidden="true">
           <circle cx="7" cy="7" r="3" />
         </svg>
-        <h2>Commits on {group.label}</h2>
+        <h2>
+          {isKoreanReviewUi()
+            ? `${group.label} 커밋`
+            : `Commits on ${group.label}`}
+        </h2>
       </div>
       <div className="review-commit-timeline">
         {group.commits.map((commit) => (
@@ -99,9 +105,11 @@ function CommitRow({
   onOpenDiff: OpenCommitDiff;
 }) {
   const session = useReviewSession();
+  const korean = isKoreanReviewUi();
   const [expanded, setExpanded] = useState(false);
   const [filesState, setFilesState] = useState<CommitFilesState | null>(null);
-  const openTooltip = useTooltip("Open commit diff");
+  const openLabel = korean ? "커밋 변경 사항 열기" : "Open commit diff";
+  const openTooltip = useTooltip(openLabel);
 
   const toggleExpanded = () => {
     const next = !expanded;
@@ -156,14 +164,14 @@ function CommitRow({
           <span className="review-commit-sha">{commit.commit.slice(0, 8)}</span>
           <CopyButton
             text={commit.commit}
-            label="Copy commit SHA"
+            label={korean ? "커밋 SHA 복사" : "Copy commit SHA"}
             className="review-topbar-icon-button"
           />
           <button
             ref={openTooltip}
             type="button"
             className="review-topbar-icon-button review-commit-open"
-            aria-label="Open commit diff"
+            aria-label={openLabel}
             onClick={() => onOpenDiff(commit, "row")}
           >
             <CodeIcon />
@@ -171,7 +179,7 @@ function CommitRow({
         </span>
         <span className="review-commit-meta">
           {commit.author} · {formatCommitTime(commit.authoredAt)} ·{" "}
-          {countLabel(commit.fileCount, "file")}{" "}
+          {reviewCountLabel(commit.fileCount, "file")}{" "}
           <DiffCount
             additions={commit.additions}
             deletions={commit.deletions}
@@ -180,7 +188,9 @@ function CommitRow({
       </div>
       {expanded ? (
         <div className="review-commit-files">
-          {filesState?.status === "loading" ? <p>Loading files…</p> : null}
+          {filesState?.status === "loading" ? (
+            <p>{korean ? "파일 불러오는 중…" : "Loading files…"}</p>
+          ) : null}
           {filesState?.status === "error" ? <p>{filesState.error}</p> : null}
           {visibleFiles?.files.map((file) => (
             <button
@@ -203,7 +213,9 @@ function CommitRow({
               className="review-commit-files-footer"
               onClick={() => onOpenDiff(commit, "row")}
             >
-              {countLabel(omittedFileCount, "more file")}
+              {korean
+                ? `파일 ${omittedFileCount}개 더 보기`
+                : countLabel(omittedFileCount, "more file")}
             </button>
           ) : null}
         </div>
@@ -244,7 +256,8 @@ function isTestFile(path: string): boolean {
 }
 
 export function groupCommitsByDate(commits: readonly ReviewCommitSummary[]) {
-  const formatter = new Intl.DateTimeFormat(undefined, {
+  const korean = isKoreanReviewUi();
+  const formatter = new Intl.DateTimeFormat(korean ? "ko-KR" : undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -270,7 +283,7 @@ export function groupCommitsByDate(commits: readonly ReviewCommitSummary[]) {
     } else {
       groups.push({
         key,
-        label: formatter.format(date).toUpperCase(),
+        label: korean ? formatter.format(date) : formatter.format(date).toUpperCase(),
         commits: [commit],
       });
     }
@@ -279,8 +292,13 @@ export function groupCommitsByDate(commits: readonly ReviewCommitSummary[]) {
   return groups;
 }
 
+function reviewCountLabel(count: number, kind: "commit" | "file"): string {
+  if (!isKoreanReviewUi()) return countLabel(count, kind);
+  return `${kind === "commit" ? "커밋" : "파일"} ${count}개`;
+}
+
 function formatCommitTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(isKoreanReviewUi() ? "ko-KR" : undefined, {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));

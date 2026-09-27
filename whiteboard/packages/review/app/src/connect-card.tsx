@@ -40,8 +40,8 @@ const COLLAPSED_LINES = 4;
 type Mode = "prompt" | "plugin";
 
 const MODES: ReadonlyArray<{ mode: Mode; label: string }> = [
-  { mode: "prompt", label: "Paste a prompt" },
-  { mode: "plugin", label: "Install the plugin" },
+  { mode: "prompt", label: "안내문 붙여넣기" },
+  { mode: "plugin", label: "플러그인 설치" },
 ];
 
 /**
@@ -113,7 +113,7 @@ export function ConnectCard({
     });
   };
 
-  const noun = mode === "prompt" ? "prompt" : "install command";
+  const noun = mode === "prompt" ? "안내문" : "설치 명령";
 
   // Prompts run to a dozen lines; show the opening and let the reader expand.
   const collapsible = (text?.split("\n").length ?? 0) > COLLAPSED_LINES;
@@ -122,22 +122,22 @@ export function ConnectCard({
 
   if (status.legacySkills.length > 0 || !cliInstallReady(status)) {
     return (
-      <section className="review-connect" aria-label="Connect your agents">
+      <section className="review-connect" aria-label="에이전트 연결">
         <p className="review-connect-note">
           {status.legacySkills.length > 0
-            ? "Remove deprecated skills first."
-            : "Install the whiteboard command in PATH first."}
+            ? "먼저 이전 Skills를 제거하세요."
+            : "먼저 PATH에 whiteboard CLI를 설치하세요."}
         </p>
       </section>
     );
   }
 
   return (
-    <section className="review-connect" aria-label="Connect your agents">
+    <section className="review-connect" aria-label="에이전트 연결">
       <div
         className="review-home-prompt-tabs review-connect-tabs"
         role="group"
-        aria-label="Agent"
+        aria-label="에이전트 선택"
       >
         {TAB_TARGETS.map((tab) => {
           const Logo = AGENT_LOGOS[tab];
@@ -163,7 +163,7 @@ export function ConnectCard({
       <div
         className="review-home-prompt-tabs review-connect-modes"
         role="group"
-        aria-label="Setup method"
+        aria-label="설정 방법"
       >
         {MODES.map(({ mode: tab, label }) => (
           <button
@@ -201,7 +201,7 @@ export function ConnectCard({
                 aria-expanded={false}
                 onClick={() => setExpanded(true)}
               >
-                Show full {noun}
+                {noun} 전체 보기
               </button>
             ) : null}
           </div>
@@ -213,27 +213,27 @@ export function ConnectCard({
                 aria-expanded={true}
                 onClick={() => setExpanded(false)}
               >
-                Show less
+                간단히 보기
               </button>
             ) : null}
             <button
               type="button"
               className="review-home-prompt-copy"
               aria-live="polite"
-              aria-label={`${copied ? "Copied" : "Copy"} ${noun} for ${agent}`}
+              aria-label={`${copied ? "복사됨" : "복사"}: ${agent}용 ${noun}`}
               onClick={() => copy(text)}
             >
               {copied ? <DrawnCheckIcon /> : <CopyIcon />}
               {copied
-                ? "Copied"
-                : `Copy ${mode === "prompt" ? "prompt" : "command"}`}
+                ? "복사됨"
+                : `${mode === "prompt" ? "안내문" : "명령"} 복사`}
             </button>
           </div>
         </>
       ) : plugin.url ? (
         <>
           <p className="review-home-prompt-body">
-            Opens {agent} and adds the review server.
+            선택한 {agent}에서 Whiteboard 연결을 추가합니다.
           </p>
           <div className="review-home-prompt-actions">
             <a
@@ -247,7 +247,7 @@ export function ConnectCard({
         </>
       ) : (
         <p className="review-home-prompt-body">
-          {`${plugin.label}\nInstall the whiteboard command first.`}
+          {`${plugin.label}\n먼저 whiteboard CLI를 설치하세요.`}
         </p>
       )}
       {status.error ? (
@@ -268,7 +268,7 @@ function OtherAgentMenu({
 
   return (
     <OptionMenu
-      ariaLabel="Other agent"
+      ariaLabel="다른 에이전트"
       value={selected}
       options={OTHER_TARGETS.map((other) => {
         const OptionLogo = AGENT_LOGOS[other];
@@ -285,7 +285,7 @@ function OtherAgentMenu({
       triggerProps={{ "aria-pressed": selected !== undefined }}
     >
       {Logo ? <Logo /> : null}
-      {selected ? TARGET_LABELS[selected] : "Other…"}
+      {selected ? TARGET_LABELS[selected] : "기타…"}
     </OptionMenu>
   );
 }
@@ -356,13 +356,13 @@ export function LegacySkillsRow({
   return (
     <section
       className="review-connect-legacy"
-      aria-label="Deprecated Whiteboard skills"
+      aria-label="이전 Whiteboard Skills"
     >
       {legacySkills.length > 0 ? (
         <>
           <p>
-            Earlier versions of Whiteboard installed these skills. Whiteboard no
-            longer uses them.
+            이전 버전의 Whiteboard가 설치한 Skills입니다. 이제 Whiteboard에서는
+            사용하지 않습니다.
           </p>
           <ul>
             {legacySkills.map((skill) => (
@@ -376,14 +376,14 @@ export function LegacySkillsRow({
             disabled={busy}
             onClick={() => void removeSkills()}
           >
-            Remove deprecated skills
+            이전 Skills 제거
           </button>
         </>
       ) : null}
       {removed.length > 0 ? (
         <>
           <p>
-            Removed {removed.length} skill{removed.length === 1 ? "" : "s"}
+            Skills {removed.length}개 제거됨
           </p>
           <ul>
             {removed.map((path) => (

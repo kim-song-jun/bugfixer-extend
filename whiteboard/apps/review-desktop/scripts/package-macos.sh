@@ -63,6 +63,8 @@ CURATED_EXTENSIONS_PAYLOAD="$MONOREPO_ROOT/$DARWIN_PAYLOAD_CURATED_EXTENSIONS_PA
 
 # shellcheck source=code-oss-dependencies.sh
 source "$APP_DIR/scripts/code-oss-dependencies.sh"
+# shellcheck source=freshness.sh
+source "$APP_DIR/scripts/freshness.sh"
 
 if (( $# > 0 )); then
   echo "usage: $0" >&2
@@ -91,6 +93,9 @@ if [[ "$PRECOMPILED" == "1" ]]; then
   CURATED_EXTENSIONS_SOURCE="$CURATED_EXTENSIONS_PAYLOAD"
 else
   bash "$APP_DIR/scripts/build.sh"
+  if [[ "${REVIEW_DESKTOP_DEV_FAST:-0}" == "1" && "${REVIEW_DESKTOP_CI_FAST:-0}" != "1" ]]; then
+    rebuild_review_desktop_outputs "$MONOREPO_ROOT" "$MONOREPO_ROOT/packages/review"
+  fi
   CURATED_EXTENSIONS_SOURCE="$CHECKOUT/extensions"
 fi
 

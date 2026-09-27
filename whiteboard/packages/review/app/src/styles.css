@@ -1,15 +1,17 @@
 @import "./fonts/fonts.css";
 .review-canvas-root {
-  --ghost: #343a46;
-  --well: #1a1f29;
-  --raised: #1a1f29;
-  --tray: #12161e;
+  --ghost: #3a3d39;
+  --well: #222522;
+  --raised: #222522;
+  --tray: #191c19;
   --chevron-down: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.5 4.25 6 8l3.5-3.75' fill='none' stroke='%239AA0AB' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   --check-mark: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 5.2 4.2 7.4 8 3.2' fill='none' stroke='%230C0F15' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  --marker-tint: rgba(91, 124, 255, 0.14);
-  --marker-glow: rgba(91, 124, 255, 0.3);
-  --board-grid: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='1' cy='1' r='0.8' fill='%231A1F2A'/></svg>");
+  --marker-tint: rgb(81 198 232 / 16%);
+  --marker-glow: rgb(81 198 232 / 30%);
+  --board-grid: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='1' cy='1' r='0.8' fill='%23292C28'/></svg>");
   --review-header-height: 35px;
+  --font-sans: "Pretendard", -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   --font-serif: "Newsreader", Georgia, serif;
   --font-mono: "Geist Mono", ui-monospace, monospace;
   --font-display: var(--font-mono);
@@ -24,15 +26,15 @@
      own. The rules bridge editorWidget.border rather than widget.border: the
      latter is null on both stock themes, so its variable is never emitted and
      the dark fallback would leak into light. */
-  --bg: var(--vscode-editor-background, #0c0f15);
-  --surface: var(--vscode-editor-background, #0c0f15);
-  --surface-raised: var(--vscode-editorWidget-background, #1a1f29);
-  --control-bg: var(--vscode-input-background, #1a1f29);
-  --ink: var(--vscode-editor-foreground, #eef0f4);
-  --ink-muted: var(--vscode-descriptionForeground, #9199a8);
-  --ink-faint: var(--vscode-disabledForeground, #5f6776);
-  --rule: var(--vscode-panel-border, #262c37);
-  --rule-soft: var(--vscode-editorWidget-border, #39404d);
+  --bg: var(--vscode-editor-background, #191c19);
+  --surface: var(--vscode-editor-background, #191c19);
+  --surface-raised: var(--vscode-editorWidget-background, #222522);
+  --control-bg: var(--vscode-input-background, #292c28);
+  --ink: var(--vscode-editor-foreground, #f5f5f2);
+  --ink-muted: var(--vscode-descriptionForeground, #b7b9b3);
+  --ink-faint: var(--vscode-disabledForeground, #858981);
+  --rule: var(--vscode-panel-border, #3b3e39);
+  --rule-soft: var(--vscode-editorWidget-border, #30332f);
   /* Affordances that used to be hover-only (disclosure chevrons) rest at
      reduced strength instead of hiding, so the surface still
      advertises them. Hover/focus escalates them to full opacity. */
@@ -51,17 +53,17 @@
   --vscode-list-focusAndSelectionOutline: transparent;
   --vscode-list-inactiveFocusOutline: transparent;
   --vscode-inputOption-activeBorder: transparent;
-  --accent: #5b7cff;
-  --accent-soft: #1a2240;
-  --on-accent: #ffffff;
-  --on-accent-wash: rgba(255, 255, 255, 0.22);
+  --accent: #51c6e8;
+  --accent-soft: #18313a;
+  --on-accent: #143038;
+  --on-accent-wash: rgb(20 48 56 / 42%);
   --on-warning: #1a1405;
-  --rpc: #8fa6ff;
-  --text-selection-bg: rgba(91, 124, 255, 0.35);
+  --rpc: #83d7e8;
+  --text-selection-bg: rgb(81 198 232 / 30%);
   --text-selection-color: #ffffff;
-  --canvas-grid: #1a1f2a;
-  --minimap-mask: rgba(12, 15, 21, 0.78);
-  --minimap-node: #8796ad;
+  --canvas-grid: #292c28;
+  --minimap-mask: rgb(25 28 25 / 78%);
+  --minimap-node: #969a91;
   --minimap-node-selected: transparent;
   --edge-muted: #6f7786;
   --edge-implied: #8c8880;
@@ -79,23 +81,23 @@
   --shadow-color-strong: rgba(0, 0, 0, 0.55);
   --shadow-color-heavy: rgba(0, 0, 0, 0.65);
   --backdrop: rgba(0, 0, 0, 0.56);
-  --topbar-bg: rgba(12, 15, 21, 0.94);
-  --tabbar-bg: rgba(18, 22, 30, 0.94);
-  --floating-bar-bg: rgba(12, 15, 21, 0.96);
-  --accent-glow: rgba(91, 124, 255, 0.5);
-  --accent-shadow: rgba(91, 124, 255, 0.2);
-  --accent-stripe: rgba(91, 124, 255, 0.18);
-  --accent-wash: rgba(91, 124, 255, 0.14);
-  --accent-outline: rgb(91 124 255 / 32%);
-  --link-open-wash: rgba(91, 124, 255, 0.15);
-  --rpc-wash: rgba(143, 166, 255, 0.12);
+  --topbar-bg: rgb(25 28 25 / 94%);
+  --tabbar-bg: rgb(34 37 34 / 94%);
+  --floating-bar-bg: rgb(25 28 25 / 96%);
+  --accent-glow: rgb(81 198 232 / 48%);
+  --accent-shadow: rgb(81 198 232 / 22%);
+  --accent-stripe: rgb(81 198 232 / 18%);
+  --accent-wash: rgb(81 198 232 / 14%);
+  --accent-outline: rgb(81 198 232 / 36%);
+  --link-open-wash: rgb(81 198 232 / 16%);
+  --rpc-wash: rgb(131 215 232 / 14%);
   --warning-wash: rgba(242, 193, 78, 0.12);
   --warning-focus: rgba(242, 193, 78, 0.52);
   --warning-shadow: rgba(242, 193, 78, 0.16);
-  --muted-shadow: rgba(86, 92, 102, 0.18);
-  --boundary-bg: rgba(18, 22, 30, 0.62);
-  --label-bg: rgba(12, 15, 21, 0.94);
-  --transparent-accent: rgb(91 124 255 / 0%);
+  --muted-shadow: rgb(111 115 106 / 18%);
+  --boundary-bg: rgb(25 28 25 / 62%);
+  --label-bg: rgb(25 28 25 / 94%);
+  --transparent-accent: rgb(81 198 232 / 0%);
   --inner-shadow: rgb(0 0 0 / 16%);
   --toc-inner-shadow: rgb(0 0 0 / 16%);
   --rail-1: #f26a55;
@@ -109,15 +111,15 @@
   --com: #565c66;
   --op: #9ba1ac;
   --review-home-bg: var(--bg);
-  --review-home-card-active: #12161e;
-  --review-home-rule: #262c37;
-  --review-home-rule-soft: #39404d;
-  --review-home-meta: #9199a8;
-  --review-home-comment: #5b7cff;
+  --review-home-card-active: #222522;
+  --review-home-rule: #3b3e39;
+  --review-home-rule-soft: #30332f;
+  --review-home-meta: #b7b9b3;
+  --review-home-comment: #51c6e8;
   --review-home-submitted: #c8a4f5;
-  --review-home-view-toggle-bg: #1a1f29;
-  --review-home-view-toggle-active-border: #39404d;
-  --review-home-view-toggle-active-bg: #0c0f15;
+  --review-home-view-toggle-bg: #292c28;
+  --review-home-view-toggle-active-border: #3b3e39;
+  --review-home-view-toggle-active-bg: #191c19;
   --review-home-view-toggle-shadow: rgb(0 0 0 / 45%);
   --review-home-view-toggle-highlight: rgb(255 255 255 / 4%);
   /* Code (Whiteboard Dark): ink at three strengths, the marker for keywords,
@@ -169,6 +171,7 @@
 .review-commits-view {
   min-height: 100%;
   padding: 32px 24px;
+  font-family: var(--font-sans);
 }
 
 .review-commits-column {
@@ -240,30 +243,19 @@
 
 .review-commit-timeline {
   position: relative;
-  margin-left: 6px;
-  padding-left: 22px;
-}
-
-.review-commit-timeline::before {
-  position: absolute;
-  top: -8px;
-  bottom: 0;
-  left: 0;
-  width: 1px;
-  background: var(--rule-soft);
-  content: "";
+  margin-left: 0;
+  padding-left: 0;
 }
 
 .review-commit-card {
-  margin-bottom: 6px;
+  margin: 0;
   overflow: hidden;
-  border: 1px solid var(--rule-soft);
-  border-radius: 6px;
-  background: var(--surface);
+  border-top: 1px solid var(--rule-soft);
+  border-radius: 0;
 }
 
 .review-commit-card--expanded {
-  background: var(--surface-raised);
+  background: transparent;
 }
 
 /* Subject over who, when and how much; the commit's actions centered at the
@@ -272,9 +264,13 @@
   position: relative;
   display: grid;
   align-items: center;
-  padding: 10px 12px;
+  padding: 12px 4px;
   gap: 4px 12px;
   grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.review-commit-card-header:hover {
+  background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
 }
 
 .review-commit-card--expanded .review-commit-card-header {
@@ -321,8 +317,9 @@
 .review-commit-toggle strong {
   overflow: hidden;
   color: var(--ink);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -342,12 +339,18 @@
 }
 
 .review-commit-meta {
-  padding-left: 26px;
+  padding: 0 4px 10px 30px;
   color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .review-commit-files {
-  padding: 6px 0;
+  padding: 0 0 4px 30px;
+}
+
+.review-commit-files > * + * {
+  border-top: 1px solid var(--rule-soft);
 }
 
 .review-commit-files > p {
@@ -361,16 +364,25 @@
   width: 100%;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  min-height: 32px;
+  padding: 6px 4px;
+  border-top: 0;
   border: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 11px;
+  font-size: 12px;
   text-align: left;
 }
 
 .review-commit-file:hover {
-  background: var(--control-bg);
+  background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
+  color: var(--accent);
+}
+
+.review-commit-file:focus-visible,
+.review-commit-files-footer:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .review-commit-file-path {
@@ -382,7 +394,8 @@
 }
 
 .review-commit-files-footer {
-  padding: 6px 12px 4px 38px;
+  padding: 8px 4px 8px 30px;
+  text-align: left;
   border: 0;
   background: transparent;
   color: var(--ink-faint);
@@ -426,6 +439,42 @@
 @media (max-width: 760px) {
   .review-commits-view {
     padding: 24px 16px;
+  }
+
+  .review-commit-card-header {
+    padding: 12px 2px;
+    gap: 6px 8px;
+  }
+
+  .review-commit-meta,
+  .review-commit-files {
+    padding-left: 24px;
+  }
+
+  .review-commit-actions {
+    gap: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .review-commits-view {
+    padding: 20px 12px;
+  }
+
+  .review-commit-card-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-commit-actions {
+    grid-column: 1;
+    grid-row: auto;
+    padding-left: 26px;
+  }
+
+  .review-commit-meta,
+  .review-commit-files,
+  .review-commit-files-footer {
+    padding-left: 26px;
   }
 }
 
@@ -1257,8 +1306,7 @@ button {
   font: 13px/20px var(--font-mono);
 }
 
-/* The prompt card sits inside an accordion step, which already draws the
-   surface, so it adds no frame of its own. */
+/* Prompt content stays flat inside its onboarding step. */
 .review-home-prompt-card {
   display: flex;
   flex-direction: column;
@@ -1304,9 +1352,8 @@ button {
 
 .tutorial-authoring-conversation {
   margin: 18px 0 24px;
-  border: 1px solid var(--review-home-rule-soft);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-raised) 76%, transparent);
+  border-top: 1px solid var(--review-home-rule-soft);
+  border-bottom: 1px solid var(--review-home-rule-soft);
 }
 
 .tutorial-authoring-conversation summary {
@@ -1327,7 +1374,7 @@ button {
 
 .tutorial-authoring-conversation ol {
   display: grid;
-  gap: 12px;
+  gap: 0;
   margin: 0;
   padding: 0 14px 14px;
   list-style: none;
@@ -1337,6 +1384,8 @@ button {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
   gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--review-home-rule-soft);
 }
 
 .tutorial-authoring-conversation li > span {
@@ -1705,13 +1754,13 @@ button {
   padding: 6px 14px;
   border: none;
   border-radius: 6px;
-  color: var(--on-accent);
+  color: #fff;
   background: var(--accent);
   font: 500 12px/16px var(--font-mono);
 }
 
 .review-home-prompt-copy:focus-visible {
-  outline: 1px solid var(--accent);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -1791,14 +1840,14 @@ button {
 
 .review-app--theme-light {
   --ghost: #cdd1d8;
-  --well: #e9ebef;
+  --well: #f5f5f2;
   --raised: #ffffff;
-  --tray: #f3f4f6;
+  --tray: #f5f5f2;
   --chevron-down: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M2.5 4.25 6 8l3.5-3.75' fill='none' stroke='%239AA0AB' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   --check-mark: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'><path d='M2 5.2 4.2 7.4 8 3.2' fill='none' stroke='%23FFFFFF' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  --marker-tint: rgba(43, 85, 230, 0.08);
-  --marker-glow: rgba(43, 85, 230, 0.22);
-  --board-grid: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='1' cy='1' r='0.8' fill='%23E6E8EC'/></svg>");
+  --marker-tint: rgb(25 176 232 / 10%);
+  --marker-glow: rgb(25 176 232 / 22%);
+  --board-grid: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='1' cy='1' r='0.8' fill='%23E4E4E0'/></svg>");
   color-scheme: light;
   --transparent: transparent;
   /* The ten neutrals bridged on .review-canvas-root are re-declared here with
@@ -1806,18 +1855,18 @@ button {
      descendant of the root, so a bare `--bg: #ffffff` would beat the bridged
      value and the session view would disagree with the workbench on any light
      theme whose editor background is not pure white (Solarized Light, etc.). */
-  --bg: var(--vscode-editor-background, #ffffff);
-  --surface: var(--vscode-editor-background, #ffffff);
+  --bg: var(--vscode-editor-background, #fafaf8);
+  --surface: var(--vscode-editor-background, #fafaf8);
   --surface-raised: var(--vscode-editorWidget-background, #ffffff);
-  --control-bg: var(--vscode-input-background, #e9ebef);
-  --ink: var(--vscode-editor-foreground, #15181e);
-  --ink-muted: var(--vscode-descriptionForeground, #5d6472);
-  --ink-faint: var(--vscode-disabledForeground, #9aa0ab);
-  --rule: var(--vscode-panel-border, #d8dbe1);
-  --rule-soft: var(--vscode-editorWidget-border, #b9bec7);
+  --control-bg: var(--vscode-input-background, #f5f5f2);
+  --ink: var(--vscode-editor-foreground, #222222);
+  --ink-muted: var(--vscode-descriptionForeground, #565852);
+  --ink-faint: var(--vscode-disabledForeground, #777a73);
+  --rule: var(--vscode-panel-border, #e4e4e0);
+  --rule-soft: var(--vscode-editorWidget-border, #e4e4e0);
   --selection: var(--accent);
   --selection-shadow: color-mix(in srgb, var(--accent) 40%, transparent);
-  --tutorial-ring: color-mix(in srgb, var(--accent) 86%, #14213d);
+  --tutorial-ring: color-mix(in srgb, var(--accent) 86%, #18313a);
   --tutorial-ring-glow: color-mix(in srgb, var(--accent) 34%, transparent);
   --tutorial-guide-bg: color-mix(in srgb, var(--surface-raised) 98%, white);
   --tutorial-guide-border: color-mix(
@@ -1833,15 +1882,15 @@ button {
   --vscode-list-focusAndSelectionOutline: transparent;
   --vscode-list-inactiveFocusOutline: transparent;
   --vscode-inputOption-activeBorder: transparent;
-  --accent: #2b55e6;
-  --accent-soft: #eef2ff;
+  --accent: #01588b;
+  --accent-soft: #e7f2f7;
   --on-accent: #ffffff;
   --on-accent-wash: rgba(255, 255, 255, 0.34);
   --on-warning: #4a3514;
-  --rpc: #2b55e6;
-  --text-selection-bg: rgba(43, 85, 230, 0.16);
+  --rpc: #117596;
+  --text-selection-bg: rgb(25 176 232 / 18%);
   --text-selection-color: var(--ink);
-  --canvas-grid: #e6e8ec;
+  --canvas-grid: #e4e4e0;
   --minimap-mask: rgba(255, 255, 255, 0.72);
   --minimap-node: #b9bec7;
   --minimap-node-selected: transparent;
@@ -1857,27 +1906,27 @@ button {
   --diff-modified-bg: #fbf5e8;
   --diff-removed: #d8402c;
   --diff-removed-bg: #fcefed;
-  --shadow-color: rgba(21, 24, 30, 0.08);
-  --shadow-color-strong: rgba(21, 24, 30, 0.1);
-  --shadow-color-heavy: rgba(21, 24, 30, 0.14);
-  --backdrop: rgba(21, 24, 30, 0.26);
+  --shadow-color: rgb(34 34 34 / 8%);
+  --shadow-color-strong: rgb(34 34 34 / 10%);
+  --shadow-color-heavy: rgb(34 34 34 / 14%);
+  --backdrop: rgb(34 34 34 / 26%);
   --topbar-bg: #ffffff;
-  --tabbar-bg: #f3f4f6;
+  --tabbar-bg: #f5f5f2;
   --floating-bar-bg: rgba(255, 255, 255, 0.96);
-  --accent-glow: rgba(43, 85, 230, 0.22);
-  --accent-shadow: rgba(43, 85, 230, 0.08);
-  --accent-stripe: rgba(43, 85, 230, 0.12);
-  --accent-wash: rgba(43, 85, 230, 0.08);
-  --accent-outline: rgba(43, 85, 230, 0.32);
-  --link-open-wash: rgba(43, 85, 230, 0.12);
-  --rpc-wash: rgba(43, 85, 230, 0.08);
+  --accent-glow: rgb(1 88 139 / 20%);
+  --accent-shadow: rgb(1 88 139 / 9%);
+  --accent-stripe: rgb(1 88 139 / 12%);
+  --accent-wash: rgb(1 88 139 / 8%);
+  --accent-outline: rgb(1 88 139 / 34%);
+  --link-open-wash: rgb(25 176 232 / 14%);
+  --rpc-wash: rgb(17 117 150 / 9%);
   --warning-wash: rgba(201, 138, 11, 0.1);
   --warning-focus: rgba(201, 138, 11, 0.24);
   --warning-shadow: rgba(201, 138, 11, 0.08);
-  --muted-shadow: rgba(21, 24, 30, 0.06);
-  --boundary-bg: rgba(255, 255, 255, 0.44);
+  --muted-shadow: rgb(34 34 34 / 6%);
+  --boundary-bg: rgb(245 245 242 / 76%);
   --label-bg: rgba(255, 255, 255, 0.94);
-  --transparent-accent: rgba(43, 85, 230, 0);
+  --transparent-accent: rgb(1 88 139 / 0%);
   --inner-shadow: rgba(21, 24, 30, 0.04);
   --toc-inner-shadow: rgba(21, 24, 30, 0.02);
   --rail-1: #d8402c;
@@ -1891,16 +1940,16 @@ button {
   --com: #767672;
   --op: #555555;
   --review-home-bg: var(--bg);
-  --review-home-card-active: #f3f4f6;
+  --review-home-card-active: #f5f5f2;
   --review-home-rule: var(--rule);
   --review-home-rule-soft: var(--rule-soft);
-  --review-home-meta: #5d6472;
+  --review-home-meta: #565852;
   --review-home-comment: var(--accent);
   --review-home-submitted: #6d43b3;
-  --review-home-view-toggle-bg: #e9ebef;
-  --review-home-view-toggle-active-border: #d8dbe1;
+  --review-home-view-toggle-bg: #f5f5f2;
+  --review-home-view-toggle-active-border: #e4e4e0;
   --review-home-view-toggle-active-bg: #ffffff;
-  --review-home-view-toggle-shadow: rgba(21, 24, 30, 0.06);
+  --review-home-view-toggle-shadow: rgb(34 34 34 / 6%);
   --review-home-view-toggle-highlight: rgba(255, 255, 255, 0.8);
   /* Code (Whiteboard Light): petrol and navy for types and functions, sepia
      strings, plum numbers; inserted and deleted sit one step deeper than the
@@ -6114,30 +6163,29 @@ button.review-stack-row:disabled .review-stack-relation {
 
 .review-onboarding-columns {
   display: flex;
-  gap: 72px;
+  gap: 56px;
   align-items: flex-start;
-  padding-top: 48px;
+  padding-top: 32px;
 }
 
 .review-onboarding-intro {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  width: 380px;
+  gap: 16px;
+  width: 340px;
   flex-shrink: 0;
 }
 
 .review-onboarding-kicker {
   color: var(--review-home-meta);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .review-onboarding-headline {
   margin: 0;
   color: var(--ink);
-  font: 500 38px/46px var(--font-serif);
+  font: 600 30px/38px var(--font-sans, system-ui, sans-serif);
 }
 
 .review-onboarding-sub {
@@ -6151,7 +6199,7 @@ button.review-stack-row:disabled .review-stack-relation {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -6160,10 +6208,10 @@ button.review-stack-row:disabled .review-stack-relation {
 
 /* Below this the fixed intro column would squeeze the steps until the agent
    rows overflow; stack the intro above them instead. */
-@media (max-width: 960px) {
+@container review-canvas (max-width: 960px) {
   .review-onboarding-columns {
     flex-direction: column;
-    gap: 32px;
+    gap: 28px;
   }
 
   .review-onboarding-intro {
@@ -6191,7 +6239,7 @@ button.review-stack-row:disabled .review-stack-relation {
   min-height: 42px;
   padding: 10px 24px;
   border-color: var(--accent);
-  color: var(--on-accent);
+  color: #fff;
   background: var(--accent);
   font-size: 14px;
   font-weight: 600;
@@ -6213,18 +6261,19 @@ button.review-stack-row:disabled .review-stack-relation {
   outline-offset: 3px;
 }
 
-/* One accordion item per step. The header is always visible; only the open
-   step renders a body, so a single step asks for attention at a time. */
+/* Flat step rows keep the sequence clear without nesting card surfaces. */
 .review-onboarding-step {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--review-home-rule);
-  border-radius: 10px;
+  border-bottom: 1px solid var(--review-home-rule-soft);
+}
+
+.review-onboarding-step:first-child {
+  border-top: 1px solid var(--review-home-rule-soft);
 }
 
 .review-onboarding-step[data-open="true"] {
-  border-color: var(--review-home-rule-soft);
-  background: var(--tray);
+  background: transparent;
 }
 
 .review-onboarding-step-header {
@@ -6232,7 +6281,8 @@ button.review-stack-row:disabled .review-stack-relation {
   align-items: center;
   gap: 12px;
   width: 100%;
-  padding: 16px 20px;
+  min-height: 52px;
+  padding: 12px 8px;
   border: none;
   color: inherit;
   background: var(--transparent);
@@ -6242,9 +6292,9 @@ button.review-stack-row:disabled .review-stack-relation {
 }
 
 .review-onboarding-step-header:focus-visible {
-  outline: 1px solid var(--accent);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
-  border-radius: 10px;
+  border-radius: 2px;
 }
 
 .review-welcome-dismiss:disabled,
@@ -6273,7 +6323,7 @@ button.review-stack-row:disabled .review-stack-relation {
 .review-onboarding-step-body {
   display: flex;
   flex-direction: column;
-  padding: 0 20px 18px;
+  padding: 0 8px 18px;
 }
 
 .review-onboarding-step-body > button {
@@ -7390,11 +7440,11 @@ button.review-stack-row:disabled .review-stack-relation {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   background: var(--tray);
-  border: 1px solid var(--rule);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid var(--ink-faint);
+  border-radius: 3px;
   pointer-events: none;
 }
 

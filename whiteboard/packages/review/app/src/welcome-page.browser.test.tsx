@@ -106,6 +106,21 @@ describe("WelcomePage", () => {
 
   const stepOpen = (index: number) => step(index)?.getAttribute("data-open");
 
+  const clickButton = (label: string, index = 0) => {
+    const matches = buttons(label);
+    const button = matches[index < 0 ? matches.length + index : index];
+
+    if (!button) throw new Error(`Expected button not found: ${label}`);
+    button.click();
+  };
+
+  const clickStepHeader = (index: number) => {
+    const header = step(index)?.querySelector<HTMLButtonElement>("button");
+
+    if (!header) throw new Error(`Expected step header not found: ${index}`);
+    header.click();
+  };
+
   it("opens on the install step until the whiteboard command is installed", async () => {
     const onClose = vi.fn<() => void>();
 
@@ -128,11 +143,11 @@ describe("WelcomePage", () => {
         />,
       ),
     );
-    expect(buttons("Close")[0]?.disabled).toBe(true);
+    expect(buttons("닫기")[0]?.disabled).toBe(true);
     expect(stepOpen(0)).toBe("true");
     expect(stepState(0)).toBe("todo");
     expect(stepState(1)).toBe("todo");
-    expect(buttons("Install whiteboard in PATH")).toHaveLength(1);
+    expect(buttons("PATH에 whiteboard 설치")).toHaveLength(1);
 
     for (const index of [1, 2, 3]) {
       const header = step(index)?.querySelector("button") as HTMLButtonElement;
@@ -141,13 +156,13 @@ describe("WelcomePage", () => {
       expect(stepOpen(index)).toBe("false");
     }
 
-    await act(async () => buttons("Install whiteboard in PATH")[0]?.click());
+    await act(async () => clickButton("PATH에 whiteboard 설치", 0));
     await waitForStepAdvance();
     expect(setupActions.installCli).toHaveBeenCalledOnce();
-    expect(buttons("Close")[0]?.disabled).toBe(false);
+    expect(buttons("닫기")[0]?.disabled).toBe(false);
     expect(stepState(0)).toBe("done");
     expect(stepOpen(1)).toBe("true");
-    expect(buttons("Install whiteboard in PATH")).toHaveLength(0);
+    expect(buttons("PATH에 whiteboard 설치")).toHaveLength(0);
     expect(
       (step(1)?.querySelector("button") as HTMLButtonElement).disabled,
     ).toBe(false);
@@ -172,9 +187,9 @@ describe("WelcomePage", () => {
       "Install the whiteboard command",
     );
     expect(stepOpen(0)).toBe("true");
-    expect(buttons("Remove deprecated skills")).toHaveLength(1);
+    expect(buttons("이전 Skills 제거")).toHaveLength(1);
 
-    await act(async () => buttons("Remove deprecated skills")[0]?.click());
+    await act(async () => clickButton("이전 Skills 제거", 0));
     await waitForStepAdvance();
     expect(install.removeLegacySkills).toHaveBeenCalledOnce();
     expect(container.querySelectorAll(".review-onboarding-step")).toHaveLength(
@@ -202,7 +217,7 @@ describe("WelcomePage", () => {
     expect(stepState(0)).toBe("done");
     expect(stepOpen(1)).toBe("true");
     expect(
-      container.querySelectorAll('[aria-label="Agent"] button'),
+      container.querySelectorAll('[aria-label="에이전트 선택"] button'),
     ).toHaveLength(5);
   });
 
@@ -223,17 +238,17 @@ describe("WelcomePage", () => {
       ),
     );
     expect(stepState(0)).toBe("todo");
-    expect(container.textContent).toContain("CLI build missing.");
-    expect(buttons("Install whiteboard in PATH")).toHaveLength(0);
+    expect(container.textContent).toContain("CLI 빌드를 찾을 수 없습니다.");
+    expect(buttons("PATH에 whiteboard 설치")).toHaveLength(0);
     expect(
       (step(1)?.querySelector("button") as HTMLButtonElement).disabled,
     ).toBe(true);
 
-    await act(async () => buttons("Refresh")[0]?.click());
+    await act(async () => clickButton("상태 새로고침", 0));
     expect(setupActions.load).toHaveBeenCalledOnce();
     expect(setupActions.installCli).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("CLI build missing.");
-    expect(buttons("Install whiteboard in PATH")).toHaveLength(1);
+    expect(container.textContent).not.toContain("CLI 빌드를 찾을 수 없습니다.");
+    expect(buttons("PATH에 whiteboard 설치")).toHaveLength(1);
     expect(
       (step(1)?.querySelector("button") as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -281,10 +296,10 @@ describe("WelcomePage", () => {
       ),
     );
     expect(container.textContent).not.toContain("~/.local/bin");
-    expect(container.textContent).toContain("new terminal");
+    expect(container.textContent).toContain("새 터미널");
   });
 
-  it("finishes the connect step once a prompt is copied", async () => {
+  it("marks prompt copy complete while keeping the connection action clear", async () => {
     const writeText = vi
       .spyOn(navigator.clipboard, "writeText")
       .mockResolvedValue();
@@ -300,10 +315,19 @@ describe("WelcomePage", () => {
       ),
     );
     expect(stepState(1)).toBe("todo");
-    await act(async () => buttons("Copy prompt")[0]?.click());
+    await act(async () => clickButton("안내문 복사", 0));
     expect(stepState(1)).toBe("done");
     expect(stepOpen(1)).toBe("true");
-    expect(buttons("Copied")).toHaveLength(1);
+    const connectHeader = step(1)?.querySelector<HTMLButtonElement>(
+      ".review-onboarding-step-header",
+    );
+    expect(connectHeader?.getAttribute("aria-label")).toContain("완료");
+    const noteId = connectHeader?.getAttribute("aria-describedby");
+    expect(noteId).toBeTruthy();
+    expect(container.querySelector(`#${noteId}`)?.textContent).toContain(
+      "복사한 설정 안내를 에이전트에 붙여넣거나 설치 명령을 실행해 연결을 마무리하세요.",
+    );
+    expect(buttons("복사됨")).toHaveLength(1);
     await waitForStepAdvance();
     expect(stepOpen(2)).toBe("true");
     expect(localStorage.getItem(REVIEW_CONNECT_COPIED_STORAGE_KEY)).toBe("1");
@@ -326,11 +350,11 @@ describe("WelcomePage", () => {
         />,
       ),
     );
-    await act(async () => buttons("Copy prompt")[0]?.click());
+    await act(async () => clickButton("안내문 복사", 0));
     await waitForStepAdvance();
     expect(stepOpen(1)).toBe("false");
     expect(stepOpen(2)).toBe("true");
-    expect(buttons("Dismiss").at(-1)?.disabled).toBe(false);
+    expect(buttons("닫기").at(-1)?.disabled).toBe(false);
     writeText.mockRestore();
   });
 
@@ -347,11 +371,11 @@ describe("WelcomePage", () => {
         />,
       ),
     );
-    expect(buttons("Close")[0]?.disabled).toBe(true);
+    expect(buttons("닫기")[0]?.disabled).toBe(true);
     await act(async () =>
       (step(1)?.querySelector("button") as HTMLButtonElement).click(),
     );
-    expect(buttons("Close")[0]?.disabled).toBe(false);
+    expect(buttons("닫기")[0]?.disabled).toBe(false);
   });
 
   it("stays on installation when it fails or PATH remains unavailable", async () => {
@@ -373,14 +397,14 @@ describe("WelcomePage", () => {
         />,
       ),
     );
-    await act(async () => buttons("Install whiteboard in PATH")[0]?.click());
+    await act(async () => clickButton("PATH에 whiteboard 설치", 0));
     expect(container.textContent).toContain("Installation failed");
     expect(stepOpen(0)).toBe("true");
-    expect(buttons("Close")[0]?.disabled).toBe(true);
+    expect(buttons("닫기")[0]?.disabled).toBe(true);
     setupActions.installCli.mockResolvedValue(undefined);
-    await act(async () => buttons("Install whiteboard in PATH")[0]?.click());
+    await act(async () => clickButton("PATH에 whiteboard 설치", 0));
     expect(stepOpen(0)).toBe("true");
-    expect(buttons("Close")[0]?.disabled).toBe(true);
+    expect(buttons("닫기")[0]?.disabled).toBe(true);
   });
 
   it("dismisses an upgrade from empty Home with PATH ready and the agent card open", async () => {
@@ -395,10 +419,10 @@ describe("WelcomePage", () => {
         <ReviewHome reviews={[]} onOpen={() => {}} install={install} />,
       ),
     );
-    await act(async () => buttons("Dismiss")[0]?.click());
+    await act(async () => clickButton("닫기", 0));
     expect(install.finishUpdate).toHaveBeenCalledOnce();
     expect(container.querySelector(".review-welcome-page")).toBeNull();
-    expect(container.querySelector("h1")?.textContent).toBe("Sessions");
+    expect(container.querySelector("h1")?.textContent).toBe("리뷰");
   });
 
   it("requires skill removal, PATH readiness, and opening the agent card before dismissal", async () => {
@@ -431,21 +455,21 @@ describe("WelcomePage", () => {
         />,
       ),
     );
-    expect(buttons("Dismiss")[0]?.disabled).toBe(true);
-    await act(async () => buttons("Remove deprecated skills")[0]?.click());
+    expect(buttons("닫기")[0]?.disabled).toBe(true);
+    await act(async () => clickButton("이전 Skills 제거", 0));
     await waitForStepAdvance();
     expect(stepOpen(1)).toBe("true");
-    expect(container.textContent).toContain(
-      "Deprecated skills removed successfully",
-    );
-    expect(buttons("Dismiss")[0]?.disabled).toBe(true);
-    await act(async () => buttons("Dismiss")[0]?.click());
+    expect(
+      step(0)?.querySelector(".review-onboarding-step-title")?.textContent,
+    ).toBe("이전 Skills를 제거했습니다");
+    expect(buttons("닫기")[0]?.disabled).toBe(true);
+    await act(async () => clickButton("닫기", 0));
     expect(onClose).not.toHaveBeenCalled();
-    await act(async () => buttons("Install whiteboard in PATH")[0]?.click());
+    await act(async () => clickButton("PATH에 whiteboard 설치", 0));
     await waitForStepAdvance();
     expect(stepOpen(2)).toBe("true");
-    expect(buttons("Dismiss")[0]?.disabled).toBe(false);
-    await act(async () => buttons("Dismiss")[0]?.click());
+    expect(buttons("닫기")[0]?.disabled).toBe(false);
+    await act(async () => clickButton("닫기", 0));
     expect(ready.finishUpdate).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -474,12 +498,12 @@ describe("WelcomePage", () => {
       ),
     );
     expect(stepOpen(0)).toBe("true");
-    expect(buttons("Remove deprecated skills")).toHaveLength(1);
-    expect(buttons("Install whiteboard in PATH")).toHaveLength(0);
+    expect(buttons("이전 Skills 제거")).toHaveLength(1);
+    expect(buttons("PATH에 whiteboard 설치")).toHaveLength(0);
     expect(
       (step(1)?.querySelector("button") as HTMLButtonElement).disabled,
     ).toBe(true);
-    await act(async () => buttons("Remove deprecated skills")[0]?.click());
+    await act(async () => clickButton("이전 Skills 제거", 0));
     await waitForStepAdvance();
     expect(
       (step(1)?.querySelector("button") as HTMLButtonElement).disabled,
@@ -487,7 +511,7 @@ describe("WelcomePage", () => {
     expect(stepState(0)).toBe("done");
     expect(stepOpen(1)).toBe("true");
     expect(stepState(1)).toBe("todo");
-    await act(async () => buttons("Install whiteboard in PATH")[0]?.click());
+    await act(async () => clickButton("PATH에 whiteboard 설치", 0));
     expect(setupActions.installCli).toHaveBeenCalledOnce();
     expect(stepState(1)).toBe("done");
     expect(stepState(0)).toBe("done");
@@ -505,9 +529,9 @@ describe("WelcomePage", () => {
       root.render(<WelcomePage install={content(status)} />),
     );
     await act(async () =>
-      (step(1)?.querySelector("button") as HTMLButtonElement)?.click(),
+      clickStepHeader(1),
     );
-    expect(buttons("Copy prompt")).toHaveLength(0);
+    expect(buttons("안내문 복사")).toHaveLength(0);
     expect(stepOpen(0)).toBe("true");
 
     await act(async () =>
@@ -524,7 +548,7 @@ describe("WelcomePage", () => {
       (step(1)?.querySelector("button") as HTMLButtonElement).click(),
     );
     expect(stepOpen(1)).toBe("true");
-    expect(buttons("Copy prompt")).toHaveLength(1);
+    expect(buttons("안내문 복사")).toHaveLength(1);
   });
 
   it("keeps removal incomplete when skills remain", async () => {
@@ -537,10 +561,10 @@ describe("WelcomePage", () => {
     const install = content(status);
     vi.mocked(install.removeLegacySkills).mockResolvedValue(status);
     await act(async () => root.render(<WelcomePage install={install} />));
-    await act(async () => buttons("Remove deprecated skills")[0]?.click());
+    await act(async () => clickButton("이전 Skills 제거", 0));
     expect(install.removeLegacySkills).toHaveBeenCalledOnce();
     expect(stepState(0)).toBe("todo");
-    expect(buttons("Remove deprecated skills")).toHaveLength(1);
+    expect(buttons("이전 Skills 제거")).toHaveLength(1);
   });
 
   it("shows the update screen and finishes the update on Dismiss", async () => {
@@ -560,8 +584,8 @@ describe("WelcomePage", () => {
     );
     expect(stepOpen(0)).toBe("true");
     expect(stepState(0)).toBe("todo");
-    expect(buttons("Remove deprecated skills")).toHaveLength(1);
-    expect(buttons("Copy prompt")).toHaveLength(0);
+    expect(buttons("이전 Skills 제거")).toHaveLength(1);
+    expect(buttons("안내문 복사")).toHaveLength(0);
 
     for (const index of [1]) {
       const header = step(index)?.querySelector("button") as HTMLButtonElement;
@@ -571,36 +595,28 @@ describe("WelcomePage", () => {
     }
 
     await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[aria-label="Expand Continue shipping thoughtful code"]',
-        )
-        ?.click(),
+      clickStepHeader(2),
     );
-    await act(async () => buttons("Dismiss").at(-1)?.click());
+    await act(async () => clickButton("닫기", -1));
     expect(install.finishUpdate).not.toHaveBeenCalled();
 
-    await act(async () => buttons("Remove deprecated skills")[0]?.click());
+    await act(async () => clickButton("이전 Skills 제거", 0));
     await waitForStepAdvance();
     expect(install.removeLegacySkills).toHaveBeenCalledOnce();
     expect(stepState(0)).toBe("done");
     expect(stepOpen(0)).toBe("false");
     expect(stepOpen(1)).toBe("true");
-    expect(buttons("Remove deprecated skills")).toHaveLength(0);
+    expect(buttons("이전 Skills 제거")).toHaveLength(0);
 
-    expect(buttons("Copy prompt")).toHaveLength(1);
+    expect(buttons("안내문 복사")).toHaveLength(1);
     expect(
-      container.querySelectorAll('[aria-label="Agent"] button'),
+      container.querySelectorAll('[aria-label="에이전트 선택"] button'),
     ).toHaveLength(5);
 
     await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[aria-label="Expand Continue shipping thoughtful code"]',
-        )
-        ?.click(),
+      clickStepHeader(2),
     );
-    await act(async () => buttons("Dismiss").at(-1)?.click());
+    await act(async () => clickButton("닫기", -1));
     expect(onClose).toHaveBeenCalledOnce();
   });
 });

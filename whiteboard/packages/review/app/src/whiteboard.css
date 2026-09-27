@@ -329,11 +329,43 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   Home. Mono display heading, serif card titles, status as marker washes.
+   Home. Warm paper surfaces, a clear navy action color, and flat review rows.
    --------------------------------------------------------------------------- */
+.review-home {
+  --accent: #01588b;
+  --marker-tint: #e5eff3;
+  --marker-glow: #b7d2df;
+  --surface: #fbf9f4;
+  --tray: #f3f0e8;
+  --well: #eae5da;
+  --raised: #fffdf8;
+  --ink: #26343b;
+  --ink-muted: #626f73;
+  --ink-faint: #667478;
+  --rule: #e2ddd2;
+  --rule-soft: #d3cdbf;
+  background: var(--surface);
+}
+
+.review-theme-host:not(.review-app--theme-light) .review-home {
+  --accent: #47bde8;
+  --marker-tint: #1b3948;
+  --marker-glow: #28607a;
+  --surface: #171c20;
+  --tray: #202a30;
+  --well: #26343b;
+  --raised: #20282d;
+  --ink: #eef2f3;
+  --ink-muted: #b3c1c7;
+  --ink-faint: #8fa1aa;
+  --rule: #35434b;
+  --rule-soft: #44545c;
+}
+
 .review-home-page-header h1 {
-  font: 600 32px/42px var(--font-mono);
-  letter-spacing: -0.02em;
+  color: var(--ink);
+  font: 600 30px/40px var(--font-sans);
+  letter-spacing: -0.03em;
 }
 
 .review-home-search {
@@ -341,15 +373,19 @@ button.host-authoring-activity[data-locatable]:focus-visible {
   height: 38px;
   padding: 0 14px;
   border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--ink-faint);
-  font-size: 12px;
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--ink-muted);
+  font-size: 13px;
 }
 
 .review-home-search:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--marker-tint);
+}
+
+.review-home .review-home-search input {
+  font: 13px/20px var(--font-sans);
 }
 
 .review-home-workspace-header {
@@ -362,6 +398,58 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 .review-home-workspace-header strong {
   font-size: 15px;
   line-height: 24px;
+}
+
+.review-home-scratchpad-rows {
+  border-top: 1px solid var(--rule);
+}
+
+.review-home-scratchpad-row {
+  display: flex;
+  width: 100%;
+  min-height: 58px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-home-scratchpad-row:hover {
+  background: var(--tray);
+}
+
+.review-home-scratchpad-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.review-home-scratchpad-main {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.review-home-scratchpad-main .review-home-review-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: 500 15px/22px var(--font-sans);
+}
+
+.review-home-scratchpad-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--ink-faint);
+  font: 12px/18px var(--font-sans);
+  white-space: nowrap;
 }
 
 .review-home-scratchpad-glyph {
@@ -631,18 +719,13 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 
 .review-document-empty-state {
   max-width: 600px;
-  margin-top: 48px;
-  padding: 24px 26px;
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  background: var(--well);
-  font-family: var(
-    --vscode-font-family,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif
-  );
+  margin: 32px 0 0;
+  padding: 20px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--font-sans);
 }
 
 .review-document-empty-state__label {
@@ -652,14 +735,8 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 }
 
 .review-document .review-document-empty-state h2 {
-  margin: 10px 0 8px;
-  font-family: var(
-    --vscode-font-family,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif
-  );
+  margin: 8px 0 6px;
+  font-family: var(--font-sans);
   font-size: 20px;
   font-weight: 700;
   line-height: 1.35;
@@ -668,6 +745,7 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 .review-document .review-document-empty-state p {
   margin: 0;
   color: var(--ink-muted);
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.6;
 }
@@ -680,13 +758,7 @@ button.host-authoring-activity[data-locatable]:focus-visible {
   border-radius: 6px;
   background: var(--accent);
   color: var(--on-accent);
-  font-family: var(
-    --vscode-font-family,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif
-  );
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
@@ -702,9 +774,21 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 }
 
 .review-document h1 {
+  font-family: var(--font-sans);
   font-size: 34px;
   line-height: 40px;
   letter-spacing: -0.005em;
+}
+
+.review-document .review-document-empty-state button {
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+@media (max-width: 560px) {
+  .review-document-empty-state {
+    margin-top: 24px;
+    padding: 16px 0;
+  }
 }
 
 .review-document h2 {
@@ -1366,7 +1450,7 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 
 .review-commits-range strong {
   flex-shrink: 0;
-  font: 600 15px/20px var(--font-mono);
+  font: 600 15px/20px var(--font-sans);
   white-space: nowrap;
 }
 
@@ -1378,14 +1462,11 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 }
 
 .review-commit-card {
-  border: 1px solid var(--rule);
-  border-radius: 8px;
-  background: var(--surface);
+  border: 0;
+  border-top: 1px solid var(--rule);
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
-}
-
-.review-commit-card--expanded {
-  border-color: var(--rule-soft);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2565,11 +2646,11 @@ button:focus-visible > .review-chevron {
 }
 
 .review-home-table-toolbar {
-  padding: 8px 0 12px;
-  margin-bottom: 24px;
+  padding: 10px 0 14px;
+  margin-bottom: 0;
   border-bottom: 1px solid var(--rule);
   color: var(--ink-muted);
-  font: 15px/24px var(--font-mono);
+  font: 13px/20px var(--font-sans);
 }
 
 /* Single-choice menus. */
@@ -2633,10 +2714,10 @@ button:focus-visible > .review-chevron {
   height: 32px;
   padding: 0 10px 0 12px;
   border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--surface);
+  border-radius: 8px;
+  background: var(--raised);
   color: var(--ink-muted);
-  font: 13px/18px var(--font-mono);
+  font: 13px/18px var(--font-sans);
   cursor: pointer;
 }
 .review-home-table-menu-trigger strong {
@@ -2660,8 +2741,6 @@ button:focus-visible > .review-chevron {
 
 .review-home-table-scroll {
   overflow-x: auto;
-  border: 1px solid var(--rule);
-  border-radius: 8px;
 }
 
 .review-home-table {
@@ -2669,7 +2748,7 @@ button:focus-visible > .review-chevron {
   min-width: 840px;
   border-collapse: collapse;
   table-layout: fixed;
-  font: 12px/18px var(--font-mono);
+  font: 13px/18px var(--font-sans);
 }
 
 .review-home-col-pr {
@@ -2686,12 +2765,10 @@ button:focus-visible > .review-chevron {
 }
 
 .review-home-table th {
-  height: 36px;
-  background: var(--tray);
-  color: var(--ink-muted);
-  font: 600 11px/16px var(--font-mono);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  height: 40px;
+  background: transparent;
+  color: var(--ink-faint);
+  font: 500 12px/16px var(--font-sans);
   text-align: left;
 }
 
@@ -2710,7 +2787,7 @@ button:focus-visible > .review-chevron {
 }
 
 .review-home-table td {
-  height: 60px;
+  height: 64px;
   color: var(--ink-muted);
 }
 
@@ -2727,6 +2804,11 @@ button:focus-visible > .review-chevron {
 }
 .review-home-table tbody tr:hover,
 .review-home-table tbody tr:focus-within {
+  background: #f4f1e9;
+}
+
+.review-theme-host:not(.review-app--theme-light) .review-home-table tbody tr:hover,
+.review-theme-host:not(.review-app--theme-light) .review-home-table tbody tr:focus-within {
   background: var(--tray);
 }
 
@@ -2747,7 +2829,8 @@ button:focus-visible > .review-chevron {
 .review-home-table .review-home-review-title {
   display: block;
   width: 100%;
-  font: 500 17px/22px var(--font-serif);
+  color: var(--ink);
+  font: 500 15px/20px var(--font-sans);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2849,6 +2932,57 @@ button:focus-visible > .review-chevron {
 .review-home-row-menu-trigger[aria-expanded="true"] {
   background: var(--well);
 }
+
+@container review-canvas (max-width: 760px) {
+  .review-home-table {
+    min-width: 0;
+  }
+
+  .review-home-table col:nth-child(1),
+  .review-home-table col:nth-child(4),
+  .review-home-table th:nth-child(1),
+  .review-home-table th:nth-child(4),
+  .review-home-table td:not([colspan]):nth-child(1),
+  .review-home-table td:nth-child(4) {
+    display: none;
+  }
+
+  .review-home-col-branch {
+    width: 120px;
+  }
+
+  .review-home-col-date {
+    width: 100px;
+  }
+
+  .review-home-col-action {
+    width: 40px;
+  }
+
+  .review-home-table th,
+  .review-home-table td {
+    padding-inline: 4px;
+  }
+
+  .review-home-table th:nth-child(2),
+  .review-home-table td:nth-child(2) {
+    padding-left: 0;
+  }
+
+  .review-home-row-menu-trigger,
+  .review-home-table .review-home-dismiss {
+    opacity: 1;
+  }
+}
+
+@container review-canvas (max-width: 500px) {
+  .review-home-table col:nth-child(3),
+  .review-home-table th:nth-child(3),
+  .review-home-table td:nth-child(3) {
+    display: none;
+  }
+}
+
 .review-home-row-menu {
   position: fixed;
   inset: auto;

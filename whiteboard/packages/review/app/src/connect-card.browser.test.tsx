@@ -49,7 +49,7 @@ const status: ReviewCliInstallStatus = {
       },
       codex: { label: "Install the Codex plugin", command: "CODEX COMMAND" },
       cursor: {
-        label: "Install in Cursor",
+        label: "Cursor에서 설치",
         url: "cursor://anysphere.cursor-deeplink/mcp/install?name=review",
       },
       opencode: {
@@ -112,6 +112,18 @@ function button(container: HTMLElement, label: string) {
   );
 }
 
+function clickButton(container: HTMLElement, label: string) {
+  const target = button(container, label);
+
+  if (!target) throw new Error(`Expected button not found: ${label}`);
+  target.click();
+}
+
+function clickTarget(target: HTMLElement | null, description: string) {
+  if (!target) throw new Error(`Expected control not found: ${description}`);
+  target.click();
+}
+
 function body(container: HTMLElement) {
   return container.querySelector(".review-home-prompt-body")?.textContent;
 }
@@ -135,7 +147,7 @@ describe("ConnectCard", () => {
     );
     expect(body(container)).toBe("CLAUDE PROMPT");
 
-    await act(async () => button(container, "Codex")?.click());
+    await act(async () => clickButton(container, "Codex"));
     expect(button(container, "Codex")?.getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -161,18 +173,20 @@ describe("ConnectCard", () => {
   it("swaps between the other agents from the menu", async () => {
     const container = await mount(<ConnectCard install={content()} />);
 
-    expect(otherTrigger(container)?.textContent).toBe("Other…");
+    expect(otherTrigger(container)?.textContent).toBe("기타…");
     expect(otherTrigger(container)?.getAttribute("aria-pressed")).toBe("false");
     expect(container.querySelector("[role=menu]")).toBeNull();
 
-    await act(async () => otherTrigger(container)?.click());
+    await act(async () =>
+      clickTarget(otherTrigger(container), "Other agent menu"),
+    );
     expect(
       [...container.querySelectorAll("[role=menuitemradio]")].map(
         (item) => item.textContent,
       ),
     ).toEqual(["Pi", "oh-my-pi"]);
 
-    await act(async () => button(container, "oh-my-pi")?.click());
+    await act(async () => clickButton(container, "oh-my-pi"));
     expect(container.querySelector("[role=menu]")).toBeNull();
     expect(otherTrigger(container)?.textContent).toBe("oh-my-pi");
     expect(otherTrigger(container)?.getAttribute("aria-pressed")).toBe("true");
@@ -185,14 +199,14 @@ describe("ConnectCard", () => {
     expect(body(container)).toBe("OMP PROMPT");
     expect(localStorage.getItem(REVIEW_CONNECT_TARGET_STORAGE_KEY)).toBe("omp");
 
-    await act(async () => button(container, "Install the plugin")?.click());
+    await act(async () => clickButton(container, "플러그인 설치"));
     expect(body(container)).toBe("OMP COMMAND");
     expect(copyButton(container)?.getAttribute("aria-label")).toBe(
-      "Copy install command for oh-my-pi",
+      "복사: oh-my-pi용 설치 명령",
     );
 
-    await act(async () => button(container, "Codex")?.click());
-    expect(otherTrigger(container)?.textContent).toBe("Other…");
+    await act(async () => clickButton(container, "Codex"));
+    expect(otherTrigger(container)?.textContent).toBe("기타…");
     expect(otherTrigger(container)?.getAttribute("aria-pressed")).toBe("false");
   });
 
@@ -203,23 +217,23 @@ describe("ConnectCard", () => {
 
     const container = await mount(<ConnectCard install={content()} />);
 
-    await act(async () => button(container, "Codex")?.click());
+    await act(async () => clickButton(container, "Codex"));
     expect(copyButton(container)?.getAttribute("aria-label")).toBe(
-      "Copy prompt for Codex",
+      "복사: Codex용 안내문",
     );
-    await act(async () => copyButton(container)?.click());
+    await act(async () => clickTarget(copyButton(container), "Copy setup text"));
     expect(writeText).toHaveBeenLastCalledWith("CODEX PROMPT");
-    expect(copyButton(container)?.textContent).toBe("Copied");
+    expect(copyButton(container)?.textContent).toBe("복사됨");
 
-    await act(async () => button(container, "Install the plugin")?.click());
+    await act(async () => clickButton(container, "플러그인 설치"));
     expect(body(container)).toBe("CODEX COMMAND");
-    expect(copyButton(container)?.textContent).toBe("Copy command");
+    expect(copyButton(container)?.textContent).toBe("명령 복사");
     expect(copyButton(container)?.getAttribute("aria-label")).toBe(
-      "Copy install command for Codex",
+      "복사: Codex용 설치 명령",
     );
-    await act(async () => copyButton(container)?.click());
+    await act(async () => clickTarget(copyButton(container), "Copy setup text"));
     expect(writeText).toHaveBeenLastCalledWith("CODEX COMMAND");
-    expect(copyButton(container)?.textContent).toBe("Copied");
+    expect(copyButton(container)?.textContent).toBe("복사됨");
     writeText.mockRestore();
   });
 
@@ -234,7 +248,7 @@ describe("ConnectCard", () => {
       <ConnectCard install={content()} onCopied={onCopied} />,
     );
 
-    await act(async () => copyButton(container)?.click());
+    await act(async () => clickTarget(copyButton(container), "Copy setup text"));
     expect(onCopied).toHaveBeenCalledOnce();
     writeText.mockRestore();
   });
@@ -244,11 +258,11 @@ describe("ConnectCard", () => {
 
     const container = await mount(<ConnectCard install={content()} />);
 
-    await act(async () => button(container, "Install the plugin")?.click());
+    await act(async () => clickButton(container, "플러그인 설치"));
 
     const link = container.querySelector("a");
 
-    expect(link?.textContent).toBe("Install in Cursor");
+    expect(link?.textContent).toBe("Cursor에서 설치");
     expect(link?.getAttribute("href")).toMatch(/^cursor:\/\//);
     expect(link?.getAttribute("target")).toBe("_blank");
 
@@ -261,14 +275,14 @@ describe("ConnectCard", () => {
             ...status.connect,
             plugins: {
               ...status.connect.plugins,
-              cursor: { label: "Install in Cursor" },
+              cursor: { label: "Cursor에서 설치" },
             },
           },
         })}
       />,
     );
 
-    await act(async () => button(bare, "Install the plugin")?.click());
+    expect(bare.textContent).toContain("먼저 PATH에 whiteboard CLI를 설치하세요.");
     expect(bare.querySelector("a")).toBeNull();
     expect(bare.querySelector("button")).toBeNull();
   });
@@ -314,22 +328,18 @@ describe("ConnectCard", () => {
     const body = container.querySelector("pre");
     expect(body?.dataset.collapsed).toBe("true");
 
-    const toggle = container.querySelector(
+    const toggle = container.querySelector<HTMLButtonElement>(
       ".review-connect-body-wrap [aria-expanded]",
     );
 
-    expect(toggle?.textContent).toBe("Show full prompt");
-    await act(async () => (toggle as HTMLButtonElement).click());
+    expect(toggle?.textContent).toBe("안내문 전체 보기");
+    await act(async () => clickTarget(toggle, "안내문 전체 보기"));
     expect(body?.dataset.collapsed).toBe("false");
     expect(
       container.querySelector(".review-connect-collapse")?.textContent,
-    ).toBe("Show less");
+    ).toBe("간단히 보기");
 
-    const copy = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent === "Copy prompt",
-    );
-
-    await act(async () => copy?.click());
+    await act(async () => clickButton(container, "안내문 복사"));
     expect(writeText).toHaveBeenCalledWith(long);
 
     const short = await mount(<ConnectCard install={content()} />);
@@ -362,14 +372,12 @@ describe("LegacySkillsRow", () => {
       <LegacySkillsRow install={install} onStatusChange={onStatusChange} />,
     );
 
-    expect(container.textContent).toContain("Whiteboard no longer uses them.");
+    expect(container.textContent).toContain(
+      "이제 Whiteboard에서는 사용하지 않습니다.",
+    );
     expect(container.textContent).toContain("/h/.claude/skills/review");
 
-    const button = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent === "Remove deprecated skills",
-    );
-
-    await act(async () => button?.click());
+    await act(async () => clickButton(container, "이전 Skills 제거"));
     expect(install.removeLegacySkills).toHaveBeenCalled();
 
     const next = onStatusChange.mock.calls[0]?.[0];
@@ -386,7 +394,7 @@ describe("LegacySkillsRow", () => {
         );
       }
     });
-    expect(container.textContent).toContain("Removed 1 skill");
+    expect(container.textContent).toContain("Skills 1개 제거됨");
     expect(container.textContent).toContain("/h/.claude/skills/review");
     expect(container.querySelector("button")).toBeNull();
 

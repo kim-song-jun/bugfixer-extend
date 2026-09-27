@@ -1,6 +1,6 @@
 # Discovery: unified agent workspace
 
-Status: source inventory and user decisions as of 2026-09-26. This document records what exists and what the new product needs; it does not describe implemented features in this repository.
+Status: source inventory and user decisions through 2026-09-28. This document records what exists and what the new product needs; it does not describe implemented features in this repository.
 
 ## Confirmed direction
 
@@ -9,7 +9,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 - Use a native Code OSS project window with the dashboard, editable project files, and Whiteboard review canvas in its editor tabs. Preserve the existing read-only source navigator for pinned review material. This is the user's selected project-window option A.
 - Give each project its own native window. The project switcher focuses an existing window or opens that project's window, and each window restores its own tabs and task context. This is the user's selected multi-project option A.
 - Keep project conventions as versioned, readable documents in app settings. An agent may draft from selected reference snapshots and a separate agent run checks the draft; people review source links and examples, edit, and explicitly apply a version before it becomes an agent instruction. This is the user's selected convention option B with its requested agent-assisted workflow.
-- Use posco-mds as the visual theme reference: a simple project dashboard, clear tabs and navigation, restrained accents, and first-class light and dark modes. Reuse the visual principles and suitable generic interaction patterns, not laboratory-specific product content.
+- Use posco-mlip as the selected visual theme reference: navy and restrained cyan over warm neutral surfaces, Pretendard typography, peer-level dashboard sections, flat rows, and clear tabs. Derive a dark mode for the native app and avoid repeated cards inside cards. Reuse generic visual principles, not laboratory-specific product content or brand assets.
 - Build for macOS first and support Windows later; whether the requested Windows x86 means 32-bit x86 or x86-64 is still open. Keep Docker-based project execution and test environments in scope for portability; the exact desktop/container boundary remains to be designed.
 - Provide Slack, Notion, and website import as first-party connectors plus a contract for user-installable connectors. This is the user's selected option B; it does not imply enabling all general VS Code extensions.
 - Use app-interpreted declarative packages for the first public user-installable connectors. Installed packages contain no executable code; sources needing custom logic or unsupported authentication require an app capability or a later, separately approved runtime. This is the user's selected execution option A.
@@ -24,7 +24,7 @@ Status: source inventory and user decisions as of 2026-09-26. This document reco
 | Bugfixer | Bug-oriented board, agent jobs, Notion and Slack collection, conventions, and E2E job flows. | A project-neutral task model and integrations. Current job state includes in-memory maps; conventions and collectors carry source-project assumptions. The implementation will be newly written. |
 | Mobius | macOS account management and switching for Claude and Codex CLI subscription logins. | Per-run account isolation for concurrent jobs and Antigravity support. Existing switching changes the live CLI credential state, so it is not a per-job credential boundary. |
 | Ego Lite | An open-source automation harness and skill for the separate macOS ego lite browser app, including agent task spaces. | An explicit app-to-E2E bridge that records evidence against tasks and runs and closes task spaces; Windows support needs separate validation later. |
-| posco-mds theme reference | Semantic light/dark color tokens, Pretendard typography, a dashboard shell, quick actions, and document/page tabs. | Apply the general visual system to project tasks and agent runs without importing laboratory-specific screens, data, or behavior. |
+| posco-mlip theme reference | Navy/cyan semantic colors, Pretendard typography, warm neutral surfaces, peer dashboard areas, flat list rows, and a clear navigation shell. | Apply the generic visual system to project tasks and agent runs without importing laboratory-specific screens, data, assets, or behavior; derive the native dark theme. |
 
 ## Provider account isolation: source check
 
@@ -75,6 +75,6 @@ The current Review source navigator is not the editable project surface required
 - Bugfixer: `src/jobs/runner.ts` tracks jobs in maps and offers `agy`/Claude engines; `src/conventions/load.ts` uses one source for displayed and injected rules but defaults to a project-root directory, while `src/conventions/paths.ts` and `redact.ts` show fixed source paths and credential-pattern masking. These files do not provide publish-ready generic rules. `src/collect/collect.ts` and `src/jobs/refreshJob.ts` show source-project-specific collectors.
 - Mobius: `README.md` documents Claude/Codex support, live CLI credential writes during switching, and a Codex session reverting a switch when it refreshes its token.
 - Ego Lite: `AGENTS.md` distinguishes the harness from the closed-source browser app; `README.md` documents macOS availability and agent spaces; `skills/ego-browser/SKILL.md` documents `taskSpace` and browser automation.
-- posco-mds: `frontend/.impeccable.md` describes its design principles and semantic token hierarchy; `frontend/src/styles/app.css` and `dark.css` contain the current light/dark values; `frontend/src/components/DocumentTabStrip.tsx` and `frontend/src/pages/Dashboard.tsx` show tab and dashboard patterns.
+- Visual reference: the selected posco-mlip theme contributes only generic color, typography, spacing, and flat hierarchy principles; no private components, product data, logos, or source files are imported.
 
 The approved workspace/review ownership and internal foundation proof are detailed in [architecture.md](architecture.md) and [foundation-checkpoint.md](foundation-checkpoint.md). The selected [first macOS C task scope](first-macos-task-scope.md) extends that proof. The proposed dashboard journey is in [ux-flow.md](ux-flow.md). The public Whiteboard source boundary and notice inventory are in [upstream-base.md](upstream-base.md).

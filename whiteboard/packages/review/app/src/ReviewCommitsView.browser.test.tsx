@@ -87,6 +87,48 @@ it("opens a commit's diff at the file clicked in its file list", async () => {
   expect(onOpenDiff).toHaveBeenCalledWith(commit, "file", file.path);
 });
 
+it("shows Korean copy for the commits view when the browser locale is Korean", async () => {
+  const language = Object.getOwnPropertyDescriptor(navigator, "language");
+  Object.defineProperty(navigator, "language", {
+    configurable: true,
+    value: "ko-KR",
+  });
+
+  try {
+    const container = await mount(
+      <ReviewCommitsView
+        commits={[commit]}
+        range={{
+          baseRef: "main",
+          headRef: "feature",
+          baseCommit: "a".repeat(40),
+          headCommit: commit.commit,
+        }}
+        onOpenDiff={vi.fn()}
+      />,
+      {
+        files: () => new Promise<ReviewDiffFileWire[]>(() => {}),
+        create: () => ({}) as ReviewDiffViewHandle,
+      },
+    );
+
+    expect(container.textContent).toContain("커밋 1개");
+    expect(container.textContent).toMatch(/2026년.*커밋/u);
+    expect(container.textContent).toContain("파일 1개");
+    expect(
+      container.querySelector('[aria-label="커밋 변경 사항 열기"]'),
+    ).not.toBeNull();
+
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>("[aria-expanded]")!.click(),
+    );
+    expect(container.textContent).toContain("파일 불러오는 중…");
+  } finally {
+    if (language) Object.defineProperty(navigator, "language", language);
+    else Reflect.deleteProperty(navigator, "language");
+  }
+});
+
 it("reveals the requested file in a commit-scoped diff", async () => {
   const revealFile = vi.fn<NonNullable<ReviewDiffViewHandle["revealFile"]>>();
 

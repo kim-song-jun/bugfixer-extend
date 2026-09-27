@@ -139,7 +139,7 @@ export function ReviewHome({
           return next;
         });
         setDeleteError(
-          `Could not delete “${reviewTitle(review)}”. Please try again.`,
+          `“${reviewTitle(review)}” 리뷰를 삭제하지 못했습니다. 다시 시도해 주세요.`,
         );
       }
     },
@@ -217,7 +217,7 @@ export function ReviewHome({
       <div className="review-home-scroll">
         <div className="review-home-content">
           <div className="review-home-page-header">
-            <h1>Sessions</h1>
+            <h1>리뷰</h1>
             <div className="review-home-page-header-tools">
               <SearchBox query={query} onChange={setQuery} />
             </div>
@@ -229,8 +229,8 @@ export function ReviewHome({
           {needle && active.length === 0 && !scratchpadShown ? (
             <p className="review-home-search-empty">
               {dismissed.length > 0
-                ? `No active reviews match “${needle}”. Look in Dismissed below.`
-                : `No reviews match “${needle}”.`}
+                ? `“${needle}”와 일치하는 진행 중인 리뷰가 없습니다. 아래 보관 목록을 확인해 주세요.`
+                : `“${needle}”와 일치하는 리뷰가 없습니다.`}
             </p>
           ) : null}
           <SearchQueryContext.Provider value={needle}>
@@ -302,8 +302,8 @@ function SearchBox({
         ref={input}
         type="search"
         value={query}
-        placeholder="Search sessions"
-        aria-label="Search sessions"
+        placeholder="리뷰 검색"
+        aria-label="리뷰 검색"
         spellCheck={false}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
@@ -317,7 +317,7 @@ function SearchBox({
         <button
           type="button"
           className="review-home-search-clear"
-          aria-label="Clear search"
+          aria-label="리뷰 검색 지우기"
           // Clearing unmounts this button, so hand focus back to the field
           // rather than letting it fall to the body.
           onClick={() => {
@@ -350,14 +350,14 @@ function DismissedSection({
   onDelete?(review: ReviewApiSummary): Promise<void>;
 }) {
   return (
-    <section className="review-home-dismissed" aria-label="Dismissed sessions">
+    <section className="review-home-dismissed" aria-label="보관한 리뷰">
       <button
         type="button"
         className="review-home-dismissed-toggle"
         aria-expanded={expanded}
         onClick={onToggle}
       >
-        <span>Dismissed</span>
+        <span>보관한 리뷰</span>
         <span className="review-home-dismissed-count">{reviews.length}</span>
       </button>
       {expanded ? (
@@ -371,7 +371,7 @@ function DismissedSection({
               >
                 <MatchedText text={reviewTitle(review)} />
               </button>
-              <span className="review-home-dismissed-clock">kept</span>
+                <span className="review-home-dismissed-clock">보관됨</span>
               <RestoreReviewButton review={review} />
               {onDelete ? (
                 <DeleteReviewButton review={review} onDelete={onDelete} />
@@ -404,7 +404,7 @@ function RestoreReviewButton({ review }: { review: ReviewApiSummary }) {
           .finally(() => setBusy(false));
       }}
     >
-      Undo
+      복원
     </button>
   );
 }
@@ -448,30 +448,30 @@ function ReviewTable({
   });
 
   return (
-    <section className="review-home-table-section" aria-label="Sessions">
+    <section className="review-home-table-section" aria-label="리뷰 목록">
       <div className="review-home-table-toolbar">
-        <span>{countLabel(filtered.length, "review")}</span>
+        <span>리뷰 {filtered.length}개</span>
         <div className="review-home-table-controls">
           <TableMenu
-            label="Filter"
-            ariaLabel="Filter by repository"
+            label="저장소"
+            ariaLabel="저장소로 필터"
             value={repository}
             options={[
-              { value: "", label: "All repos" },
+              { value: "", label: "모든 저장소" },
               ...repositories.map((name) => ({ value: name, label: name })),
             ]}
             onChange={setRepository}
           />
           <TableMenu<ReviewSort>
-            label="Sort"
-            ariaLabel="Sort reviews"
+            label="정렬"
+            ariaLabel="리뷰 정렬"
             value={sort}
             options={[
-              { value: "newest", label: "Newest first" },
-              { value: "oldest", label: "Oldest first" },
-              { value: "updated", label: "Recently updated" },
-              { value: "pr", label: "PR number" },
-              { value: "title", label: "Title A–Z" },
+              { value: "newest", label: "최신순" },
+              { value: "oldest", label: "오래된 순" },
+              { value: "updated", label: "최근 업데이트순" },
+              { value: "pr", label: "PR 번호순" },
+              { value: "title", label: "제목순" },
             ]}
             onChange={setSort}
           />
@@ -490,12 +490,12 @@ function ReviewTable({
           <thead>
             <tr>
               <th scope="col">PR</th>
-              <th scope="col">Title</th>
-              <th scope="col">Head branch</th>
-              <th scope="col">Created</th>
-              <th scope="col">Updated</th>
+              <th scope="col">제목</th>
+              <th scope="col">브랜치</th>
+              <th scope="col">생성</th>
+              <th scope="col">업데이트</th>
               <th scope="col">
-                <span className="review-home-action-heading">Actions</span>
+                <span className="review-home-action-heading">작업</span>
               </th>
             </tr>
           </thead>
@@ -523,7 +523,7 @@ function ReviewTable({
                       className="review-home-table-repository"
                       title={
                         review.repositoryPath ??
-                        (review.shared ? "Shared review" : undefined)
+                        (review.shared ? "공유 리뷰" : undefined)
                       }
                     >
                       <RepositoryName review={review} />
@@ -539,7 +539,7 @@ function ReviewTable({
                   {formatCreatedTime(review.firstCreatedAt)}
                 </td>
                 <td title={reviewUpdatedAt(review)}>
-                  {formatRelativeTime(reviewUpdatedAt(review))}
+                  {formatHomeRelativeTime(reviewUpdatedAt(review))}
                 </td>
                 <td>
                   <ReviewRowActions review={review} />
@@ -548,7 +548,7 @@ function ReviewTable({
             ))}
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={6}>No reviews match this repository.</td>
+                <td colSpan={6}>이 저장소에 해당하는 리뷰가 없습니다.</td>
               </tr>
             ) : null}
           </tbody>
@@ -585,7 +585,7 @@ function ReviewRowActions({ review }: { review: ReviewApiSummary }) {
         ref={trigger}
         type="button"
         className="review-home-row-menu-trigger"
-        aria-label={`Actions for ${reviewTitle(review)}`}
+        aria-label={`${reviewTitle(review)} 작업`}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
@@ -601,7 +601,7 @@ function ReviewRowActions({ review }: { review: ReviewApiSummary }) {
           ref={popover}
           popover="manual"
           role="menu"
-          aria-label="Session actions"
+          aria-label="리뷰 작업"
           className="review-home-row-menu"
         >
           <DeleteReviewButton review={review} onDelete={onDelete} menu />
@@ -618,7 +618,7 @@ function TableMenu<T extends string>({
   options,
   onChange,
 }: {
-  label: "Filter" | "Sort";
+  label: "저장소" | "정렬";
   ariaLabel: string;
   value: T;
   options: { value: T; label: string }[];
@@ -640,7 +640,7 @@ function TableMenu<T extends string>({
       >
         <path
           d={
-            label === "Filter"
+            label === "저장소"
               ? "M3 5h14M6 10h8M8.5 15h3"
               : "M6 4v12m0 0-3-3m3 3 3-3M14 16V4m0 0-3 3m3-3 3 3"
           }
@@ -657,7 +657,7 @@ function TableMenu<T extends string>({
 function formatCreatedTime(value: string | undefined): string {
   if (!value || !Number.isFinite(Date.parse(value))) return "—";
 
-  return new Date(value).toLocaleString(undefined, {
+  return new Date(value).toLocaleString("ko-KR", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -681,33 +681,31 @@ function ScratchpadGroup({
   const contents = review.contents;
 
   return (
-    <section className="review-home-scratchpad" aria-label="Scratchpad">
-      <div className="review-home-cards">
-        <div className="review-home-card-shell">
-          <button
-            type="button"
-            className="review-home-card review-home-scratchpad-card"
-            onClick={() => onOpen(review)}
-          >
-            <span className="review-home-card-main">
-              <span className="review-home-review-title">
-                <PencilIcon />
-                <MatchedText text={reviewTitle(review)} />
-              </span>
-              <span className="review-home-card-meta">
-                {contents ? (
-                  <>
-                    <span>{countLabel(contents.blocks, "block")}</span>
-                    <span>{countLabel(contents.diagrams, "diagram")}</span>
-                  </>
-                ) : null}
-                <span>
-                  updated {formatRelativeTime(reviewUpdatedAt(review))}
-                </span>
+    <section className="review-home-scratchpad" aria-label="메모">
+      <div className="review-home-scratchpad-rows">
+        <button
+          type="button"
+          className="review-home-scratchpad-row"
+          onClick={() => onOpen(review)}
+        >
+          <span className="review-home-scratchpad-main">
+            <span className="review-home-review-title">
+              <PencilIcon />
+              <MatchedText text={reviewTitle(review)} />
+            </span>
+            <span className="review-home-scratchpad-meta">
+              {contents ? (
+                <>
+                  <span>{contents.blocks}개 항목</span>
+                  <span>{contents.diagrams}개 다이어그램</span>
+                </>
+              ) : null}
+              <span>
+                {formatHomeRelativeTime(reviewUpdatedAt(review))} 업데이트
               </span>
             </span>
-          </button>
-        </div>
+          </span>
+        </button>
       </div>
     </section>
   );
@@ -742,8 +740,8 @@ function DismissReviewButton({ review }: { review: ReviewApiSummary }) {
     <button
       type="button"
       className="review-home-dismiss"
-      aria-label={`Dismiss ${title}`}
-      title="Dismiss session"
+      aria-label={`${title} 보관`}
+      title="리뷰 보관"
       disabled={busy}
       onKeyDown={(event) => event.stopPropagation()}
       onClick={(event) => {
@@ -788,8 +786,8 @@ function DeleteReviewButton({
             : "review-home-delete"
       }
       role={menu ? "menuitem" : undefined}
-      aria-label={armed ? `Confirm delete ${title}` : `Delete ${title}`}
-      title={armed ? "Confirm delete" : "Delete session"}
+      aria-label={armed ? `${title} 삭제 확인` : `${title} 삭제`}
+      title={armed ? "삭제 확인" : "리뷰 삭제"}
       disabled={busy}
       onBlur={() => setArmed(false)}
       onKeyDown={(event) => event.stopPropagation()}
@@ -814,10 +812,10 @@ function DeleteReviewButton({
       {menu ? (
         <>
           <TrashIcon />
-          <span>{armed ? "Confirm delete" : "Delete session"}</span>
+          <span>{armed ? "삭제 확인" : "리뷰 삭제"}</span>
         </>
       ) : armed ? (
-        "Delete?"
+        "삭제?"
       ) : (
         <TrashIcon />
       )}
@@ -886,8 +884,25 @@ export function formatRelativeTime(
   }).format(then);
 }
 
+function formatHomeRelativeTime(timestamp: string | null | undefined): string {
+  if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return "알 수 없음";
+
+  const elapsed = Math.max(0, Date.now() - Date.parse(timestamp));
+  const formatter = new Intl.RelativeTimeFormat("ko", { numeric: "auto" });
+
+  if (elapsed < 60_000) return formatter.format(0, "second");
+  if (elapsed < 3_600_000) {
+    return formatter.format(-Math.floor(elapsed / 60_000), "minute");
+  }
+  if (elapsed < 86_400_000) {
+    return formatter.format(-Math.floor(elapsed / 3_600_000), "hour");
+  }
+
+  return formatter.format(-Math.floor(elapsed / 86_400_000), "day");
+}
+
 function reviewTitle(review: ReviewApiSummary): string {
-  return review.title.trim() || "Untitled session";
+  return review.title.trim() || "제목 없는 리뷰";
 }
 
 function matchesQuery(review: ReviewApiSummary, query: string): boolean {

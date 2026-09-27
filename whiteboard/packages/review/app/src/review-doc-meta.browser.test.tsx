@@ -12,8 +12,6 @@ import { testReviewSession } from "./review-session-test-utils";
 let root: Root | null = null;
 
 describe("ReviewDocumentMetaLine", () => {
-  beforeEach(() => {});
-
   afterEach(async () => {
     if (root) {
       await act(async () => root?.unmount());
@@ -158,6 +156,65 @@ describe("ReviewDocumentMetaLine", () => {
     };
     await render(2);
     await vi.waitFor(() => expect(container.querySelector("a")).toBeNull());
+  });
+
+  it("shows Korean relative time and stack labels for Korean UI", async () => {
+    const language = Object.getOwnPropertyDescriptor(navigator, "language");
+    Object.defineProperty(navigator, "language", {
+      configurable: true,
+      value: "ko-KR",
+    });
+
+    try {
+      const now = Date.UTC(2026, 6, 22, 12, 10);
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      const session = testReviewSession();
+      session.review!.updatedAtMs = now - 300_000;
+      session.review!.pullRequestNumber = 20;
+      session.review!.stack = async () => [
+        {
+          branch: "feature-a",
+          relation: "current",
+          pullRequestNumber: 20,
+          pullRequestUrl: "https://github.com/o/r/pull/20",
+          reviewUuid: "22222222-2222-4222-8222-222222222222",
+          reviewTitle: "Review A",
+        },
+        {
+          branch: "feature-b",
+          relation: "later",
+          pullRequestNumber: 30,
+          pullRequestUrl: "https://github.com/o/r/pull/30",
+          reviewUuid: "11111111-1111-4111-8111-111111111111",
+          reviewTitle: "Review B",
+        },
+      ];
+
+      const container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () => {
+        root?.render(
+          <ReviewSessionProvider session={session}>
+            <ReviewDocumentMetaLine />
+          </ReviewSessionProvider>,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain("5분 전 업데이트");
+        expect(container.textContent).toContain("1 / 2");
+      });
+      expect(container.textContent).toContain("스택");
+      expect(container.textContent).toContain("현재");
+    } finally {
+      if (language) {
+        Object.defineProperty(navigator, "language", language);
+      } else {
+        Reflect.deleteProperty(navigator, "language");
+      }
+    }
   });
 
   it("opens an available later Review in a background tab", async () => {

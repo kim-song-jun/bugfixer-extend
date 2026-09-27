@@ -19,6 +19,7 @@ import { DisplayedReviewVersionContext } from "./displayed-review-version-contex
 import { useReviewSession } from "./host/review-session";
 import { ReviewBranchRange } from "./review-branch-range";
 import { useReviewDiffFiles } from "./review-diff-files-context";
+import { isKoreanReviewUi } from "./review-locale";
 
 interface ReviewDocumentMetaState {
   pullRequestNumber: number | null;
@@ -37,6 +38,7 @@ export function ReviewDocumentMetaLine({
   children?: ReactNode;
 }): ReactElement {
   const session = useReviewSession();
+  const korean = isKoreanReviewUi();
   const reviewFetch = session.fetch;
   const displayedVersion = useContext(DisplayedReviewVersionContext);
   const diffFiles = useReviewDiffFiles();
@@ -49,6 +51,7 @@ export function ReviewDocumentMetaLine({
   );
 
   const [stackLayers, setStackLayers] = useState<ReviewStackLayer[]>([]);
+  const [stackError, setStackError] = useState(false);
 
   useEffect(() => {
     setRelativeTimeNowMs(Date.now());
@@ -56,6 +59,7 @@ export function ReviewDocumentMetaLine({
 
   useEffect(() => {
     const controller = new AbortController();
+    setStackError(false);
 
     if (!meta?.pullRequestNumber) {
       setStackLayers([]);
@@ -69,7 +73,12 @@ export function ReviewDocumentMetaLine({
       .then((next) => {
         if (!controller.signal.aborted) setStackLayers(next);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setStackLayers([]);
+          setStackError(true);
+        }
+      });
 
     return () => controller.abort();
   }, [
@@ -85,7 +94,7 @@ export function ReviewDocumentMetaLine({
 
   const updatedLabel =
     meta?.updatedAtMs != null && relativeTimeNowMs != null
-      ? relativeTimeLabel(meta.updatedAtMs, relativeTimeNowMs)
+      ? relativeTimeLabel(meta.updatedAtMs, relativeTimeNowMs, korean)
       : null;
 
   const repository = meta.pullRequestUrl?.match(
@@ -102,7 +111,7 @@ export function ReviewDocumentMetaLine({
       node: (
         <span
           className="review-doc-meta-branch"
-          title={`Head branch: ${branch}`}
+          title={`${korean ? "헤드 브랜치" : "Head branch"}: ${branch}`}
         >
           <svg width="13" height="13" viewBox="0 0 20 20" aria-hidden="true">
             <circle cx="5" cy="4.5" r="2" />
@@ -121,7 +130,11 @@ export function ReviewDocumentMetaLine({
       key: "files",
       node: (
         <span>
-          {diff.fileCount === 1 ? "1 file" : `${diff.fileCount} files`}
+          {korean
+            ? `${diff.fileCount}개 파일`
+            : diff.fileCount === 1
+              ? "1 file"
+              : `${diff.fileCount} files`}
         </span>
       ),
     });
@@ -205,9 +218,18 @@ export function ReviewDocumentMetaLine({
               <ReviewStackSelector layers={stackLayers} />
             </>
           ) : null}
+          {stackError ? (
+            <span className="review-header-stack-error" role="status">
+              {isKoreanReviewUi()
+                ? "스택 정보를 불러오지 못했습니다"
+                : "Could not load stack information"}
+            </span>
+          ) : null}
         </div>
         {updatedLabel && (
-          <span className="review-header-updated">Updated {updatedLabel}</span>
+          <span className="review-header-updated">
+            {korean ? `${updatedLabel} 업데이트` : `Updated ${updatedLabel}`}
+          </span>
         )}
       </div>
       {children}
@@ -238,6 +260,7 @@ function ReviewStackSelector({
   layers: readonly ReviewStackLayer[];
 }): ReactElement {
   const session = useReviewSession();
+  const korean = isKoreanReviewUi();
   const detailsRef = useRef<HTMLDetailsElement>(null);
 
   const currentIndex = layers.findIndex(
@@ -270,9 +293,11 @@ function ReviewStackSelector({
     <details className="review-stack-selector" ref={detailsRef}>
       <summary>
         <span className="review-stack-position">
-          {position} of {layers.length}
+          {korean
+            ? `${position} / ${layers.length}`
+            : `${position} of ${layers.length}`}
         </span>
-        <span className="review-stack-label">stack</span>
+        <span className="review-stack-label">{korean ? "스택" : "stack"}</span>
         <svg viewBox="0 0 12 12" aria-hidden="true">
           <path d="m3 4.5 3 3 3-3" />
         </svg>
@@ -303,6 +328,7 @@ function ReviewStackLayerRow({
     event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey" | "button">,
   ) => void;
 }): ReactElement {
+  const korean = isKoreanReviewUi();
   const current = layer.relation === "current";
 
   const content = (
@@ -318,7 +344,17 @@ function ReviewStackLayerRow({
         <span className="review-stack-branch">{layer.branch}</span>
       </span>
       <span className="review-stack-relation">
-        {!layer.reviewUuid && !current ? "No session" : layer.relation}
+        {!layer.reviewUuid && !current
+          ? korean
+            ? "세션 없음"
+            : "No session"
+          : korean
+            ? layer.relation === "current"
+              ? "현재"
+              : layer.relation === "later"
+                ? "이후"
+                : layer.relation
+            : layer.relation}
       </span>
     </>
   );
@@ -339,8 +375,12 @@ function ReviewStackLayerRow({
       disabled={!layer.reviewUuid}
       title={
         layer.reviewUuid
-          ? "Open session (Cmd/Ctrl-click to open in the background)"
-          : "No generated session exists for this pull request"
+          ? korean
+            ? "세션 열기 (Cmd/Ctrl 클릭으로 백그라운드에서 열기)"
+            : "Open session (Cmd/Ctrl-click to open in the background)"
+          : korean
+            ? "이 풀 리퀘스트에는 생성된 세션이 없습니다"
+            : "No generated session exists for this pull request"
       }
       onClick={(event) => onOpen(layer, event)}
       onAuxClick={(event) => {
@@ -372,22 +412,38 @@ function reviewDiffStats(diff: {
   return summarizeReviewDiffFiles(diff.files);
 }
 
-function relativeTimeLabel(timeMs: number, nowMs: number): string | null {
+function relativeTimeLabel(
+  timeMs: number,
+  nowMs: number,
+  korean: boolean,
+): string | null {
   if (!Number.isFinite(timeMs)) return null;
   const seconds = Math.max(0, Math.round((nowMs - timeMs) / 1000));
 
-  if (seconds < 60) return "just now";
+  if (seconds < 60) return korean ? "방금" : "just now";
   const minutes = Math.round(seconds / 60);
 
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 60) return korean ? `${minutes}분 전` : `${minutes} min ago`;
   const hours = Math.round(minutes / 60);
 
-  if (hours < 24) return hours === 1 ? "1 hour ago" : `${hours} hours ago`;
+  if (hours < 24) {
+    return korean
+      ? `${hours}시간 전`
+      : hours === 1
+        ? "1 hour ago"
+        : `${hours} hours ago`;
+  }
   const days = Math.round(hours / 24);
 
-  if (days < 7) return days === 1 ? "1 day ago" : `${days} days ago`;
+  if (days < 7) {
+    return korean
+      ? `${days}일 전`
+      : days === 1
+        ? "1 day ago"
+        : `${days} days ago`;
+  }
 
-  return new Date(timeMs).toLocaleDateString(undefined, {
+  return new Date(timeMs).toLocaleDateString(korean ? "ko-KR" : undefined, {
     month: "short",
     day: "numeric",
   });

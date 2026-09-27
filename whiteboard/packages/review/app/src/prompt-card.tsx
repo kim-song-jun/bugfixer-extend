@@ -9,8 +9,8 @@ export const REVIEW_HOME_PROMPT_KIND_STORAGE_KEY =
   "dev.fast.review.homePromptKind";
 
 const PROMPT_KINDS: ReadonlyArray<{ kind: PromptKind; label: string }> = [
-  { kind: "change", label: "Review a change" },
-  { kind: "architecture", label: "Architecture review" },
+  { kind: "change", label: "변경 사항 검토" },
+  { kind: "architecture", label: "아키텍처 검토" },
 ];
 
 /**
@@ -19,9 +19,9 @@ const PROMPT_KINDS: ReadonlyArray<{ kind: PromptKind; label: string }> = [
  */
 export const PROMPTS: Record<PromptKind, string> = {
   change:
-    "Create a Whiteboard of my current branch against up to date main, then open it in Whiteboard.",
+    "현재 브랜치를 최신 main과 비교하는 Whiteboard를 만들고, Whiteboard에서 여세요.",
   architecture:
-    "Create a Whiteboard that sketches out the main data flows, access patterns, and code paths in this repo, so I can do a full architecture review of it. Open it in Whiteboard when you're done.",
+    "이 저장소의 주요 데이터 흐름, 접근 방식, 코드 경로를 정리한 Whiteboard를 만들어 아키텍처를 검토할 수 있게 해 주세요. 작업을 마치면 Whiteboard에서 여세요.",
 };
 
 const COPIED_RESET_MS = 2000;
@@ -70,11 +70,11 @@ export function PromptCard() {
   };
 
   return (
-    <section className="review-home-prompt-card" aria-label="Whiteboard prompt">
+    <section className="review-home-prompt-card" aria-label="Whiteboard 안내문">
       <div
         className="review-home-prompt-tabs"
         role="group"
-        aria-label="What to review"
+        aria-label="검토할 내용"
       >
         {PROMPT_KINDS.map(({ kind: tab, label }) => (
           <button
@@ -94,11 +94,11 @@ export function PromptCard() {
           type="button"
           className="review-home-prompt-copy"
           aria-live="polite"
-          aria-label={copied ? "Prompt copied" : "Copy prompt"}
+          aria-label={copied ? "안내문 복사됨" : "안내문 복사"}
           onClick={copyPrompt}
         >
           <CopyIcon />
-          {copied ? "Copied" : "Copy prompt"}
+          {copied ? "복사됨" : "안내문 복사"}
         </button>
       </div>
     </section>

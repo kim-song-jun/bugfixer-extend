@@ -23,7 +23,7 @@ describe("ReviewHome", () => {
     vi.restoreAllMocks();
   });
 
-  it("groups chronologically across repositories and shows origins", async () => {
+  it("sorts reviews chronologically across repositories and shows origins", async () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-22T12:00:00Z"));
 
     const reviews = [
@@ -107,10 +107,10 @@ describe("ReviewHome", () => {
 
     const select = async (label: string, value: string) => {
       const names = new Map([
-        ["updated", "Recently updated"],
-        ["oldest", "Oldest first"],
-        ["pr", "PR number"],
-        ["title", "Title A–Z"],
+        ["updated", "최근 업데이트순"],
+        ["oldest", "오래된 순"],
+        ["pr", "PR 번호순"],
+        ["title", "제목순"],
       ]);
 
       await act(async () =>
@@ -129,19 +129,19 @@ describe("ReviewHome", () => {
     };
 
     expect(titles()).toEqual(["Alpha", "Zulu"]);
-    await select("Sort reviews", "updated");
+    await select("리뷰 정렬", "updated");
     expect(titles()).toEqual(["Zulu", "Alpha"]);
-    await select("Sort reviews", "oldest");
+    await select("리뷰 정렬", "oldest");
     expect(titles()).toEqual(["Zulu", "Alpha"]);
-    await select("Sort reviews", "pr");
+    await select("리뷰 정렬", "pr");
     expect(titles()).toEqual(["Alpha", "Zulu"]);
-    await select("Sort reviews", "title");
+    await select("리뷰 정렬", "title");
     expect(titles()).toEqual(["Alpha", "Zulu"]);
-    await select("Filter by repository", "alpha");
+    await select("저장소로 필터", "alpha");
     expect(titles()).toEqual(["Zulu"]);
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>('button[aria-label="Dismiss Zulu"]')!
+        .querySelector<HTMLButtonElement>('button[aria-label="Zulu 보관"]')!
         .click(),
     );
     expect(onDismiss).toHaveBeenCalledWith(reviews[0]);
@@ -187,9 +187,9 @@ describe("ReviewHome", () => {
       labels.findIndex((text) => text.includes("A review")),
     );
     expect(container.querySelectorAll(".review-home-table")).toHaveLength(1);
-    expect(container.textContent).not.toContain("Dismiss Scratchpad");
-    expect(container.textContent).toContain("6 blocks");
-    expect(container.textContent).toContain("2 diagrams");
+    expect(container.querySelector(".review-home-dismiss")).toBeNull();
+    expect(container.textContent).toContain("6개 항목");
+    expect(container.textContent).toContain("2개 다이어그램");
 
     const button = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.includes("Scratchpad"),
@@ -199,7 +199,7 @@ describe("ReviewHome", () => {
     expect(onOpen).toHaveBeenCalledWith(pad);
   });
 
-  it("opens API reviews grouped by repository without needing a checkout path", async () => {
+  it("opens API reviews without a checkout path", async () => {
     const { repositoryPath: _, ...review } = summary({ title: "API review" });
     const item = { ...review, repositoryName: "Review repository" };
     const onOpen = vi.fn<(review: typeof item) => void>();
@@ -256,7 +256,7 @@ describe("ReviewHome", () => {
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[aria-label="Actions for Menu review"]',
+          '[aria-label="Menu review 작업"]',
         )!
         .click(),
     );
@@ -268,7 +268,7 @@ describe("ReviewHome", () => {
 
     await act(async () => remove.click());
     expect(onDelete).not.toHaveBeenCalled();
-    expect(remove.textContent).toContain("Confirm delete");
+    expect(remove.textContent).toContain("삭제 확인");
     await act(async () => remove.click());
     expect(onDelete).toHaveBeenCalledWith(review);
     expect(onOpen).not.toHaveBeenCalled();
@@ -299,21 +299,22 @@ describe("ReviewHome", () => {
       ".review-home-dismissed-toggle",
     );
 
-    await act(async () => dismissed?.click());
+    expect(dismissed).not.toBeNull();
+    await act(async () => dismissed!.click());
 
     const remove = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Delete Removable"]',
+      'button[aria-label="Removable 삭제"]',
     );
 
     expect(remove).not.toBeNull();
-    await act(async () => remove?.click());
+    await act(async () => remove!.click());
     expect(onDelete).not.toHaveBeenCalled();
 
     const confirm = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Confirm delete Removable"]',
+      'button[aria-label="Removable 삭제 확인"]',
     );
 
-    await act(async () => confirm?.click());
+    await act(async () => confirm!.click());
     expect(onDelete).toHaveBeenCalledWith(reviews[0]);
     expect(onOpen).not.toHaveBeenCalled();
   });
@@ -346,13 +347,13 @@ describe("ReviewHome", () => {
           .querySelector<HTMLButtonElement>(
             isDismissed
               ? ".review-home-dismissed-toggle"
-              : '[aria-label="Actions for Pending review"]',
+              : '[aria-label="Pending review 작업"]',
           )!
           .click(),
       );
 
       const remove = container.querySelector<HTMLButtonElement>(
-        '[aria-label="Delete Pending review"]',
+        '[aria-label="Pending review 삭제"]',
       )!;
 
       await act(async () => remove.click());
@@ -363,14 +364,14 @@ describe("ReviewHome", () => {
       expect(container.querySelector('[role="menu"]')).toBeNull();
 
       await act(async () => deletion.reject(new Error("Offline")));
-      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-        "Could not delete",
-      );
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert).not.toBeNull();
+      expect(alert!.textContent).toContain("삭제하지 못했습니다");
       expect(
         container.querySelector(
           isDismissed
-            ? '[aria-label="Delete Pending review"]'
-            : '[aria-label="Actions for Pending review"]',
+            ? '[aria-label="Pending review 삭제"]'
+            : '[aria-label="Pending review 작업"]',
         ),
       ).not.toBeNull();
     },
@@ -399,7 +400,7 @@ describe("ReviewHome", () => {
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[aria-label="Actions for Pending review"]',
+          '[aria-label="Pending review 작업"]',
         )!
         .click(),
     );
@@ -452,7 +453,7 @@ describe("ReviewHome", () => {
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[aria-label="Dismiss Native review"]',
+          '[aria-label="Native review 보관"]',
         )!
         .click(),
     );
@@ -478,9 +479,9 @@ describe("ReviewHome", () => {
     );
     expect(onRestore).toHaveBeenCalledWith(dismissed);
     await render({ ...dismissed, dismissedAt: null });
-    expect(
-      container.querySelector(".review-home-table-open")?.textContent,
-    ).toContain("Native review");
+    const reviewButton = container.querySelector(".review-home-table-open");
+    expect(reviewButton).not.toBeNull();
+    expect(reviewButton!.textContent).toContain("Native review");
   });
 
   it.each([
@@ -512,7 +513,8 @@ describe("ReviewHome", () => {
         return event;
       };
 
-      const search = container.querySelector('[aria-label="Search sessions"]');
+      const search = container.querySelector('[aria-label="리뷰 검색"]');
+      expect(search).not.toBeNull();
 
       expect((await press(other)).defaultPrevented).toBe(false);
       expect(document.activeElement).not.toBe(search);
@@ -540,7 +542,7 @@ describe("ReviewHome", () => {
     await act(async () =>
       root.render(<ReviewHome reviews={[review]} onOpen={() => {}} />),
     );
-    expect(container.textContent).toContain("6 min ago");
+    expect(container.textContent).toContain("6분 전");
     expect(container.textContent).not.toContain("updated not published");
   });
 });
@@ -548,7 +550,7 @@ describe("ReviewHome", () => {
 describe("formatRelativeTime", () => {
   const now = Date.parse("2026-07-29T12:00:00.000Z");
 
-  it("uses compact home-page relative labels", () => {
+  it("formats compact relative times", () => {
     expect(formatRelativeTime("2026-07-29T11:54:00.000Z", now)).toBe(
       "6 min ago",
     );

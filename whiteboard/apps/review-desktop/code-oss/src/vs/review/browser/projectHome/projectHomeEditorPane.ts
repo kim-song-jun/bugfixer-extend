@@ -105,7 +105,13 @@ export class ProjectHomeEditorPane extends EditorPane {
 	}
 
 	private async openReviews(): Promise<void> {
-		try { await this.reviewTabs.openHome(true); }
+		try {
+			const input = this.input;
+			await this.reviewTabs.openHome(true);
+			if (input instanceof ProjectHomeEditorInput && this.group.contains(input)) {
+				await this.group.closeEditor(input, { force: true, preserveFocus: true });
+			}
+		}
 		catch (error) { this.notificationService.error(error); }
 	}
 
