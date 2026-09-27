@@ -1545,22 +1545,24 @@ export class CodeApplication extends Disposable {
 				async (sender, review) => {
 					const window = BrowserWindow.fromWebContents(sender);
 					if (!window || window.isDestroyed()) { throw new Error('The project window closed before connector approval.'); }
+					const trustStatus = review.trustStatus === 'first-install' ? '새 패키지'
+						: review.trustStatus === 'same-key-update' ? '같은 서명 키로 업데이트' : '설치된 패키지';
 					const result = await dialog.showMessageBox(window, {
 						type: 'question',
-						title: 'Install connector package',
+						title: '커넥터 패키지 설치',
 						message: `${review.name} ${review.version}`,
 						detail: [
 							review.description,
-							`Package: ${review.packageId}`,
-							`Status: ${review.trustStatus}`,
-							`Allowed domains:\n${review.domains.join('\n')}`,
-							`Account access: ${review.accountAccess}`,
-							`Requested scopes: ${review.requestedScopes.length ? review.requestedScopes.join(', ') : 'none'}`,
-							`Sources and collection rules:\n${review.sourceRules.map(source => `${source.label}: ${source.method} https://${source.domain}${source.path}; fields ${source.fields.join(', ')}; scope ${source.requiredScope ?? 'none'}; pagination ${source.paginated ? 'yes' : 'no'}`).join('\n')}`,
-							`Signing key SHA-256: ${review.fingerprint}`,
-							`Manifest SHA-256: ${review.manifestDigest}`,
+							`패키지 ID: ${review.packageId}`,
+							`설치 상태: ${trustStatus}`,
+							`허용 도메인:\n${review.domains.join('\n')}`,
+							`계정 접근: ${review.accountAccess === 'none' ? '없음' : '앱에서 관리하는 토큰'}`,
+							`요청 권한: ${review.requestedScopes.length ? review.requestedScopes.join(', ') : '없음'}`,
+							`자료 원본 및 수집 규칙:\n${review.sourceRules.map(source => `${source.label}: ${source.method} https://${source.domain}${source.path}; 필드 ${source.fields.join(', ')}; 권한 ${source.requiredScope ?? '없음'}; 페이지 나누기 ${source.paginated ? '사용' : '사용 안 함'}`).join('\n')}`,
+							`서명 키 SHA-256: ${review.fingerprint}`,
+							`매니페스트 SHA-256: ${review.manifestDigest}`,
 						].join('\n\n'),
-						buttons: ['Cancel', 'Install package'], cancelId: 0, defaultId: 0, noLink: true,
+						buttons: ['취소', '패키지 설치'], cancelId: 0, defaultId: 0, noLink: true,
 					});
 					return result.response === 1;
 					},
@@ -1570,14 +1572,14 @@ export class CodeApplication extends Disposable {
 						const window = BrowserWindow.fromWebContents(sender);
 						if (!window || window.isDestroyed()) { throw new Error('The project window closed before account approval.'); }
 						const result = await dialog.showMessageBox(window, {
-							type: 'warning', title: 'Connect connector package account',
+							type: 'warning', title: '커넥터 계정 연결',
 							message: `${review.name}: ${label}`,
 							detail: [
-								`The token will be sent only to https://${host}.`,
-								`Granted scopes: ${scopes.length ? scopes.join(', ') : 'none'}`,
-								'Only the signed package source rules will receive this account token.',
+								`토큰은 https://${host}에만 전송됩니다.`,
+								`허용 범위: ${scopes.length ? scopes.join(', ') : '없음'}`,
+								'이 계정 토큰은 서명된 패키지의 자료 수집 규칙에만 사용됩니다.',
 							].join('\n\n'),
-							buttons: ['Cancel', 'Connect account'], cancelId: 0, defaultId: 0, noLink: true,
+							buttons: ['취소', '계정 연결'], cancelId: 0, defaultId: 0, noLink: true,
 						});
 						return result.response === 1;
 					},
