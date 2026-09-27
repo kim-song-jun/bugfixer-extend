@@ -595,7 +595,7 @@ export class WorkspaceProviderRunsChannel {
 		return {
 			directory: join(userInfo().homedir, providerId === 'codex' ? '.codex' : '.claude'),
 			ref: `local-default-${providerId}`,
-			label: `${provider} local CLI profile (account unverified)`,
+			label: `${provider} 로컬 CLI 프로필 (계정 미확인)`,
 		};
 	}
 

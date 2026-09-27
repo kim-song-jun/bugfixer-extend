@@ -398,7 +398,7 @@ export class WorkspaceConventionAgentChannel {
 		return {
 			directory: join(userInfo().homedir, providerId === 'codex' ? '.codex' : '.claude'),
 			ref: `local-default-${providerId}`,
-			label: `${providerId === 'codex' ? 'Codex' : 'Claude'} local CLI profile (account unverified)`,
+			label: `${providerId === 'codex' ? 'Codex' : 'Claude'} 로컬 CLI 프로필 (계정 미확인)`,
 		};
 	}
 

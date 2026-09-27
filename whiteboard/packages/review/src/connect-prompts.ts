@@ -171,7 +171,7 @@ export function connectPrompt(
 }
 
 export function connectSetupPrompt(target: InstallTarget): string {
-  return `Run \`whiteboard connect ${target}\` and follow the instructions to connect this agent to Whiteboard.`;
+  return `\`whiteboard connect ${target}\`를 실행하고 안내에 따라 이 에이전트를 Whiteboard에 연결해 주세요.`;
 }
 
 export function connectSetupPrompts(): Record<InstallTarget, string> {
