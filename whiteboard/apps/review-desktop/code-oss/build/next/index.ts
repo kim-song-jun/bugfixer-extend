@@ -388,12 +388,17 @@ async function copyResources(outDir: string): Promise<void> {
 // Plugins
 // ============================================================================
 
-function inlineMinimistPlugin(): esbuild.Plugin {
+function inlineBootstrapDependenciesPlugin(): esbuild.Plugin {
 	return {
-		name: 'inline-minimist',
+		name: 'inline-bootstrap-dependencies',
 		setup(build) {
 			build.onResolve({ filter: /^minimist$/ }, () => ({
 				path: path.join(REPO_ROOT, 'node_modules/minimist/index.js'),
+				external: false,
+			}));
+			// Main's static imports resolve before bootstrap installs the node_modules.asar loader.
+			build.onResolve({ filter: /^eventsource-parser$/ }, args => ({
+				path: nodeRequire.resolve(args.path, { paths: [args.resolveDir] }),
 				external: false,
 			}));
 		},
@@ -670,7 +675,7 @@ ${tslib}`,
 		buildResults.push({ outPath, result });
 	}));
 
-	// Bundle bootstrap files (with minimist inlined) directly from TypeScript source
+	// Bundle bootstrap files with their pre-ASAR dependencies directly from TypeScript source.
 	for (const entry of bootstrapEntryPoints) {
 		const entryPath = path.join(REPO_ROOT, SRC_DIR, `${entry}.ts`);
 		if (!fs.existsSync(entryPath)) {
@@ -680,7 +685,7 @@ ${tslib}`,
 
 		const outPath = path.join(REPO_ROOT, outDir, `${entry}.js`);
 
-		const bootstrapPlugins: esbuild.Plugin[] = [inlineMinimistPlugin(), contentMapperPlugin];
+		const bootstrapPlugins: esbuild.Plugin[] = [inlineBootstrapDependenciesPlugin(), contentMapperPlugin];
 		if (doNls) {
 			bootstrapPlugins.unshift(nlsPlugin({
 				baseDir: path.join(REPO_ROOT, SRC_DIR),
