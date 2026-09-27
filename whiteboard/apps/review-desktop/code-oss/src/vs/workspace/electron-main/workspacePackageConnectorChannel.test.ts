@@ -129,6 +129,7 @@ test('signed package install requires native consent, pins updates, and imports 
 		const binding = database.listFolderBindings(one.project.id)[0];
 		const task = database.createTask({ projectId: one.project.id, bindingId: binding.id, title: 'Import reviewed issue' });
 		const otherTask = database.createTask({ projectId: one.project.id, bindingId: binding.id, title: 'Different task' });
+		const fetchCountBeforeImport = fetchCount;
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
 			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: preview.previewId, taskId: randomUUID(),
 		}), /active task/i);
@@ -147,7 +148,7 @@ test('signed package install requires native consent, pins updates, and imports 
 		});
 		assert.equal(retry.id, imported.id, 'retry after a lost IPC response must return the committed snapshot');
 		assert.equal(retry.version, imported.version);
-		assert.equal(fetchCount, 2, 'commit and retry must not refetch the remote source');
+		assert.equal(fetchCount, fetchCountBeforeImport, 'import and retry must not refetch the remote source');
 		assert.equal(database.knowledge.listProjectReferences(one.project.id).length, 1);
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
 			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: preview.previewId, taskId: otherTask.id,
