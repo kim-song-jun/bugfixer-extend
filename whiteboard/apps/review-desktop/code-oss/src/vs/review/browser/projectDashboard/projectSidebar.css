@@ -133,18 +133,16 @@
 	min-height: 38px;
 	gap: 8px;
 	margin-top: 12px;
-	border: 0;
+	border: 1px solid var(--project-sidebar-accent);
 	border-radius: 8px;
-	color: #FFFFFF;
-	background: var(--project-sidebar-accent);
+	color: var(--project-sidebar-accent);
+	background: transparent;
 	font: inherit;
 	font-weight: 650;
 	cursor: pointer;
 }
 
-.project-sidebar__create:hover { filter: brightness(.94); }
-.vs-dark .project-sidebar__create,
-.hc-black .project-sidebar__create { color: #17171C; }
+.project-sidebar__create:hover { background: var(--project-sidebar-selected); }
 
 .project-sidebar__item {
 	display: flex;

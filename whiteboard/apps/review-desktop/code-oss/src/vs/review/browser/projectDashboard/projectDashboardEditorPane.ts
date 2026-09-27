@@ -1892,8 +1892,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		}
 	}
 
-	private renderTaskViewNavigation(shell: HTMLElement): void {
-		const navigation = shell.appendChild($('.project-dashboard__task-views'));
+	private renderTaskViewNavigation(container: HTMLElement): void {
+		const navigation = container.appendChild($('.project-dashboard__task-views'));
 		navigation.setAttribute('role', 'group'); navigation.setAttribute('aria-label', '작업 보기');
 		for (const [view, label] of [['board', '보드'], ['archived', '보관됨'], ['trash', '휴지통']] as const) {
 			const button = navigation.appendChild(createElement('button', 'project-dashboard__task-view'));
@@ -1910,6 +1910,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const heading = section.appendChild($('.project-dashboard__section-heading'));
 		const title = heading.appendChild($('h2')); title.textContent = this.taskView === 'archived' ? '보관된 작업' : '휴지통';
 		const count = heading.appendChild($('span')); count.textContent = `작업 ${tasks.length}개`;
+		this.renderTaskViewNavigation(heading);
 		if (this.lifecycleLoading) {
 			const status = section.appendChild($('.project-dashboard__status')); status.setAttribute('role', 'status'); status.textContent = `${this.taskView === 'archived' ? '보관된 작업' : '휴지통'} 불러오는 중…`;
 			return;
@@ -2062,14 +2063,25 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		clearNode(this.root);
 		const shell = this.root.appendChild($('.project-dashboard__shell'));
 		const heading = shell.appendChild($('.project-dashboard__heading'));
-		const eyebrow = heading.appendChild($('.project-dashboard__eyebrow'));
+		const headingCopy = heading.appendChild($('.project-dashboard__heading-copy'));
+		const eyebrow = headingCopy.appendChild($('.project-dashboard__eyebrow'));
 		eyebrow.textContent = '프로젝트 작업 공간';
-		const title = heading.appendChild($('h1'));
+		const title = headingCopy.appendChild($('h1'));
 		title.id = 'project-dashboard-title';
 		title.tabIndex = -1;
 		title.textContent = this.dashboard?.project.name ?? '프로젝트';
-		const location = heading.appendChild($('.project-dashboard__location'));
-		location.textContent = this.dashboard?.folder.path ?? '프로젝트 정보 불러오는 중';
+		const location = headingCopy.appendChild($('.project-dashboard__location'));
+		if (this.dashboard) {
+			const tasks = this.dashboard.tasks;
+			location.textContent = `작업 ${tasks.length}개 · 리뷰 대기 ${tasks.filter(task => task.state === 'review').length}개 · 실행 중 ${tasks.filter(task => task.state === 'inProgress').length}개`;
+			location.title = this.dashboard.folder.path;
+		} else location.textContent = '프로젝트 정보 불러오는 중';
+		if (this.dashboard) {
+			const create = heading.appendChild(createElement('button', 'project-dashboard__primary project-dashboard__header-create'));
+			create.type = 'button'; create.textContent = '새 작업'; create.disabled = !!this.taskMutationBusy;
+			create.dataset.focusKey = 'header-create';
+			create.addEventListener('click', () => this.openCreateTaskForm());
+		}
 		if (this.error) {
 			const banner = shell.appendChild($('.project-dashboard__error'));
 			banner.setAttribute('role', 'alert');
@@ -2095,7 +2107,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			restorePosition();
 			return;
 		}
-		this.renderTaskViewNavigation(shell);
 		if (this.taskMutationError) {
 			const error = shell.appendChild($('.project-dashboard__error')); error.setAttribute('role', 'alert'); error.textContent = this.taskMutationError;
 		}
@@ -2156,6 +2167,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const boardHeader = shell.appendChild($('.project-dashboard__section-heading'));
 		const boardTitle = boardHeader.appendChild($('h2')); boardTitle.textContent = '작업 보드';
 		const count = boardHeader.appendChild($('span')); count.textContent = `작업 ${this.dashboard.tasks.length}개`;
+		this.renderTaskViewNavigation(boardHeader);
 		const detail = this.dashboard.tasks.find(task => task.id === this.selectedTaskId);
 		const workArea = shell.appendChild($('.project-dashboard__work-area'));
 		if (detail) workArea.classList.add('project-dashboard__work-area--with-detail');
