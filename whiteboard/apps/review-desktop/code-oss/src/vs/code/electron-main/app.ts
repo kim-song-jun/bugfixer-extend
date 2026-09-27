@@ -144,6 +144,7 @@ import { ReviewUpdateDialog } from '../../review/electron-main/reviewUpdateDialo
 import { REVIEW_DESKTOP_CHANNEL, ReviewDesktopChannel } from '../../review/electron-main/reviewDesktopChannel.js';
 import { WorkspaceDatabase } from '../../workspace/electron-main/workspaceDatabase.js';
 import { ProjectWorkspaceService } from '../../workspace/electron-main/projectWorkspaceService.js';
+import { hasProjectWindow, projectIdForWindow, restoreProjectWindows } from './projectWindowRestore.js';
 import { WorkspaceDashboardChannel } from '../../workspace/electron-main/workspaceDashboardChannel.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../workspace/common/workspaceDashboardProtocol.js';
 import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/workspaceProviderRunsChannel.js';
@@ -184,6 +185,9 @@ export class CodeApplication extends Disposable {
 	private nativeHostMainService: INativeHostMainService | undefined;
 	private reviewDesktopHost: ReviewDesktopHost | undefined;
 	private workspaceDatabase: WorkspaceDatabase | undefined;
+	private startupProjectIds: readonly string[] = [];
+	private startupProjectWindowOpener!: (projectId: string, initialStartup: boolean) => Promise<ICodeWindow[]>;
+	private reportProjectWindowRestoreFailure!: (projectId: string, error: unknown) => void;
 	private workspaceProviderRuns: WorkspaceProviderRunsChannel | undefined;
 	private workspaceConventionAgent: WorkspaceConventionAgentChannel | undefined;
 	private workspaceEgoCapture: WorkspaceEgoCaptureChannel | undefined;
@@ -730,6 +734,35 @@ export class CodeApplication extends Disposable {
 		}
 		const projectWorkspaces = new ProjectWorkspaceService(workspaceDatabase, this.environmentMainService.userDataPath);
 		const windowsMainService = appInstantiationService.invokeFunction(accessor => accessor.get(IWindowsMainService));
+		const recordProjectWindowOpen = (window: ICodeWindow): void => {
+			const projectId = projectIdForWindow(window);
+			if (!projectId) { return; }
+			try {
+				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
+			} catch (error) {
+				this.logService.error(`Could not save open state for project window ${projectId}.`, error);
+				dialog.showErrorBox(localize('projectWindowStateSaveFailed', '프로젝트 창 상태 저장 실패'),
+					localize('projectWindowStateSaveFailedMessage', '프로젝트 창의 열림 상태를 저장하지 못했습니다. 프로젝트를 다시 열어 상태를 복구하고, 자세한 내용은 로그를 확인하세요. (프로젝트 ID: {0})', projectId));
+			}
+		};
+		for (const window of windowsMainService.getWindows()) { recordProjectWindowOpen(window); }
+		this._register(windowsMainService.onDidSignalReadyWindow(recordProjectWindowOpen));
+		this._register(this.lifecycleMainService.onBeforeCloseWindow(window => {
+			const projectId = projectIdForWindow(window);
+			if (!projectId || this.lifecycleMainService.quitRequested) { return; }
+			try {
+				const view = workspaceDatabase.getProjectView(projectId);
+				if (!view) { throw new Error(`Project ${projectId} has no saved workspace view.`); }
+				const remainingWindows = windowsMainService.getWindows().filter(candidate => candidate.id !== window.id);
+				if (!hasProjectWindow(projectId, view.descriptorUri, remainingWindows)) {
+					workspaceDatabase.setProjectOpenAtQuit(projectId, false);
+				}
+			} catch (error) {
+				this.logService.error(`Could not clear open state for project window ${projectId}.`, error);
+				dialog.showErrorBox(localize('projectWindowStateClearFailed', '프로젝트 창 상태 저장 실패'),
+					localize('projectWindowStateClearFailedMessage', '프로젝트 창의 닫힘 상태를 저장하지 못했습니다. 다시 실행하면 닫은 프로젝트가 열릴 수 있습니다. 자세한 내용은 로그를 확인하세요. (프로젝트 ID: {0})', projectId));
+			}
+		}));
 		windowsMainService.setReviewProjectWorkspaceResolver(workspaceConfigPath => {
 			const view = workspaceDatabase.findProjectViewByDescriptorUri(workspaceConfigPath.toString());
 			if (!view) { return undefined; }
@@ -738,14 +771,32 @@ export class CodeApplication extends Disposable {
 		});
 		this._register(toDisposable(() => windowsMainService.setReviewProjectWorkspaceResolver(undefined)));
 		const openProject = async (projectId: string): Promise<void> => {
+			await openProjectWindow(projectId, false);
+		};
+		const openProjectWindow = async (projectId: string, initialStartup: boolean): Promise<ICodeWindow[]> => {
 			const project = projectWorkspaces.ensureDescriptor(projectId);
-			await windowsMainService.open({
+			const opened = await windowsMainService.open({
 				context: OpenContext.API,
 				cli: this.environmentMainService.args,
 				urisToOpen: [{ workspaceUri: URI.file(project.descriptorPath) }],
 				forceNewWindow: true,
 				reviewWindowLaunch: { kind: 'project', projectId, projectName: project.project.name },
+				initialStartup,
 			});
+			const view = workspaceDatabase.getProjectView(projectId);
+			if (!view) { throw new Error(`Project ${projectId} has no saved workspace view.`); }
+			if (hasProjectWindow(projectId, view.descriptorUri, windowsMainService.getWindows())) {
+				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
+			}
+			return opened;
+		};
+		const startupProjectViews = workspaceDatabase.listProjectViewsOpenAtQuit();
+		this.startupProjectIds = startupProjectViews.map(view => view.projectId);
+		this.startupProjectWindowOpener = openProjectWindow;
+		this.reportProjectWindowRestoreFailure = (projectId, error) => {
+			this.logService.error(`Could not restore project window ${projectId}.`, error);
+			dialog.showErrorBox(localize('projectWindowRestoreFailed', '프로젝트 창 복원 실패'),
+				localize('projectWindowRestoreFailedMessage', '프로젝트 창을 복원하지 못했습니다. 프로젝트 메뉴에서 다시 열고, 해결되지 않으면 로그를 확인하세요. (프로젝트 ID: {0})', projectId));
 		};
 		const menubar = appInstantiationService.invokeFunction(accessor => accessor.get(IMenubarMainService)) as ReviewMenubarMainService;
 		menubar.setProjectMenuActions({
@@ -794,6 +845,17 @@ export class CodeApplication extends Disposable {
 
 		// Open Windows
 		await appInstantiationService.invokeFunction(accessor => this.openFirstWindow(accessor, initialProtocolUrls));
+		const openWindows = this.windowsMainService?.getWindows() ?? [];
+		const alreadyOpenProjectIds = this.startupProjectIds.filter(projectId => {
+			const descriptorUri = startupProjectViews.find(view => view.projectId === projectId)?.descriptorUri;
+			return !!descriptorUri && hasProjectWindow(projectId, descriptorUri, openWindows);
+		});
+		await restoreProjectWindows(
+			this.startupProjectIds,
+			alreadyOpenProjectIds,
+			async projectId => { await this.startupProjectWindowOpener!(projectId, false); },
+			(projectId, error) => this.reportProjectWindowRestoreFailure(projectId, error),
+		);
 
 		// Signal phase: after window open
 		this.lifecycleMainService.phase = LifecycleMainPhase.AfterWindowOpen;
@@ -1674,6 +1736,18 @@ export class CodeApplication extends Disposable {
 		}
 
 		// default: read paths from cli
+		if (!hasCliArgs && !hasFolderURIs && !hasFileURIs && macOpenFiles.length === 0
+			&& (!initialProtocolUrls || (initialProtocolUrls.openables.length === 0 && initialProtocolUrls.urls.length === 0))
+			&& !args['new-window'] && !forceProfile && !forceTempProfile && this.startupProjectIds.length > 0) {
+			const [firstProjectId, ...remainingProjectIds] = this.startupProjectIds;
+			this.startupProjectIds = remainingProjectIds;
+			try {
+				return await this.startupProjectWindowOpener!(firstProjectId, true);
+			} catch (error) {
+				this.reportProjectWindowRestoreFailure(firstProjectId, error);
+			}
+		}
+
 		return windowsMainService.open({
 			context,
 			cli: args,

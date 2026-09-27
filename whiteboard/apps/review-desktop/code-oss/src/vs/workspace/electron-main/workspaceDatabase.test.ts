@@ -68,6 +68,22 @@ test('projects, bindings, tasks, review links and project view persist across da
 	});
 });
 
+test('open-at-quit project views are returned in stable project order and exclude closed projects', () => {
+	withDatabase((_path, database) => {
+		const second = database.createProject('Second');
+		const first = database.createProject('First');
+		database.setProjectView({ projectId: second.id, descriptorUri: 'file:///projects/second.code-workspace', openAtQuit: true, selectedTaskId: null, dashboardPosition: null });
+		database.setProjectView({ projectId: first.id, descriptorUri: 'file:///projects/first.code-workspace', openAtQuit: true, selectedTaskId: null, dashboardPosition: null });
+		const closed = database.createProject('Closed');
+		database.setProjectView({ projectId: closed.id, descriptorUri: 'file:///projects/closed.code-workspace', openAtQuit: false, selectedTaskId: null, dashboardPosition: null });
+
+		assert.deepEqual(database.listProjectViewsOpenAtQuit().map(view => view.projectId), [first.id, second.id].sort());
+		database.setProjectOpenAtQuit(first.id, false);
+		assert.deepEqual(database.listProjectViewsOpenAtQuit().map(view => view.projectId), [second.id]);
+		assert.equal(database.getProjectView(first.id)?.descriptorUri, 'file:///projects/first.code-workspace');
+	});
+});
+
 test('concurrent first opens serialize the initial schema migration', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-open-race-'));
 	const path = join(directory, 'workspace.db');
@@ -393,22 +409,43 @@ test('a queued attempt with the persisted launch gate is safely recovered as nev
 test('version 5 databases migrate gate-less attempts without claiming cleanup proof', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-v5-'));
 	const path = join(directory, 'workspace.db');
-	let database = WorkspaceDatabase.open(path);
-	const { task } = createProjectAndTask(database);
-	const oldAttempt = database.createProviderAttempt({
-		taskId: task.id, provider: 'claude', purpose: 'connectionTest', profileRef: 'profile:local',
-		folderIdentity: '/work/project', cwd: '/work/project', mode: 'connectionTest', prompt: 'Verify',
-	});
-	database.close();
 	const legacy = new DatabaseSync(path);
+	const migrations = WorkspaceDatabase as unknown as {
+		migrateV1(database: DatabaseSync): void;
+		migrateV2(database: DatabaseSync): void;
+		migrateV3(database: DatabaseSync): void;
+		migrateV4(database: DatabaseSync): void;
+		migrateV5(database: DatabaseSync): void;
+	};
+	const oldAttemptId = 'legacy-gate-less-attempt';
 	try {
-		legacy.exec('ALTER TABLE provider_attempts DROP COLUMN launch_gate_version; PRAGMA user_version = 5;');
+		legacy.exec('PRAGMA foreign_keys = ON; BEGIN EXCLUSIVE;');
+		migrations.migrateV1(legacy);
+		migrations.migrateV2(legacy);
+		migrations.migrateV3(legacy);
+		migrations.migrateV4(legacy);
+		migrations.migrateV5(legacy);
+		const now = new Date().toISOString();
+		legacy.prepare('INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)').run('legacy-project', 'Legacy', now);
+		legacy.prepare('INSERT INTO folder_bindings (id, project_id, path, vcs_kind, vcs_root, review_repository_id, created_at) VALUES (?, ?, ?, NULL, NULL, NULL, ?)')
+			.run('legacy-binding', 'legacy-project', '/work/project', now);
+		legacy.prepare(`INSERT INTO tasks (id, project_id, binding_id, title, description, state, position, revision, created_at, updated_at)
+			VALUES (?, ?, ?, ?, NULL, 'ready', 0, 1, ?, ?)`)
+			.run('legacy-task', 'legacy-project', 'legacy-binding', 'Legacy task', now, now);
+		const prompt = 'Verify';
+		legacy.prepare(`INSERT INTO provider_attempts
+			(attempt_id, task_id, provider, purpose, profile_ref, folder_identity, cwd, mode, prompt, prompt_hash, convention_snapshot_id, ref_snapshot_id,
+			state, created_at, updated_at, cleanup_verified, cleanup_verified_at, owned_pgid)
+			VALUES (?, ?, 'claude', 'connectionTest', 'profile:local', '/work/project', '/work/project', 'connectionTest', ?, ?, NULL, NULL,
+			'queued', ?, ?, 0, NULL, NULL)`)
+			.run(oldAttemptId, 'legacy-task', prompt, createHash('sha256').update(prompt, 'utf8').digest('hex'), now, now);
+		legacy.exec('COMMIT;');
 	} finally {
 		legacy.close();
 	}
-	database = WorkspaceDatabase.open(path);
+	const database = WorkspaceDatabase.open(path);
 	try {
-		const migrated = database.getProviderAttempt(oldAttempt.attemptId)!;
+		const migrated = database.getProviderAttempt(oldAttemptId)!;
 		assert.equal(migrated.launchGateVersion, null);
 		assert.equal(migrated.state, 'interrupted');
 		assert.equal(migrated.cleanupVerified, false);
@@ -427,7 +464,7 @@ test('provider attempt transitions are audited, task moves are conditional, and 
 		assert.equal(running.state, 'running');
 		assert.equal(database.getTask(task.id)?.state, 'inProgress');
 		const inProgress = database.getTask(task.id)!;
-		const finished = database.finishProviderAttempt(attempt.attemptId, 'succeeded', 'session-7', inProgress.revision);
+		const finished = database.finishProviderAttempt(attempt.attemptId, 'succeeded', 'session-7', inProgress.revision, null, true);
 		assert.equal(finished.state, 'succeeded');
 		assert.equal(finished.providerSessionId, 'session-7');
 		assert.ok(finished.startedAt);
@@ -488,7 +525,7 @@ test('stale successful attempt records a review suggestion without changing the 
 		database.setProviderAttemptRunning(attempt.attemptId, task.revision, 73003);
 		const inProgress = database.getTask(task.id)!;
 		database.updateTask(task.id, inProgress.revision, { title: 'Edited elsewhere' });
-		database.finishProviderAttempt(attempt.attemptId, 'succeeded', 'session-8', inProgress.revision);
+		database.finishProviderAttempt(attempt.attemptId, 'succeeded', 'session-8', inProgress.revision, null, true);
 		assert.equal(database.getTask(task.id)?.state, 'inProgress');
 		const audit = new DatabaseSync(path);
 		try {

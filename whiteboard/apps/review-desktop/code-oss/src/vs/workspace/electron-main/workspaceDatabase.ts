@@ -1939,6 +1939,19 @@ export class WorkspaceDatabase {
 		return row ? this.projectViewFromRow(row) : undefined;
 	}
 
+	listProjectViewsOpenAtQuit(): ProjectView[] {
+		this.assertOpen();
+		return this.db.prepare(`SELECT project_id, descriptor_uri, open_at_quit, selected_task_id, dashboard_position
+			FROM project_views WHERE open_at_quit = 1 ORDER BY project_id`).all().map(row => this.projectViewFromRow(row));
+	}
+
+	setProjectOpenAtQuit(projectId: string, openAtQuit: boolean): ProjectView {
+		this.assertOpen();
+		const result = this.db.prepare('UPDATE project_views SET open_at_quit = ? WHERE project_id = ?').run(openAtQuit ? 1 : 0, projectId);
+		if (Number(result.changes) !== 1) { throw new Error(`Project ${projectId} has no workspace view.`); }
+		return this.getProjectView(projectId)!;
+	}
+
 	setProjectView(view: ProjectView): ProjectView {
 		this.assertOpen();
 		if (view.selectedTaskId !== null && this.db.prepare('SELECT 1 FROM tasks WHERE id = ? AND project_id = ? AND archived_at IS NULL AND trashed_at IS NULL').get(view.selectedTaskId, view.projectId) === undefined) {
