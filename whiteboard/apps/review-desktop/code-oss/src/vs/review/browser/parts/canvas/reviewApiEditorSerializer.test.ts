@@ -11,25 +11,23 @@ import { ReviewCanvasEditorInput } from "./reviewCanvasEditorInput.js";
 
 test("opening historical source requests its version and opens a separate native workspace only after success", async (t) => {
 	const opened: unknown[][] = [];
-	const requests: string[] = [];
+	const requests: { path: string; method: string }[] = [];
 	let ok = true;
-	t.mock.method(globalThis, "fetch", async (url: string) => {
-		requests.push(url);
-		return ok
-			? Response.json({ workspacePath: "/pinned/review.code-workspace" })
-			: Response.json({ error: "Source unavailable" }, { status: 409 });
-	});
 	const tabs = new ReviewCanvasEditorTabsService(
 		{} as never,
 		{ onDidCloseEditor: Event.None } as never,
 		{} as never,
-		{ async getConnection() { return { serverUrl: "http://localhost", token: "test" }; } } as never,
+		{ async request(request: { path: string; method: string }) {
+			requests.push(request);
+			if (!ok) throw new Error("Source unavailable");
+			return { workspacePath: "/pinned/review.code-workspace" };
+		} } as never,
 		{ async openWindow(...args: unknown[]) { opened.push(args); } } as never,
 		{ warn() {} } as never,
 	);
 	t.after(() => tabs.dispose());
 	await tabs.openApiSource({ reviewId: "review-a", kind: "version", version: 7 }, "Historical Review");
-	assert.equal(requests[0], "http://localhost/reviews-api/review-a/navigator?version=7");
+	assert.deepEqual(requests[0], { path: "/reviews-api/review-a/navigator?version=7", method: "POST" });
 	assert.equal(opened.length, 1);
 	assert.deepEqual(opened[0]![1], { forceNewWindow: true });
 	ok = false;
@@ -92,7 +90,7 @@ test("native group restoration preserves both reviews, order and pinned source v
 	groupService.mainPart.activeGroup = groups[1];
 	assert.deepEqual(
 		groups.map((group) => group.getEditors(EditorsOrder.SEQUENTIAL).map((editor) => editor.getName())),
-		[["Home", "Review A", "Source — Review A (v7)"], ["Review B"]],
+		[["홈", "Review A", "자료 — Review A (v7)"], ["Review B"]],
 	);
 	assert.equal(groups[0]!.activeEditor!.getName(), "Review A");
 	const restored = groups[0]!.activeEditor;
@@ -139,6 +137,6 @@ test("current Source tabs retain identity and main version tabs still restore", 
     assert.equal(tabs.inputFor({ kind: "api-source", reviewId: "a", title: "A", selection: { reviewId: "a", kind: "current" } }), restored);
     assert.notEqual(tabs.inputFor({ kind: "api-source", reviewId: "a", title: "A", selection: { reviewId: "a", kind: "version", version: 2 } }), restored);
     const historical = serializer.deserialize(instantiation as never, JSON.stringify({ kind: "api-source", reviewId: "a", title: "A", version: 2 }));
-    assert.equal((historical as ReviewCanvasEditorInput).getName(), "Source — A (v2)");
+    assert.equal((historical as ReviewCanvasEditorInput).getName(), "자료 — A (v2)");
   } finally { tabs.dispose(); inputs.forEach(input => input.dispose()); }
 });

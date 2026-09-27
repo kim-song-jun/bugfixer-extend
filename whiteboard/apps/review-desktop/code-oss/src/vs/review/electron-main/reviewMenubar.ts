@@ -76,6 +76,7 @@ export class ReviewMenubarMainService
   declare readonly _serviceBrand: undefined;
   private readonly nativeMenu: Promise<NavigatorMenubar>;
   private projectMenuActions: ReviewProjectMenuActions | undefined;
+  private shuttingDown = false;
 
   private readonly scheduler = this._register(
     new RunOnceScheduler(() => this.install(), 0),
@@ -93,12 +94,17 @@ export class ReviewMenubarMainService
     @IInstantiationService instantiationService: IInstantiationService,
   ) {
     super();
+    this._register(lifecycleMainService.onWillShutdown(() => {
+      this.shuttingDown = true;
+      this.scheduler.cancel();
+      this.projectMenuActions = undefined;
+    }));
     this.nativeMenu = lifecycleMainService.when(LifecycleMainPhase.AfterWindowOpen).then(() =>
       this._register(instantiationService.createInstance(NavigatorMenubar)),
     );
 
     lifecycleMainService.when(LifecycleMainPhase.AfterWindowOpen).then(() => {
-      if (this._store.isDisposed) return;
+      if (this.shuttingDown || this._store.isDisposed) return;
 
       this.configureAboutPanel();
       this.install();
@@ -146,6 +152,7 @@ export class ReviewMenubarMainService
   }
 
   private schedule(): void {
+    if (this.shuttingDown || this._store.isDisposed) return;
     // Electron cannot mutate a live menu, so every change reinstalls the whole
     // menu. Buffer overlapping changes into one rebuild.
     if (!this.scheduler.isScheduled()) {
@@ -154,6 +161,7 @@ export class ReviewMenubarMainService
   }
 
   private install(): void {
+    if (this.shuttingDown || this._store.isDisposed) return;
     const window = this.windowsMainService.getFocusedWindow() ?? this.windowsMainService.getLastActiveWindow();
     if (window?.openedWorkspace) return;
     if (!isMacintosh) {
@@ -173,7 +181,7 @@ export class ReviewMenubarMainService
     );
     if (this.projectMenuActions) {
       menubar.append(new MenuItem({
-        label: localize("review.menu.file", "File"),
+        label: localize("review.menu.file", "파일"),
         submenu: this.createProjectMenu(this.projectMenuActions),
       }));
     }
@@ -213,13 +221,13 @@ export class ReviewMenubarMainService
   private createProjectMenu(actions: ReviewProjectMenuActions): Menu {
     const menu = new Menu();
     menu.append(new MenuItem({
-      label: localize("review.menu.newProject", "New Project..."),
+      label: localize("review.menu.newProject", "새 프로젝트..."),
       click: () => this.runProjectAction(() => actions.createProject()),
     }));
     const projects = actions.listProjects();
     const openMenu = new Menu();
     if (projects.length === 0) {
-      openMenu.append(new MenuItem({ label: localize("review.menu.noProjects", "No projects yet"), enabled: false }));
+      openMenu.append(new MenuItem({ label: localize("review.menu.noProjects", "아직 프로젝트가 없습니다"), enabled: false }));
     } else {
       for (const project of projects) {
         openMenu.append(new MenuItem({
@@ -228,7 +236,7 @@ export class ReviewMenubarMainService
         }));
       }
     }
-    menu.append(new MenuItem({ label: localize("review.menu.openProject", "Open Project"), submenu: openMenu }));
+    menu.append(new MenuItem({ label: localize("review.menu.openProject", "프로젝트 열기"), submenu: openMenu }));
     return menu;
   }
 
@@ -236,7 +244,7 @@ export class ReviewMenubarMainService
     void action().catch(error => {
       this.logService.error(error);
       dialog.showErrorBox(
-        localize("review.menu.projectErrorTitle", "Project unavailable"),
+        localize("review.menu.projectErrorTitle", "프로젝트를 사용할 수 없습니다"),
         toErrorMessage(error),
       );
     }).finally(() => this.schedule());

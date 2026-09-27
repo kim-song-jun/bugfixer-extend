@@ -24,7 +24,6 @@ const PRODUCT = {
   ...releaseIdentityFor("stable"),
   commit: "abc123",
   quality: "stable",
-  updateUrl: "https://update.dev.fast",
 };
 
 test("buildManifest emits the schema the update Worker serves", () => {
@@ -109,14 +108,14 @@ test("assertPackagedProduct rejects a mismatched commit", () => {
   );
 });
 
-test("assertPackagedProduct rejects a build without hardened update config", () => {
+test("assertPackagedProduct rejects a build with an automatic update feed", () => {
   assert.throws(
     () =>
       assertPackagedProduct(
-        { ...PRODUCT, updateUrl: "" },
+        { ...PRODUCT, updateUrl: "https://update.dev.fast" },
         { commit: "abc123" },
       ),
-    /updateUrl/,
+    /must not configure an automatic update feed/,
   );
 });
 

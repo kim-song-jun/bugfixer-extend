@@ -178,6 +178,5 @@
 	"sessionsWindowAllowedExtensions": [],
 	"enableTelemetry": false,
 	"quality": "stable",
-	"updateUrl": "https://update.dev.fast",
 	"extensionsGallery": null
 }

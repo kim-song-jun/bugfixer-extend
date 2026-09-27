@@ -101,7 +101,6 @@ export function assertPackagedProduct(product, { commit, channel = "stable" }) {
   const expectations = {
     commit,
     quality: channel,
-    updateUrl: UPDATE_URL,
     ...releaseIdentityFor(channel),
   };
 
@@ -111,6 +110,12 @@ export function assertPackagedProduct(product, { commit, channel = "stable" }) {
         `packaged product.json ${key} is ${JSON.stringify(product[key])}, expected ${JSON.stringify(expected)}`,
       );
     }
+  }
+
+  if (Object.hasOwn(product, "updateUrl")) {
+    throw new Error(
+      `packaged product.json must not configure an automatic update feed; found ${JSON.stringify(product.updateUrl)}`,
+    );
   }
 }
 

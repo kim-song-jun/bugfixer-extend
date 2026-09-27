@@ -96,18 +96,18 @@ export class ReviewCanvasEditorInput extends EditorInput {
 			this.target.kind === "home" &&
 			this.editorGroupsService.getPart(targetGroup) !== this.editorGroupsService.mainPart
 		) {
-			return localize("reviewHomeCannotMove", "The Home tab cannot move to a separate window.");
+			return localize("reviewHomeCannotMove", "홈 탭은 별도 창으로 옮길 수 없습니다.");
 		}
 		return super.canMove(sourceGroup, targetGroup);
 	}
 
 	override getName(): string {
-		if (this.target.kind === "api-source") return this.target.selection.kind === "current" ? `Source — ${this.target.title}` : `Source — ${this.target.title} (v${this.target.selection.version})`;
+		if (this.target.kind === "api-source") return this.target.selection.kind === "current" ? `자료 — ${this.target.title}` : `자료 — ${this.target.title} (v${this.target.selection.version})`;
 		if (this.target.kind === "api" || this.target.kind === "api-task-review") return this.target.title;
-		if (this.target.kind === "home") return "Home";
-		if (this.target.kind === "welcome") return "Welcome";
-		if (this.target.kind === "settings") return "Settings";
-		return "Session";
+		if (this.target.kind === "home") return "홈";
+		if (this.target.kind === "welcome") return "시작하기";
+		if (this.target.kind === "settings") return "설정";
+		return "세션";
 	}
 
 	override getIcon(): ThemeIcon | undefined {

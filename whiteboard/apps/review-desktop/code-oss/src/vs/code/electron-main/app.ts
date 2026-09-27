@@ -751,7 +751,7 @@ export class CodeApplication extends Disposable {
 		menubar.setProjectMenuActions({
 			createProject: async () => {
 				const choice = await dialog.showOpenDialog({
-					title: localize('projectChooseFolder', "Choose a project folder"),
+					title: localize('projectChooseFolder', "프로젝트 폴더 선택"),
 					properties: ['openDirectory', 'createDirectory'],
 				});
 				const folderPath = choice.filePaths[0];

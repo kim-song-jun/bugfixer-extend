@@ -7,9 +7,9 @@ const readSource = (relativePath) =>
 
 const product = JSON.parse(await readSource("../code-oss/product.json"));
 
-test("keeps compatibility-sensitive Desktop identifiers unchanged", () => {
+test("keeps compatibility-sensitive Desktop identifiers while disabling upstream updates", () => {
   assert.equal(product.darwinBundleIdentifier, "dev.fast.review");
-  assert.equal(product.updateUrl, "https://update.dev.fast");
+  assert.equal(product.updateUrl, undefined);
   assert.equal(product.urlProtocol, "dev-fast-review");
   assert.equal(product.dataFolderName, ".dev-fast-review");
   assert.equal(product.sharedDataFolderName, ".dev-fast-review-shared");

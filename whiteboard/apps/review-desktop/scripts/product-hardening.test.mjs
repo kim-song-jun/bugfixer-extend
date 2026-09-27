@@ -27,13 +27,13 @@ test("keeps Review disconnected from Microsoft update and extension services", (
   assert.equal(product.enableTelemetry, false);
   assert.equal(product.extensionsGallery, null);
   assert.deepEqual(product.builtInExtensions, []);
-  // Review must never fall back to Microsoft's update service; the sanctioned
-  // feed below is the only one it may contact.
-  assert.notEqual(product.updateUrl, "https://update.code.visualstudio.com");
+  // This public fork must not inherit an automatic update feed from another
+  // product. Updates require a deliberate product-level decision.
+  assert.equal(product.updateUrl, undefined);
 });
 
-test("updates only from the sanctioned dev.fast feed", () => {
-  assert.equal(product.updateUrl, "https://update.dev.fast");
+test("does not configure an automatic client update feed", () => {
+  assert.equal(Object.hasOwn(product, "updateUrl"), false);
   assert.equal(
     product.quality,
     process.env.REVIEW_EXPECTED_QUALITY ?? "stable",
