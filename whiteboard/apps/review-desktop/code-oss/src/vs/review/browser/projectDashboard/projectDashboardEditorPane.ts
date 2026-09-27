@@ -637,12 +637,13 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.renderPackageConnectors(panel);
 	}
 
-	private async loadInstalledPackages(): Promise<void> {
+	private async loadInstalledPackages(): Promise<boolean> {
 		const projectId = this.projectId;
-		if (!projectId) return;
+		if (!projectId) return false;
 		this.packageLoading = true;
 		this.packageError = undefined;
 		this.render();
+		let loaded = false;
 		try {
 			const packages = await ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'listPackages', projectId) as readonly WorkspaceInstalledPackageDTO[];
 			const connections = (await Promise.all(packages.map(item => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'listPackageConnections', { projectId, packageId: item.packageId })))) as readonly (readonly WorkspacePackageConnectionDTO[])[];
@@ -656,12 +657,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 						else this.packageConnectionIds.delete(item.packageId);
 					}
 				}
+				loaded = true;
 			}
 		} catch (error) {
 			if (this.projectId === projectId) this.packageError = this.errorMessage(error, '설치된 커넥터 패키지를 불러오지 못했습니다.');
 		} finally {
 			if (this.projectId === projectId) { this.packageLoading = false; this.render(); }
 		}
+		return loaded;
 	}
 
 	private clearPackagePreview(): void {
@@ -781,7 +784,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				if (reload) await this.loadInstalledPackages();
 			}
 		} catch (error) {
-			if (this.projectId === projectId) this.packageError = this.errorMessage(error, '커넥터 패키지 작업을 완료하지 못했습니다.');
+			const operationError = this.errorMessage(error, '커넥터 패키지 작업을 완료하지 못했습니다.');
+			const loaded = this.projectId === projectId && await this.loadInstalledPackages();
+			if (this.projectId === projectId) this.packageError = loaded ? operationError : `${operationError} · ${this.packageError ?? '설치 및 계정 상태도 다시 불러오지 못했습니다.'}`;
 		} finally {
 			this.packageBusy = false;
 			this.render();
@@ -821,13 +826,18 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	}
 
 	private packageRefreshCandidates(installed: WorkspaceInstalledPackageDTO): PackageRefreshCandidate[] {
-		const sources = [...installed.sources].sort((left, right) => right.sourceId.length - left.sourceId.length);
+		const accountRef = this.selectedPackageConnection(installed)?.accountRef;
+		if (!accountRef) return [];
+		const sources = installed.sources;
 		const latestBySource = new Map<string, PackageRefreshCandidate>();
 		for (const reference of this.knowledge?.references ?? []) {
-			if (reference.connectorId !== `local:${installed.packageId}` || reference.accountRef !== this.selectedPackageConnection(installed)?.accountRef) continue;
-			const source = sources.find(item => reference.externalId.startsWith(`${installed.packageId}:${item.sourceId}:`));
+			if (reference.connectorId !== `local:${installed.packageId}` || reference.accountRef !== accountRef) continue;
+			const accountPrefix = `${installed.packageId}:${accountRef}:`;
+			if (!reference.externalId.startsWith(accountPrefix)) continue;
+			const accountScopedExternalId = reference.externalId.slice(accountPrefix.length);
+			const source = sources.find(item => accountScopedExternalId.startsWith(`${item.sourceId}:`));
 			if (!source) continue;
-			const sourceKey = reference.externalId.slice(`${installed.packageId}:${source.sourceId}:`.length);
+			const sourceKey = accountScopedExternalId.slice(`${source.sourceId}:`.length);
 			if (!sourceKey) continue;
 			const candidate: PackageRefreshCandidate = { reference, sourceId: source.sourceId, sourceKey, sourceLabel: source.label };
 			const current = latestBySource.get(reference.sourceId);
@@ -908,7 +918,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				await this.loadInstalledPackages();
 			}
 		} catch (error) {
-			if (this.projectId === projectId) this.packageError = this.errorMessage(error, '패키지 계정을 연결하지 못했습니다.');
+			const operationError = this.errorMessage(error, '패키지 계정을 연결하지 못했습니다.');
+			const loaded = this.projectId === projectId && await this.loadInstalledPackages();
+			if (this.projectId === projectId) this.packageError = loaded ? operationError : `${operationError} · 계정 상태도 다시 불러오지 못했습니다.`;
 		} finally {
 			this.packageBusy = false;
 			this.render();
@@ -999,7 +1011,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				if (connection.state === 'active' && connection.authKind === 'bearer-token') {
 					const revoke = connectionRow.appendChild(createElement('button', 'project-dashboard__danger')); revoke.type = 'button'; revoke.disabled = this.packageBusy; revoke.textContent = '연결 해제';
 					revoke.addEventListener('click', () => void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'disconnectPackageConnection', { projectId: this.projectId, packageId: installed.packageId, connectionId: connection.connectionId }), `${connection.label} 연결을 해제했습니다.`));
-				} else if (connection.state === 'disconnecting') {
+				} else if (connection.state === 'disconnecting' || connection.state === 'pending') {
 					const retryCleanup = connectionRow.appendChild(createElement('button', 'project-dashboard__retry')); retryCleanup.type = 'button'; retryCleanup.disabled = this.packageBusy; retryCleanup.textContent = '정리 다시 시도';
 					retryCleanup.addEventListener('click', () => void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'retryPackageConnectionCleanup', { projectId: this.projectId, packageId: installed.packageId, connectionId: connection.connectionId }), '연결 정보 정리를 다시 시도했습니다.'));
 				}
@@ -1102,7 +1114,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const historyDetails = refreshCard.appendChild(document.createElement('details'));
 				const historySummary = historyDetails.appendChild(document.createElement('summary')); historySummary.textContent = '스냅샷 기록';
 				const historyList = historyDetails.appendChild(document.createElement('ol'));
-				for (const snapshot of (this.knowledge?.references ?? []).filter(reference => reference.sourceId === selectedCandidate.reference.sourceId).sort((left, right) => left.version - right.version)) {
+				for (const snapshot of (this.knowledge?.references ?? []).filter(reference => reference.sourceId === selectedCandidate.reference.sourceId
+					&& reference.accountRef === this.selectedPackageConnection(installed)?.accountRef).sort((left, right) => left.version - right.version)) {
 					const item = historyList.appendChild(document.createElement('li'));
 					item.textContent = `버전 ${snapshot.version} · ${new Date(snapshot.retrievedAt).toLocaleString()}${snapshot.id === selectedCandidate.reference.id ? ' · 최신' : ''}`;
 				}
