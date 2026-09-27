@@ -4,30 +4,56 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { WebContents } from 'electron';
+import { createHash, randomUUID } from 'node:crypto';
 import { SequencerByKey } from '../../base/common/async.js';
 import { isUUID } from '../../base/common/uuid.js';
 import type { WorkspaceDashboardDTO } from '../common/workspaceDashboardProtocol.js';
+import type { WorkspaceReferenceDTO } from '../common/workspaceKnowledgeProtocol.js';
 import type {
 	WorkspaceInstalledPackageDTO, WorkspacePackageApproval, WorkspacePackageImportRequest, WorkspacePackageInstallRequest,
-	WorkspacePackageRefreshRequest, WorkspacePackageRequest, WorkspacePackageReviewDTO, WorkspacePackageReviewRequest, WorkspaceSignedPackageEnvelope,
+	WorkspacePackagePreviewDTO, WorkspacePackagePreviewImportRequest, WorkspacePackageRefreshRequest, WorkspacePackageRequest,
+	WorkspacePackageReviewDTO, WorkspacePackageReviewRequest, WorkspaceSignedPackageEnvelope,
 } from '../common/workspacePackageConnectorProtocol.js';
 import {
 	approveDeclarativePackage, validateDeclarativePackage, type DeclarativePackageTrustContext, type ValidatedDeclarativePackage,
 } from './connectors/declarativePackage.js';
-import { importDeclarativePackageSource } from './connectors/declarativePackageRuntime.js';
+import { importDeclarativePackageSource, type DeclarativeImportedReferenceInput } from './connectors/declarativePackageRuntime.js';
 import { PinnedDeclarativePackageTransport, type DeclarativePackageTransport } from './connectors/declarativePackageTransport.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase, type InstalledConnectorPackage } from './workspaceDatabase.js';
 
+const packagePreviewTtlMs = 5 * 60_000;
+const maxPendingPackagePreviews = 32;
+
+interface PendingPackagePreview {
+	readonly previewId: string;
+	readonly senderId: number;
+	readonly projectId: string;
+	readonly packageId: string;
+	readonly packageVersion: string;
+	readonly packageFingerprint: string;
+	readonly packageManifestDigest: string;
+	readonly sourceId: string;
+	readonly sourceKey: string;
+	readonly source: DeclarativeImportedReferenceInput;
+	readonly contentSha256: string;
+	readonly createdAt: number;
+	readonly expiresAt: number;
+	committedTaskId?: string;
+	receipt?: WorkspaceReferenceDTO;
+}
+
 /** Signed, credential-free package broker. Only the project window may review, install, and import. */
 export class WorkspacePackageConnectorChannel {
 	private readonly sequencer = new SequencerByKey<string>();
+	private readonly previews = new Map<string, PendingPackagePreview>();
 
 	constructor(
 		private readonly database: WorkspaceDatabase,
 		private readonly dashboardChannel: WorkspaceDashboardChannel,
 		private readonly confirmInstall: (sender: WebContents, review: WorkspacePackageReviewDTO) => Promise<boolean>,
 		private readonly transportFactory: () => DeclarativePackageTransport = () => new PinnedDeclarativePackageTransport(),
+		private readonly clock: () => number = Date.now,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -54,15 +80,19 @@ export class WorkspacePackageConnectorChannel {
 						manifestBytesBase64: request.envelope.manifestBytesBase64,
 						signatureBase64: request.envelope.signatureBase64, publicKeyBase64: request.envelope.publicKeyBase64,
 					});
+					this.invalidatePreviews(projectId, saved.packageId);
 					return this.installedDTO(saved);
 				}) as T;
 			}
 			case 'uninstallPackage': {
 				const request = this.packageRequest(arg);
-				await this.sequencer.queue(this.key(projectId, request.packageId), async () => this.database.uninstallConnectorPackage(projectId, request.packageId));
+				await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
+					this.database.uninstallConnectorPackage(projectId, request.packageId);
+					this.invalidatePreviews(projectId, request.packageId);
+				});
 				return undefined as T;
 			}
-			case 'importPackageSource': {
+			case 'previewPackageSource': {
 				const request = this.importRequest(arg);
 				return await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
 					const installed = this.database.getInstalledConnectorPackage(projectId, request.packageId);
@@ -70,7 +100,44 @@ export class WorkspacePackageConnectorChannel {
 					const validated = this.validateInstalled(installed);
 					const approved = approveDeclarativePackage(validated, this.approval(installed));
 					const source = await importDeclarativePackageSource(approved, request, this.transportFactory());
-					const { content: _content, derivedText: _derivedText, ...metadata } = this.database.knowledge.importReference({ projectId, ...source });
+					await this.dashboardChannel.call<WorkspaceDashboardDTO>(sender, 'getDashboard', projectId);
+					return this.createPreview(sender, projectId, installed, request, source) as T;
+				}) as T;
+			}
+			case 'importPackagePreview': {
+				const request = this.previewImportRequest(arg);
+				return await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
+					const preview = this.requirePreview(request.previewId, sender.id, projectId, request.packageId);
+					if (preview.receipt) {
+						if (request.taskId !== preview.committedTaskId) {
+							throw new Error('This connector preview was already imported for a different task.');
+						}
+						return preview.receipt as T;
+					}
+					const installed = this.database.getInstalledConnectorPackage(projectId, request.packageId);
+					if (!installed || installed.version !== preview.packageVersion || installed.fingerprint !== preview.packageFingerprint
+						|| installed.manifestDigest !== preview.packageManifestDigest) {
+						this.previews.delete(preview.previewId);
+						throw new Error('The connector package changed after preview. Preview the source again before importing.');
+					}
+					if (preview.source.connectorId !== `local:${preview.packageId}` || preview.source.connectorVersion !== preview.packageVersion
+						|| preview.source.accountRef !== null || preview.source.externalId !== `${preview.packageId}:${preview.sourceId}:${preview.sourceKey}`) {
+						this.previews.delete(preview.previewId);
+						throw new Error('The reviewed source identity changed. Preview the source again before importing.');
+					}
+					if (this.sourceHash(preview.source) !== preview.contentSha256) {
+						this.previews.delete(preview.previewId);
+						throw new Error('The reviewed source changed in memory. Preview it again before importing.');
+					}
+					const imported = this.database.knowledge.importReferenceWithTask({ projectId, ...preview.source }, request.taskId);
+					const { content: _content, derivedText: _derivedText, ...metadata } = imported;
+					if (metadata.contentSha256 !== preview.contentSha256 || metadata.connectorId !== preview.source.connectorId
+						|| metadata.externalId !== preview.source.externalId || metadata.sourceUri !== preview.source.sourceUri
+						|| metadata.title !== preview.source.title) {
+						throw new Error('The saved source did not match the reviewed preview.');
+					}
+					preview.committedTaskId = request.taskId;
+					preview.receipt = metadata;
 					return metadata;
 				}) as T;
 			}
@@ -108,6 +175,66 @@ export class WorkspacePackageConnectorChannel {
 		const existing = this.database.getInstalledConnectorPackage(projectId, packageId);
 		const validated = validateDeclarativePackage(envelope, existing ? this.trust(existing) : undefined);
 		return { validated, review: this.reviewDTO(validated) };
+	}
+
+	private createPreview(
+		sender: WebContents,
+		projectId: string,
+		installed: InstalledConnectorPackage,
+		request: WorkspacePackageImportRequest,
+		source: DeclarativeImportedReferenceInput,
+	): WorkspacePackagePreviewDTO {
+		const now = this.clock();
+		this.pruneExpiredPreviews(now);
+		while (this.previews.size >= maxPendingPackagePreviews) {
+			const oldest = [...this.previews.values()].filter(preview => !preview.receipt)
+				.sort((left, right) => left.createdAt - right.createdAt)[0];
+			if (!oldest) { throw new Error('Too many connector previews are awaiting retry. Wait for one to expire before previewing another source.'); }
+			this.previews.delete(oldest.previewId);
+		}
+		const previewId = randomUUID();
+		const contentSha256 = this.sourceHash(source);
+		const expiresAt = now + packagePreviewTtlMs;
+		const storedSource = { ...source, content: Uint8Array.from(source.content), omissions: [...source.omissions] };
+		this.previews.set(previewId, {
+			previewId, senderId: sender.id, projectId, packageId: installed.packageId,
+			packageVersion: installed.version, packageFingerprint: installed.fingerprint, packageManifestDigest: installed.manifestDigest,
+			sourceId: request.sourceId, sourceKey: request.sourceKey, source: storedSource, contentSha256, createdAt: now, expiresAt,
+		});
+		return {
+			previewId, packageId: installed.packageId, sourceId: request.sourceId, sourceKey: request.sourceKey,
+			connectorVersion: source.connectorVersion, externalId: source.externalId, sourceUri: source.sourceUri,
+			title: source.title, contentSha256, content: new TextDecoder('utf-8', { fatal: true }).decode(source.content),
+			omissions: [...source.omissions], expiresAt: new Date(expiresAt).toISOString(),
+		};
+	}
+
+	private requirePreview(previewId: string, senderId: number, projectId: string, packageId: string): PendingPackagePreview {
+		const preview = this.previews.get(previewId);
+		if (!preview || preview.senderId !== senderId || preview.projectId !== projectId || preview.packageId !== packageId) {
+			throw new Error('This connector source preview is unavailable in this project window. Preview the source again before importing.');
+		}
+		if (preview.expiresAt <= this.clock()) {
+			this.previews.delete(previewId);
+			throw new Error('This connector source preview expired. Preview the source again before importing.');
+		}
+		return preview;
+	}
+
+	private pruneExpiredPreviews(now = this.clock()): void {
+		for (const [id, preview] of this.previews) {
+			if (preview.expiresAt <= now) { this.previews.delete(id); }
+		}
+	}
+
+	private invalidatePreviews(projectId: string, packageId: string): void {
+		for (const [id, preview] of this.previews) {
+			if (preview.projectId === projectId && preview.packageId === packageId && !preview.receipt) { this.previews.delete(id); }
+		}
+	}
+
+	private sourceHash(source: DeclarativeImportedReferenceInput): string {
+		return createHash('sha256').update(source.content).digest('hex');
 	}
 
 	private validateInstalled(installed: InstalledConnectorPackage): ValidatedDeclarativePackage {
@@ -189,6 +316,17 @@ export class WorkspacePackageConnectorChannel {
 			throw new Error('A valid previous reference ID is required to refresh a connector source.');
 		}
 		return record as unknown as WorkspacePackageRefreshRequest;
+	}
+
+	private previewImportRequest(value: unknown): WorkspacePackagePreviewImportRequest {
+		const record = this.packageRequest(value) as unknown as Record<string, unknown>;
+		if (typeof record.previewId !== 'string' || !isUUID(record.previewId)) {
+			throw new Error('A valid connector source preview is required before importing.');
+		}
+		if (record.taskId !== undefined && (typeof record.taskId !== 'string' || !isUUID(record.taskId))) {
+			throw new Error('A valid task ID is required to attach this connector source.');
+		}
+		return record as unknown as WorkspacePackagePreviewImportRequest;
 	}
 
 	private record(value: unknown): Record<string, unknown> {

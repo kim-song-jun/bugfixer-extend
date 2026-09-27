@@ -71,6 +71,27 @@ export interface WorkspacePackageImportRequest extends WorkspacePackageRequest {
 	readonly sourceKey: string;
 }
 
+export interface WorkspacePackagePreviewDTO {
+	readonly previewId: string;
+	readonly packageId: string;
+	readonly sourceId: string;
+	readonly sourceKey: string;
+	readonly connectorVersion: string;
+	readonly externalId: string;
+	readonly sourceUri: string;
+	readonly title: string;
+	readonly contentSha256: string;
+	readonly content: string;
+	readonly omissions: readonly string[];
+	readonly expiresAt: string;
+}
+
+export interface WorkspacePackagePreviewImportRequest extends WorkspacePackageRequest {
+	readonly previewId: string;
+	/** Attach the imported snapshot to this active task in the same database transaction. */
+	readonly taskId?: string;
+}
+
 export interface WorkspacePackageRefreshRequest extends WorkspacePackageImportRequest {
 	/** Latest immutable snapshot selected by the user for this remote source. */
 	readonly previousReferenceId: string;
@@ -81,6 +102,7 @@ export interface WorkspacePackageConnectorOperations {
 	readonly reviewPackage: { readonly request: WorkspacePackageReviewRequest; readonly response: WorkspacePackageReviewDTO };
 	readonly installPackage: { readonly request: WorkspacePackageInstallRequest; readonly response: WorkspaceInstalledPackageDTO };
 	readonly uninstallPackage: { readonly request: WorkspacePackageRequest; readonly response: void };
-	readonly importPackageSource: { readonly request: WorkspacePackageImportRequest; readonly response: WorkspaceReferenceDTO };
+	readonly previewPackageSource: { readonly request: WorkspacePackageImportRequest; readonly response: WorkspacePackagePreviewDTO };
+	readonly importPackagePreview: { readonly request: WorkspacePackagePreviewImportRequest; readonly response: WorkspaceReferenceDTO };
 	readonly refreshPackageSource: { readonly request: WorkspacePackageRefreshRequest; readonly response: WorkspaceReferenceDTO };
 }
