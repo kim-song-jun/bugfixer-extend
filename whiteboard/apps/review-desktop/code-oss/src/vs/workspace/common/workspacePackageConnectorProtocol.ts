@@ -24,6 +24,7 @@ export interface WorkspacePackageSourceRuleDTO extends WorkspacePackageSourceDTO
 	readonly path: string;
 	readonly fields: readonly string[];
 	readonly paginated: boolean;
+	readonly requiredScope?: string;
 }
 
 export interface WorkspacePackageReviewDTO {
@@ -34,7 +35,8 @@ export interface WorkspacePackageReviewDTO {
 	readonly fingerprint: string;
 	readonly manifestDigest: string;
 	readonly domains: readonly string[];
-	readonly accountAccess: 'none';
+	readonly accountAccess: 'none' | 'bearer-token';
+	readonly requestedScopes: readonly string[];
 	readonly sources: readonly WorkspacePackageSourceDTO[];
 	readonly sourceRules: readonly WorkspacePackageSourceRuleDTO[];
 	readonly trustStatus: 'first-install' | 'installed' | 'same-key-update';
@@ -43,6 +45,32 @@ export interface WorkspacePackageReviewDTO {
 export interface WorkspaceInstalledPackageDTO extends WorkspacePackageReviewDTO {
 	readonly installedAt: string;
 	readonly updatedAt: string;
+}
+
+export interface WorkspacePackageConnectionDTO {
+	readonly connectionId: string;
+	readonly accountRef: string;
+	readonly projectId: string;
+	readonly packageId: string;
+	readonly manifestDigest: string;
+	readonly host: string;
+	readonly grantedScopes: readonly string[];
+	readonly label: string;
+	readonly authKind: 'none' | 'bearer-token';
+	readonly state: 'pending' | 'active' | 'disconnecting' | 'disconnected';
+}
+
+export type WorkspacePackageConnectionListRequest = WorkspacePackageRequest;
+
+export interface WorkspacePackageConnectionRequest extends WorkspacePackageRequest {
+	readonly host: string;
+	readonly label: string;
+	readonly credential: string;
+	readonly grantedScopes: readonly string[];
+}
+
+export interface WorkspacePackageConnectionActionRequest extends WorkspacePackageRequest {
+	readonly connectionId: string;
 }
 
 export interface WorkspacePackageApproval {
@@ -69,11 +97,13 @@ export interface WorkspacePackageRequest {
 export interface WorkspacePackageImportRequest extends WorkspacePackageRequest {
 	readonly sourceId: string;
 	readonly sourceKey: string;
+	readonly connectionId: string;
 }
 
 export interface WorkspacePackagePreviewDTO {
 	readonly previewId: string;
 	readonly packageId: string;
+	readonly accountRef: string;
 	readonly sourceId: string;
 	readonly sourceKey: string;
 	readonly connectorVersion: string;
@@ -88,6 +118,7 @@ export interface WorkspacePackagePreviewDTO {
 
 export interface WorkspacePackagePreviewImportRequest extends WorkspacePackageRequest {
 	readonly previewId: string;
+	readonly connectionId: string;
 	/** Attach the imported snapshot to this active task in the same database transaction. */
 	readonly taskId?: string;
 }
@@ -99,6 +130,10 @@ export interface WorkspacePackageRefreshRequest extends WorkspacePackageImportRe
 
 export interface WorkspacePackageConnectorOperations {
 	readonly listPackages: { readonly request: string; readonly response: readonly WorkspaceInstalledPackageDTO[] };
+	readonly listPackageConnections: { readonly request: WorkspacePackageConnectionListRequest; readonly response: readonly WorkspacePackageConnectionDTO[] };
+	readonly connectPackageConnection: { readonly request: WorkspacePackageConnectionRequest; readonly response: WorkspacePackageConnectionDTO };
+	readonly disconnectPackageConnection: { readonly request: WorkspacePackageConnectionActionRequest; readonly response: WorkspacePackageConnectionDTO };
+	readonly retryPackageConnectionCleanup: { readonly request: WorkspacePackageConnectionActionRequest; readonly response: WorkspacePackageConnectionDTO };
 	readonly reviewPackage: { readonly request: WorkspacePackageReviewRequest; readonly response: WorkspacePackageReviewDTO };
 	readonly installPackage: { readonly request: WorkspacePackageInstallRequest; readonly response: WorkspaceInstalledPackageDTO };
 	readonly uninstallPackage: { readonly request: WorkspacePackageRequest; readonly response: void };

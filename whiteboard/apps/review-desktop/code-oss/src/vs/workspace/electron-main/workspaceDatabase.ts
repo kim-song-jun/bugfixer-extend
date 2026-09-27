@@ -115,6 +115,23 @@ export interface InstalledConnectorPackage {
 	readonly updatedAt: string;
 }
 
+export type PackageConnectionState = 'pending' | 'active' | 'disconnecting' | 'disconnected';
+
+/** Durable grant metadata for an installed declarative package. Credentials live only in Keychain. */
+export interface DeclarativePackageConnection {
+	readonly accountRef: string;
+	readonly projectId: string;
+	readonly packageId: string;
+	readonly manifestDigest: string;
+	readonly host: string;
+	readonly grantedScopes: readonly string[];
+	readonly label: string;
+	readonly authKind: 'none' | 'bearer-token';
+	readonly state: PackageConnectionState;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
 export interface WorkspaceTask {
 	readonly id: string;
 	readonly projectId: string;
@@ -278,7 +295,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 18;
+const schemaVersion = 19;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -335,6 +352,7 @@ export class WorkspaceDatabase {
 				if (version < 16) { WorkspaceDatabase.migrateV16(db); }
 				if (version < 17) { WorkspaceDatabase.migrateV17(db); }
 				if (version < 18) { WorkspaceDatabase.migrateV18(db); }
+				if (version < 19) { WorkspaceDatabase.migrateV19(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -672,6 +690,27 @@ export class WorkspaceDatabase {
 		`);
 	}
 
+	private static migrateV19(db: DatabaseSync): void {
+		db.exec(`
+			CREATE TABLE package_connections (
+				account_ref TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+				package_id TEXT NOT NULL,
+				manifest_digest TEXT NOT NULL,
+				host TEXT NOT NULL,
+				granted_scopes_json TEXT NOT NULL CHECK (json_valid(granted_scopes_json)),
+				label TEXT NOT NULL CHECK (length(trim(label)) BETWEEN 1 AND 200),
+				auth_kind TEXT NOT NULL CHECK (auth_kind IN ('none', 'bearer-token')),
+				state TEXT NOT NULL CHECK (state IN ('pending', 'active', 'disconnecting', 'disconnected')),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				FOREIGN KEY (project_id, package_id) REFERENCES connector_packages(project_id, package_id) ON DELETE CASCADE
+			) STRICT;
+			CREATE INDEX package_connections_scope ON package_connections(project_id, package_id, state, created_at);
+			PRAGMA user_version = 19;
+		`);
+	}
+
 	private static migrateV4(db: DatabaseSync): void {
 		db.exec(`
 			ALTER TABLE tasks ADD COLUMN archived_at TEXT;
@@ -929,6 +968,76 @@ export class WorkspaceDatabase {
 			.run(new Date().toISOString(), id);
 		if (Number(result.changes) !== 1) { throw new Error('The connector account is not ready to disconnect.'); }
 		return this.getConnectorAccount(id)!;
+	}
+
+	createPackageConnection(input: {
+		projectId: string; packageId: string; manifestDigest: string; host: string; grantedScopes: readonly string[];
+		label: string; authKind: DeclarativePackageConnection['authKind'];
+	}): DeclarativePackageConnection {
+		this.assertOpen();
+		if (typeof input.label !== 'string' || !input.label.trim() || input.label.trim().length > 200
+			|| !/^[a-f0-9]{64}$/.test(input.manifestDigest) || !/^[a-z0-9.-]+$/.test(input.host)
+			|| !Array.isArray(input.grantedScopes) || input.grantedScopes.length > 100
+			|| input.grantedScopes.some(scope => typeof scope !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,79}$/.test(scope))
+			|| new Set(input.grantedScopes).size !== input.grantedScopes.length
+			|| (input.authKind !== 'none' && input.authKind !== 'bearer-token')) {
+			throw new Error('A valid package connection grant is required.');
+		}
+		const pkg = this.getInstalledConnectorPackage(input.projectId, input.packageId);
+		if (!pkg || pkg.manifestDigest !== input.manifestDigest) { throw new Error('The installed connector package changed before its account grant was saved.'); }
+		const accountRef = randomUUID();
+		const now = new Date().toISOString();
+		this.db.prepare(`INSERT INTO package_connections
+			(account_ref, project_id, package_id, manifest_digest, host, granted_scopes_json, label, auth_kind, state, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`).run(
+			accountRef, input.projectId, input.packageId, input.manifestDigest, input.host,
+			JSON.stringify([...input.grantedScopes]), input.label.trim(), input.authKind, now, now,
+		);
+		return this.getPackageConnection(input.projectId, input.packageId, accountRef)!;
+	}
+
+	getPackageConnection(projectId: string, packageId: string, accountRef: string): DeclarativePackageConnection | undefined {
+		this.assertOpen();
+		const row = this.db.prepare('SELECT * FROM package_connections WHERE project_id = ? AND package_id = ? AND account_ref = ?')
+			.get(projectId, packageId, accountRef);
+		return row ? this.packageConnectionFromRow(row) : undefined;
+	}
+
+	listPackageConnections(projectId: string, packageId: string): DeclarativePackageConnection[] {
+		this.assertOpen();
+		return this.db.prepare('SELECT * FROM package_connections WHERE project_id = ? AND package_id = ? ORDER BY created_at, account_ref')
+			.all(projectId, packageId).map(row => this.packageConnectionFromRow(row));
+	}
+
+	activatePackageConnection(projectId: string, packageId: string, accountRef: string): DeclarativePackageConnection {
+		this.assertOpen();
+		const connection = this.getPackageConnection(projectId, packageId, accountRef);
+		const pkg = this.getInstalledConnectorPackage(projectId, packageId);
+		if (!connection || !pkg || connection.manifestDigest !== pkg.manifestDigest || connection.state !== 'pending') {
+			throw new Error('The package account is no longer pending for the installed package version.');
+		}
+		this.db.prepare("UPDATE package_connections SET state = 'active', updated_at = ? WHERE account_ref = ? AND state = 'pending'")
+			.run(new Date().toISOString(), accountRef);
+		return this.getPackageConnection(projectId, packageId, accountRef)!;
+	}
+
+	beginPackageConnectionDisconnect(projectId: string, packageId: string, accountRef: string): DeclarativePackageConnection {
+		this.assertOpen();
+		const connection = this.getPackageConnection(projectId, packageId, accountRef);
+		if (!connection || connection.state === 'disconnected') { throw new Error('The package account is unavailable.'); }
+		if (connection.state !== 'disconnecting') {
+			this.db.prepare("UPDATE package_connections SET state = 'disconnecting', updated_at = ? WHERE account_ref = ?")
+				.run(new Date().toISOString(), accountRef);
+		}
+		return this.getPackageConnection(projectId, packageId, accountRef)!;
+	}
+
+	completePackageConnectionDisconnect(projectId: string, packageId: string, accountRef: string): DeclarativePackageConnection {
+		this.assertOpen();
+		const result = this.db.prepare("UPDATE package_connections SET state = 'disconnected', updated_at = ? WHERE project_id = ? AND package_id = ? AND account_ref = ? AND state = 'disconnecting'")
+			.run(new Date().toISOString(), projectId, packageId, accountRef);
+		if (Number(result.changes) !== 1) { throw new Error('The package account is not ready to disconnect.'); }
+		return this.getPackageConnection(projectId, packageId, accountRef)!;
 	}
 
 	getInstalledConnectorPackage(projectId: string, packageId: string): InstalledConnectorPackage | undefined {
@@ -2058,6 +2167,18 @@ export class WorkspaceDatabase {
 			id: String(row.id), projectId: String(row.project_id), provider: row.provider as ConnectorAccount['provider'],
 			label: String(row.label), remoteIdentity: String(row.remote_identity), state: row.state as ConnectorAccount['state'],
 			createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+		};
+	}
+
+	private packageConnectionFromRow(row: Record<string, SQLOutputValue>): DeclarativePackageConnection {
+		let scopes: unknown;
+		try { scopes = JSON.parse(String(row.granted_scopes_json)); } catch { throw new Error('Stored package account scopes are invalid.'); }
+		if (!Array.isArray(scopes) || scopes.some(scope => typeof scope !== 'string')) { throw new Error('Stored package account scopes are invalid.'); }
+		return {
+			accountRef: String(row.account_ref), projectId: String(row.project_id), packageId: String(row.package_id),
+			manifestDigest: String(row.manifest_digest), host: String(row.host), grantedScopes: scopes,
+			label: String(row.label), authKind: row.auth_kind as DeclarativePackageConnection['authKind'],
+			state: row.state as PackageConnectionState, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
 		};
 	}
 

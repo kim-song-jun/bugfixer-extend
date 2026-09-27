@@ -14,7 +14,7 @@ import { URI } from '../../base/common/uri.js';
 import type { ICodeWindow } from '../../platform/window/electron-main/window.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
 import type { WorkspaceReferenceDTO } from '../common/workspaceKnowledgeProtocol.js';
-import type { WorkspaceInstalledPackageDTO, WorkspacePackagePreviewDTO, WorkspacePackageReviewDTO, WorkspaceSignedPackageEnvelope } from '../common/workspacePackageConnectorProtocol.js';
+import type { WorkspaceInstalledPackageDTO, WorkspacePackageConnectionDTO, WorkspacePackagePreviewDTO, WorkspacePackageReviewDTO, WorkspaceSignedPackageEnvelope } from '../common/workspacePackageConnectorProtocol.js';
 import type { DeclarativePackageTransport } from './connectors/declarativePackageTransport.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
@@ -85,76 +85,106 @@ test('signed package install requires native consent, pins updates, and imports 
 		assert.equal(installed.trustStatus, 'installed');
 		assert.equal(database.listInstalledConnectorPackages(two.project.id).length, 0);
 		await assert.rejects(channel.call(sender, 'listPackages', two.project.id), /does not match this window/);
+		const [anonymousConnection] = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: one.project.id, packageId: installed.packageId,
+		});
+		assert.ok(anonymousConnection);
+		assert.equal(anonymousConnection.authKind, 'none');
+		assert.equal(anonymousConnection.state, 'active');
+		const connectionId = anonymousConnection.connectionId;
 		const expiredPreview = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1',
+			projectId: one.project.id, packageId: installed.packageId, connectionId, sourceId: 'issues', sourceKey: 'selected_1',
 		});
 		assert.equal(expiredPreview.content, 'Record 1\ntitle: Previewed issue text\n');
 		assert.equal(database.knowledge.listProjectReferences(one.project.id).length, 0, 'preview must not persist a snapshot');
 		await assert.rejects(channel.call(secondSender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: expiredPreview.previewId,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: expiredPreview.previewId,
 		}), /unavailable in this project window/i);
 		currentTime = Date.parse(expiredPreview.expiresAt) + 1;
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: expiredPreview.previewId,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: expiredPreview.previewId,
 		}), /expired/i);
 		currentTime = 1_000_000;
 		const preview = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1',
+			projectId: one.project.id, packageId: installed.packageId, connectionId, sourceId: 'issues', sourceKey: 'selected_1',
 		});
+		const secondAccount = database.createPackageConnection({
+			projectId: one.project.id, packageId: installed.packageId, manifestDigest: installed.manifestDigest,
+			host: 'api.example.org', grantedScopes: [], label: 'Second account', authKind: 'none',
+		});
+		database.activatePackageConnection(one.project.id, installed.packageId, secondAccount.accountRef);
+		const secondAccountPreview = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
+			projectId: one.project.id, packageId: installed.packageId, connectionId: secondAccount.accountRef, sourceId: 'issues', sourceKey: 'selected_1',
+		});
+		assert.equal(secondAccountPreview.externalId, `${installed.packageId}:${secondAccount.accountRef}:issues:selected_1`);
+		assert.notEqual(secondAccountPreview.externalId, preview.externalId, 'account scope must distinguish identical external resources');
+		await channel.call(sender, 'disconnectPackageConnection', {
+			projectId: one.project.id, packageId: installed.packageId, connectionId: secondAccount.accountRef,
+		});
+		await assert.rejects(channel.call(sender, 'importPackagePreview', {
+			projectId: one.project.id, packageId: installed.packageId, connectionId: secondAccount.accountRef, previewId: secondAccountPreview.previewId,
+		}), /active matching account/i, 'revoking an account after preview blocks snapshot import');
 		remoteText = 'Changed upstream after preview';
 		const binding = database.listFolderBindings(one.project.id)[0];
 		const task = database.createTask({ projectId: one.project.id, bindingId: binding.id, title: 'Import reviewed issue' });
 		const otherTask = database.createTask({ projectId: one.project.id, bindingId: binding.id, title: 'Different task' });
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: preview.previewId, taskId: randomUUID(),
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: preview.previewId, taskId: randomUUID(),
 		}), /active task/i);
 		assert.equal(database.knowledge.listProjectReferences(one.project.id).length, 0, 'invalid task must roll back snapshot creation');
 		const imported = await channel.call<WorkspaceReferenceDTO>(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: preview.previewId, taskId: task.id,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: preview.previewId, taskId: task.id,
 		});
 		assert.equal(imported.connectorId, 'local:example-issues');
+		assert.equal(imported.accountRef, connectionId);
 		assert.equal(imported.contentSha256, preview.contentSha256);
 		assert.match(Buffer.from(database.knowledge.readReference(imported.id)!.content).toString('utf8'), /Previewed issue text/);
 		assert.doesNotMatch(Buffer.from(database.knowledge.readReference(imported.id)!.content).toString('utf8'), /Changed upstream/);
 		assert.deepEqual(database.knowledge.listTaskReferences(task.id).map(reference => reference.id), [imported.id]);
 		const retry = await channel.call<WorkspaceReferenceDTO>(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: preview.previewId, taskId: task.id,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: preview.previewId, taskId: task.id,
 		});
 		assert.equal(retry.id, imported.id, 'retry after a lost IPC response must return the committed snapshot');
 		assert.equal(retry.version, imported.version);
 		assert.equal(fetchCount, 2, 'commit and retry must not refetch the remote source');
 		assert.equal(database.knowledge.listProjectReferences(one.project.id).length, 1);
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: preview.previewId, taskId: otherTask.id,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: preview.previewId, taskId: otherTask.id,
 		}), /different task/i, 'a committed preview cannot be rebound to another task');
 		const refreshed = await channel.call<WorkspaceReferenceDTO>(sender, 'refreshPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1', previousReferenceId: imported.id,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, sourceId: 'issues', sourceKey: 'selected_1', previousReferenceId: imported.id,
 		});
 		assert.equal(refreshed.previousId, imported.id);
 		assert.equal(refreshed.version, imported.version + 1);
 		assert.equal(refreshed.connectorVersion, installed.version);
 		assert.match(Buffer.from(database.knowledge.readReference(refreshed.id)!.content).toString('utf8'), /Changed upstream after preview/);
 		await assert.rejects(channel.call(sender, 'refreshPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1', previousReferenceId: imported.id,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, sourceId: 'issues', sourceKey: 'selected_1', previousReferenceId: imported.id,
 		}), /latest version/i);
 		await assert.rejects(channel.call(sender, 'refreshPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_2', previousReferenceId: refreshed.id,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, sourceId: 'issues', sourceKey: 'selected_2', previousReferenceId: refreshed.id,
 		}), /does not belong/i);
 		const next = envelopeFor('2.0.0');
 		const nextReview = await channel.call<WorkspacePackageReviewDTO>(sender, 'reviewPackage', { projectId: one.project.id, envelope: next });
 		assert.equal(nextReview.trustStatus, 'same-key-update');
 		const staleOnUpdate = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1',
+			projectId: one.project.id, packageId: installed.packageId,
+			connectionId: (await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', { projectId: one.project.id, packageId: installed.packageId }))
+				.find(connection => connection.state === 'active')!.connectionId,
+			sourceId: 'issues', sourceKey: 'selected_1',
 		});
 		await channel.call(sender, 'installPackage', {
 			projectId: one.project.id, envelope: next,
 			approval: { packageId: nextReview.packageId, version: nextReview.version, fingerprint: nextReview.fingerprint, manifestDigest: nextReview.manifestDigest },
 		});
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: staleOnUpdate.previewId,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: staleOnUpdate.previewId,
 		}), /unavailable in this project window/i);
 		const staleOnUninstall = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
-			projectId: one.project.id, packageId: installed.packageId, sourceId: 'issues', sourceKey: 'selected_1',
+			projectId: one.project.id, packageId: installed.packageId,
+			connectionId: (await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', { projectId: one.project.id, packageId: installed.packageId }))
+				.find(connection => connection.state === 'active')!.connectionId,
+			sourceId: 'issues', sourceKey: 'selected_1',
 		});
 		assert.throws(() => database.saveInstalledConnectorPackage({
 			projectId: one.project.id, packageId: firstReview.packageId, version: firstReview.version, name: firstReview.name,
@@ -164,7 +194,7 @@ test('signed package install requires native consent, pins updates, and imports 
 		await channel.call(sender, 'uninstallPackage', { projectId: one.project.id, packageId: firstReview.packageId });
 		assert.equal(database.getInstalledConnectorPackage(one.project.id, firstReview.packageId), undefined);
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
-			projectId: one.project.id, packageId: installed.packageId, previewId: staleOnUninstall.previewId,
+			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: staleOnUninstall.previewId,
 		}), /unavailable in this project window/i);
 		assert.ok(database.knowledge.readReference(imported.id));
 	} finally {

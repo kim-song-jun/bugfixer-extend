@@ -13,6 +13,7 @@ import type {
 	WorkspaceInstalledPackageDTO, WorkspacePackageApproval, WorkspacePackageImportRequest, WorkspacePackageInstallRequest,
 	WorkspacePackagePreviewDTO, WorkspacePackagePreviewImportRequest, WorkspacePackageRefreshRequest, WorkspacePackageRequest,
 	WorkspacePackageReviewDTO, WorkspacePackageReviewRequest, WorkspaceSignedPackageEnvelope,
+	WorkspacePackageConnectionDTO, WorkspacePackageConnectionRequest, WorkspacePackageConnectionActionRequest,
 } from '../common/workspacePackageConnectorProtocol.js';
 import {
 	approveDeclarativePackage, validateDeclarativePackage, type DeclarativePackageTrustContext, type ValidatedDeclarativePackage,
@@ -20,7 +21,8 @@ import {
 import { importDeclarativePackageSource, type DeclarativeImportedReferenceInput } from './connectors/declarativePackageRuntime.js';
 import { PinnedDeclarativePackageTransport, type DeclarativePackageTransport } from './connectors/declarativePackageTransport.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
-import { WorkspaceDatabase, type InstalledConnectorPackage } from './workspaceDatabase.js';
+import { WorkspaceDatabase, type DeclarativePackageConnection, type InstalledConnectorPackage } from './workspaceDatabase.js';
+import type { KeychainVault } from './keychainVault.js';
 
 const packagePreviewTtlMs = 5 * 60_000;
 const maxPendingPackagePreviews = 32;
@@ -33,6 +35,8 @@ interface PendingPackagePreview {
 	readonly packageVersion: string;
 	readonly packageFingerprint: string;
 	readonly packageManifestDigest: string;
+	readonly connectionId: string;
+	readonly accountRef: string;
 	readonly sourceId: string;
 	readonly sourceKey: string;
 	readonly source: DeclarativeImportedReferenceInput;
@@ -47,6 +51,7 @@ interface PendingPackagePreview {
 export class WorkspacePackageConnectorChannel {
 	private readonly sequencer = new SequencerByKey<string>();
 	private readonly previews = new Map<string, PendingPackagePreview>();
+	private vault: Pick<KeychainVault, 'put' | 'get' | 'delete'> | undefined;
 
 	constructor(
 		private readonly database: WorkspaceDatabase,
@@ -54,6 +59,8 @@ export class WorkspacePackageConnectorChannel {
 		private readonly confirmInstall: (sender: WebContents, review: WorkspacePackageReviewDTO) => Promise<boolean>,
 		private readonly transportFactory: () => DeclarativePackageTransport = () => new PinnedDeclarativePackageTransport(),
 		private readonly clock: () => number = Date.now,
+		private readonly vaultFactory: () => Pick<KeychainVault, 'put' | 'get' | 'delete'> = () => { throw new Error('Connector package credentials are unavailable.'); },
+		private readonly confirmConnection: (sender: WebContents, packageReview: WorkspacePackageReviewDTO, label: string, host: string, scopes: readonly string[]) => Promise<boolean> = async () => false,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -62,6 +69,11 @@ export class WorkspacePackageConnectorChannel {
 		switch (command) {
 			case 'listPackages':
 				return this.database.listInstalledConnectorPackages(projectId).map(record => this.installedDTO(record)) as T;
+			case 'listPackageConnections': {
+				const request = this.packageRequest(arg);
+				this.requireInstalled(projectId, request.packageId);
+				return this.database.listPackageConnections(projectId, request.packageId).map(connection => this.connectionDTO(connection)) as T;
+			}
 			case 'reviewPackage': {
 				const request = this.reviewRequest(arg);
 				return this.review(projectId, request.envelope).review as T;
@@ -80,6 +92,10 @@ export class WorkspacePackageConnectorChannel {
 						manifestBytesBase64: request.envelope.manifestBytesBase64,
 						signatureBase64: request.envelope.signatureBase64, publicKeyBase64: request.envelope.publicKeyBase64,
 					});
+					for (const connection of this.database.listPackageConnections(projectId, saved.packageId)) {
+						if (connection.manifestDigest !== saved.manifestDigest && connection.state !== 'disconnected') { await this.cleanupConnection(connection); }
+					}
+					this.ensureAnonymousConnection(projectId, saved, validated);
 					this.invalidatePreviews(projectId, saved.packageId);
 					return this.installedDTO(saved);
 				}) as T;
@@ -87,6 +103,9 @@ export class WorkspacePackageConnectorChannel {
 			case 'uninstallPackage': {
 				const request = this.packageRequest(arg);
 				await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
+					for (const connection of this.database.listPackageConnections(projectId, request.packageId)) {
+						if (connection.state !== 'disconnected') { await this.cleanupConnection(connection); }
+					}
 					this.database.uninstallConnectorPackage(projectId, request.packageId);
 					this.invalidatePreviews(projectId, request.packageId);
 				});
@@ -99,7 +118,9 @@ export class WorkspacePackageConnectorChannel {
 					if (!installed) { throw new Error('The connector package is not installed in this project.'); }
 					const validated = this.validateInstalled(installed);
 					const approved = approveDeclarativePackage(validated, this.approval(installed));
-					const source = await importDeclarativePackageSource(approved, request, this.transportFactory());
+					const connection = this.requireActiveConnection(projectId, installed, request.connectionId, request.sourceId);
+					const source = await importDeclarativePackageSource(approved, request, this.transportFactory(), await this.connectionBinding(connection));
+					this.requireActiveConnection(projectId, this.requireInstalled(projectId, request.packageId), request.connectionId, request.sourceId, connection.accountRef);
 					await this.dashboardChannel.call<WorkspaceDashboardDTO>(sender, 'getDashboard', projectId);
 					return this.createPreview(sender, projectId, installed, request, source) as T;
 				}) as T;
@@ -108,12 +129,16 @@ export class WorkspacePackageConnectorChannel {
 				const request = this.previewImportRequest(arg);
 				return await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
 					const preview = this.requirePreview(request.previewId, sender.id, projectId, request.packageId);
+					if (request.connectionId !== preview.connectionId) {
+						throw new Error('This preview belongs to a different package account. Preview the source again before importing.');
+					}
 					if (preview.receipt) {
 						if (request.taskId !== preview.committedTaskId) {
 							throw new Error('This connector preview was already imported for a different task.');
 						}
 						return preview.receipt as T;
 					}
+					this.requireActiveConnection(projectId, this.requireInstalled(projectId, request.packageId), request.connectionId, preview.sourceId, preview.accountRef);
 					const installed = this.database.getInstalledConnectorPackage(projectId, request.packageId);
 					if (!installed || installed.version !== preview.packageVersion || installed.fingerprint !== preview.packageFingerprint
 						|| installed.manifestDigest !== preview.packageManifestDigest) {
@@ -121,7 +146,7 @@ export class WorkspacePackageConnectorChannel {
 						throw new Error('The connector package changed after preview. Preview the source again before importing.');
 					}
 					if (preview.source.connectorId !== `local:${preview.packageId}` || preview.source.connectorVersion !== preview.packageVersion
-						|| preview.source.accountRef !== null || preview.source.externalId !== `${preview.packageId}:${preview.sourceId}:${preview.sourceKey}`) {
+						|| preview.source.accountRef !== preview.accountRef || preview.source.externalId !== `${preview.packageId}:${preview.accountRef}:${preview.sourceId}:${preview.sourceKey}`) {
 						this.previews.delete(preview.previewId);
 						throw new Error('The reviewed source identity changed. Preview the source again before importing.');
 					}
@@ -147,22 +172,38 @@ export class WorkspacePackageConnectorChannel {
 					const installed = this.database.getInstalledConnectorPackage(projectId, request.packageId);
 					if (!installed) { throw new Error('The connector package is not installed in this project.'); }
 					const previous = this.database.knowledge.readReference(request.previousReferenceId);
-					const expectedExternalId = `${request.packageId}:${request.sourceId}:${request.sourceKey}`;
+					const connection = this.requireActiveConnection(projectId, installed, request.connectionId, request.sourceId);
 					if (!previous || previous.projectId !== projectId || previous.connectorId !== `local:${request.packageId}`
-						|| previous.accountRef !== null || previous.externalId !== expectedExternalId) {
+						|| previous.accountRef !== connection.accountRef || previous.externalId !== `${request.packageId}:${connection.accountRef}:${request.sourceId}:${request.sourceKey}`) {
 						throw new Error('The selected reference does not belong to this connector source in this project.');
 					}
 					const validated = this.validateInstalled(installed);
 					const approved = approveDeclarativePackage(validated, this.approval(installed));
-					const source = await importDeclarativePackageSource(approved, request, this.transportFactory());
+					const source = await importDeclarativePackageSource(approved, request, this.transportFactory(), await this.connectionBinding(connection));
 					// Recheck after network I/O, immediately before the synchronous store transaction.
 					const latest = this.database.knowledge.listProjectReferences(projectId)
 						.filter(reference => reference.sourceId === previous.sourceId)
 						.sort((left, right) => right.version - left.version)[0];
 					if (latest?.id !== previous.id) { throw new Error('Refresh the latest version of this connector source.'); }
+					this.requireActiveConnection(projectId, this.requireInstalled(projectId, request.packageId), request.connectionId, request.sourceId, previous.accountRef);
 					const imported = this.database.knowledge.importReference({ projectId, ...source });
 					const { content: _content, derivedText: _derivedText, ...metadata } = imported;
 					return metadata;
+				}) as T;
+			}
+			case 'connectPackageConnection': {
+				const request = this.connectionRequest(arg);
+				return await this.sequencer.queue(this.key(projectId, request.packageId), async () => this.connect(sender, projectId, request)) as T;
+			}
+			case 'disconnectPackageConnection':
+			case 'retryPackageConnectionCleanup': {
+				const request = this.connectionActionRequest(arg);
+				return await this.sequencer.queue(this.key(projectId, request.packageId), async () => {
+					const connection = this.requireConnection(projectId, request.packageId, request.connectionId);
+					if (command === 'retryPackageConnectionCleanup' && connection.state !== 'pending' && connection.state !== 'disconnecting') {
+						throw new Error('This package account has no cleanup pending.');
+					}
+					return this.connectionDTO(await this.cleanupConnection(connection));
 				}) as T;
 			}
 			default:
@@ -199,10 +240,11 @@ export class WorkspacePackageConnectorChannel {
 		this.previews.set(previewId, {
 			previewId, senderId: sender.id, projectId, packageId: installed.packageId,
 			packageVersion: installed.version, packageFingerprint: installed.fingerprint, packageManifestDigest: installed.manifestDigest,
+			connectionId: request.connectionId, accountRef: source.accountRef,
 			sourceId: request.sourceId, sourceKey: request.sourceKey, source: storedSource, contentSha256, createdAt: now, expiresAt,
 		});
 		return {
-			previewId, packageId: installed.packageId, sourceId: request.sourceId, sourceKey: request.sourceKey,
+			previewId, packageId: installed.packageId, accountRef: source.accountRef, sourceId: request.sourceId, sourceKey: request.sourceKey,
 			connectorVersion: source.connectorVersion, externalId: source.externalId, sourceUri: source.sourceUri,
 			title: source.title, contentSha256, content: new TextDecoder('utf-8', { fatal: true }).decode(source.content),
 			omissions: [...source.omissions], expiresAt: new Date(expiresAt).toISOString(),
@@ -235,6 +277,104 @@ export class WorkspacePackageConnectorChannel {
 
 	private sourceHash(source: DeclarativeImportedReferenceInput): string {
 		return createHash('sha256').update(source.content).digest('hex');
+	}
+
+	private ensureAnonymousConnection(projectId: string, installed: InstalledConnectorPackage, validated: ValidatedDeclarativePackage): void {
+		if (validated.manifest.accountAccess !== 'none') { return; }
+		for (const host of validated.manifest.domains) {
+			const hostConnection = this.database.listPackageConnections(projectId, installed.packageId)
+				.find(connection => connection.manifestDigest === installed.manifestDigest && connection.host === host && connection.authKind === 'none' && connection.state === 'active');
+			if (hostConnection) { continue; }
+			const connection = this.database.createPackageConnection({
+				projectId, packageId: installed.packageId, manifestDigest: installed.manifestDigest,
+				host, grantedScopes: [], label: installed.name, authKind: 'none',
+			});
+			this.database.activatePackageConnection(projectId, installed.packageId, connection.accountRef);
+		}
+	}
+
+	private async connect(sender: WebContents, projectId: string, request: WorkspacePackageConnectionRequest): Promise<WorkspacePackageConnectionDTO> {
+		const installed = this.requireInstalled(projectId, request.packageId);
+		const validated = this.validateInstalled(installed);
+		const manifest = validated.manifest;
+		if (manifest.accountAccess !== 'bearer-token' || manifest.domains.length !== 1 || request.host !== manifest.domains[0]) {
+			throw new Error('This signed package does not allow a bearer account for the selected host.');
+		}
+		if (typeof request.label !== 'string' || !request.label.trim() || request.label.trim().length > 200
+			|| typeof request.credential !== 'string' || !/^[\x21-\x7e]{1,16384}$/.test(request.credential)
+			|| !Array.isArray(request.grantedScopes) || request.grantedScopes.some(scope => !manifest.requestedScopes.includes(scope))
+			|| new Set(request.grantedScopes).size !== request.grantedScopes.length) {
+			throw new Error('The package account label, token, or requested scopes are invalid.');
+		}
+		if (!await this.confirmConnection(sender, this.reviewDTO(validated), request.label.trim(), request.host, request.grantedScopes)) {
+			throw new Error('Connector package account connection was cancelled.');
+		}
+		const connection = this.database.createPackageConnection({
+			projectId, packageId: request.packageId, manifestDigest: installed.manifestDigest, host: request.host,
+			grantedScopes: request.grantedScopes, label: request.label, authKind: 'bearer-token',
+		});
+		await this.getVault().put('declarative-package', connection.accountRef, request.credential);
+		return this.connectionDTO(this.database.activatePackageConnection(projectId, request.packageId, connection.accountRef));
+	}
+
+	private async cleanupConnection(connection: DeclarativePackageConnection): Promise<DeclarativePackageConnection> {
+		this.database.beginPackageConnectionDisconnect(connection.projectId, connection.packageId, connection.accountRef);
+		this.invalidatePreviewsForAccount(connection.accountRef);
+		if (connection.authKind === 'bearer-token') { await this.getVault().delete('declarative-package', connection.accountRef); }
+		return this.database.completePackageConnectionDisconnect(connection.projectId, connection.packageId, connection.accountRef);
+	}
+
+	private invalidatePreviewsForAccount(accountRef: string): void {
+		for (const [id, preview] of this.previews) {
+			if (preview.accountRef === accountRef && !preview.receipt) { this.previews.delete(id); }
+		}
+	}
+
+	private async connectionBinding(connection: DeclarativePackageConnection): Promise<{ accountRef: string; packageId: string; manifestDigest: string; host: string; grantedScopes: readonly string[]; credential: string | null }> {
+		return {
+			accountRef: connection.accountRef, packageId: connection.packageId, manifestDigest: connection.manifestDigest,
+			host: connection.host, grantedScopes: connection.grantedScopes,
+			credential: connection.authKind === 'bearer-token' ? await this.getVault().get('declarative-package', connection.accountRef) ?? null : null,
+		};
+	}
+
+	private getVault(): Pick<KeychainVault, 'put' | 'get' | 'delete'> {
+		this.vault ??= this.vaultFactory();
+		return this.vault;
+	}
+
+	private requireInstalled(projectId: string, packageId: string): InstalledConnectorPackage {
+		const installed = this.database.getInstalledConnectorPackage(projectId, packageId);
+		if (!installed) { throw new Error('The connector package is not installed in this project.'); }
+		return installed;
+	}
+
+	private requireConnection(projectId: string, packageId: string, connectionId: string): DeclarativePackageConnection {
+		const connection = this.database.getPackageConnection(projectId, packageId, connectionId);
+		if (!connection || connection.accountRef !== connectionId) { throw new Error('The package account is unavailable in this project.'); }
+		return connection;
+	}
+
+	private requireActiveConnection(
+		projectId: string, installed: InstalledConnectorPackage, connectionId: string, sourceId: string, expectedAccountRef?: string | null,
+	): DeclarativePackageConnection {
+		const connection = this.requireConnection(projectId, installed.packageId, connectionId);
+		const validated = this.validateInstalled(installed);
+		const source = validated.manifest.sources.find(candidate => candidate.sourceId === sourceId);
+		if (!source || connection.state !== 'active' || connection.manifestDigest !== installed.manifestDigest
+			|| connection.host !== source.domain || connection.authKind !== validated.manifest.accountAccess
+			|| (expectedAccountRef !== undefined && expectedAccountRef !== connection.accountRef)) {
+			throw new Error('Connect an active matching account for this installed package source.');
+		}
+		return connection;
+	}
+
+	private connectionDTO(connection: DeclarativePackageConnection): WorkspacePackageConnectionDTO {
+		return {
+			connectionId: connection.accountRef, accountRef: connection.accountRef, projectId: connection.projectId,
+			packageId: connection.packageId, manifestDigest: connection.manifestDigest, host: connection.host,
+			grantedScopes: [...connection.grantedScopes], label: connection.label, authKind: connection.authKind, state: connection.state,
+		};
 	}
 
 	private validateInstalled(installed: InstalledConnectorPackage): ValidatedDeclarativePackage {
@@ -304,7 +444,7 @@ export class WorkspacePackageConnectorChannel {
 
 	private importRequest(value: unknown): WorkspacePackageImportRequest {
 		const record = this.packageRequest(value) as unknown as Record<string, unknown>;
-		if (typeof record.sourceId !== 'string' || typeof record.sourceKey !== 'string') {
+		if (typeof record.sourceId !== 'string' || typeof record.sourceKey !== 'string' || typeof record.connectionId !== 'string' || !isUUID(record.connectionId)) {
 			throw new Error('A connector source and selected resource ID are required.');
 		}
 		return record as unknown as WorkspacePackageImportRequest;
@@ -320,13 +460,28 @@ export class WorkspacePackageConnectorChannel {
 
 	private previewImportRequest(value: unknown): WorkspacePackagePreviewImportRequest {
 		const record = this.packageRequest(value) as unknown as Record<string, unknown>;
-		if (typeof record.previewId !== 'string' || !isUUID(record.previewId)) {
+		if (typeof record.previewId !== 'string' || !isUUID(record.previewId) || typeof record.connectionId !== 'string' || !isUUID(record.connectionId)) {
 			throw new Error('A valid connector source preview is required before importing.');
 		}
 		if (record.taskId !== undefined && (typeof record.taskId !== 'string' || !isUUID(record.taskId))) {
 			throw new Error('A valid task ID is required to attach this connector source.');
 		}
 		return record as unknown as WorkspacePackagePreviewImportRequest;
+	}
+
+	private connectionRequest(value: unknown): WorkspacePackageConnectionRequest {
+		const record = this.packageRequest(value) as unknown as Record<string, unknown>;
+		if (typeof record.host !== 'string' || typeof record.label !== 'string' || typeof record.credential !== 'string'
+			|| !Array.isArray(record.grantedScopes) || record.grantedScopes.some(scope => typeof scope !== 'string')) {
+			throw new Error('A valid package host, account label, token, and granted scopes are required.');
+		}
+		return record as unknown as WorkspacePackageConnectionRequest;
+	}
+
+	private connectionActionRequest(value: unknown): WorkspacePackageConnectionActionRequest {
+		const record = this.packageRequest(value) as unknown as Record<string, unknown>;
+		if (typeof record.connectionId !== 'string' || !isUUID(record.connectionId)) { throw new Error('A valid package account ID is required.'); }
+		return record as unknown as WorkspacePackageConnectionActionRequest;
 	}
 
 	private record(value: unknown): Record<string, unknown> {

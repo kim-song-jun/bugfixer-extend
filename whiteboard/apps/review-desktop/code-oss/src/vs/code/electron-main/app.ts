@@ -1538,16 +1538,34 @@ export class CodeApplication extends Disposable {
 							`Package: ${review.packageId}`,
 							`Status: ${review.trustStatus}`,
 							`Allowed domains:\n${review.domains.join('\n')}`,
-							'Account access: none',
-							`Sources and collection rules:\n${review.sourceRules.map(source => `${source.label}: ${source.method} https://${source.domain}${source.path}; fields ${source.fields.join(', ')}; pagination ${source.paginated ? 'yes' : 'no'}`).join('\n')}`,
+							`Account access: ${review.accountAccess}`,
+							`Requested scopes: ${review.requestedScopes.length ? review.requestedScopes.join(', ') : 'none'}`,
+							`Sources and collection rules:\n${review.sourceRules.map(source => `${source.label}: ${source.method} https://${source.domain}${source.path}; fields ${source.fields.join(', ')}; scope ${source.requiredScope ?? 'none'}; pagination ${source.paginated ? 'yes' : 'no'}`).join('\n')}`,
 							`Signing key SHA-256: ${review.fingerprint}`,
 							`Manifest SHA-256: ${review.manifestDigest}`,
 						].join('\n\n'),
 						buttons: ['Cancel', 'Install package'], cancelId: 0, defaultId: 0, noLink: true,
 					});
 					return result.response === 1;
-				},
-			);
+					},
+					undefined, undefined,
+					() => new KeychainVault(resolveKeychainVaultHelper(app.isPackaged, process.resourcesPath)),
+					async (sender, review, label, host, scopes) => {
+						const window = BrowserWindow.fromWebContents(sender);
+						if (!window || window.isDestroyed()) { throw new Error('The project window closed before account approval.'); }
+						const result = await dialog.showMessageBox(window, {
+							type: 'warning', title: 'Connect connector package account',
+							message: `${review.name}: ${label}`,
+							detail: [
+								`The token will be sent only to https://${host}.`,
+								`Granted scopes: ${scopes.length ? scopes.join(', ') : 'none'}`,
+								'Only the signed package source rules will receive this account token.',
+							].join('\n\n'),
+							buttons: ['Cancel', 'Connect account'], cancelId: 0, defaultId: 0, noLink: true,
+						});
+						return result.response === 1;
+					},
+				);
 			validatedIpcMain.handle(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, (event, command: string, arg: unknown) => packageConnectorChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL)));
 			const egoCapture = this.workspaceEgoCapture = new WorkspaceEgoCaptureChannel(
