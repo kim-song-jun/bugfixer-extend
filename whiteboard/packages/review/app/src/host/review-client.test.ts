@@ -34,11 +34,14 @@ it("uses relative desktop API paths and retains asset and storage configuration"
 it("does not add credentials to API requests or URLs", async () => {
   let requestUrl: RequestInfo | URL | undefined;
   let requestInit: RequestInit | undefined;
+
   const fetchMock: typeof fetch = async (input, init) => {
     requestUrl = input;
     requestInit = init;
+
     return new Response(null, { status: 204 });
   };
+
   vi.stubGlobal("fetch", fetchMock);
 
   const path = jsonReviewApiUrl(injectedConfig, "review", "/telemetry/event");

@@ -253,9 +253,14 @@ export function ApiCanvas({
       post: async (request: Parameters<ApiContent["bridge"]["post"]>[0]) => {
         if (request.name === "openReviewRevision") {
           if (content.taskLocked) {
-            content.bridge.notify?.({ kind: "error", text: "This task review is pinned to an immutable version." });
+            content.bridge.notify?.({
+              kind: "error",
+              text: "This task review is pinned to an immutable version.",
+            });
+
             return { ok: true as const };
           }
+
           setVersion(
             request.args.revision === undefined
               ? undefined

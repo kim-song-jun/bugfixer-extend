@@ -56,6 +56,7 @@ type Subscription = {
 };
 
 type Request = (url: string, init?: RequestInit) => Promise<Response>;
+
 type FollowTransport = <T>(
   path: string,
   signal: AbortSignal,
@@ -86,8 +87,10 @@ export class ReviewApiClient {
     private readonly request: Request = defaultRequest,
     private readonly followTransport?: FollowTransport,
   ) {}
+
   async response(route: string, init?: RequestInit) {
     const headers = new Headers(init?.headers);
+
     if (this.connection) headers.set("x-review-token", this.connection.token);
     else headers.delete("x-review-token");
 
@@ -96,7 +99,9 @@ export class ReviewApiClient {
     const url = this.connection
       ? `${this.connection.serverUrl}/reviews-api${route}`
       : `/reviews-api${route}`;
-    const response = await this.request(url, { ...init, headers });
+
+    const requestInit = { ...init, headers };
+    const response = await this.request(url, requestInit);
 
     if (!response.ok) {
       const body = await response.json().catch(() => null);
@@ -111,6 +116,7 @@ export class ReviewApiClient {
   async read<T>(route: string, signal?: AbortSignal): Promise<T> {
     return (await this.response(route, { signal })).json();
   }
+
   async post<T>(
     route: string,
     // oxlint-disable-next-line anti-slop/no-unknown-parameters -- JSON transport boundary; the selected host route parses its input schema.
@@ -179,19 +185,30 @@ export class ReviewApiClient {
     mode?: "structural" | "textual",
   ) {
     if (signal.aborted) return;
+
     if (this.followTransport) {
-      const path =
-        reviewId === null
-          ? `/reviews-api/watch?subscriptions=${encodeURIComponent(JSON.stringify([{ reviewId, ...(mode ? { mode } : {}) }]))}`
-          : `/reviews-api/${encodeURIComponent(reviewId)}/watch`;
+      let path: string;
+
+      if (reviewId === null) {
+        const subscription: Subscription = { reviewId };
+
+        if (mode) subscription.mode = mode;
+
+        path = `/reviews-api/watch?subscriptions=${encodeURIComponent(JSON.stringify([subscription]))}`;
+      } else {
+        path = `/reviews-api/${encodeURIComponent(reviewId)}/watch`;
+      }
+
       return new Promise<void>((resolve) => {
         let subscription: { dispose(): void } | undefined;
+
         const stop = () => {
           signal.removeEventListener("abort", stop);
           subscription?.dispose();
           subscription = undefined;
           resolve();
         };
+
         signal.addEventListener("abort", stop, { once: true });
         subscription = this.followTransport!(
           path,
@@ -199,14 +216,17 @@ export class ReviewApiClient {
           accept,
           disconnected,
         );
+
         if (signal.aborted) stop();
       });
     }
+
     if (!this.connection) {
       throw new Error(
         "Review API live updates require a desktop follow transport.",
       );
     }
+
     let connections = liveConnections.get(this.request);
 
     if (!connections)

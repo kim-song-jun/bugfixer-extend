@@ -323,7 +323,7 @@ export interface ReviewCanvasBridge {
     path: string,
     signal: AbortSignal,
     accept: (value: T) => void | Promise<void>,
-    disconnected: (error: unknown) => void,
+    disconnected: (cause: unknown) => void,
   ): ReviewDisposable;
   post(request: ReviewVerbRequest): Promise<ReviewVerbResponse>;
   subscribe(listener: (event: ReviewSurfaceEvent) => void): ReviewDisposable;

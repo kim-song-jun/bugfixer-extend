@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const source = fileURLToPath(new URL("./keychain-vault.c", import.meta.url));
+
 const account = "00000000-0000-4000-8000-000000000042";
+
 const fixture = Buffer.from("synthetic-slack-token-fixture-2026");
 
 function run(binary, args, input) {
@@ -25,6 +27,7 @@ function run(binary, args, input) {
       stderr: Buffer.concat(stderr),
       pid: child.pid,
     }));
+
     if (input) child.stdin.end(input);
     else child.stdin.end();
   });
@@ -34,9 +37,12 @@ test("synthetic Keychain item round trips and is deleted", { skip: process.platf
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "review-keychain-vault-test-"));
   const binary = path.join(temporaryRoot, "keychain-vault");
   const pids = new Set();
+
   const invoke = async (...args) => {
     const result = await run(binary, args);
+
     if (result.pid) pids.add(result.pid);
+
     return result;
   };
 
@@ -50,6 +56,7 @@ test("synthetic Keychain item round trips and is deleted", { skip: process.platf
     assert.ok(stale.code === 0 || stale.code === 3, stale.stderr.toString());
 
     const put = await run(binary, ["put", "slack", account], fixture);
+
     if (put.pid) pids.add(put.pid);
     assert.equal(put.code, 0, put.stderr.toString());
     assert.deepEqual(put.stdout, Buffer.alloc(0));

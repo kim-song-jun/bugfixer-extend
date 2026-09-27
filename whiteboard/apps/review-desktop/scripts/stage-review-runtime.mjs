@@ -118,21 +118,28 @@ export async function assertPackagedArtifacts(packagedRoot) {
 
   if (resolvedPackagedApp(packagedRoot)) {
     const runtimeRoot = runtimeRootForPackagedRoot(packagedRoot);
+
     for (const name of [BOUND_CHECKOUT_HELPER, KEYCHAIN_VAULT_HELPER, NODE_RUNTIME]) {
       const helper = path.join(runtimeRoot, name);
       const helperStat = await stat(helper);
+
       if (!helperStat.isFile() || (helperStat.mode & 0o111) === 0) {
         throw new Error(`The Review Desktop package has no executable native helper at ${helper}.`);
       }
     }
+
     const nodeBinary = path.join(runtimeRoot, NODE_RUNTIME);
+
     const nodeArchitectures = (await execFileAsync("lipo", ["-archs", nodeBinary])).stdout
       .trim()
       .split(/\s+/);
+
     if (!nodeArchitectures.includes(process.arch)) {
       throw new Error(`The packaged Node runtime does not contain ${process.arch}.`);
     }
+
     const nodeVersion = (await execFileAsync(nodeBinary, ["--version"])).stdout.trim();
+
     if (!/^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(nodeVersion)) {
       throw new Error(`The packaged Node runtime returned an invalid version: ${nodeVersion}`);
     }
@@ -181,11 +188,13 @@ export async function stageReviewRuntime(packagedRoot) {
 
   await stageReviewDocs(runtimeRoot);
   await stageDiffrBinary(runtimeRoot);
+
   if (path.resolve(packagedRoot).endsWith(".app")) {
     await stageBoundCheckoutHelper(runtimeRoot);
     await stageKeychainVaultHelper(runtimeRoot);
     await stageNodeRuntime(runtimeRoot);
   }
+
   await makeTreeOwnerWritable(path.join(runtimeRoot, "tutorial", "git-stub"));
   await assertRuntimeClosure(runtimeRoot);
 
@@ -252,6 +261,7 @@ export async function stageBoundCheckoutHelper(
   if (process.platform !== "darwin") {
     throw new Error("The bound-checkout helper can only be built on macOS.");
   }
+
   if (!(await stat(source).catch(() => null))?.isFile()) {
     throw new Error(`Missing native helper source: ${source}`);
   }
@@ -262,6 +272,7 @@ export async function stageBoundCheckoutHelper(
     "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", source, "-o", destination,
   ]);
   await chmod(destination, 0o755);
+
   return destination;
 }
 
@@ -272,6 +283,7 @@ export async function stageKeychainVaultHelper(
   if (process.platform !== "darwin") {
     throw new Error("The Keychain vault helper can only be built on macOS.");
   }
+
   if (!(await stat(source).catch(() => null))?.isFile()) {
     throw new Error(`Missing native helper source: ${source}`);
   }
@@ -283,6 +295,7 @@ export async function stageKeychainVaultHelper(
     "-framework", "CoreFoundation", "-framework", "Security",
   ]);
   await chmod(destination, 0o755);
+
   return destination;
 }
 
@@ -296,6 +309,7 @@ export async function stageNodeRuntime(
 
   const resolvedSource = await realpath(source);
   const sourceStat = await stat(resolvedSource);
+
   if (!sourceStat.isFile() || (sourceStat.mode & 0o111) === 0) {
     throw new Error(`The Node runtime source is not an executable file: ${resolvedSource}`);
   }
@@ -303,15 +317,19 @@ export async function stageNodeRuntime(
   const architectures = (await execFileAsync("lipo", ["-archs", resolvedSource])).stdout
     .trim()
     .split(/\s+/);
+
   if (!architectures.includes(process.arch)) {
     throw new Error(`The Node runtime does not contain ${process.arch}: ${resolvedSource}`);
   }
 
   const sourceVersion = (await execFileAsync(resolvedSource, ["--version"])).stdout.trim();
+
   if (!/^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(sourceVersion)) {
     throw new Error(`The Node runtime returned an invalid version: ${sourceVersion}`);
   }
+
   const licenseSource = path.resolve(path.dirname(resolvedSource), "..", "LICENSE");
+
   if (!(await stat(licenseSource).catch(() => null))?.isFile()) {
     throw new Error(`The Node runtime license is missing: ${licenseSource}`);
   }
@@ -325,14 +343,17 @@ export async function stageNodeRuntime(
   await copyFile(licenseSource, licenseDestination);
 
   const stagedVersion = (await execFileAsync(destination, ["--version"])).stdout.trim();
+
   if (stagedVersion !== sourceVersion) {
     throw new Error(`The staged Node runtime version differs (${stagedVersion} != ${sourceVersion}).`);
   }
+
   return destination;
 }
 
 function resolvedPackagedApp(packagedRoot) {
   const resolved = path.resolve(packagedRoot);
+
   return resolved.endsWith(".app") ? resolved : "";
 }
 

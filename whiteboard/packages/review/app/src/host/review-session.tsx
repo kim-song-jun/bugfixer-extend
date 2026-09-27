@@ -52,10 +52,12 @@ export function createReviewSession(
 
   const request = async (input: RequestInfo | URL, init?: RequestInit) => {
     const requestInput = input instanceof Request ? input : undefined;
+
     const target = new URL(
       requestInput ? requestInput.url : String(input),
       "http://review.invalid",
     );
+
     if (
       target.origin !== "http://review.invalid" ||
       !target.pathname.startsWith("/reviews-api/") ||
@@ -66,6 +68,7 @@ export function createReviewSession(
         "Review requests must use an allowlisted relative API path.",
       );
     }
+
     return bridge.request(
       `${target.pathname}${target.search}`,
       init ?? requestInput,

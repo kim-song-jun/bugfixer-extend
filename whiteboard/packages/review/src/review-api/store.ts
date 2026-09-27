@@ -427,6 +427,8 @@ export class ReviewStore {
         root_dev TEXT, root_ino TEXT);
       CREATE TABLE IF NOT EXISTS resources(id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES repositories(id),
         kind TEXT NOT NULL, mime_type TEXT NOT NULL, data BLOB NOT NULL);`);
+
+    // SAFETY: PRAGMA table_info returns one row per declared column with a string `name`.
     const repositoryColumns = new Set(
       (
         this.db.prepare("PRAGMA table_info(repositories)").all() as {
@@ -434,10 +436,15 @@ export class ReviewStore {
         }[]
       ).map((column) => column.name),
     );
-    if (!repositoryColumns.has("root_dev"))
+
+    if (!repositoryColumns.has("root_dev")) {
       this.db.exec("ALTER TABLE repositories ADD COLUMN root_dev TEXT");
-    if (!repositoryColumns.has("root_ino"))
+    }
+
+    if (!repositoryColumns.has("root_ino")) {
       this.db.exec("ALTER TABLE repositories ADD COLUMN root_ino TEXT");
+    }
+
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS review_coverage(review_id TEXT REFERENCES reviews(id), file TEXT, fingerprint TEXT NOT NULL, coverage TEXT NOT NULL, PRIMARY KEY(review_id,file));",
     );
@@ -635,8 +642,11 @@ export class ReviewStore {
     root: string,
     identity?: { canonicalPath: string; dev: string; ino: string },
   ) {
+    // SAFETY: The SELECT names every field declared in the row type; absent rows are handled below.
     const existing = this.db
-      .prepare("SELECT id,name,root_dev,root_ino FROM repositories WHERE path=?")
+      .prepare(
+        "SELECT id,name,root_dev,root_ino FROM repositories WHERE path=?",
+      )
       .get(root) as
       | {
           id: string;
@@ -645,13 +655,16 @@ export class ReviewStore {
           root_ino: string | null;
         }
       | undefined;
+
     if (existing && identity) {
       if (
         identity.canonicalPath !== root ||
         ((existing.root_dev !== null || existing.root_ino !== null) &&
-          (existing.root_dev !== identity.dev || existing.root_ino !== identity.ino))
+          (existing.root_dev !== identity.dev ||
+            existing.root_ino !== identity.ino))
       )
         throw new ReviewInputError("Repository root identity changed.", 409);
+
       if (
         existing.root_dev === null &&
         existing.root_ino === null &&
@@ -661,12 +674,15 @@ export class ReviewStore {
           "This unverified repository is already used by reviews and cannot be identity-bound.",
           409,
         );
+
       this.db
         .prepare("UPDATE repositories SET root_dev=?,root_ino=? WHERE id=?")
         .run(identity.dev, identity.ino, existing.id);
     } else if (!existing) {
       this.db
-        .prepare("INSERT INTO repositories(id,path,name,root_dev,root_ino) VALUES(?,?,?,?,?)")
+        .prepare(
+          "INSERT INTO repositories(id,path,name,root_dev,root_ino) VALUES(?,?,?,?,?)",
+        )
         .run(
           randomUUID(),
           root,
@@ -676,8 +692,11 @@ export class ReviewStore {
         );
     }
 
+    // SAFETY: The registered path is unique and this SELECT names every field in the row type.
     const row = this.db
-      .prepare("SELECT id,name,root_dev,root_ino FROM repositories WHERE path=?")
+      .prepare(
+        "SELECT id,name,root_dev,root_ino FROM repositories WHERE path=?",
+      )
       .get(root) as {
       id: string;
       name: string;
@@ -685,26 +704,34 @@ export class ReviewStore {
       root_ino: string | null;
     };
 
-    return {
+    const result = {
       id: String(row.id),
       name: String(row.name),
       verified: row.root_dev !== null && row.root_ino !== null,
-      ...(row.root_dev !== null && row.root_ino !== null
-        ? {
-            rootIdentity: {
-              canonicalPath: root,
-              dev: String(row.root_dev),
-              ino: String(row.root_ino),
-            },
-          }
-        : {}),
+    };
+
+    if (row.root_dev === null || row.root_ino === null) return result;
+
+    return {
+      ...result,
+      rootIdentity: {
+        canonicalPath: root,
+        dev: String(row.root_dev),
+        ino: String(row.root_ino),
+      },
     };
   }
+
   repositoryIdentity(id: string) {
+    // SAFETY: The SELECT names each field declared in the row type; the missing case is checked below.
     const row = this.db
       .prepare("SELECT path,root_dev,root_ino FROM repositories WHERE id=?")
-      .get(id) as { path: string; root_dev: string | null; root_ino: string | null } | undefined;
+      .get(id) as
+      | { path: string; root_dev: string | null; root_ino: string | null }
+      | undefined;
+
     if (!row) throw new ReviewInputError("Repository is not registered.", 404);
+
     return row.root_dev !== null && row.root_ino !== null
       ? {
           canonicalPath: String(row.path),

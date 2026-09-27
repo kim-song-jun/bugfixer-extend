@@ -27,6 +27,7 @@ export function jsonReviewApiUrl(
 
   if (url.searchParams.has("token"))
     throw new Error("Review API URLs cannot contain credentials.");
+
   if (!url.pathname.startsWith(`/reviews-api/${encodeURIComponent(reviewId)}/`))
     throw new Error("Review API endpoint escaped its review path.");
 

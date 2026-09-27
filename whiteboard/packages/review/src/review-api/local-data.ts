@@ -593,6 +593,7 @@ export class LocalReviewData {
     const registered = this.store
       .repositories()
       .filter((repository) => repository.path === rootPath);
+
     for (const repository of registered) {
       await this.closeReader(repository.id);
       this.repositories.delete(repository.id);
@@ -673,7 +674,14 @@ export class LocalReviewData {
 
   /** Detected once; dropped when the root vanishes or detection found nothing. */
   private async vcs(repositoryId: string): Promise<LocalVcs | null> {
-    await this.assertRegisteredRootIdentity(repositoryId);
+    try {
+      await this.assertRegisteredRootIdentity(repositoryId);
+    } catch (cause) {
+      await this.forgetRepository(repositoryId);
+
+      throw cause;
+    }
+
     const cached = this.repositories.get(repositoryId);
 
     if (cached && (!cached.vcs || existsSync(cached.vcs.rootPath)))
@@ -713,19 +721,28 @@ export class LocalReviewData {
   async assertRegisteredRootIdentity(repositoryId: string) {
     const expected = this.store.repositoryIdentity(repositoryId);
     const root = this.store.repositoryPath(repositoryId);
+
     const canonicalPath = await realpath(root).catch(() => {
       throw unavailableCheckout();
     });
+
     if (canonicalPath !== root) throw unavailableCheckout();
+
     if (!expected) return false;
+
     const info = await stat(canonicalPath, { bigint: true }).catch(() => null);
+
     if (
       !info?.isDirectory() ||
       expected.canonicalPath !== canonicalPath ||
       expected.dev !== info.dev.toString() ||
       expected.ino !== info.ino.toString()
     )
-      throw new ReviewInputError("Registered repository root was replaced.", 409);
+      throw new ReviewInputError(
+        "Registered repository root was replaced.",
+        409,
+      );
+
     return true;
   }
 
@@ -803,13 +820,16 @@ export class LocalReviewData {
 
     const canonicalPath = await realpath(vcs.rootPath);
     const info = await stat(canonicalPath, { bigint: true }).catch(() => null);
+
     if (!info?.isDirectory())
       throw new ReviewInputError("Repository root is unavailable.", 409);
+
     const identity = {
       canonicalPath,
       dev: info.dev.toString(),
       ino: info.ino.toString(),
     };
+
     if (
       expectedRoot &&
       (expectedRoot.canonicalPath !== identity.canonicalPath ||
@@ -817,10 +837,14 @@ export class LocalReviewData {
         expectedRoot.ino !== identity.ino)
     ) {
       await this.invalidateRepositoryPath(canonicalPath);
-      throw new ReviewInputError("Repository root identity does not match.", 409);
+      throw new ReviewInputError(
+        "Repository root identity does not match.",
+        409,
+      );
     }
 
     let repository: ReturnType<ReviewStore["registerRepository"]>;
+
     try {
       repository = this.store.registerRepository(
         canonicalPath,
@@ -830,6 +854,7 @@ export class LocalReviewData {
       await this.invalidateRepositoryPath(canonicalPath);
       throw error;
     }
+
     if (expectedRoot) await this.assertRegisteredRootIdentity(repository.id);
 
     // Registration may follow replacement of a managed repository at the same
@@ -867,6 +892,7 @@ export class LocalReviewData {
     if (!snapshot.pins) return undefined;
 
     await this.assertRegisteredRootIdentity(snapshot.pins.repositoryId);
+
     if (!existsSync(this.store.repositoryPath(snapshot.pins.repositoryId)))
       throw unavailableCheckout();
 
@@ -1131,14 +1157,12 @@ export class LocalReviewData {
     const prefix = directory ? directory.replace(/\/$/, "") + "/" : "";
     const entries = new Map<string, ReviewSourceEntry>();
 
-    const vcs = pins.worktreeRevision
-      ? await this.vcs(pins.repositoryId)
-      : undefined;
+    const vcs = await this.vcs(pins.repositoryId);
 
     if (pins.worktreeRevision && !vcs) throw unavailableCheckout();
 
     const files =
-      vcs && side === "head"
+      pins.worktreeRevision && vcs && side === "head"
         ? await workingFiles(vcs)
         : pins[side] === EMPTY_SOURCE
           ? []

@@ -40,7 +40,9 @@ export function fixtureReviewBridge(api: FixtureReviewApi): ReviewCanvasBridge {
       String(url),
       "http://review.invalid",
     );
+
     const route = pathname.slice(pathname.indexOf("/reviews-api") + 12);
+
     const id = api.snapshot.reviewId;
 
     if (route === `/${id}` && searchParams.get("full") === "true")

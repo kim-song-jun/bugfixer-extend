@@ -41,34 +41,41 @@ function apiCanvasTestBridge(
       path: string,
       signal: AbortSignal,
       accept: (value: T) => void | Promise<void>,
-      disconnected: (error: unknown) => void,
+      disconnected: (cause: unknown) => void,
     ) {
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       const subscription = { dispose: () => void reader?.cancel() };
       void (async () => {
         try {
           const response = await request(path, { signal });
+
           if (!response.ok || !response.body)
             throw new Error(`Review API stream failed (${response.status}).`);
           reader = response.body.getReader();
           const decoder = new TextDecoder();
           let pending = "";
+
           while (!signal.aborted) {
             const { value, done } = await reader.read();
             pending += decoder.decode(value, { stream: !done });
             let newline: number;
+
             while ((newline = pending.indexOf("\n")) !== -1) {
               const line = pending.slice(0, newline).trim();
               pending = pending.slice(newline + 1);
+
               if (line) await accept(JSON.parse(line) as T);
             }
+
             if (done) break;
           }
+
           if (pending.trim()) await accept(JSON.parse(pending.trim()) as T);
         } catch (error) {
           if (!signal.aborted) disconnected(error);
         }
       })();
+
       return subscription;
     },
   };
@@ -80,19 +87,34 @@ const command = <Operation,>(operation: Operation, leaseId?: string) =>
   store.execute({ commandId: randomUUID(), leaseId, operation });
 
 it("keeps a task review on its authorized version while the live review advances", async () => {
-  const review = await command({ type: "create", title: "Pinned task review", pins });
+  const review = await command({
+    type: "create",
+    title: "Pinned task review",
+    pins,
+  });
+
   const inserted = await command({
     type: "edit",
     reviewId: review.reviewId,
-    edit: { type: "insert", content: { type: "markdown", markdown: "Authorized snapshot text" } },
+    edit: {
+      type: "insert",
+      content: { type: "markdown", markdown: "Authorized snapshot text" },
+    },
   });
+
   const app = new Hono().route("/reviews-api", createReviewApi(store));
   app.get("/reviews-api/:id/commits", (context) => context.json([]));
-  const notify = vi.fn();
-  const bridge = apiCanvasTestBridge({}, {
-    request: async (url, init) => app.request(url, init),
-    notify,
-  });
+
+  const notify = vi.fn<NonNullable<ReviewCanvasBridge["notify"]>>();
+
+  const bridge = apiCanvasTestBridge(
+    {},
+    {
+      request: async (url, init) => app.request(url, init),
+      notify,
+    },
+  );
+
   const container = document.createElement("div");
   document.body.append(container);
   await act(async () => {
@@ -106,13 +128,18 @@ it("keeps a task review on its authorized version while the live review advances
     });
   });
   await act(async () => {
-    await vi.waitFor(() => expect(container.textContent).toContain("Authorized snapshot text"));
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain("Authorized snapshot text"),
+    );
   });
   await act(async () => {
     await command({
       type: "edit",
       reviewId: review.reviewId,
-      edit: { type: "insert", content: { type: "markdown", markdown: "Later live text" } },
+      edit: {
+        type: "insert",
+        content: { type: "markdown", markdown: "Later live text" },
+      },
     });
   });
   await act(async () => {
@@ -120,8 +147,11 @@ it("keeps a task review on its authorized version while the live review advances
   });
   expect(container.textContent).toContain("Authorized snapshot text");
   expect(container.textContent).not.toContain("Later live text");
-  const backToLatest = [...container.querySelectorAll<HTMLButtonElement>("button")]
-    .find((button) => button.textContent === "Back to latest");
+
+  const backToLatest = [
+    ...container.querySelectorAll<HTMLButtonElement>("button"),
+  ].find((button) => button.textContent === "Back to latest");
+
   expect(backToLatest).toBeTruthy();
   await act(async () => backToLatest!.click());
   await act(async () => {
@@ -129,7 +159,10 @@ it("keeps a task review on its authorized version while the live review advances
   });
   expect(container.textContent).toContain("Authorized snapshot text");
   expect(container.textContent).not.toContain("Later live text");
-  expect(notify).toHaveBeenCalledWith({ kind: "error", text: "This task review is pinned to an immutable version." });
+  expect(notify).toHaveBeenCalledWith({
+    kind: "error",
+    text: "This task review is pinned to an immutable version.",
+  });
 });
 
 beforeEach(() => {

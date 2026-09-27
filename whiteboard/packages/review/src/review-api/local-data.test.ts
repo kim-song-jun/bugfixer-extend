@@ -57,7 +57,9 @@ const git = (...args: string[]) =>
 
 const expectedRoot = (root: string) => {
   const canonicalPath = realpathSync(root);
+
   const info = statSync(canonicalPath, { bigint: true });
+
   return {
     canonicalPath,
     dev: info.dev.toString(),
@@ -161,16 +163,18 @@ it("binds a registered root to its server-observed identity and rejects same-pat
     verified: true,
     rootIdentity: identity,
   });
-  await expect(local.data.assertRegisteredRootIdentity(verified.id)).resolves.toBe(true);
+  await expect(
+    local.data.assertRegisteredRootIdentity(verified.id),
+  ).resolves.toBe(true);
 
   const moved = path.join(directory, "repository-original");
   renameSync(repository, moved);
   mkdirSync(repository);
   execFileSync("git", ["init", "-q"], { cwd: repository });
 
-  await expect(local.data.assertRegisteredRootIdentity(verified.id)).rejects.toThrow(
-    /replaced/,
-  );
+  await expect(
+    local.data.assertRegisteredRootIdentity(verified.id),
+  ).rejects.toThrow(/replaced/);
   await expect(local.data.register(repository, identity)).rejects.toThrow(
     /identity does not match/,
   );
@@ -1625,9 +1629,9 @@ it("detects again when the repository root goes away and comes back", async () =
   rmSync(repository, { recursive: true, force: true });
 
   await expect(local.data.file(pins, "head", source.file)).rejects.toThrow(
-    "File is unavailable at the pinned commit.",
+    "The selected local checkout is unavailable.",
   );
-  expect(detections()).toEqual(detectionPair(root));
+  expect(detections()).toEqual([]);
   execFileSync("git", ["clone", "--quiet", backup, repository], {
     stdio: "pipe",
   });
@@ -1635,19 +1639,25 @@ it("detects again when the repository root goes away and comes back", async () =
   expect(await local.data.file(pins, "head", source.file)).toMatchObject({
     text: "export const value = 2;\nexport const saved = true;\n",
   });
-  expect(detections()).toEqual([
-    ...detectionPair(root),
-    ...detectionPair(root),
-  ]);
+  expect(detections()).toEqual(detectionPair(root));
 });
 
-it("relists a pinned tree after the repository root comes back", async () => {
+it("rejects a missing root without detection and relists after it comes back", async () => {
+  const root = realpathSync.native(repository);
   const backup = path.join(directory, "backup");
 
   git("clone", "--quiet", repository, backup);
+  expect(await local.data.tree(pins, "head", "")).toContainEqual({
+    path: source.file,
+    kind: "file",
+  });
+  recordSpawns();
   rmSync(repository, { recursive: true, force: true });
 
-  expect(await local.data.tree(pins, "head", "")).toEqual([]);
+  await expect(local.data.tree(pins, "head", "")).rejects.toThrow(
+    "The selected local checkout is unavailable.",
+  );
+  expect(detections()).toEqual([]);
   execFileSync("git", ["clone", "--quiet", backup, repository], {
     stdio: "pipe",
   });
@@ -1656,6 +1666,7 @@ it("relists a pinned tree after the repository root comes back", async () => {
     path: source.file,
     kind: "file",
   });
+  expect(detections()).toEqual(detectionPair(root));
 });
 
 it("detects again after a detection that could not run", async () => {
@@ -2263,11 +2274,18 @@ it("exposes real source and resource operations through the authenticated deskto
 
     expect(
       await (await post("/repositories", { path: repository })).json(),
-    ).toMatchObject({ id: pins.repositoryId, name: "repository", verified: false });
+    ).toMatchObject({
+      id: pins.repositoryId,
+      name: "repository",
+      verified: false,
+    });
     const rootIdentity = expectedRoot(repository);
     expect(
       await (
-        await post("/repositories", { path: repository, expectedRoot: rootIdentity })
+        await post("/repositories", {
+          path: repository,
+          expectedRoot: rootIdentity,
+        })
       ).json(),
     ).toEqual({
       id: pins.repositoryId,

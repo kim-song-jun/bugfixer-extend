@@ -24,10 +24,12 @@ it("sends credential-free relative JSON requests to the displayed version", asyn
 
   version = 3;
   await session.fetch("/telemetry/event", { method: "POST" });
+
   const telemetryUrl = new URL(
     request.mock.calls[1]![0],
     "http://review.invalid",
   );
+
   expect(telemetryUrl.pathname).toBe("/reviews-api/review-1/telemetry/event");
   expect(telemetryUrl.searchParams.get("version")).toBe("3");
   expect(telemetryUrl.searchParams.has("token")).toBe(false);
@@ -37,6 +39,7 @@ it("rejects absolute or tokenized request URLs before invoking the bridge", asyn
   const request = vi.fn<ReturnType<typeof testReviewBridge>["request"]>(
     async () => Response.json({ ok: true }),
   );
+
   const session = createReviewSession(testReviewBridge({}, { request }), {
     jsonReview: { id: "review-1", version: () => undefined },
   });

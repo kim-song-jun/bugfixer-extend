@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { after, test } from "node:test";
 
 const execFileAsync = promisify(execFile);
+
 const temporaryRoots = [];
+
 const nativeTest = process.platform === "darwin";
 
 after(async () => {
@@ -222,6 +224,7 @@ test("provider execution preserves the bound cwd and stdio and rejects unsafe ex
   const raceRootStat = await stat(raceRoot, { bigint: true });
   const barrierReady = path.join(await realpath(temporaryRoot), "codex-script-barrier-ready");
   const barrierRelease = path.join(await realpath(temporaryRoot), "codex-script-barrier-release");
+
   const racingChild = spawn(helper, [
     "--root", raceRoot, "--dev", raceRootStat.dev.toString(), "--ino", raceRootStat.ino.toString(),
     "provider", "codex-node", realpathNodeExecutable, raceScript,
@@ -229,14 +232,17 @@ test("provider execution preserves the bound cwd and stdio and rejects unsafe ex
     env: { ...process.env, REVIEW_BOUND_CHECKOUT_BARRIER_READY: barrierReady, REVIEW_BOUND_CHECKOUT_BARRIER_RELEASE: barrierRelease },
     stdio: ["ignore", "pipe", "pipe"],
   });
+
   const raceOutput = [];
   const raceErrors = [];
   racingChild.stdout.on("data", (chunk) => raceOutput.push(chunk));
   racingChild.stderr.on("data", (chunk) => raceErrors.push(chunk));
+
   const raceCompleted = new Promise((resolve, reject) => {
     racingChild.once("error", reject);
     racingChild.once("close", (code) => resolve({ code, stdout: Buffer.concat(raceOutput).toString(), stderr: Buffer.concat(raceErrors).toString() }));
   });
+
   try {
     await waitForFile(barrierReady, racingChild);
     await rename(raceScript, renamedScript);
@@ -297,6 +303,7 @@ test("provider execution preserves the bound cwd and stdio and rejects unsafe ex
     ["--work-tree", temporaryRoot, "rev-parse", "HEAD"],
     ["-c", `core.worktree=${temporaryRoot}`, "rev-parse", "HEAD"],
   ];
+
   for (const gitArgs of overrideArgs) {
     const overrideResult = await runHelper(helper, [...common, "exec", "git", ...gitArgs]);
     assert.notEqual(overrideResult.code, 0);
@@ -311,10 +318,12 @@ test("provider execution preserves the bound cwd and stdio and rejects unsafe ex
   await mkdir(linkedWorktreeRoot);
   await writeFile(path.join(linkedWorktreeRoot, ".git"), `gitdir: ${temporaryRoot}/.git/worktrees/linked\n`);
   const linkedStat = await stat(linkedWorktreeRoot, { bigint: true });
+
   const linkedResult = await runHelper(helper, [
     "--root", linkedWorktreeRoot, "--dev", linkedStat.dev.toString(), "--ino", linkedStat.ino.toString(),
     "exec", "git", "status",
   ]);
+
   assert.notEqual(linkedResult.code, 0);
   assert.match(linkedResult.stderr, /linked worktrees and external metadata are unavailable/u);
 
@@ -359,15 +368,19 @@ async function replacementRace({ temporaryRoot, helper, caseName, prepare, comma
   await Promise.all([mkdir(root), mkdir(rogue)]);
   await prepare(root, rogue);
   const rootStat = await stat(root, { bigint: true });
+
   const identity = {
     dev: rootStat.dev.toString(),
     ino: rootStat.ino.toString(),
   };
+
   let originalHead;
+
   if (caseName === "exec" || caseName === "gitdir") {
     originalHead = (await execFileAsync("/usr/bin/git", ["-C", root, "rev-parse", "HEAD"])).stdout.trim();
     identity.rogueHead = (await execFileAsync("/usr/bin/git", ["-C", rogue, "rev-parse", "HEAD"])).stdout.trim();
   }
+
   const child = spawn(helper, command(root, identity), {
     env: {
       ...process.env,
@@ -377,10 +390,12 @@ async function replacementRace({ temporaryRoot, helper, caseName, prepare, comma
     },
     stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
+
   const stdoutChunks = [];
   const stderrChunks = [];
   child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
   child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
   const completed = new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => resolve({
@@ -390,10 +405,12 @@ async function replacementRace({ temporaryRoot, helper, caseName, prepare, comma
       stderr: Buffer.concat(stderrChunks).toString(),
     }));
   });
+
   if (stdin !== undefined) child.stdin.end(stdin);
 
   try {
     await waitForFile(barrierReady, child);
+
     if (caseName === "gitdir") {
       await rename(path.join(root, ".git"), path.join(root, ".git-original"));
       await rename(path.join(rogue, ".git"), path.join(root, ".git"));
@@ -401,9 +418,11 @@ async function replacementRace({ temporaryRoot, helper, caseName, prepare, comma
       await rename(root, original);
       identity.rogueRoot = root;
       await mkdir(root);
+
       if (caseName === "read") await writeFile(path.join(root, "payload.txt"), "rogue replacement\n");
       else await createRepository(root, "rogue replacement head");
     }
+
     await writeFile(barrierRelease, "release\n");
     const result = await completed;
     await verify(result, identity, originalHead, original);
@@ -432,15 +451,18 @@ async function runHelper(helper, args) {
 
 async function waitForFile(file, child) {
   const started = Date.now();
+
   while (Date.now() - started < 5000) {
     try {
       await readFile(file);
+
       return;
     } catch {
       if (child.exitCode !== null) throw new Error(`Helper exited before barrier (status ${child.exitCode}).`);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
+
   throw new Error("Timed out waiting for helper test barrier.");
 }
 
