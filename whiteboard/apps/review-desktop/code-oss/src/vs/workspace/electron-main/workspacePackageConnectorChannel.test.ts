@@ -123,7 +123,8 @@ test('signed package install requires native consent, pins updates, and imports 
 		});
 		await assert.rejects(channel.call(sender, 'importPackagePreview', {
 			projectId: one.project.id, packageId: installed.packageId, connectionId: secondAccount.accountRef, previewId: secondAccountPreview.previewId,
-		}), /active matching account/i, 'revoking an account after preview blocks snapshot import');
+		}), /unavailable in this project window/i, 'revoking an account invalidates its outstanding preview');
+		assert.equal(database.knowledge.listProjectReferences(one.project.id).length, 0, 'revoked account preview must not create a snapshot');
 		remoteText = 'Changed upstream after preview';
 		const binding = database.listFolderBindings(one.project.id)[0];
 		const task = database.createTask({ projectId: one.project.id, bindingId: binding.id, title: 'Import reviewed issue' });
