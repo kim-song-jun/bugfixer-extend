@@ -160,7 +160,7 @@ async function hydratePaginatedProperties(
 			}
 			continue;
 		}
-		if (typeof property.id !== 'string' || !isSafeNotionPropertyId(property.id)) {
+		if (typeof property.id !== 'string' || !isSafeNotionPropertyId(property.id, pageId)) {
 			omissions.push(`Notion property “${name}” (${type}) has no valid property ID; its full value could not be verified and remaining values, if any, were omitted.`);
 			continue;
 		}
@@ -198,10 +198,11 @@ async function hydratePaginatedProperties(
 	}
 }
 
-function isSafeNotionPropertyId(value: string): boolean {
-	return value.length <= 200
-		&& /^(?:[A-Za-z0-9_-]|%[A-Fa-f0-9]{2}){1,200}$/.test(value)
-		&& !/%(?:2f|3f|23|2e)/i.test(value);
+function isSafeNotionPropertyId(value: string, pageId: string): boolean {
+	if (value.length > 200 || !/^(?:[A-Za-z0-9_-]|%[A-Fa-f0-9]{2}){1,200}$/.test(value)) { return false; }
+	const path = `pages/${pageId}/properties/${value}`;
+	const url = new URL(path, notionApiOrigin);
+	return url.origin === notionApiHost && url.pathname === `/v1/${path}` && !url.search && !url.hash;
 }
 
 function throwIfNotionTokenRejected(response: Response): void {

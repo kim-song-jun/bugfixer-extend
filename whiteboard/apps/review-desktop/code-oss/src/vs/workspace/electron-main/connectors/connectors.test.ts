@@ -157,6 +157,27 @@ test('Notion retrieves people and rich text properties that can truncate without
 	assert.match(result.derivedText, /Mention 26/);
 });
 
+test('Notion preserves encoded property IDs that stay within the endpoint path and omits dot-segment IDs', async () => {
+	const requests: URL[] = [];
+	const transport: ConnectorTransport = { fetch: async input => {
+		const url = new URL(String(input));
+		requests.push(url);
+		if (url.pathname.endsWith('/children')) { return Response.json({ results: [], has_more: false }); }
+		if (url.pathname.endsWith('/properties/%2F%3F%23')) {
+			return Response.json({ object: 'list', results: [{ object: 'property_item', type: 'relation', relation: { id: 'ffffffff-ffff-ffff-ffff-ffffffffffff' } }], has_more: false });
+		}
+		return Response.json({ object: 'page', properties: {
+			Safe: { id: '%2F%3F%23', type: 'relation', relation: [{ id: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee' }], has_more: true },
+			Unsafe: { id: '%2E%2E', type: 'relation', relation: [], has_more: true },
+		} });
+	} };
+	const result = await importNotionPage({ pageId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', accountRef: 'notion_account' }, resolver, transport);
+	assert.ok(requests.some(url => url.pathname.endsWith('/properties/%2F%3F%23')));
+	assert.equal(requests.length, 3);
+	assert.match(result.derivedText, /ffffffff-ffff-ffff-ffff-ffffffffffff/);
+	assert.ok(result.omissions.some(item => /Unsafe.*has no valid property ID/.test(item)));
+});
+
 test('Slack selected message follows bounded thread cursors and retains reply context', async () => {
 	const requests: URL[] = [];
 	const transport: ConnectorTransport = { fetch: async input => {
