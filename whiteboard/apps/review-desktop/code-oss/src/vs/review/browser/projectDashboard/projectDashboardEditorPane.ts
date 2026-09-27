@@ -607,7 +607,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		token.addEventListener('input', () => { this.connectorTokenDraft = token.value; });
 		const tokenHelp = form.appendChild($('p')); tokenHelp.className = 'project-dashboard__connector-note';
 		const notionDisclosure = form.appendChild($('p')); notionDisclosure.className = 'project-dashboard__connector-note project-dashboard__connector-notion-disclosure'; notionDisclosure.hidden = this.connectorProvider !== 'notion';
-		notionDisclosure.textContent = '이 토큰은 연결을 만든 사용자의 Notion 계정으로 동작합니다. 앱은 그 사용자가 접근할 수 있고 해당 연결에 공유된 페이지에 읽기 요청만 보냅니다. 앱은 토큰에 설정된 권한(capabilities)을 조회하거나 강제하지 않으므로, 읽기 전용 권한을 선택할 수 있다면 그렇게 설정하세요.';
+		notionDisclosure.textContent = '이 토큰은 연결을 만든 사용자의 Notion 계정 권한으로 동작합니다. 앱은 사용자가 지정한 페이지 ID에 읽기 요청만 보내지만, 토큰 자체는 그 사용자가 접근할 수 있는 다른 페이지에 대한 권한도 가질 수 있습니다. 앱은 토큰의 Notion 권한을 조회하거나 강제하지 않습니다. 만들 때 읽기 전용 권한을 선택할 수 있다면 그렇게 설정하세요.';
 		const updateProviderFields = () => {
 			const isNotion = provider.value === 'notion';
 			this.connectorProvider = provider.value as WorkspaceConnectorId;
@@ -622,11 +622,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if (isNotion) {
 				tokenHelp.append('Notion에서 토큰을 만들고 붙여넣으세요. ');
 				const setupLink = tokenHelp.appendChild(createElement('a'));
-				setupLink.href = 'https://www.notion.com/help/create-integrations-with-the-notion-api'; setupLink.target = '_blank'; setupLink.rel = 'noreferrer'; setupLink.textContent = 'Notion 개인 액세스 토큰 설정 방법';
+				setupLink.href = 'https://developers.notion.com/guides/get-started/personal-access-tokens'; setupLink.target = '_blank'; setupLink.rel = 'noreferrer'; setupLink.textContent = 'Notion 개인 액세스 토큰 설정 방법';
 				tokenHelp.append(' 제출하면 입력란이 비워집니다.');
 				notionDisclosure.hidden = false;
 			} else {
-				tokenHelp.textContent = 'Slack 사용자 토큰(xoxp-) 또는 Notion 통합 토큰을 붙여넣으세요. 제출하면 입력란이 비워집니다.';
+				tokenHelp.textContent = 'Slack 사용자 토큰(xoxp-)을 붙여넣으세요. 제출하면 입력란이 비워집니다.';
 				notionDisclosure.hidden = true;
 			}
 		};
