@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { URI } from '../../base/common/uri.js';
-import { hasProjectWindow, ProjectWindowOpenCoordinator, restoreProjectWindows, type ProjectWindowIdentity } from './projectWindowRestore.js';
+import { hasProjectWindow, ProjectWindowOpenCoordinator, releaseRecordedProjectWindow, restoreProjectWindows, type ProjectWindowIdentity } from './projectWindowRestore.js';
 
 test('concurrent project opens share one window creation and allow retry after failure', async () => {
 	const coordinator = new ProjectWindowOpenCoordinator<string>();
@@ -44,20 +44,54 @@ test('startup restoration skips already open and duplicate projects, continues a
 	assert.match(String(failures[0].error), /folder unavailable/);
 });
 
-test('closing one window preserves open-at-quit while another window still owns the same project', () => {
+test('only a window launched for the project satisfies project reuse and open-at-quit ownership', () => {
 	const projectId = 'project-one';
 	const descriptorUri = URI.file('/profile/projects/project-one.code-workspace').toString();
 	const sameProjectWindow: ProjectWindowIdentity = {
 		config: { reviewWindowLaunch: { kind: 'project', projectId, projectName: 'Project One' } },
+		openedWorkspace: { id: 'workspace-one', configPath: URI.parse(descriptorUri) },
 	};
-	const descriptorOpenedWindow: ProjectWindowIdentity = {
+	const switchedWorkspace: ProjectWindowIdentity = {
+		config: sameProjectWindow.config,
+		openedWorkspace: { id: 'workspace-two', configPath: URI.file('/profile/projects/other.code-workspace') },
+	};
+	const projectWindowBeforeLoad: ProjectWindowIdentity = { config: sameProjectWindow.config };
+	const descriptorOpenedWindow = {
+		config: {},
+		openedWorkspace: { id: 'workspace-one', configPath: URI.parse(descriptorUri) },
+	};
+	const sourceNavigatorWindow = {
+		config: { reviewWindowLaunch: { kind: 'sourceNavigator' as const } },
 		openedWorkspace: { id: 'workspace-one', configPath: URI.parse(descriptorUri) },
 	};
 	const otherProjectWindow: ProjectWindowIdentity = {
 		config: { reviewWindowLaunch: { kind: 'project', projectId: 'project-two', projectName: 'Project Two' } },
+		openedWorkspace: sameProjectWindow.openedWorkspace,
 	};
 
 	assert.equal(hasProjectWindow(projectId, descriptorUri, [sameProjectWindow]), true);
-	assert.equal(hasProjectWindow(projectId, descriptorUri, [descriptorOpenedWindow]), true);
+	assert.equal(hasProjectWindow(projectId, descriptorUri, [switchedWorkspace]), false);
+	assert.equal(hasProjectWindow(projectId, descriptorUri, [projectWindowBeforeLoad]), false);
+	assert.equal(hasProjectWindow(projectId, descriptorUri, [descriptorOpenedWindow]), false);
+	assert.equal(hasProjectWindow(projectId, descriptorUri, [sourceNavigatorWindow]), false);
 	assert.equal(hasProjectWindow(projectId, descriptorUri, [otherProjectWindow]), false);
+	assert.equal(hasProjectWindow(projectId, descriptorUri, [switchedWorkspace, sameProjectWindow]), true);
+});
+
+test('a switched window retains ownership until its open-at-quit clear succeeds', () => {
+	const recorded = new Set([7]);
+	let attempts = 0;
+	const clear = (): void => {
+		attempts++;
+		if (attempts === 1) { throw new Error('workspace database busy'); }
+	};
+	assert.throws(() => releaseRecordedProjectWindow(recorded, 7, false, clear), /database busy/);
+	assert.equal(recorded.has(7), true);
+	releaseRecordedProjectWindow(recorded, 7, false, clear);
+	assert.equal(recorded.has(7), false);
+	assert.equal(attempts, 2);
+	recorded.add(8);
+	releaseRecordedProjectWindow(recorded, 8, true, clear);
+	assert.equal(recorded.has(8), false);
+	assert.equal(attempts, 2);
 });

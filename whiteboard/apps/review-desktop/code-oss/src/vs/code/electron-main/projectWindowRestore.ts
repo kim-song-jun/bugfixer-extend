@@ -3,12 +3,12 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { isWorkspaceIdentifier, type IWorkspaceIdentifier, type ISingleFolderWorkspaceIdentifier } from '../../platform/workspace/common/workspace.js';
 import type { ReviewWindowLaunch } from '../../platform/window/common/window.js';
+import type { URI } from '../../base/common/uri.js';
 
 export interface ProjectWindowIdentity {
 	readonly config?: { readonly reviewWindowLaunch?: ReviewWindowLaunch };
-	readonly openedWorkspace?: IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier;
+	readonly openedWorkspace?: { readonly id: string; readonly configPath?: URI };
 }
 
 export function projectIdForWindow(window: ProjectWindowIdentity): string | undefined {
@@ -17,11 +17,18 @@ export function projectIdForWindow(window: ProjectWindowIdentity): string | unde
 }
 
 export function hasProjectWindow(projectId: string, descriptorUri: string, windows: readonly ProjectWindowIdentity[]): boolean {
-	return windows.some(window => {
-		if (projectIdForWindow(window) === projectId) { return true; }
-		const workspace = window.openedWorkspace;
-		return !!workspace && isWorkspaceIdentifier(workspace) && workspace.configPath.toString() === descriptorUri;
-	});
+	return windows.some(window => projectIdForWindow(window) === projectId && window.openedWorkspace?.configPath?.toString() === descriptorUri);
+}
+
+export function releaseRecordedProjectWindow(
+	recordedWindowIds: Set<number>,
+	windowId: number,
+	hasMatchingProjectWindow: boolean,
+	clearOpenAtQuit: () => void,
+): void {
+	if (!recordedWindowIds.has(windowId)) { return; }
+	if (!hasMatchingProjectWindow) { clearOpenAtQuit(); }
+	recordedWindowIds.delete(windowId);
 }
 
 /** Share one window creation while menu, Home, and startup restoration race for a project. */

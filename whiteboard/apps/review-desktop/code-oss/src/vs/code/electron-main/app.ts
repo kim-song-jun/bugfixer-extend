@@ -146,7 +146,7 @@ import { WorkspaceDatabase } from '../../workspace/electron-main/workspaceDataba
 import { WorkspaceProjectHomeChannel } from '../../workspace/electron-main/workspaceProjectHomeChannel.js';
 import { WORKSPACE_PROJECT_HOME_CHANNEL } from '../../workspace/common/workspaceProjectHomeProtocol.js';
 import { ProjectWorkspaceService } from '../../workspace/electron-main/projectWorkspaceService.js';
-import { hasProjectWindow, ProjectWindowOpenCoordinator, projectIdForWindow, restoreProjectWindows } from './projectWindowRestore.js';
+import { hasProjectWindow, ProjectWindowOpenCoordinator, projectIdForWindow, releaseRecordedProjectWindow, restoreProjectWindows } from './projectWindowRestore.js';
 import { WorkspaceDashboardChannel } from '../../workspace/electron-main/workspaceDashboardChannel.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../workspace/common/workspaceDashboardProtocol.js';
 import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/workspaceProviderRunsChannel.js';
@@ -741,11 +741,21 @@ export class CodeApplication extends Disposable {
 			const projectId = projectIdForWindow(window);
 			if (!projectId) { return; }
 			try {
-				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
+				const view = workspaceDatabase.getProjectView(projectId);
+				if (!view) { throw new Error(`Project ${projectId} has no saved workspace view.`); }
+				if (!hasProjectWindow(projectId, view.descriptorUri, [window])) {
+					releaseRecordedProjectWindow(
+						recordedProjectWindowOpenIds, window.id,
+						hasProjectWindow(projectId, view.descriptorUri, windowsMainService.getWindows()),
+						() => workspaceDatabase.setProjectOpenAtQuit(projectId, false),
+					);
+					return;
+				}
 				if (!recordedProjectWindowOpenIds.has(window.id)) {
 					workspaceDatabase.markProjectOpened(projectId);
-					recordedProjectWindowOpenIds.add(window.id);
 				}
+				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
+				recordedProjectWindowOpenIds.add(window.id);
 			} catch (error) {
 				this.logService.error(`Could not save open state for project window ${projectId}.`, error);
 				dialog.showErrorBox(localize('projectWindowStateSaveFailed', '프로젝트 창 상태 저장 실패'),
@@ -759,7 +769,12 @@ export class CodeApplication extends Disposable {
 			projectFocusListeners.set(window.id, Event.fromNodeEventEmitter(browserWindow, 'focus', () => window)(focusedWindow => {
 				const projectId = projectIdForWindow(focusedWindow);
 				if (!projectId) { return; }
-				try { workspaceDatabase.markProjectOpened(projectId); }
+				try {
+					const view = workspaceDatabase.getProjectView(projectId);
+					if (view && hasProjectWindow(projectId, view.descriptorUri, [focusedWindow])) {
+						workspaceDatabase.markProjectOpened(projectId);
+					}
+				}
 				catch (error) { this.logService.error(`Could not save recent project open time for ${projectId}.`, error); }
 			}));
 		};
@@ -782,6 +797,14 @@ export class CodeApplication extends Disposable {
 				const view = workspaceDatabase.getProjectView(projectId);
 				if (!view) { throw new Error(`Project ${projectId} has no saved workspace view.`); }
 				const remainingWindows = windowsMainService.getWindows().filter(candidate => candidate.id !== window.id);
+				if (!hasProjectWindow(projectId, view.descriptorUri, [window])) {
+					releaseRecordedProjectWindow(
+						recordedProjectWindowOpenIds, window.id,
+						hasProjectWindow(projectId, view.descriptorUri, remainingWindows),
+						() => workspaceDatabase.setProjectOpenAtQuit(projectId, false),
+					);
+					return;
+				}
 				if (!hasProjectWindow(projectId, view.descriptorUri, remainingWindows)) {
 					workspaceDatabase.setProjectOpenAtQuit(projectId, false);
 				}
@@ -811,15 +834,17 @@ export class CodeApplication extends Disposable {
 		const openProjectWindow = (projectId: string, initialStartup: boolean): Promise<ICodeWindow[]> => {
 			return projectWindowOpens.open(projectId, async (): Promise<ICodeWindow[]> => {
 				const project = projectWorkspaces.ensureDescriptor(projectId);
+				const descriptorUri = project.view.descriptorUri;
+				const descriptor = URI.parse(descriptorUri);
 				const opened = await windowsMainService.open({
 					context: OpenContext.API,
 					cli: this.environmentMainService.args,
-					urisToOpen: [{ workspaceUri: URI.file(project.descriptorPath) }],
+					urisToOpen: [{ workspaceUri: descriptor }],
 					forceNewWindow: true,
 					reviewWindowLaunch: { kind: 'project', projectId, projectName: project.project.name },
 					initialStartup,
 				});
-				if (!windowsMainService.getWindows().some(window => projectIdForWindow(window) === projectId)) {
+				if (!hasProjectWindow(projectId, descriptorUri, windowsMainService.getWindows())) {
 					throw new Error(`Project window ${projectId} did not open.`);
 				}
 				workspaceDatabase.setProjectOpenAtQuit(projectId, true);
@@ -882,10 +907,7 @@ export class CodeApplication extends Disposable {
 		// Open Windows
 		await appInstantiationService.invokeFunction(accessor => this.openFirstWindow(accessor, initialProtocolUrls));
 		const openWindows = this.windowsMainService?.getWindows() ?? [];
-		const alreadyOpenProjectIds = this.startupProjectIds.filter(projectId => {
-			const descriptorUri = startupProjectViews.find(view => view.projectId === projectId)?.descriptorUri;
-			return !!descriptorUri && hasProjectWindow(projectId, descriptorUri, openWindows);
-		});
+		const alreadyOpenProjectIds = startupProjectViews.filter(view => hasProjectWindow(view.projectId, view.descriptorUri, openWindows)).map(view => view.projectId);
 		await restoreProjectWindows(
 			this.startupProjectIds,
 			alreadyOpenProjectIds,

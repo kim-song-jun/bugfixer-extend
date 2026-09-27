@@ -58,6 +58,7 @@ import { IAuxiliaryWindowsMainService } from '../../auxiliaryWindow/electron-mai
 import { IAuxiliaryWindow } from '../../auxiliaryWindow/electron-main/auxiliaryWindow.js';
 import { ICSSDevelopmentService } from '../../cssDev/node/cssDevService.js';
 import { ResourceSet } from '../../../base/common/map.js';
+import { reviewWindowLaunchForWorkspace } from './reviewWindowLaunchPolicy.js';
 
 //#region Helper Interfaces
 
@@ -279,18 +280,12 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		const requestedProjectWorkspace = openConfig.reviewWindowLaunch?.kind === 'project' && openConfig.urisToOpen?.length === 1 && isWorkspaceToOpen(openConfig.urisToOpen[0])
 			? openConfig.urisToOpen[0].workspaceUri
 			: undefined;
-		if (openConfig.reviewWindowLaunch?.kind === 'project' && requestedProjectWorkspace && isWorkspaceIdentifier(workspace) && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, requestedProjectWorkspace)) {
-			return openConfig.reviewWindowLaunch;
-		}
-
-		if (openConfig.initialStartup && isWorkspaceIdentifier(workspace)) {
-			const project = this.reviewProjectWorkspaceResolver?.(workspace.configPath);
-			if (project?.projectId.trim() && project.projectName.trim()) {
-				return { kind: 'project', ...project };
-			}
-		}
-
-		return { kind: 'sourceNavigator' };
+		const isDescriptor = isWorkspaceIdentifier(workspace);
+		const explicitProjectDescriptorMatches = !!requestedProjectWorkspace && isDescriptor && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, requestedProjectWorkspace);
+		const resolvedProject = !openConfig.reviewWindowLaunch && isDescriptor
+			? this.reviewProjectWorkspaceResolver?.(workspace.configPath)
+			: undefined;
+		return reviewWindowLaunchForWorkspace(openConfig.reviewWindowLaunch, isDescriptor, explicitProjectDescriptorMatches, resolvedProject);
 	}
 
 	private sameReviewWindowLaunch(left: ReviewWindowLaunch | undefined, right: ReviewWindowLaunch): boolean {
