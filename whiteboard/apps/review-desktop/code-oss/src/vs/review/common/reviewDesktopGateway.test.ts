@@ -15,6 +15,7 @@ test("Review Desktop gateway permits only bounded first-party API routes", () =>
 		urlPath: "/reviews-api/abc/file?side=head", method: "GET",
 	});
 	assert.equal(validateReviewDesktopRequest({ path: "/reviews-api/abc/history" }).urlPath, "/reviews-api/abc/history");
+	assert.equal(validateReviewDesktopRequest({ path: "/reviews-api/abc/tree?side=head&path=src" }).urlPath, "/reviews-api/abc/tree?side=head&path=src");
 	assert.equal(validateReviewDesktopRequest({ path: "/reviews-api/abc/stack?version=2" }).urlPath, "/reviews-api/abc/stack?version=2");
 	assert.equal(validateReviewDesktopRequest({ path: "/reviews-api/abc/commits?version=2" }).urlPath, "/reviews-api/abc/commits?version=2");
 	assert.equal(validateReviewDesktopRequest({ path: "/reviews-api/abc/progress?version=2&mode=structural&wait=false" }).urlPath, "/reviews-api/abc/progress?version=2&mode=structural&wait=false");
@@ -25,6 +26,7 @@ test("Review Desktop gateway permits only bounded first-party API routes", () =>
 	assert.throws(() => validateReviewDesktopRequest({ path: "//evil.example/reviews-api" }), /path/);
 	assert.throws(() => validateReviewDesktopRequest({ path: "/control?token=stolen" }), /not allowed/);
 	assert.throws(() => validateReviewDesktopRequest({ path: "/reviews-api/abc/file", method: "POST" }), /not allowed/);
+	assert.throws(() => validateReviewDesktopRequest({ path: "/reviews-api/abc/tree", method: "POST" }), /not allowed/);
 	assert.throws(() => validateReviewDesktopRequest({ path: "/reviews-api/abc/arbitrary" }), /not allowed/);
 	assert.throws(() => validateReviewDesktopRequest({ path: "/reviews-api/abc/progress", method: "POST" }), /not allowed/);
 	assert.throws(() => validateReviewDesktopRequest({ path: "/reviews-api/sharing/account", method: "POST" }), /not allowed/);

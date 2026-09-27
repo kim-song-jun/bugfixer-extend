@@ -47,6 +47,7 @@ const ROUTES: readonly { readonly method: string; readonly pattern: RegExp }[] =
 	{ method: "POST", pattern: /^\/reviews-api(?:\/[A-Za-z0-9_-]+)?\/commands$/ },
 	{ method: "POST", pattern: /^\/reviews-api\/[A-Za-z0-9_-]+\/navigator$/ },
 	{ method: "POST", pattern: /^\/reviews-api\/[A-Za-z0-9_-]+\/(?:copy-context|telemetry\/(?:event|tab|bug-report))$/ },
+	{ method: "GET", pattern: /^\/reviews-api\/[A-Za-z0-9_-]+\/tree$/ },
 	{ method: "GET", pattern: /^\/reviews-api\/[^/]+\/(?:file|diff|navigator|structural-diff|language-context)$/ },
 	{ method: "GET", pattern: /^\/(?:diffr-config|preferences\/scratchpad|tutorial\/status|install\/status)$/ },
 	{ method: "PUT", pattern: /^\/(?:diffr-config|diffr-config\/summarizer|preferences\/scratchpad)$/ },
