@@ -113,6 +113,11 @@ test("invalid saved tabs are ignored instead of preventing the window from resto
 	]) {
 		assert.equal(serializer.deserialize({} as never, value), undefined);
 	}
+	const taskTarget = { kind: "api-task-review", taskId: "task-1", reviewId: "review-1", version: 7, title: "Pinned" } as const;
+	const taskInput = new ReviewCanvasEditorInput(taskTarget, {} as never);
+	assert.equal(serializer.canSerialize(taskInput), false);
+	assert.equal(serializer.deserialize({} as never, JSON.stringify(taskTarget)), undefined);
+	taskInput.dispose();
 });
 
 

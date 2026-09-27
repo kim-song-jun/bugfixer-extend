@@ -14,6 +14,7 @@
 	type ILoadResult<M, T extends ISandboxConfiguration> = import('../../../platform/window/electron-browser/window.js').ILoadResult<M, T>;
 	type ILoadOptions<T extends ISandboxConfiguration> = import('../../../platform/window/electron-browser/window.js').ILoadOptions<T>;
 	type INativeWindowConfiguration = import('../../../platform/window/common/window.ts').INativeWindowConfiguration;
+	type ReviewWindowLaunch = import('../../../platform/window/common/window.js').ReviewWindowLaunch;
 	type IMainWindowSandboxGlobals = import('../../../base/parts/sandbox/electron-browser/globals.js').IMainWindowSandboxGlobals;
 	type IDesktopMain = import('../../../workbench/electron-browser/desktop.main.js').IDesktopMain;
 
@@ -367,6 +368,30 @@
 		}
 	}
 
+	function isReviewWindowLaunch(value: unknown): value is ReviewWindowLaunch {
+		if (!value || typeof value !== 'object' || !('kind' in value)) {
+			return false;
+		}
+		const launch = value as { kind: unknown; projectId?: unknown; projectName?: unknown };
+		return launch.kind === 'home' || launch.kind === 'sourceNavigator' || (
+			launch.kind === 'project' &&
+			typeof launch.projectId === 'string' && launch.projectId.trim().length > 0 &&
+			typeof launch.projectName === 'string' && launch.projectName.trim().length > 0
+		);
+	}
+
+	function reviewEntryPoint(configuration: ISandboxConfiguration): string {
+		const launch = (configuration as ISandboxConfiguration & { reviewWindowLaunch?: unknown }).reviewWindowLaunch;
+		if (!isReviewWindowLaunch(launch)) {
+			return 'review.desktop.main';
+		}
+		switch (launch.kind) {
+			case 'project': return 'project.desktop.main';
+			case 'sourceNavigator': return 'navigator.desktop.main';
+			case 'home': return 'review.desktop.main';
+		}
+	}
+
 	//#endregion
 
 	//#region Window Helpers
@@ -397,9 +422,7 @@
 
 		// ESM Import
 		try {
-			const entryPoint = 'workspace' in configuration && configuration.workspace
-				? 'navigator.desktop.main'
-				: 'review.desktop.main';
+			const entryPoint = reviewEntryPoint(configuration);
 			const stylesheet = document.querySelector<HTMLLinkElement>('link[href$="review.desktop.main.css"]');
 			if (stylesheet) {
 				stylesheet.href = new URL(`vs/review/${entryPoint}.css`, baseUrl).href;

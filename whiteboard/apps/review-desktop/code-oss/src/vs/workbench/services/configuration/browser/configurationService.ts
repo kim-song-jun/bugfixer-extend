@@ -49,6 +49,7 @@ import { mainWindow } from '../../../../base/browser/window.js';
 import { runWhenWindowIdle } from '../../../../base/browser/dom.js';
 import { renderAsPlaintext } from '../../../../base/browser/markdownRenderer.js';
 import { fixSettingLinks } from '../../preferences/common/preferencesModels.js';
+import type { ReviewWindowLaunch } from '../../../../platform/window/common/window.js';
 
 function getLocalUserConfigurationScopes(userDataProfile: IUserDataProfile, hasRemote: boolean): ConfigurationScope[] | undefined {
 	const isDefaultProfile = userDataProfile.isDefault || userDataProfile.useDefaultFlags?.settings;
@@ -111,7 +112,7 @@ export class WorkspaceService extends Disposable implements IWorkbenchConfigurat
 
 	constructor(
 		{ remoteAuthority, configurationCache }: { remoteAuthority?: string; configurationCache: IConfigurationCache },
-		environmentService: IBrowserWorkbenchEnvironmentService,
+		private readonly environmentService: IBrowserWorkbenchEnvironmentService,
 		private readonly userDataProfileService: IUserDataProfileService,
 		private readonly userDataProfilesService: IUserDataProfilesService,
 		private readonly fileService: IFileService,
@@ -525,7 +526,9 @@ export class WorkspaceService extends Disposable implements IWorkbenchConfigurat
 		const workspaceConfigPath = workspaceIdentifier.configPath;
 		const workspaceFolders = toWorkspaceFolders(this.workspaceConfiguration.getFolders(), workspaceConfigPath, this.uriIdentityService.extUri);
 		const workspaceId = workspaceIdentifier.id;
-		const workspace = new Workspace(workspaceId, workspaceFolders, this.workspaceConfiguration.isTransient(), workspaceConfigPath, uri => this.uriIdentityService.extUri.ignorePathCasing(uri));
+		const launch = (this.environmentService as IBrowserWorkbenchEnvironmentService & { readonly reviewWindowLaunch?: ReviewWindowLaunch }).reviewWindowLaunch;
+		const projectName = launch?.kind === 'project' ? launch.projectName : undefined;
+		const workspace = new Workspace(workspaceId, workspaceFolders, this.workspaceConfiguration.isTransient(), workspaceConfigPath, uri => this.uriIdentityService.extUri.ignorePathCasing(uri), projectName);
 		workspace.initialized = this.workspaceConfiguration.initialized;
 		return workspace;
 	}

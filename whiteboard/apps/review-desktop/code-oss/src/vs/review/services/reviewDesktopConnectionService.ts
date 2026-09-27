@@ -4,16 +4,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter,Event } from "../../base/common/event.js";
-import { Disposable } from "../../base/common/lifecycle.js";
+import { Disposable, type IDisposable, toDisposable } from "../../base/common/lifecycle.js";
+import { ipcRenderer } from "../../base/parts/sandbox/electron-browser/globals.js";
 import { createDecorator } from "../../platform/instantiation/common/instantiation.js";
-import { IMainProcessService } from "../../platform/ipc/common/mainProcessService.js";
 import { IStorageService,StorageScope,StorageTarget } from "../../platform/storage/common/storage.js";
 import {
 REVIEW_DESKTOP_CHANNEL,
 REVIEW_DESKTOP_CONNECTION_VERSION,
-type ReviewDesktopConnection,
 } from "../common/reviewDesktopBootstrap.js";
-import { consumeReviewEventStream } from "../common/reviewEventStream.js";
+import type { ReviewDesktopRequest, ReviewDesktopStreamEvent } from "../common/reviewDesktopGateway.js";
 import {
 type JsonValue,
 	type ReviewDiffrConfig,
@@ -36,10 +35,9 @@ import {
 
 const REVIEW_TUTORIAL_AUTOPREPARE_SUPPRESSED_KEY = "review.tutorial.autoPrepareSuppressed.v1";
 
-export interface ReviewServerConnection {
-	readonly serverUrl: string;
-	readonly token: string;
-	/** The launch's id, minted by the main process; canvas telemetry carries it. */
+interface ReviewDesktopStatus {
+	readonly version: number;
+	readonly instanceId: string;
 	readonly appSessionId: string;
 }
 
@@ -55,7 +53,10 @@ export interface IReviewDesktopConnectionService {
 	/** Fires at control-stream connection/disconnection boundaries, before reuse. */
 	readonly onDidChangeConnection: Event<void>;
 	initialize(): Promise<void>;
-	getConnection(): Promise<ReviewServerConnection>;
+	getAppSessionId(): Promise<string>;
+	/** Authenticated, route-allowlisted JSON request handled by the main process. */
+	request<T>(request: ReviewDesktopRequest): Promise<T>;
+	follow<T>(path: string, signal: AbortSignal, accept: (value: T) => void | Promise<void>, disconnected: (error: unknown) => void, options?: { reconnect?: boolean; onComplete?: () => void }): IDisposable;
 	readDiffrConfig(): Promise<ReviewDiffrConfig>;
 	saveDiffrSummarizer(input: ReviewDiffrSummarizerInput): Promise<ReviewDiffrConfig>;
 	testDiffrSummarizer(input: ReviewDiffrSummarizerInput): Promise<string>;
@@ -103,26 +104,18 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 	 * The main process owns the embedded server's endpoint and credentials and
 	 * publishes them only once it has validated the server's ready event.
 	 */
-	private connection: ReviewDesktopConnection | undefined;
-	private get serverUrl(): string {
-		return this.requireConnection().url;
-	}
-	private get token(): string {
-		return this.requireConnection().token;
-	}
+	private connection: ReviewDesktopStatus | undefined;
 	private get instanceId(): string {
 		return this.requireConnection().instanceId;
 	}
 
 	constructor(
-		@IMainProcessService
-		private readonly mainProcessService: IMainProcessService,
 		@IStorageService private readonly storageService: IStorageService,
 	) {
 		super();
 	}
 
-	private requireConnection(): ReviewDesktopConnection {
+	private requireConnection(): ReviewDesktopStatus {
 		if (!this.connection) {
 			throw new Error("The Whiteboard connection is not established yet.");
 		}
@@ -131,9 +124,7 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 
 	private async connect(): Promise<void> {
 		if (this.connection) return;
-		const connection = (await this.mainProcessService
-			.getChannel(REVIEW_DESKTOP_CHANNEL)
-			.call("getConnection")) as ReviewDesktopConnection;
+		const connection = await ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "getStatus") as ReviewDesktopStatus;
 		if (connection?.version !== REVIEW_DESKTOP_CONNECTION_VERSION) {
 			throw new Error(`Unsupported Whiteboard Desktop connection version: ${String(connection?.version)}.`);
 		}
@@ -148,10 +139,57 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		return this.initializePromise;
 	}
 
-	async getConnection(): Promise<ReviewServerConnection> {
+	async getAppSessionId(): Promise<string> {
 		await this.initialize();
-		const { token, appSessionId } = this.requireConnection();
-		return { serverUrl: this.serverUrl, token, appSessionId };
+		return this.requireConnection().appSessionId;
+	}
+
+	async request<T>(request: ReviewDesktopRequest): Promise<T> {
+		await this.initialize();
+		return this.requestDirect<T>(request);
+	}
+
+	private requestDirect<T>(request: ReviewDesktopRequest): Promise<T> {
+		return ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "request", request) as Promise<T>;
+	}
+
+	follow<T>(path: string, signal: AbortSignal, accept: (value: T) => void | Promise<void>, disconnected: (error: unknown) => void, options: { reconnect?: boolean; onComplete?: () => void } = {}): IDisposable {
+		if (signal.aborted) return toDisposable(() => undefined);
+		const controller = new AbortController();
+		const abort = () => controller.abort();
+		signal.addEventListener("abort", abort, { once: true });
+		let activeId: string | undefined;
+		const connect = async (onConnected: () => void): Promise<void> => {
+			await this.initialize();
+			const started = await ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "streamStart", { path }) as { id: string };
+			activeId = started.id;
+			onConnected();
+			try {
+				while (!controller.signal.aborted) {
+					const frame = await ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "streamNext", { id: started.id }) as ReviewDesktopStreamEvent | { pending: true } | { done: true };
+					if ("pending" in frame) continue;
+					if ("done" in frame) {
+						if (options.reconnect === false) { options.onComplete?.(); return; }
+						throw new Error("Review Desktop stream ended.");
+					}
+					if ("error" in frame) throw new Error(frame.error);
+					await accept(frame.value as T);
+				}
+			} finally {
+				await ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "streamCancel", { id: started.id });
+				if (activeId === started.id) activeId = undefined;
+			}
+		};
+		if (options.reconnect === false) {
+			void connect(() => undefined).catch(error => { if (!controller.signal.aborted) disconnected(error); });
+		} else {
+			void reconnectUntilAborted(controller.signal, connect, { onRetry: disconnected });
+		}
+		return toDisposable(() => {
+			signal.removeEventListener("abort", abort);
+			controller.abort();
+			if (activeId) void ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "streamCancel", { id: activeId });
+		});
 	}
 
 	/**
@@ -161,85 +199,39 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 	 */
 	async readDiffrConfig(): Promise<ReviewDiffrConfig> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/diffr-config`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(30_000),
-		});
-		await this.requireOk(response, "diffr configuration");
-		return parseReviewDiffrConfig(await response.json());
+		return parseReviewDiffrConfig(await this.requestDirect<JsonValue>({ path: "/diffr-config" }));
 	}
 
 	async setDiffrConfigValue(key: string, value: JsonValue): Promise<ReviewDiffrConfig> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/diffr-config`, {
-			method: "PUT",
-			headers: {
-				...this.authHeaders(),
-				"content-type": "application/json",
-			},
-			body: JSON.stringify({ key, value }),
-			signal: AbortSignal.timeout(30_000),
-		});
-		await this.requireOk(response, "diffr configuration");
-		return parseReviewDiffrConfig(await response.json());
+		return parseReviewDiffrConfig(await this.requestDirect<JsonValue>({ path: "/diffr-config", method: "PUT", body: { key, value } }));
 	}
 
 	async readScratchpadEnabled(): Promise<boolean> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/preferences/scratchpad`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(30_000),
-		});
-		await this.requireOk(response, "scratchpad preference");
-		return parseScratchpadPreference(await response.json());
+		return parseScratchpadPreference(await this.requestDirect<unknown>({ path: "/preferences/scratchpad" }));
 	}
 
 	async setScratchpadEnabled(enabled: boolean): Promise<boolean> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/preferences/scratchpad`, {
-			method: "PUT",
-			headers: { ...this.authHeaders(), "content-type": "application/json" },
-			body: JSON.stringify({ enabled }),
-			signal: AbortSignal.timeout(120_000),
-		});
-		await this.requireOk(response, "scratchpad preference");
-		return parseScratchpadPreference(await response.json());
+		return parseScratchpadPreference(await this.requestDirect<unknown>({ path: "/preferences/scratchpad", method: "PUT", body: { enabled } }));
 	}
 
 	async saveDiffrSummarizer(input: ReviewDiffrSummarizerInput): Promise<ReviewDiffrConfig> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/diffr-config/summarizer`, {
-			method: "PUT",
-			headers: { ...this.authHeaders(), "content-type": "application/json" },
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(120_000),
-		});
-		await this.requireOk(response, "summary settings");
-		return parseReviewDiffrConfig(await response.json());
+		return parseReviewDiffrConfig(await this.requestDirect<JsonValue>({ path: "/diffr-config/summarizer", method: "PUT", body: input }));
 	}
 
 	async testDiffrSummarizer(input: ReviewDiffrSummarizerInput): Promise<string> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/diffr-config/summarizer/test`, {
-			method: "POST",
-			headers: { ...this.authHeaders(), "content-type": "application/json" },
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(95_000),
-		});
-		await this.requireOk(response, "summary test");
-		const result: unknown = await response.json();
+		const result: unknown = await this.requestDirect({ path: "/diffr-config/summarizer/test", method: "POST", body: input });
 		if (!isJsonObject(result) || typeof result.summary !== "string") throw new Error("Malformed summary test response.");
 		return result.summary;
 	}
 
 	async getTutorialStatus(): Promise<{ version: 1; reviewUuid: string | null }> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/tutorial/status`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(5_000),
-		});
-		await this.requireOk(response, "Whiteboard tutorial status");
-		const payload = (await response.json()) as {
+		const payload = (await this.requestDirect<unknown>({ path: "/tutorial/status" })) as {
 			version?: unknown;
 			reviewUuid?: unknown;
 		};
@@ -269,23 +261,12 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 
 	private async requestTutorialPreparation(): Promise<void> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/tutorial/prepare`, {
-			method: "POST",
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(120_000),
-		});
-		await this.requireOk(response, "Whiteboard tutorial preparation");
+		await this.requestDirect({ path: "/tutorial/prepare", method: "POST" });
 	}
 
 	async openTutorial(): Promise<ReviewTutorialOpenResponse> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/tutorial/open`, {
-			method: "POST",
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(120_000),
-		});
-		await this.requireOk(response, "Whiteboard tutorial open");
-		const payload = parseReviewTutorialOpenResponse(await response.json());
+		const payload = parseReviewTutorialOpenResponse(await this.requestDirect<JsonValue>({ path: "/tutorial/open", method: "POST" }));
 		this.tutorialPrepareAttempted = true;
 		this.storageService.remove(REVIEW_TUTORIAL_AUTOPREPARE_SUPPRESSED_KEY, StorageScope.APPLICATION);
 		return payload;
@@ -293,12 +274,7 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 
 	async deleteTutorial(): Promise<void> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/tutorial`, {
-			method: "DELETE",
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(30_000),
-		});
-		await this.requireOk(response, "Whiteboard tutorial delete");
+		await this.requestDirect({ path: "/tutorial", method: "DELETE" });
 		this.tutorialPreparePromise = undefined;
 		this.tutorialPrepareAttempted = true;
 		this.storageService.store(
@@ -310,26 +286,10 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		this._onDidChangeLists.fire();
 	}
 
-	/** Raises the server's own error message when it sends one. */
-	private async requireOk(response: Response, what: string): Promise<void> {
-		if (response.ok) {
-			return;
-		}
-		const payload = (await response.json().catch(() => ({}))) as {
-			error?: unknown;
-		};
-		throw new Error(typeof payload.error === "string" ? payload.error : `${what} returned ${response.status}.`);
-	}
-
 	async getCliInstallStatus(): Promise<ReviewCliInstallStatus> {
 		await this.initialize();
 		this.cliInstallStatusPromise ??= (async () => {
-			const response = await fetch(`${this.serverUrl}/install/status`, {
-				headers: this.authHeaders(),
-				signal: AbortSignal.timeout(30_000),
-			});
-			await this.requireOk(response, "Whiteboard install status");
-			return parseReviewCliInstallStatus(await response.json());
+				return parseReviewCliInstallStatus(await this.requestDirect<JsonValue>({ path: "/install/status" }));
 		})().finally(() => {
 			this.cliInstallStatusPromise = undefined;
 		});
@@ -342,50 +302,24 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		trace?: true | { endpoint?: string; bucket?: string; key?: string; secret?: string };
 	}): Promise<ReviewCliInstallApplyResponse> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/install/apply`, {
-			method: "POST",
-			headers: {
-				...this.authHeaders(),
-				"content-type": "application/json",
-			},
-			body: JSON.stringify({
+		const payload = await this.requestDirect<JsonValue>({
+			path: "/install/apply", method: "POST", body: {
 				...(request.autoUpdate ? { autoUpdate: true } : {}),
 				...(request.shim !== undefined ? { shim: request.shim } : {}),
 				...(request.trace !== undefined ? { trace: request.trace } : {}),
-			}),
-			signal: AbortSignal.timeout(120_000),
+			},
 		});
-		const payload: JsonValue = await response.json().catch(() => ({}));
-		if (!response.ok) {
-			const detail = payload as { output?: unknown; error?: unknown };
-			throw new Error(
-				typeof detail.output === "string" && detail.output
-					? detail.output
-					: typeof detail.error === "string"
-						? detail.error
-						: `Whiteboard install returned ${response.status}.`,
-			);
-		}
 		return parseReviewCliInstallApplyResponse(payload);
 	}
 
 	async removeCliInstall(request: { shim?: boolean; trace?: true }): Promise<void> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/install/remove`, {
-			method: "POST",
-			headers: {
-				...this.authHeaders(),
-				"content-type": "application/json",
-			},
-			body: JSON.stringify({
+		await this.requestDirect({
+			path: "/install/remove", method: "POST", body: {
 				...(request.shim ? { shim: true } : {}),
 				...(request.trace ? { trace: true } : {}),
-			}),
-			signal: AbortSignal.timeout(30_000),
+			},
 		});
-		if (!response.ok) {
-			throw new Error(`Whiteboard install remove returned ${response.status}.`);
-		}
 	}
 
 	async removeLegacySkills(): Promise<void> {
@@ -410,14 +344,7 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 
 	private async postCliInstallVerb(verb: "decline" | "skip" | "reset" | "legacy-skills/remove" | "finish-update"): Promise<void> {
 		await this.initialize();
-		const response = await fetch(`${this.serverUrl}/install/${verb}`, {
-			method: "POST",
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(30_000),
-		});
-		if (!response.ok) {
-			throw new Error(`Whiteboard install ${verb} returned ${response.status}.`);
-		}
+		await this.requestDirect({ path: `/install/${verb}`, method: "POST" });
 	}
 
 	attachControl(dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>): void {
@@ -464,11 +391,8 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		const deadline = Date.now() + REVIEW_SERVER_STARTUP_TIMEOUT_MS;
 		while (Date.now() < deadline) {
 			try {
-				const response = await fetch(`${this.serverUrl}/health`, {
-					signal: AbortSignal.timeout(1_000),
-				});
-				const value = (await response.json()) as { instanceId?: unknown };
-				if (response.ok && value.instanceId === this.instanceId) return;
+				const value = await this.requestDirect<{ instanceId?: unknown }>({ path: "/health" });
+				if (value.instanceId === this.instanceId) return;
 			} catch {
 				// The utility host may still be starting.
 			}
@@ -498,17 +422,13 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 		dispatch: (value: JsonValue) => Promise<ReviewVerbResponse>,
 		onConnected: () => void,
 	): Promise<void> {
-		const url = new URL("/control", this.serverUrl);
-		url.searchParams.set("token", this.token);
-		const response = await fetch(url, { signal: this.controller.signal });
-		if (!response.ok || !response.body) {
-			throw new Error(`Desktop control returned ${response.status}.`);
-		}
 		this.connectionChanged.fire();
 		onConnected();
-		await consumeReviewEventStream(
-			response.body,
-			async (value) => {
+		await new Promise<void>((resolve, reject) => {
+			let subscription: IDisposable | undefined;
+			const onAbort = () => { subscription?.dispose(); resolve(); };
+			this.controller.signal.addEventListener("abort", onAbort, { once: true });
+			subscription = this.follow<JsonValue>("/control", this.controller.signal, async (value) => {
 				const frame = parseReviewDesktopVerbFrame(value);
 				let verbResponse: ReviewVerbResponse;
 				try {
@@ -519,25 +439,23 @@ export class ReviewDesktopConnectionService extends Disposable implements IRevie
 						error: error instanceof Error ? error.message : String(error),
 					};
 				}
-				await fetch(`${this.serverUrl}/control/result`, {
-					method: "POST",
-					headers: {
-						...this.authHeaders(),
-						"content-type": "application/json",
-					},
-					body: JSON.stringify({
+				await this.requestDirect({
+					path: "/control/result", method: "POST", body: {
 						id: frame.id,
 						response: verbResponse,
-					}),
-					signal: this.controller.signal,
+					},
 				});
-			},
-			this.controller.signal,
-		).finally(() => this.connectionChanged.fire());
-	}
-
-	private authHeaders(): Record<string, string> {
-		return { "x-review-token": this.token };
+			}, (error) => {
+				this.controller.signal.removeEventListener("abort", onAbort);
+				subscription?.dispose();
+				reject(error);
+			}, { reconnect: false, onComplete: () => {
+				this.controller.signal.removeEventListener("abort", onAbort);
+				subscription?.dispose();
+				reject(new Error("The Whiteboard control stream ended."));
+			} });
+		});
+		this.connectionChanged.fire();
 	}
 }
 

@@ -692,10 +692,19 @@ export function createReviewApi(
     });
     app.post("/repositories", async (context) => {
       const input = z
-        .strictObject({ path: z.string().min(1) })
+        .strictObject({
+          path: z.string().min(1),
+          expectedRoot: z
+            .strictObject({
+              canonicalPath: z.string().min(1),
+              dev: z.string().regex(/^\d+$/),
+              ino: z.string().regex(/^\d+$/),
+            })
+            .optional(),
+        })
         .parse(await readBoundedRequestJson(context.req.raw));
 
-      return context.json(await data!.register(input.path));
+      return context.json(await data!.register(input.path, input.expectedRoot));
     });
     app.post("/pins", async (context) => {
       const input = z

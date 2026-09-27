@@ -29,7 +29,7 @@ import { resolveReviewSourceView, reviewSourceAnchor, reviewSourceComparison, re
 import { REVIEW_LANGUAGE_SOURCE_SCHEME } from "../common/reviewReadonlySource.js";
 import { apiSourceUri, sourceLocation, sourceTreeUri, sourceTreeSelection, REVIEW_API_TREE_SCHEME, REVIEW_API_SOURCE_SCHEME } from "../common/reviewSourceView.js";
 import { IReviewCanvasEditorTabsService } from "./reviewCanvasEditorTabsService.js";
-import { IReviewDesktopConnectionService, reviewResponseError } from "./reviewDesktopConnectionService.js";
+import { IReviewDesktopConnectionService } from "./reviewDesktopConnectionService.js";
 import type { ReviewDiffViewService, ReviewDiffViewSource } from "./reviewDiffViewService.js";
 import type { ReviewEmbeddedEditors } from "./reviewEmbeddedEditors.js";
 
@@ -159,18 +159,12 @@ export class ReviewApiSourceService extends Disposable implements IReviewApiSour
 		route: string,
 		query: Record<string, string | number | undefined>,
 	): Promise<T> {
-		const { serverUrl, token } = await this.session.getConnection();
 		const params = new URLSearchParams(
 			Object.entries(query)
 				.filter(([key, value]) => key !== "reviewId" && value !== undefined)
 				.map(([key, value]) => [key, String(value)]),
 		);
-		const response = await fetch(`${serverUrl}/reviews-api/${encodeURIComponent(reviewId)}${route}?${params}`, {
-			headers: { "x-review-token": token },
-			signal: AbortSignal.timeout(30_000),
-		});
-		if (!response.ok) throw await reviewResponseError(response, `Could not read pinned source (${response.status}).`);
-		return response.json();
+		return this.session.request<T>({ path: `/reviews-api/${encodeURIComponent(reviewId)}${route}?${params}` });
 	}
 
 	private async sourceResource(target: ApiSourceTarget, empty = false): Promise<URI> {

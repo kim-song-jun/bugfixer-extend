@@ -20,7 +20,11 @@ function setup() {
 	const registered: string[] = [];
 	const service = new ReviewApiSourceService(
 		{
-			getConnection: async () => ({ serverUrl: "http://localhost:5570", token: "secret" }),
+			request: async ({ path }: { path: string }) => {
+				const response = await fetch(`http://localhost:5570${path}`, { headers: { "x-review-token": "secret" } });
+				if (!response.ok) throw new Error(`request failed (${response.status})`);
+				return response.json();
+			},
 		} as never,
 		{
 			registerTextModelContentProvider: (scheme: string, value: ITextModelContentProvider) => {

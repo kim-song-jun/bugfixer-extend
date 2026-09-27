@@ -30,13 +30,11 @@ describe("ReviewSessionProvider", () => {
     await session.fetch("/versions");
 
     expect(request).toHaveBeenCalledWith(
-      "http://127.0.0.1:5570/reviews-api/test-review/versions",
-      expect.objectContaining({
-        headers: expect.any(Headers),
-      }),
+      "/reviews-api/test-review/versions",
+      {},
     );
     const requestHeaders = new Headers(request.mock.calls[0]?.[1]?.headers);
-    expect(requestHeaders.get("x-review-token")).toBe("secret-token");
+    expect(requestHeaders.has("x-review-token")).toBe(false);
   });
 
   it("keeps mounted sessions independent when a sibling session unmounts", async () => {
@@ -44,7 +42,7 @@ describe("ReviewSessionProvider", () => {
     const postedB: ReviewVerbRequest[] = [];
 
     const sessionA = testReviewSession(
-      { reviewId: "a", token: "token-a" },
+      { reviewId: "a" },
       {
         post: async (request) => {
           postedA.push(request);
@@ -55,7 +53,7 @@ describe("ReviewSessionProvider", () => {
     );
 
     const sessionB = testReviewSession(
-      { reviewId: "b", token: "token-b" },
+      { reviewId: "b" },
       {
         post: async (request) => {
           postedB.push(request);

@@ -425,6 +425,12 @@ export interface IWindowConfiguration {
 	filesToMerge?: IPath[];
 }
 
+/** Product-owned identity for selecting a Review desktop workbench entry point. */
+export type ReviewWindowLaunch =
+	| { readonly kind: 'home' }
+	| { readonly kind: 'sourceNavigator' }
+	| { readonly kind: 'project'; readonly projectId: string; readonly projectName: string };
+
 export interface IOSConfiguration {
 	readonly release: string;
 	readonly hostname: string;
@@ -432,6 +438,8 @@ export interface IOSConfiguration {
 }
 
 export interface INativeWindowConfiguration extends IWindowConfiguration, NativeParsedArgs, ISandboxConfiguration {
+	/** Selected by the main process; never inferred from renderer input or workspace paths. */
+	reviewWindowLaunch: ReviewWindowLaunch;
 	mainPid: number;
 	handle?: VSBuffer;
 

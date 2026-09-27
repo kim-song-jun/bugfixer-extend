@@ -32,8 +32,7 @@ export interface ReviewSession {
     init?: RequestInit,
     options?: ReviewRequestOptions,
   ) => Promise<Response>;
-  fetchUrl(url: string | URL, init?: RequestInit): Promise<Response>;
-  beaconUrl(endpoint: `/${string}`): string;
+  fetchUrl(url: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   wasmUrl(): string;
   storageKey(
     namespace: string,
@@ -51,12 +50,26 @@ export function createReviewSession(
   const config = bridge.config;
   const appSessionId = bridge.appSessionId ?? createReviewAppSessionId();
 
-  const request = (url: string | URL, init: RequestInit = {}) => {
-    const headers = new Headers(init.headers);
-
-    if (config.token) headers.set("x-review-token", config.token);
-
-    return bridge.request(String(url), { ...init, headers });
+  const request = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const requestInput = input instanceof Request ? input : undefined;
+    const target = new URL(
+      requestInput ? requestInput.url : String(input),
+      "http://review.invalid",
+    );
+    if (
+      target.origin !== "http://review.invalid" ||
+      !target.pathname.startsWith("/reviews-api/") ||
+      target.hash ||
+      target.searchParams.has("token")
+    ) {
+      throw new Error(
+        "Review requests must use an allowlisted relative API path.",
+      );
+    }
+    return bridge.request(
+      `${target.pathname}${target.search}`,
+      init ?? requestInput,
+    );
   };
 
   const apiUrl = (
@@ -64,8 +77,7 @@ export function createReviewSession(
     requestOptions?: ReviewRequestOptions,
   ) =>
     jsonReviewApiUrl(config, options.jsonReview.id, endpoint, {
-      version: options.jsonReview.version(),
-      tokenInQuery: requestOptions?.tokenInQuery,
+      version: requestOptions?.version ?? options.jsonReview.version(),
     });
 
   return {
@@ -77,7 +89,6 @@ export function createReviewSession(
     fetch: (endpoint, init, options) =>
       request(apiUrl(endpoint, options), init),
     fetchUrl: request,
-    beaconUrl: (endpoint) => apiUrl(endpoint, { tokenInQuery: true }),
     wasmUrl: () => reviewWasmUrl(config),
     storageKey: (namespace, ...parts) =>
       reviewStorageKey(config, namespace, ...parts),

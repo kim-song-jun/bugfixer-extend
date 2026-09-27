@@ -7,6 +7,7 @@ import path from "node:path";
 import type {
   ReviewCanvasBridge,
   ReviewInlineEditorSpec,
+  ReviewRuntimeConfig,
   ReviewSurfaceEvent,
 } from "@dev.fast/review-protocol";
 import { Hono } from "hono";
@@ -27,10 +28,109 @@ let store: ReviewStore, directory: string;
 
 let canvas: ReturnType<typeof mount> | undefined;
 
+function apiCanvasTestBridge(
+  config: Partial<ReviewRuntimeConfig> = {},
+  overrides: Partial<Omit<ReviewCanvasBridge, "config">> = {},
+): ReviewCanvasBridge {
+  const bridge = testReviewBridge(config, overrides);
+  const request = overrides.request ?? bridge.request;
+
+  return {
+    ...bridge,
+    follow<T>(
+      path: string,
+      signal: AbortSignal,
+      accept: (value: T) => void | Promise<void>,
+      disconnected: (error: unknown) => void,
+    ) {
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      const subscription = { dispose: () => void reader?.cancel() };
+      void (async () => {
+        try {
+          const response = await request(path, { signal });
+          if (!response.ok || !response.body)
+            throw new Error(`Review API stream failed (${response.status}).`);
+          reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let pending = "";
+          while (!signal.aborted) {
+            const { value, done } = await reader.read();
+            pending += decoder.decode(value, { stream: !done });
+            let newline: number;
+            while ((newline = pending.indexOf("\n")) !== -1) {
+              const line = pending.slice(0, newline).trim();
+              pending = pending.slice(newline + 1);
+              if (line) await accept(JSON.parse(line) as T);
+            }
+            if (done) break;
+          }
+          if (pending.trim()) await accept(JSON.parse(pending.trim()) as T);
+        } catch (error) {
+          if (!signal.aborted) disconnected(error);
+        }
+      })();
+      return subscription;
+    },
+  };
+}
+
 const pins = { repositoryId: "repo", base: "base", head: "head" };
 
 const command = <Operation,>(operation: Operation, leaseId?: string) =>
   store.execute({ commandId: randomUUID(), leaseId, operation });
+
+it("keeps a task review on its authorized version while the live review advances", async () => {
+  const review = await command({ type: "create", title: "Pinned task review", pins });
+  const inserted = await command({
+    type: "edit",
+    reviewId: review.reviewId,
+    edit: { type: "insert", content: { type: "markdown", markdown: "Authorized snapshot text" } },
+  });
+  const app = new Hono().route("/reviews-api", createReviewApi(store));
+  app.get("/reviews-api/:id/commits", (context) => context.json([]));
+  const notify = vi.fn();
+  const bridge = apiCanvasTestBridge({}, {
+    request: async (url, init) => app.request(url, init),
+    notify,
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  await act(async () => {
+    canvas = mount(container, {
+      kind: "api",
+      reviewId: review.reviewId,
+      version: inserted.version,
+      taskId: "task-1",
+      taskLocked: true,
+      bridge,
+    });
+  });
+  await act(async () => {
+    await vi.waitFor(() => expect(container.textContent).toContain("Authorized snapshot text"));
+  });
+  await act(async () => {
+    await command({
+      type: "edit",
+      reviewId: review.reviewId,
+      edit: { type: "insert", content: { type: "markdown", markdown: "Later live text" } },
+    });
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+  expect(container.textContent).toContain("Authorized snapshot text");
+  expect(container.textContent).not.toContain("Later live text");
+  const backToLatest = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "Back to latest");
+  expect(backToLatest).toBeTruthy();
+  await act(async () => backToLatest!.click());
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(container.textContent).toContain("Authorized snapshot text");
+  expect(container.textContent).not.toContain("Later live text");
+  expect(notify).toHaveBeenCalledWith({ kind: "error", text: "This task review is pinned to an immutable version." });
+});
 
 beforeEach(() => {
   localStorage.clear();
@@ -89,7 +189,7 @@ it("mounts the existing canvas and preserves a section's DOM and collapsed state
   const ready = vi.fn<() => void>();
   const displayedVersion = vi.fn<(version: number) => void>();
 
-  const bridge = testReviewBridge(
+  const bridge = apiCanvasTestBridge(
     {},
     {
       request: async (url, init) => {
@@ -354,7 +454,7 @@ it("dismisses immediately through the API without changing the saved document", 
   const app = new Hono().route("/reviews-api", createReviewApi(store));
   app.get("/reviews-api/:id/commits", (context) => context.json([]));
 
-  const bridge = testReviewBridge(
+  const bridge = apiCanvasTestBridge(
     {},
     { request: async (url, init) => app.request(url, init) },
   );
@@ -415,7 +515,7 @@ it.each([false, true])(
       context.json(trace),
     );
 
-    const bridge = testReviewBridge(
+    const bridge = apiCanvasTestBridge(
       {},
       {
         request: async (url, init) => app.request(url, init),
@@ -533,7 +633,7 @@ it("renders a code peek block on its pinned side without fetching source text", 
   const requested: string[] = [];
   const created: ReviewInlineEditorSpec[] = [];
 
-  const bridge = testReviewBridge(
+  const bridge = apiCanvasTestBridge(
     {},
     {
       request: async (url, init) => {
@@ -646,7 +746,7 @@ it("copies prose and code from the displayed historical JSON review", async () =
   const app = new Hono().route("/reviews-api", createReviewApi(store, data));
   const listeners = new Set<Parameters<ReviewCanvasBridge["subscribe"]>[0]>();
 
-  const bridge = testReviewBridge(
+  const bridge = apiCanvasTestBridge(
     {},
     {
       request: async (url, init) => app.request(url, init),
@@ -810,7 +910,7 @@ it("degrades to the retained document and an unavailable Commits tab when the ch
     const commits = vi.fn<() => Response>(() => new Response("[]"));
     app.get("/reviews-api/:id/commits", commits);
 
-    const bridge = testReviewBridge(
+    const bridge = apiCanvasTestBridge(
       {},
       { request: async (url, init) => app.request(url, init) },
     );
@@ -849,11 +949,15 @@ it("leaves window errors to the workbench it shares a window with", async () => 
   app.get("/reviews-api/:id/commits", (context) => context.json([]));
   const telemetry: string[] = [];
 
-  const bridge = testReviewBridge(
+  const bridge = apiCanvasTestBridge(
     {},
     {
       request: async (url, init) => {
-        if (new URL(String(url)).pathname.endsWith("/telemetry/event"))
+        if (
+          new URL(String(url), "http://review.invalid").pathname.endsWith(
+            "/telemetry/event",
+          )
+        )
           telemetry.push(JSON.parse(String(init?.body)).name);
 
         return app.request(url, init);

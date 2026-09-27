@@ -308,6 +308,9 @@ export class LabelService extends Disposable implements ILabelService {
 
 	getWorkspaceLabel(workspace: IWorkspace | IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier | URI, options?: { verbose: Verbosity }): string {
 		if (isWorkspace(workspace)) {
+			if (workspace.name && workspace.configuration) {
+				return this.doGetWorkspaceLabel(workspace.configuration, options, workspace.name);
+			}
 			const identifier = toWorkspaceIdentifier(workspace);
 			if (isSingleFolderWorkspaceIdentifier(identifier) || isWorkspaceIdentifier(identifier)) {
 				return this.getWorkspaceLabel(identifier, options);
@@ -334,7 +337,7 @@ export class LabelService extends Disposable implements ILabelService {
 		return '';
 	}
 
-	private doGetWorkspaceLabel(workspaceUri: URI, options?: { verbose: Verbosity }): string {
+	private doGetWorkspaceLabel(workspaceUri: URI, options?: { verbose: Verbosity }, displayName?: string): string {
 
 		// Workspace: Untitled
 		if (isUntitledWorkspace(workspaceUri, this.environmentService)) {
@@ -347,8 +350,8 @@ export class LabelService extends Disposable implements ILabelService {
 		}
 
 		// Workspace: Saved
-		let filename = basename(workspaceUri);
-		if (filename.endsWith(WORKSPACE_EXTENSION)) {
+		let filename = displayName ?? basename(workspaceUri);
+		if (!displayName && filename.endsWith(WORKSPACE_EXTENSION)) {
 			filename = filename.substr(0, filename.length - WORKSPACE_EXTENSION.length - 1);
 		}
 
@@ -358,7 +361,9 @@ export class LabelService extends Disposable implements ILabelService {
 				label = filename; // skip suffix for short label
 				break;
 			case Verbosity.LONG:
-				label = localize('workspaceNameVerbose', "{0} (Workspace)", this.getUriLabel(joinPath(dirname(workspaceUri), filename)));
+				label = displayName
+					? localize('workspaceName', "{0} (Workspace)", displayName)
+					: localize('workspaceNameVerbose', "{0} (Workspace)", this.getUriLabel(joinPath(dirname(workspaceUri), filename)));
 				break;
 			case Verbosity.MEDIUM:
 			default:

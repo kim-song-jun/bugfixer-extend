@@ -123,6 +123,12 @@ export const uploadSchema = z.discriminatedUnion("kind", [
 const unavailableCheckout = () =>
   new ReviewInputError("The selected local checkout is unavailable.", 404);
 
+export interface ExpectedRepositoryRootIdentity {
+  canonicalPath: string;
+  dev: string;
+  ino: string;
+}
+
 /** File reads cannot name the root or a directory; tree reads can. */
 function checkRelativePath(file: string) {
   inputError(() => checkSourcePath(file));
@@ -210,6 +216,7 @@ export class LocalReviewData {
   /** Desktop language services borrow the registered checkout, never create one. */
   async liveFile(repositoryId: string, file: string, text: string) {
     try {
+      await this.assertRegisteredRootIdentity(repositoryId);
       const rootPath = await realpath(this.store.repositoryPath(repositoryId));
       const localPath = await localSourcePath(rootPath, file);
 
@@ -273,6 +280,7 @@ export class LocalReviewData {
     let rootPath: string;
 
     try {
+      await this.assertRegisteredRootIdentity(repositoryId);
       rootPath = await realpath(this.store.repositoryPath(repositoryId));
     } catch (error) {
       if (error instanceof ReviewInputError && error.status !== 404)
@@ -324,6 +332,7 @@ export class LocalReviewData {
       source.anchor,
     );
 
+    await this.assertRegisteredRootIdentity(pins.repositoryId);
     const repository = this.store.repositoryPath(pins.repositoryId);
     const side = source.side ?? "head";
 
@@ -540,6 +549,8 @@ export class LocalReviewData {
   }): AsyncGenerator<StructuralDiffEvent> {
     if (file !== undefined) checkRelativePath(file);
 
+    await this.assertRegisteredRootIdentity(pins.repositoryId);
+
     const rootPath = await ensureReviewPinnedCheckout({
       rootPath: this.store.repositoryPath(pins.repositoryId),
       ref: pins.head,
@@ -576,6 +587,17 @@ export class LocalReviewData {
 
     if (entry) for (const watcher of entry.watchers) watcher.close();
     this.worktrees.delete(repositoryId);
+  }
+
+  private async invalidateRepositoryPath(rootPath: string) {
+    const registered = this.store
+      .repositories()
+      .filter((repository) => repository.path === rootPath);
+    for (const repository of registered) {
+      await this.closeReader(repository.id);
+      this.repositories.delete(repository.id);
+      this.forgetWorktree(repository.id);
+    }
   }
 
   private async worktreeState(repositoryId: string, vcs: LocalVcs) {
@@ -650,7 +672,8 @@ export class LocalReviewData {
   }
 
   /** Detected once; dropped when the root vanishes or detection found nothing. */
-  private vcs(repositoryId: string): Promise<LocalVcs | null> {
+  private async vcs(repositoryId: string): Promise<LocalVcs | null> {
+    await this.assertRegisteredRootIdentity(repositoryId);
     const cached = this.repositories.get(repositoryId);
 
     if (cached && (!cached.vcs || existsSync(cached.vcs.rootPath)))
@@ -684,6 +707,26 @@ export class LocalReviewData {
     this.repositories.set(repositoryId, entry);
 
     return entry.detection;
+  }
+
+  /** Compare a registered root with its durable identity before VCS use. */
+  async assertRegisteredRootIdentity(repositoryId: string) {
+    const expected = this.store.repositoryIdentity(repositoryId);
+    const root = this.store.repositoryPath(repositoryId);
+    const canonicalPath = await realpath(root).catch(() => {
+      throw unavailableCheckout();
+    });
+    if (canonicalPath !== root) throw unavailableCheckout();
+    if (!expected) return false;
+    const info = await stat(canonicalPath, { bigint: true }).catch(() => null);
+    if (
+      !info?.isDirectory() ||
+      expected.canonicalPath !== canonicalPath ||
+      expected.dev !== info.dev.toString() ||
+      expected.ino !== info.ino.toString()
+    )
+      throw new ReviewInputError("Registered repository root was replaced.", 409);
+    return true;
   }
 
   /** None once closed: a read suspended across close() gets its own process. */
@@ -742,7 +785,7 @@ export class LocalReviewData {
     return { rootPath };
   }
 
-  async register(root: string) {
+  async register(root: string, expectedRoot?: ExpectedRepositoryRootIdentity) {
     const resolved = await realpath(root).catch(() => {
       throw new ReviewInputError(
         "Repository path does not exist or is not readable.",
@@ -758,9 +801,36 @@ export class LocalReviewData {
 
     if (!vcs) throw new ReviewInputError("Choose a Git or jj repository.");
 
-    const repository = this.store.registerRepository(
-      await realpath(vcs.rootPath),
-    );
+    const canonicalPath = await realpath(vcs.rootPath);
+    const info = await stat(canonicalPath, { bigint: true }).catch(() => null);
+    if (!info?.isDirectory())
+      throw new ReviewInputError("Repository root is unavailable.", 409);
+    const identity = {
+      canonicalPath,
+      dev: info.dev.toString(),
+      ino: info.ino.toString(),
+    };
+    if (
+      expectedRoot &&
+      (expectedRoot.canonicalPath !== identity.canonicalPath ||
+        expectedRoot.dev !== identity.dev ||
+        expectedRoot.ino !== identity.ino)
+    ) {
+      await this.invalidateRepositoryPath(canonicalPath);
+      throw new ReviewInputError("Repository root identity does not match.", 409);
+    }
+
+    let repository: ReturnType<ReviewStore["registerRepository"]>;
+    try {
+      repository = this.store.registerRepository(
+        canonicalPath,
+        expectedRoot ? identity : undefined,
+      );
+    } catch (error) {
+      await this.invalidateRepositoryPath(canonicalPath);
+      throw error;
+    }
+    if (expectedRoot) await this.assertRegisteredRootIdentity(repository.id);
 
     // Registration may follow replacement of a managed repository at the same
     // path (for example resetting the tutorial). Reopen its Git reader too.
@@ -796,6 +866,7 @@ export class LocalReviewData {
 
     if (!snapshot.pins) return undefined;
 
+    await this.assertRegisteredRootIdentity(snapshot.pins.repositoryId);
     if (!existsSync(this.store.repositoryPath(snapshot.pins.repositoryId)))
       throw unavailableCheckout();
 

@@ -22,7 +22,7 @@ import {
 import { reviewSourceQuery, type ReviewSourceSelection } from "../common/reviewProtocol.js";
 import { REVIEW_LANGUAGE_SOURCE_SCHEME } from "../common/reviewReadonlySource.js";
 import { sourceLocation, sourceSelectionIdentity, REVIEW_API_SOURCE_SCHEME } from "../common/reviewSourceView.js";
-import { IReviewDesktopConnectionService, reviewResponseError } from "./reviewDesktopConnectionService.js";
+import { IReviewDesktopConnectionService } from "./reviewDesktopConnectionService.js";
 
 export const IReviewCanvasEditorTabsService = createDecorator<IReviewCanvasEditorTabsService>(
 	"reviewCanvasEditorTabsService",
@@ -30,8 +30,9 @@ export const IReviewCanvasEditorTabsService = createDecorator<IReviewCanvasEdito
 
 export interface IReviewCanvasEditorTabsService {
 	readonly _serviceBrand: undefined;
-	inputFor(target: Extract<ReviewCanvasEditorTarget, { kind: "api" | "api-source" | "home" }>): ReviewCanvasEditorInput;
+	inputFor(target: Extract<ReviewCanvasEditorTarget, { kind: "api" | "api-task-review" | "api-source" | "home" }>): ReviewCanvasEditorInput;
 	openApiReview(reviewId: string, title: string, active?: boolean): Promise<ReviewCanvasEditorInput>;
+	openTaskApiReview(taskId: string, reviewId: string, version: number, title: string): Promise<ReviewCanvasEditorInput>;
 	openApiSource(selection: ReviewSourceSelection, title: string): Promise<void>;
 	openSourceEditor(editor: IUntypedEditorInput): Promise<boolean>;
 	openSourceReferences(resource: URI, position: { readonly lineNumber: number; readonly column: number }): Promise<boolean>;
@@ -74,14 +75,16 @@ export class ReviewCanvasEditorTabsService extends Disposable implements IReview
 	}
 
 	inputFor(
-		target: Extract<ReviewCanvasEditorTarget, { kind: "api" | "api-source" | "home" }>,
+		target: Extract<ReviewCanvasEditorTarget, { kind: "api" | "api-task-review" | "api-source" | "home" }>,
 	): ReviewCanvasEditorInput {
 		const key =
 			target.kind === "home"
 				? "home"
 				: target.kind === "api"
 					? `api:${target.reviewId}`
-					: `api:${target.reviewId}:source:${sourceSelectionIdentity(target.selection)}`;
+					: target.kind === "api-task-review"
+						? `task-api:${encodeURIComponent(target.taskId)}:${encodeURIComponent(target.reviewId)}:${target.version}`
+						: `api:${target.reviewId}:source:${sourceSelectionIdentity(target.selection)}`;
 		let input = this.inputs.get(key);
 		if (!input || input.isDisposed()) {
 			input = this.instantiationService.createInstance(ReviewCanvasEditorInput, target);
@@ -94,6 +97,15 @@ export class ReviewCanvasEditorTabsService extends Disposable implements IReview
 	async openApiReview(reviewId: string, title: string, active = true): Promise<ReviewCanvasEditorInput> {
 		const input = this.inputFor({ kind: "api", reviewId, title });
 		await this.openReviewInput(input, active);
+		return input;
+	}
+
+	async openTaskApiReview(taskId: string, reviewId: string, version: number, title: string): Promise<ReviewCanvasEditorInput> {
+		if (!taskId || !reviewId || !Number.isSafeInteger(version) || version < 0) {
+			throw new Error("A task-pinned Review requires a task, review, and valid immutable version.");
+		}
+		const input = this.inputFor({ kind: "api-task-review", taskId, reviewId, version, title });
+		await this.openReviewInput(input, true);
 		return input;
 	}
 
@@ -147,15 +159,11 @@ export class ReviewCanvasEditorTabsService extends Disposable implements IReview
 	}
 
 	private async navigatorWorkspace(reviewId: string, values: Record<string, string | number | undefined>): Promise<{ workspacePath: string; filePath?: string }> {
-		const { serverUrl, token } = await this.desktopConnection.getConnection();
 		const query = new URLSearchParams(Object.entries(values).filter(([key, value]) => key !== "reviewId" && value !== undefined).map(([key, value]) => [key, String(value)]));
-		const response = await fetch(`${serverUrl}/reviews-api/${encodeURIComponent(reviewId)}/navigator${query.size ? `?${query}` : ""}`, {
+		return this.desktopConnection.request<{ workspacePath: string; filePath?: string }>({
+			path: `/reviews-api/${encodeURIComponent(reviewId)}/navigator${query.size ? `?${query}` : ""}`,
 			method: "POST",
-			headers: { "x-review-token": token },
-			signal: AbortSignal.timeout(60_000),
 		});
-		if (!response.ok) throw await reviewResponseError(response, "Could not open the code navigator.");
-		return response.json();
 	}
 
 	openSettings(active: boolean): Promise<ReviewCanvasEditorInput> {
@@ -207,13 +215,14 @@ export class ReviewCanvasEditorTabsService extends Disposable implements IReview
 	}
 
 	async closeReview(reviewUuid: string): Promise<void> {
-		const keys = [...this.inputs.keys()].filter(
-			(key) =>
+		const keys = [...this.inputs.entries()].filter(
+			([key, input]) =>
 				key === reviewUuid ||
 				key === `api:${reviewUuid}` ||
 				key.startsWith(`api:${reviewUuid}:source:`) ||
+				(input.target.kind === "api-task-review" && input.target.reviewId === reviewUuid) ||
 				key.startsWith(`${reviewUuid}@`),
-		);
+		).map(([key]) => key);
 		const reviewInputs = keys
 			.map((key) => this.inputs.get(key))
 			.filter((input): input is ReviewCanvasEditorInput => Boolean(input && !input.isDisposed()));

@@ -14,7 +14,6 @@ import {
 	registerWorkbenchContribution2,
 	WorkbenchPhase,
 } from "../../../workbench/common/contributions.js";
-import { ReviewApiClient } from "../../common/reviewProtocol.js";
 import { IReviewCanvasEditorTabsService } from "../../services/reviewCanvasEditorTabsService.js";
 import { IReviewDesktopConnectionService } from "../../services/reviewDesktopConnectionService.js";
 
@@ -26,11 +25,10 @@ async function openShare(
 	progress: IProgressService,
 ) {
 	try {
-		const client = new ReviewApiClient(await session.getConnection());
 		await progress.withProgress({ location: ProgressLocation.Notification, title: "Opening shared review" }, async (reporter) => {
-			const started = await client.post<{ reviewId: string }>("/sharing/import", { url });
+			const started = await session.request<{ reviewId: string }>({ path: "/reviews-api/sharing/import", method: "POST", body: { url } });
 			for (;;) {
-				const status = await client.read<{ stage: string; title?: string; error?: string }>(`/sharing/import/${started.reviewId}`);
+				const status = await session.request<{ stage: string; title?: string; error?: string }>({ path: `/reviews-api/sharing/import/${encodeURIComponent(started.reviewId)}` });
 				if (status.stage === "error") throw new Error(status.error ?? "Could not open the shared session.");
 				if (status.stage === "ready") {
 					await tabs.openApiReview(started.reviewId, status.title ?? "Shared review");

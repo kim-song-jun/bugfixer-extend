@@ -87,9 +87,7 @@ const loopbackOriginSchema = urlSchema("origin", (url) =>
 );
 
 export const ReviewRuntimeConfigSchema = z.strictObject({
-  serverUrl: loopbackOriginSchema,
   reviewId: requiredString,
-  token: stringAllowEmpty,
   wasmUrl: absoluteUrlSchema,
   appVersion: requiredString.max(100),
   theme: reviewThemeSchema,
@@ -321,6 +319,12 @@ export interface ReviewCanvasBridge {
   readonly inlineEditors: ReviewInlineEditorFactory;
   readonly diffView: ReviewDiffViewFactory;
   request(url: string, init?: RequestInit): Promise<Response>;
+  follow<T>(
+    path: string,
+    signal: AbortSignal,
+    accept: (value: T) => void | Promise<void>,
+    disconnected: (error: unknown) => void,
+  ): ReviewDisposable;
   post(request: ReviewVerbRequest): Promise<ReviewVerbResponse>;
   subscribe(listener: (event: ReviewSurfaceEvent) => void): ReviewDisposable;
   currentTheme(): ReviewTheme;
@@ -632,6 +636,8 @@ export type ReviewCanvasContent =
       softwareMapEnabled?: boolean;
       reviewId: string;
       version?: number;
+      taskId?: string;
+      taskLocked?: boolean;
       bridge: ReviewCanvasBridge;
       setTitle?(title: string): void;
       setSourceView?(

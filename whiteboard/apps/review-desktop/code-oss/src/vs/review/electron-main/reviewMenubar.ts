@@ -3,9 +3,10 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, BrowserWindow, Menu, MenuItem } from "electron";
+import { app, BrowserWindow, dialog, Menu, MenuItem } from "electron";
 import { RunOnceScheduler } from "../../base/common/async.js";
 import { CancellationToken } from "../../base/common/cancellation.js";
+import { toErrorMessage } from "../../base/common/errorMessage.js";
 import { Disposable } from "../../base/common/lifecycle.js";
 import { isMacintosh } from "../../base/common/platform.js";
 import { localize } from "../../nls.js";
@@ -41,6 +42,12 @@ function labelsOf(menu: Menu): string {
     .join(" | ");
 }
 
+export interface ReviewProjectMenuActions {
+  createProject(): Promise<void>;
+  listProjects(): readonly { readonly id: string; readonly name: string }[];
+  openProject(projectId: string): Promise<void>;
+}
+
 /** Keep the upstream menu implementation scoped to native workspace windows. */
 class NavigatorMenubar extends Menubar {
   protected override install(): void {
@@ -68,6 +75,7 @@ export class ReviewMenubarMainService
 {
   declare readonly _serviceBrand: undefined;
   private readonly nativeMenu: Promise<NavigatorMenubar>;
+  private projectMenuActions: ReviewProjectMenuActions | undefined;
 
   private readonly scheduler = this._register(
     new RunOnceScheduler(() => this.install(), 0),
@@ -132,6 +140,11 @@ export class ReviewMenubarMainService
     (await this.nativeMenu).updateMenu(menus, windowId);
   }
 
+  setProjectMenuActions(actions: ReviewProjectMenuActions): void {
+    this.projectMenuActions = actions;
+    this.schedule();
+  }
+
   private schedule(): void {
     // Electron cannot mutate a live menu, so every change reinstalls the whole
     // menu. Buffer overlapping changes into one rebuild.
@@ -158,6 +171,12 @@ export class ReviewMenubarMainService
         submenu: applicationMenu,
       }),
     );
+    if (this.projectMenuActions) {
+      menubar.append(new MenuItem({
+        label: localize("review.menu.file", "File"),
+        submenu: this.createProjectMenu(this.projectMenuActions),
+      }));
+    }
     const editMenuItem = new MenuItem({
       label: localize("review.menu.edit", "Edit"),
       role: "editMenu",
@@ -189,6 +208,38 @@ export class ReviewMenubarMainService
     this.logService.info(
       `reviewMenubar#install - menus [${labelsOf(menubar)}], application menu [${labelsOf(applicationMenu)}]`,
     );
+  }
+
+  private createProjectMenu(actions: ReviewProjectMenuActions): Menu {
+    const menu = new Menu();
+    menu.append(new MenuItem({
+      label: localize("review.menu.newProject", "New Project..."),
+      click: () => this.runProjectAction(() => actions.createProject()),
+    }));
+    const projects = actions.listProjects();
+    const openMenu = new Menu();
+    if (projects.length === 0) {
+      openMenu.append(new MenuItem({ label: localize("review.menu.noProjects", "No projects yet"), enabled: false }));
+    } else {
+      for (const project of projects) {
+        openMenu.append(new MenuItem({
+          label: project.name,
+          click: () => this.runProjectAction(() => actions.openProject(project.id)),
+        }));
+      }
+    }
+    menu.append(new MenuItem({ label: localize("review.menu.openProject", "Open Project"), submenu: openMenu }));
+    return menu;
+  }
+
+  private runProjectAction(action: () => Promise<void>): void {
+    void action().catch(error => {
+      this.logService.error(error);
+      dialog.showErrorBox(
+        localize("review.menu.projectErrorTitle", "Project unavailable"),
+        toErrorMessage(error),
+      );
+    }).finally(() => this.schedule());
   }
 
   private createApplicationMenu(): Menu {

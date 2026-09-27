@@ -15,7 +15,7 @@ import { parse } from '../../base/common/jsonc.js';
 import { getPathLabel } from '../../base/common/labels.js';
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../base/common/lifecycle.js';
 import { Schemas, VSCODE_AUTHORITY } from '../../base/common/network.js';
-import { join, posix } from '../../base/common/path.js';
+import { basename, join, posix } from '../../base/common/path.js';
 import { IProcessEnvironment, isLinux, isLinuxSnap, isMacintosh, isWindows, OS } from '../../base/common/platform.js';
 import { assertType } from '../../base/common/types.js';
 import { URI } from '../../base/common/uri.js';
@@ -143,6 +143,28 @@ import { ReviewMenubarMainService } from '../../review/electron-main/reviewMenub
 import { ReviewUpdateDialog } from '../../review/electron-main/reviewUpdateDialog.js';
 import { REVIEW_DESKTOP_CHANNEL, ReviewDesktopChannel } from '../../review/electron-main/reviewDesktopChannel.js';
 import { WorkspaceDatabase } from '../../workspace/electron-main/workspaceDatabase.js';
+import { ProjectWorkspaceService } from '../../workspace/electron-main/projectWorkspaceService.js';
+import { WorkspaceDashboardChannel } from '../../workspace/electron-main/workspaceDashboardChannel.js';
+import { WORKSPACE_DASHBOARD_CHANNEL } from '../../workspace/common/workspaceDashboardProtocol.js';
+import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/workspaceProviderRunsChannel.js';
+import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspaceProviderRunProtocol.js';
+import { WorkspaceKnowledgeChannel } from '../../workspace/electron-main/workspaceKnowledgeChannel.js';
+import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../workspace/common/workspaceKnowledgeProtocol.js';
+import { WorkspaceConnectorChannel } from '../../workspace/electron-main/workspaceConnectorChannel.js';
+import { WORKSPACE_CONNECTOR_CHANNEL } from '../../workspace/common/workspaceConnectorProtocol.js';
+import { KeychainVault, resolveKeychainVaultHelper } from '../../workspace/electron-main/keychainVault.js';
+import { WorkspacePackageConnectorChannel } from '../../workspace/electron-main/workspacePackageConnectorChannel.js';
+import { WORKSPACE_PACKAGE_CONNECTOR_CHANNEL } from '../../workspace/common/workspacePackageConnectorProtocol.js';
+import { WorkspaceEgoCaptureChannel } from '../../workspace/electron-main/workspaceEgoCaptureChannel.js';
+import { WORKSPACE_EGO_CAPTURE_CHANNEL } from '../../workspace/common/workspaceBrowserCaptureProtocol.js';
+import { EgoBrowserCliRuntime } from '../../workspace/electron-main/browserCapture/egoCaptureRuntime.js';
+import { WorkspaceConventionAgentChannel } from '../../workspace/electron-main/workspaceConventionAgentChannel.js';
+import { WORKSPACE_CONVENTION_AGENT_CHANNEL } from '../../workspace/common/workspaceConventionAgentProtocol.js';
+import { WorkspaceReviewBridgeChannel } from '../../workspace/electron-main/workspaceReviewBridgeChannel.js';
+import { WORKSPACE_REVIEW_BRIDGE_CHANNEL } from '../../workspace/common/workspaceReviewBridgeProtocol.js';
+import { WorkspaceE2eChannel } from '../../workspace/electron-main/workspaceE2eChannel.js';
+import { WORKSPACE_E2E_CHANNEL } from '../../workspace/common/workspaceE2eProtocol.js';
+import { EgoBrowserE2eRuntime } from '../../workspace/electron-main/browserCapture/egoE2eRuntime.js';
 
 /**
  * The main VS Code application. There will only ever be one instance,
@@ -159,6 +181,12 @@ export class CodeApplication extends Disposable {
 	private auxiliaryWindowsMainService: IAuxiliaryWindowsMainService | undefined;
 	private nativeHostMainService: INativeHostMainService | undefined;
 	private reviewDesktopHost: ReviewDesktopHost | undefined;
+	private workspaceDatabase: WorkspaceDatabase | undefined;
+	private workspaceProviderRuns: WorkspaceProviderRunsChannel | undefined;
+	private workspaceConventionAgent: WorkspaceConventionAgentChannel | undefined;
+	private workspaceEgoCapture: WorkspaceEgoCaptureChannel | undefined;
+	private workspaceE2e: WorkspaceE2eChannel | undefined;
+	private workspaceDataShutdown: Promise<void> | undefined;
 
 	constructor(
 		private readonly mainProcessNodeIpcServer: NodeIPCServer,
@@ -178,6 +206,22 @@ export class CodeApplication extends Disposable {
 
 		this.configureSession();
 		this.registerListeners();
+	}
+
+	private closeWorkspaceData(): Promise<void> {
+		return this.workspaceDataShutdown ??= (async () => {
+			try {
+				const results = await Promise.allSettled([
+					this.workspaceProviderRuns?.shutdown(),
+					this.workspaceConventionAgent?.shutdown(),
+					this.workspaceEgoCapture?.shutdown(),
+					this.workspaceE2e?.shutdown(),
+				]);
+				const failures = results.filter(result => result.status === 'rejected').map(result => (result as PromiseRejectedResult).reason);
+				if (failures.length) { throw new AggregateError(failures, 'Workspace services did not shut down cleanly.'); }
+			}
+			finally { this.workspaceDatabase?.close(); }
+		})();
 	}
 
 	private configureSession(): void {
@@ -461,7 +505,10 @@ export class CodeApplication extends Disposable {
 	private registerListeners(): void {
 
 		// Dispose on shutdown
-		Event.once(this.lifecycleMainService.onWillShutdown)(() => this.dispose());
+		Event.once(this.lifecycleMainService.onWillShutdown)(event => {
+			event.join('workspace provider runs and database', this.closeWorkspaceData());
+			this.dispose();
+		});
 
 		// Contextmenu via IPC support
 		registerContextMenuListener();
@@ -665,9 +712,12 @@ export class CodeApplication extends Disposable {
 		const appInstantiationService = await this.initServices(machineId, sqmId, devDeviceId, sharedProcessReady);
 
 		// Keep one app-owned workspace store for this profile. Review owns its own database.
+		let workspaceDatabase: WorkspaceDatabase;
 		try {
-			const workspaceDatabase = WorkspaceDatabase.open(join(this.environmentMainService.userDataPath, 'workspace.db'));
-			this._register(toDisposable(() => workspaceDatabase.close()));
+			workspaceDatabase = this.workspaceDatabase = WorkspaceDatabase.open(join(this.environmentMainService.userDataPath, 'workspace.db'));
+			this._register(toDisposable(() => {
+				void this.closeWorkspaceData().catch(() => this.logService.error('Could not close workspace provider runs and database cleanly.'));
+			}));
 		} catch (error) {
 			this.logService.error(`Could not open workspace.db: ${toErrorMessage(error)}`);
 			dialog.showErrorBox(
@@ -676,6 +726,40 @@ export class CodeApplication extends Disposable {
 			);
 			throw error;
 		}
+		const projectWorkspaces = new ProjectWorkspaceService(workspaceDatabase, this.environmentMainService.userDataPath);
+		const windowsMainService = appInstantiationService.invokeFunction(accessor => accessor.get(IWindowsMainService));
+		windowsMainService.setReviewProjectWorkspaceResolver(workspaceConfigPath => {
+			const view = workspaceDatabase.findProjectViewByDescriptorUri(workspaceConfigPath.toString());
+			if (!view) { return undefined; }
+			const project = projectWorkspaces.ensureDescriptor(view.projectId).project;
+			return { projectId: project.id, projectName: project.name };
+		});
+		this._register(toDisposable(() => windowsMainService.setReviewProjectWorkspaceResolver(undefined)));
+		const openProject = async (projectId: string): Promise<void> => {
+			const project = projectWorkspaces.ensureDescriptor(projectId);
+			await windowsMainService.open({
+				context: OpenContext.API,
+				cli: this.environmentMainService.args,
+				urisToOpen: [{ workspaceUri: URI.file(project.descriptorPath) }],
+				forceNewWindow: true,
+				reviewWindowLaunch: { kind: 'project', projectId, projectName: project.project.name },
+			});
+		};
+		const menubar = appInstantiationService.invokeFunction(accessor => accessor.get(IMenubarMainService)) as ReviewMenubarMainService;
+		menubar.setProjectMenuActions({
+			createProject: async () => {
+				const choice = await dialog.showOpenDialog({
+					title: localize('projectChooseFolder', "Choose a project folder"),
+					properties: ['openDirectory', 'createDirectory'],
+				});
+				const folderPath = choice.filePaths[0];
+				if (choice.canceled || !folderPath) { return; }
+				const project = projectWorkspaces.createProject(basename(folderPath), folderPath);
+				await openProject(project.project.id);
+			},
+			listProjects: () => workspaceDatabase.listProjects(),
+			openProject,
+		});
 
 		// Review Desktop owns one global embedded server for the application lifetime.
 		this.reviewDesktopHost = this._register(appInstantiationService.createInstance(ReviewDesktopHost));
@@ -1258,10 +1342,92 @@ export class CodeApplication extends Disposable {
 
 		const disposables = this._register(new DisposableStore());
 
-		// Review Desktop hands the renderer its server endpoint over IPC rather
-		// than through bootstrap environment variables.
+		// Review operations are brokered through the main process for code windows.
+		const windowsMainService = accessor.get(IWindowsMainService);
 		if (this.reviewDesktopHost) {
-			mainProcessElectronServer.registerChannel(REVIEW_DESKTOP_CHANNEL, new ReviewDesktopChannel(this.reviewDesktopHost));
+			const reviewDesktopChannel = new ReviewDesktopChannel(this.reviewDesktopHost,
+				sender => !!windowsMainService.getWindowByWebContents(sender));
+			validatedIpcMain.handle(REVIEW_DESKTOP_CHANNEL, (event, command: string, arg: unknown) => {
+				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Review Desktop IPC is only available to the application main frame.'); }
+				return reviewDesktopChannel.call(event.sender, command, arg);
+			});
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(REVIEW_DESKTOP_CHANNEL)));
+		}
+		if (this.workspaceDatabase) {
+			const dashboardChannel = new WorkspaceDashboardChannel(this.workspaceDatabase, windowsMainService, {
+				deleteTask: (projectId, taskId, expectedRevision, requestId) => {
+					const providerRuns = this.workspaceProviderRuns;
+					if (!providerRuns) { throw new Error('Provider run cleanup is unavailable.'); }
+					return providerRuns.deleteTask(projectId, taskId, expectedRevision, requestId);
+				},
+				reconcileTaskCleanup: taskId => {
+					const providerRuns = this.workspaceProviderRuns;
+					if (!providerRuns) { throw new Error('Provider run cleanup is unavailable.'); }
+					return providerRuns.reconcileTaskCleanup(taskId);
+				},
+			});
+			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, accessor.get(ILogService));
+			providerRuns.recoverPendingTaskDeletions();
+			validatedIpcMain.handle(WORKSPACE_DASHBOARD_CHANNEL, (event, command: string, arg: unknown) => dashboardChannel.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
+			validatedIpcMain.handle(WORKSPACE_PROVIDER_RUNS_CHANNEL, (event, command: string, arg: unknown) => providerRuns.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_PROVIDER_RUNS_CHANNEL)));
+			const knowledgeChannel = new WorkspaceKnowledgeChannel(this.workspaceDatabase, dashboardChannel);
+			validatedIpcMain.handle(WORKSPACE_KNOWLEDGE_CHANNEL, (event, command: string, arg: unknown) => knowledgeChannel.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_KNOWLEDGE_CHANNEL)));
+			const connectorChannel = new WorkspaceConnectorChannel(
+				this.workspaceDatabase, dashboardChannel,
+				() => new KeychainVault(resolveKeychainVaultHelper(app.isPackaged, process.resourcesPath)),
+				accessor.get(ILogService),
+			);
+			validatedIpcMain.handle(WORKSPACE_CONNECTOR_CHANNEL, (event, command: string, arg: unknown) => connectorChannel.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_CONNECTOR_CHANNEL)));
+			const packageConnectorChannel = new WorkspacePackageConnectorChannel(
+				this.workspaceDatabase, dashboardChannel,
+				async (sender, review) => {
+					const window = BrowserWindow.fromWebContents(sender);
+					if (!window || window.isDestroyed()) { throw new Error('The project window closed before connector approval.'); }
+					const result = await dialog.showMessageBox(window, {
+						type: 'question',
+						title: 'Install connector package',
+						message: `${review.name} ${review.version}`,
+						detail: [
+							review.description,
+							`Package: ${review.packageId}`,
+							`Status: ${review.trustStatus}`,
+							`Allowed domains:\n${review.domains.join('\n')}`,
+							'Account access: none',
+							`Sources and collection rules:\n${review.sourceRules.map(source => `${source.label}: ${source.method} https://${source.domain}${source.path}; fields ${source.fields.join(', ')}; pagination ${source.paginated ? 'yes' : 'no'}`).join('\n')}`,
+							`Signing key SHA-256: ${review.fingerprint}`,
+							`Manifest SHA-256: ${review.manifestDigest}`,
+						].join('\n\n'),
+						buttons: ['Cancel', 'Install package'], cancelId: 0, defaultId: 0, noLink: true,
+					});
+					return result.response === 1;
+				},
+			);
+			validatedIpcMain.handle(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, (event, command: string, arg: unknown) => packageConnectorChannel.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL)));
+			const egoCapture = this.workspaceEgoCapture = new WorkspaceEgoCaptureChannel(
+				this.workspaceDatabase, dashboardChannel, new EgoBrowserCliRuntime(),
+			);
+			validatedIpcMain.handle(WORKSPACE_EGO_CAPTURE_CHANNEL, (event, command: string, arg: unknown) => egoCapture.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_EGO_CAPTURE_CHANNEL)));
+			const e2e = this.workspaceE2e = new WorkspaceE2eChannel(
+				this.workspaceDatabase, dashboardChannel, new EgoBrowserE2eRuntime(), join(this.environmentMainService.userDataPath, 'e2e-evidence'),
+			);
+			validatedIpcMain.handle(WORKSPACE_E2E_CHANNEL, (event, command: string, arg: unknown) => e2e.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_E2E_CHANNEL)));
+			const conventionAgent = this.workspaceConventionAgent = new WorkspaceConventionAgentChannel(
+				this.workspaceDatabase, dashboardChannel, accessor.get(ILogService),
+			);
+			validatedIpcMain.handle(WORKSPACE_CONVENTION_AGENT_CHANNEL, (event, command: string, arg: unknown) => conventionAgent.call(event.sender, command, arg));
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_CONVENTION_AGENT_CHANNEL)));
+			if (this.reviewDesktopHost) {
+				const reviewBridge = new WorkspaceReviewBridgeChannel(this.workspaceDatabase, dashboardChannel, this.reviewDesktopHost);
+				validatedIpcMain.handle(WORKSPACE_REVIEW_BRIDGE_CHANNEL, (event, command: string, arg: unknown) => reviewBridge.call(event.sender, command, arg));
+				this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_REVIEW_BRIDGE_CHANNEL)));
+			}
 		}
 
 		const launchChannel = ProxyChannel.fromService(accessor.get(ILaunchMainService), disposables, { disableMarshalling: true });

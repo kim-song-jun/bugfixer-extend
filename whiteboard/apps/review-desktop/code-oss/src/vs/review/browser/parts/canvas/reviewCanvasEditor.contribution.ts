@@ -5,39 +5,23 @@
 
 import { Event } from "../../../../base/common/event.js";
 import { Disposable } from "../../../../base/common/lifecycle.js";
-import { SyncDescriptor } from "../../../../platform/instantiation/common/descriptors.js";
-import { Registry } from "../../../../platform/registry/common/platform.js";
-import { EditorPaneDescriptor, IEditorPaneRegistry } from "../../../../workbench/browser/editor.js";
+import './reviewCanvasEditorRegistration.js';
 import {
 	IWorkbenchContribution,
 	registerWorkbenchContribution2,
 	WorkbenchPhase,
 } from "../../../../workbench/common/contributions.js";
 import {
-	EditorExtensions,
 	EditorResourceAccessor,
 	SideBySideEditor,
-	type IEditorFactoryRegistry,
 } from "../../../../workbench/common/editor.js";
 import { IEditorGroupsService } from "../../../../workbench/services/editor/common/editorGroupsService.js";
 import { IEditorService } from "../../../../workbench/services/editor/common/editorService.js";
 import { IReviewApiCatalogService } from "../../../services/reviewApiCatalogService.js";
 import { IReviewCanvasEditorTabsService } from "../../../services/reviewCanvasEditorTabsService.js";
 import { IReviewDesktopConnectionService } from "../../../services/reviewDesktopConnectionService.js";
-import { ReviewApiEditorSerializer } from "./reviewApiEditorSerializer.js";
 import { ReviewCanvasEditorInput } from "./reviewCanvasEditorInput.js";
-import { ReviewCanvasEditorPane } from "./reviewCanvasPart.js";
 import { isReviewReadonlySource } from "../../../common/reviewReadonlySource.js";
-
-Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(
-	ReviewCanvasEditorInput.ID,
-	ReviewApiEditorSerializer,
-);
-
-Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
-	EditorPaneDescriptor.create(ReviewCanvasEditorPane, ReviewCanvasEditorPane.ID, "Whiteboard"),
-	[new SyncDescriptor(ReviewCanvasEditorInput)],
-);
 
 class ReviewCanvasEditorContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = "workbench.contrib.devfast.reviewCanvasEditor";

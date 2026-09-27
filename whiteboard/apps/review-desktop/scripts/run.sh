@@ -49,6 +49,43 @@ fi
 # shellcheck source=freshness.sh
 source "$APP_DIR/scripts/freshness.sh"
 
+# The native helper is macOS-only and is rebuilt from its checked-in source so
+# development uses the same root-bound path checks as the signed app.
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  if [[ -n "$PACKAGED_ROOT" ]]; then
+    BOUND_CHECKOUT_BINARY="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/bound-checkout"
+    KEYCHAIN_VAULT_BINARY="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/keychain-vault"
+    REVIEW_NODE_EXECUTABLE="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/node"
+  else
+    BOUND_CHECKOUT_SOURCE="$APP_DIR/native/bound-checkout/bound-checkout.c"
+    BOUND_CHECKOUT_BINARY="$CHECKOUT/.build/dev-fast/bound-checkout"
+    mkdir -p "$(dirname "$BOUND_CHECKOUT_BINARY")"
+    clang -std=c11 -Wall -Wextra -Werror -O2 "$BOUND_CHECKOUT_SOURCE" -o "$BOUND_CHECKOUT_BINARY"
+    chmod 755 "$BOUND_CHECKOUT_BINARY"
+    KEYCHAIN_VAULT_SOURCE="$APP_DIR/native/keychain-vault/keychain-vault.c"
+    KEYCHAIN_VAULT_BINARY="$CHECKOUT/.build/dev-fast/keychain-vault"
+    mkdir -p "$(dirname "$KEYCHAIN_VAULT_BINARY")"
+    clang -std=c11 -Wall -Wextra -Werror -O2 "$KEYCHAIN_VAULT_SOURCE" -o "$KEYCHAIN_VAULT_BINARY" -framework CoreFoundation -framework Security
+    chmod 755 "$KEYCHAIN_VAULT_BINARY"
+    REVIEW_NODE_EXECUTABLE="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+  fi
+  if [[ ! -x "$BOUND_CHECKOUT_BINARY" ]]; then
+    echo "Review Desktop bound-checkout helper is missing or not executable at $BOUND_CHECKOUT_BINARY" >&2
+    exit 1
+  fi
+  export DEV_FAST_REVIEW_BOUND_CHECKOUT_HELPER="$BOUND_CHECKOUT_BINARY"
+  if [[ ! -x "$KEYCHAIN_VAULT_BINARY" ]]; then
+    echo "Review Desktop Keychain vault helper is missing or not executable at $KEYCHAIN_VAULT_BINARY" >&2
+    exit 1
+  fi
+  export DEV_FAST_REVIEW_KEYCHAIN_VAULT_HELPER="$KEYCHAIN_VAULT_BINARY"
+  if [[ ! -x "$REVIEW_NODE_EXECUTABLE" ]]; then
+    echo "Review Desktop standalone Node runtime is missing or not executable at $REVIEW_NODE_EXECUTABLE" >&2
+    exit 1
+  fi
+  export DEV_FAST_REVIEW_NODE_EXECUTABLE="$REVIEW_NODE_EXECUTABLE"
+fi
+
 REVIEW_USER_HOME="$(node -p "require('node:os').homedir()")"
 REVIEW_BASE_HOME="${DEV_REVIEW_HOME:-$REVIEW_USER_HOME/.dev}"
 STATE_ROOT="${DEV_FAST_REVIEW_DESKTOP_STATE_ROOT:-$REVIEW_BASE_HOME/review-desktop/state}"

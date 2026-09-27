@@ -45,7 +45,11 @@ it("clears a lens without destroying the full comparison's native state", async 
     },
   );
 
-  const client = new ReviewApiClient(session.config, session.bridge.request);
+  const client = new ReviewApiClient(
+    undefined,
+    session.bridge.request,
+    session.bridge.follow,
+  );
 
   const snapshot: Snapshot = {
     reviewId: "test-session",

@@ -15,9 +15,7 @@ import {
 } from "./host/review-session";
 
 export const TEST_REVIEW_CONFIG = {
-  serverUrl: "http://127.0.0.1:5570",
   reviewId: "test-session",
-  token: "secret-token",
   wasmUrl: "vscode-file://review/libavoid.wasm",
   appVersion: "0.0.13",
   theme: "dark",
@@ -45,6 +43,7 @@ export function testReviewBridge(
       },
     },
     request: (url, init) => reviewFetchUrl({}, url, init),
+    follow: (_path, _signal, _accept, _disconnected) => ({ dispose() {} }),
     post: async () => ({ ok: true }),
     subscribe: () => ({ dispose() {} }),
     currentTheme: () => "dark",

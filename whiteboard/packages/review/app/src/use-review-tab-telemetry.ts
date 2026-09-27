@@ -29,9 +29,8 @@ export function useReviewTabTelemetry(activeView: ReviewView): void {
     Parameters<typeof createReviewTabDwellTracker>[0]["send"]
   >((payload, options) => {
     createReviewTabTelemetryTransport({
-      endpoint: session.beaconUrl("/telemetry/tab"),
-      navigator: window.navigator,
-      fetch: window.fetch.bind(window),
+      endpoint: session.apiUrl("/telemetry/tab"),
+      fetch: session.fetchUrl,
     })(payload, options);
   });
 

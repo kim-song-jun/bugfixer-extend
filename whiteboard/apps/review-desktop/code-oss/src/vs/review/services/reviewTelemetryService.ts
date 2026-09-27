@@ -5,15 +5,11 @@
 
 import { IConfigurationService } from "../../platform/configuration/common/configuration.js";
 import { createDecorator } from "../../platform/instantiation/common/instantiation.js";
-import { IMainProcessService } from "../../platform/ipc/common/mainProcessService.js";
+import { ipcRenderer } from "../../base/parts/sandbox/electron-browser/globals.js";
 import { ILifecycleService } from "../../workbench/services/lifecycle/common/lifecycle.js";
-import {
-	REVIEW_DESKTOP_CHANNEL,
-	type ReviewDesktopConnection,
-} from "../common/reviewDesktopBootstrap.js";
+import { REVIEW_DESKTOP_CHANNEL } from "../common/reviewDesktopBootstrap.js";
 import { REVIEW_TELEMETRY_SETTING } from "../common/reviewConfigurationDefaults.js";
 import type { ReviewErrorReport } from "../common/reviewErrorReport.js";
-import { reviewTelemetryEventRequest } from "../common/reviewTelemetryRequest.js";
 
 type ReviewTelemetryProperties = Record<string, string | number | boolean>;
 
@@ -53,20 +49,18 @@ export class ReviewTelemetryService implements IReviewTelemetryService {
 
 	private readonly queued: QueuedReviewTelemetryEvent[] = [];
 	private readonly inFlight = new Set<Promise<void>>();
-	private readonly connectionPromise: Promise<ReviewDesktopConnection | undefined>;
-	private connection: ReviewDesktopConnection | undefined;
+  private readonly connectionPromise: Promise<{ appSessionId: string } | undefined>;
+  private connection: { appSessionId: string } | undefined;
 
 	constructor(
-		@IMainProcessService mainProcessService: IMainProcessService,
 		@IConfigurationService
 		private readonly configurationService: IConfigurationService,
 		@ILifecycleService lifecycleService: ILifecycleService,
 	) {
-		this.connectionPromise = mainProcessService
-			.getChannel(REVIEW_DESKTOP_CHANNEL)
-			.call<ReviewDesktopConnection>("getConnection")
+		this.connectionPromise = (ipcRenderer
+			.invoke(REVIEW_DESKTOP_CHANNEL, "getStatus") as Promise<{ appSessionId: string }>)
 			.then((connection) => {
-				this.connection = connection;
+				this.connection = connection as { appSessionId: string };
 				this.drainQueue();
 				return connection;
 			})
@@ -113,16 +107,9 @@ export class ReviewTelemetryService implements IReviewTelemetryService {
 		const connection = this.connection;
 		if (!connection) return;
 		let request: Promise<void>;
-		request = fetch(
-			`${connection.url}/telemetry/event`,
-			reviewTelemetryEventRequest(
-				connection,
-				event,
-				{ keepalive: true },
-			),
-		)
+		request = ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, "request", { path: "/telemetry/event", method: "POST", body: event })
 			.then(() => undefined)
-			.catch(() => undefined)
+			.catch(error => { console.error("[Whiteboard] telemetry send failed", error); })
 			.finally(() => this.inFlight.delete(request));
 		this.inFlight.add(request);
 	}

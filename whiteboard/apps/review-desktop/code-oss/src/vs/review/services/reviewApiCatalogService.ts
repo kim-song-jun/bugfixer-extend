@@ -10,7 +10,7 @@ import { Disposable, toDisposable } from "../../base/common/lifecycle.js";
 import { generateUuid } from "../../base/common/uuid.js";
 import { createDecorator } from "../../platform/instantiation/common/instantiation.js";
 import { ILogService } from "../../platform/log/common/log.js";
-import { ReviewApiClient, type ReviewApiSummary } from "../common/reviewProtocol.js";
+import { type ReviewApiSummary } from "../common/reviewProtocol.js";
 import { IReviewDesktopConnectionService } from "./reviewDesktopConnectionService.js";
 
 export const IReviewApiCatalogService = createDecorator<IReviewApiCatalogService>("reviewApiCatalogService");
@@ -35,7 +35,6 @@ export class ReviewApiCatalogService extends Disposable implements IReviewApiCat
 	readonly onDidCloseReview = this.closed.event;
 	reviews: ReviewApiSummary[] = [];
 	loaded = false;
-	private client?: ReviewApiClient;
 	private started?: Promise<void>;
 	private connectionAbort?: AbortController;
 
@@ -71,7 +70,6 @@ export class ReviewApiCatalogService extends Disposable implements IReviewApiCat
 		const abort = new AbortController();
 		this.connectionAbort = abort;
 		const mode = this.configuration.getValue<boolean>(REVIEW_STRUCTURAL_DIFF_SETTING) === false ? "textual" : "structural";
-		const client = new ReviewApiClient(await this.session.getConnection());
 		this._register(toDisposable(() => abort.abort()));
 		const accept = (reviews: ReviewApiSummary[]) => {
 			if (abort.signal.aborted) return;
@@ -86,27 +84,43 @@ export class ReviewApiCatalogService extends Disposable implements IReviewApiCat
 		};
 		// Surface a failed first list instead of reporting an empty catalog:
 		// tab restoration would otherwise drop every persisted API tab.
-		accept(await client.read<ReviewApiSummary[]>(`?mode=${mode}`, abort.signal));
-		this.client = client;
-		void client.follow<ReviewApiSummary[]>(null, abort.signal, accept, (error) =>
+		accept(await this.session.request<ReviewApiSummary[]>({ path: `/reviews-api?mode=${mode}` }));
+		const subscriptions = encodeURIComponent(JSON.stringify([{ reviewId: null, mode }]));
+		this.session.follow<unknown>(`/reviews-api/watch?subscriptions=${subscriptions}`, abort.signal, frame => {
+			const reviews = parseCatalogWatchFrame(frame);
+			if (reviews) { accept(reviews); }
+		}, (error) =>
 			this.log.warn("[Whiteboard] API review list disconnected:", error),
-			mode,
 		);
 	}
 
 	async attention(reviewId: string, action: "view" | "dismiss" | "restore"): Promise<void> {
 		await this.initialize();
-		await this.client!.post("/commands", {
+		await this.session.request({ path: "/reviews-api/commands", method: "POST", body: {
 			commandId: generateUuid(),
 			operation: { type: "attention", reviewId, action },
-		});
+		} });
 	}
 
 	async deleteReview(reviewId: string): Promise<void> {
 		await this.initialize();
-		await this.client!.post("/commands", {
+		await this.session.request({ path: "/reviews-api/commands", method: "POST", body: {
 			commandId: generateUuid(),
 			operation: { type: "delete", reviewId },
-		});
+		} });
 	}
+}
+
+/** The watch endpoint sends one result per subscription, not a bare catalog. */
+export function parseCatalogWatchFrame(frame: unknown): ReviewApiSummary[] | undefined {
+	if (!Array.isArray(frame) || frame.length !== 1) { throw new Error("Review catalog watch returned an invalid subscription frame."); }
+	const entry: unknown = frame[0];
+	if (entry === null) { return undefined; }
+	if (typeof entry !== "object" || Array.isArray(entry)) { throw new Error("Review catalog watch returned an invalid entry."); }
+	const item = entry as Record<string, unknown>;
+	if (typeof item.error === "string") { throw new Error(item.error); }
+	if (!Array.isArray(item.value) || item.value.some(review => !review || typeof review !== "object" || Array.isArray(review) || typeof review.reviewId !== "string" || typeof review.title !== "string")) {
+		throw new Error("Review catalog watch returned invalid reviews.");
+	}
+	return item.value as ReviewApiSummary[];
 }

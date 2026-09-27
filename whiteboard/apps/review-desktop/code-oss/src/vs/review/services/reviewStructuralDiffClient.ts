@@ -11,38 +11,38 @@ export class StructuralDiffClient implements StructuralDiffStream {
 	constructor(private readonly connection: IReviewDesktopConnectionService, private readonly comparison: ReviewSourceView) { }
 
 	async *streamComparison(signal: AbortSignal): AsyncGenerator<StructuralEvent> {
-		const { serverUrl, token } = await this.connection.getConnection();
 		signal.throwIfAborted();
 		const query = new URLSearchParams(Object.entries(reviewSourceQuery(this.comparison)).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
-		const response = await fetch(`${serverUrl}/reviews-api/${encodeURIComponent(this.comparison.reviewId)}/structural-diff?${query}`, {
-			headers: { "x-review-token": token }, signal,
-		});
-		if (!response.ok) throw new Error((await response.json()).error ?? "Structural diff request failed.");
-		if (!response.body || !response.headers.get("content-type")?.includes("ndjson")) {
-			await response.body?.cancel();
-			throw new Error("The Whiteboard host must be updated to stream structural diffs.");
-		}
-		const reader = response.body.getReader();
-		const decoder = new TextDecoder();
-		let buffer = "";
+		const values: StructuralEvent[] = [];
+		let failure: unknown;
+		let completed = false;
+		let wake: (() => void) | undefined;
+		const notify = () => { const current = wake; wake = undefined; current?.(); };
+		const onAbort = () => { completed = true; notify(); };
+		signal.addEventListener("abort", onAbort, { once: true });
+		const subscription = this.connection.follow<unknown>(
+			`/reviews-api/${encodeURIComponent(this.comparison.reviewId)}/structural-diff?${query}`,
+			signal,
+			value => {
+				const event = decodeReviewStructuralDiffEvent(JSON.stringify(value));
+				if (event.type === "error") throw new Error(event.message);
+				values.push(event);
+				notify();
+			},
+			error => { failure = error; completed = true; notify(); },
+			{ reconnect: false, onComplete: () => { completed = true; notify(); } },
+		);
 		try {
 			while (true) {
-				const chunk = await reader.read();
-				buffer += decoder.decode(chunk.value, { stream: !chunk.done });
-				const lines = buffer.split("\n");
-				buffer = lines.pop()!;
-				if (chunk.done && buffer.trim()) { lines.push(buffer); buffer = ""; }
-				for (const line of lines) {
-					if (!line.trim()) continue;
-					const event = decodeReviewStructuralDiffEvent(line);
-					if (event.type === "error") throw new Error(event.message);
-					yield event;
-				}
-				if (chunk.done) break;
+				const value = values.shift();
+				if (value) { yield value; continue; }
+				if (failure) throw failure;
+				if (completed || signal.aborted) return;
+				await new Promise<void>(resolve => { wake = resolve; });
 			}
 		} finally {
-			await reader.cancel().catch(() => { });
-			reader.releaseLock();
+			signal.removeEventListener("abort", onAbort);
+			subscription.dispose();
 		}
 	}
 }

@@ -113,7 +113,31 @@ const reviewCanvasPolicy = createTrustedTypesPolicy("reviewCanvas", {
 	createScriptURL: (value: string) => value,
 });
 
-const requestReviewApi: typeof fetch = (url, init) => fetch(url, init);
+function requestReviewApiThroughDesktop(connection: IReviewDesktopConnectionService): typeof fetch {
+	return async (input, init) => {
+		const request = input instanceof Request ? input : undefined;
+		const target = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://review.invalid");
+		if (target.origin !== "http://review.invalid" || !target.pathname.startsWith("/reviews-api/") || target.hash || target.searchParams.has("token")) {
+			throw new Error("Review API requests must use an allowlisted relative path.");
+		}
+		const options = init ?? request;
+		const method = (options?.method ?? "GET").toUpperCase();
+		if (method !== "GET" && method !== "POST") throw new Error(`Review API method is not allowed: ${method}`);
+		let body: unknown;
+		if (options?.body !== undefined && options.body !== null) {
+			const text = typeof options.body === "string" ? options.body : request ? await request.clone().text() : undefined;
+			if (text === undefined) throw new Error("Review API request body must be JSON.");
+			body = JSON.parse(text);
+			if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Review API request body must be a JSON object.");
+		}
+		const result = await connection.request<unknown>({
+			path: `${target.pathname}${target.search}`,
+			method,
+			...(body === undefined ? {} : { body }),
+		});
+		return result === undefined ? new Response(null, { status: 204 }) : Response.json(result);
+	};
+}
 
 function isTutorialStepId(step: unknown): step is TutorialStepId {
 	return typeof step === "string" && REVIEW_TUTORIAL_STEP_IDS.includes(step as TutorialStepId);
@@ -332,7 +356,7 @@ export class ReviewCanvasEditorPane extends EditorPane {
 		if (generation !== this.loadGeneration || token.isCancellationRequested) {
 			return;
 		}
-		if (input.target.kind === "api" && this.readyInput === input && this.renderedInput === input) {
+		if ((input.target.kind === "api" || input.target.kind === "api-task-review") && this.readyInput === input && this.renderedInput === input) {
 			// clearInput ended the session when this review was hidden; the mounted canvas is already ready.
 			this.sessionTelemetry.start(input.target.reviewId);
 			this.sessionTelemetry.resumed();
@@ -352,10 +376,11 @@ export class ReviewCanvasEditorPane extends EditorPane {
 			return;
 		}
 		this.modelSubscription.clear();
-		if (input.target.kind === "api") {
+		if (input.target.kind === "api" || input.target.kind === "api-task-review") {
 			try {
 				const { reviewId } = input.target;
-				const [connection, assets] = await Promise.all([this.desktopConnection.getConnection(), this.loadAssets()]);
+				const taskReview = input.target.kind === "api-task-review" ? input.target : undefined;
+				const [appSessionId, assets] = await Promise.all([this.desktopConnection.getAppSessionId(), this.loadAssets()]);
 				if (generation !== this.loadGeneration || token.isCancellationRequested) return;
 				this.renderedInput = input;
 				this.setCanvasState("active", reviewId);
@@ -363,7 +388,9 @@ export class ReviewCanvasEditorPane extends EditorPane {
 				void this.apiCatalog
 					.attention(reviewId, "view")
 					.catch((error) => this.logService.warn("[Whiteboard] Could not mark session viewed:", error));
-				let sourceSelection: ReviewSourceSelection = { reviewId, kind: "current" };
+				let sourceSelection: ReviewSourceSelection = taskReview
+					? { reviewId, kind: "version", version: taskReview.version }
+					: { reviewId, kind: "current" };
 				let sourceView: ReviewSourceView = resolveReviewSourceView({ reviewId, version: 0, pins: {} });
 				const source = this.apiSource.canvas(() => sourceView, this.inlineEditors, this.diffViews);
 				const closeTutorial = () => void this.group.closeEditor(input);
@@ -395,6 +422,9 @@ export class ReviewCanvasEditorPane extends EditorPane {
 						},
 						kind: "api",
 						reviewId,
+						version: taskReview?.version,
+						taskId: taskReview?.taskId,
+						taskLocked: taskReview !== undefined,
 						structuralDiffEnabled: this.currentStructuralDiffEnabled(),
 						softwareMapEnabled: this.currentSoftwareMapEnabled(),
 						setTitle: (title) => input.setApiTitle(title),
@@ -410,16 +440,14 @@ export class ReviewCanvasEditorPane extends EditorPane {
 								this.readyInput = input;
 								this.sessionTelemetry.presented();
 							}),
-							appSessionId: connection.appSessionId,
+							appSessionId,
 							config: this.reviewRuntimeConfig(
-								{
-									serverUrl: connection.serverUrl,
-									token: connection.token,
-									reviewId: reviewId,
-								},
+								{ reviewId },
 								assets,
 							),
-							request: requestReviewApi,
+							request: requestReviewApiThroughDesktop(this.desktopConnection),
+							follow: (path, signal, accept, disconnected) =>
+								this.desktopConnection.follow(path, signal, accept, disconnected),
 							post: async (request) => {
 								if (request.name === "openSourceTree") {
 									await this.tabsService.openApiSource(sourceSelection, input.getName());
@@ -1079,7 +1107,7 @@ export class ReviewCanvasEditorPane extends EditorPane {
 	}
 
 	private reviewRuntimeConfig(
-		connection: Pick<ReviewRuntimeConfig, "serverUrl" | "reviewId" | "token">,
+		connection: Pick<ReviewRuntimeConfig, "reviewId">,
 		assets: ReviewCanvasAssetsModule,
 	): ReviewRuntimeConfig {
 		return {

@@ -14,8 +14,8 @@
 // revisions instead of building them.
 export const REVIEW_DESKTOP_CONNECTION_VERSION = 3;
 
-/** Main-process IPC channel the renderer asks for that endpoint on. */
-export const REVIEW_DESKTOP_CHANNEL = "review";
+/** Main-process IPC channel. Code OSS preload permits the `vscode:` namespace. */
+export const REVIEW_DESKTOP_CHANNEL = "vscode:reviewDesktop";
 
 export interface ReviewDesktopConnection {
   readonly version: number;

@@ -56,6 +56,12 @@ type Subscription = {
 };
 
 type Request = (url: string, init?: RequestInit) => Promise<Response>;
+type FollowTransport = <T>(
+  path: string,
+  signal: AbortSignal,
+  accept: (value: T) => void | Promise<void>,
+  disconnected: (cause: unknown) => void,
+) => { dispose(): void };
 
 const defaultRequest: Request = (url, init) => fetch(url, init);
 
@@ -76,19 +82,21 @@ const liveConnections = new WeakMap<Request, Map<string, LiveConnection>>();
 /** Shared by the canvas and thin agent clients; no filesystem or SQL access. */
 export class ReviewApiClient {
   constructor(
-    readonly connection: { serverUrl: string; token: string },
+    readonly connection: { serverUrl: string; token: string } | undefined,
     private readonly request: Request = defaultRequest,
+    private readonly followTransport?: FollowTransport,
   ) {}
   async response(route: string, init?: RequestInit) {
     const headers = new Headers(init?.headers);
-    headers.set("x-review-token", this.connection.token);
+    if (this.connection) headers.set("x-review-token", this.connection.token);
+    else headers.delete("x-review-token");
 
     if (init?.body) headers.set("content-type", "application/json");
 
-    const response = await this.request(
-      `${this.connection.serverUrl}/reviews-api${route}`,
-      { ...init, headers },
-    );
+    const url = this.connection
+      ? `${this.connection.serverUrl}/reviews-api${route}`
+      : `/reviews-api${route}`;
+    const response = await this.request(url, { ...init, headers });
 
     if (!response.ok) {
       const body = await response.json().catch(() => null);
@@ -171,6 +179,34 @@ export class ReviewApiClient {
     mode?: "structural" | "textual",
   ) {
     if (signal.aborted) return;
+    if (this.followTransport) {
+      const path =
+        reviewId === null
+          ? `/reviews-api/watch?subscriptions=${encodeURIComponent(JSON.stringify([{ reviewId, ...(mode ? { mode } : {}) }]))}`
+          : `/reviews-api/${encodeURIComponent(reviewId)}/watch`;
+      return new Promise<void>((resolve) => {
+        let subscription: { dispose(): void } | undefined;
+        const stop = () => {
+          signal.removeEventListener("abort", stop);
+          subscription?.dispose();
+          subscription = undefined;
+          resolve();
+        };
+        signal.addEventListener("abort", stop, { once: true });
+        subscription = this.followTransport!(
+          path,
+          signal,
+          accept,
+          disconnected,
+        );
+        if (signal.aborted) stop();
+      });
+    }
+    if (!this.connection) {
+      throw new Error(
+        "Review API live updates require a desktop follow transport.",
+      );
+    }
     let connections = liveConnections.get(this.request);
 
     if (!connections)

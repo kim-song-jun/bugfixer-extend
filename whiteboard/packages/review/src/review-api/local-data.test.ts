@@ -9,6 +9,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   watch,
   writeFileSync,
@@ -53,6 +54,16 @@ const source = {
 
 const git = (...args: string[]) =>
   execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+
+const expectedRoot = (root: string) => {
+  const canonicalPath = realpathSync(root);
+  const info = statSync(canonicalPath, { bigint: true });
+  return {
+    canonicalPath,
+    dev: info.dev.toString(),
+    ino: info.ino.toString(),
+  };
+};
 
 const spawns: string[][] = [];
 
@@ -139,6 +150,49 @@ afterEach(async () => {
   await local.data.close();
   vi.unstubAllEnvs();
   rmSync(directory, { recursive: true, force: true });
+});
+
+it("binds a registered root to its server-observed identity and rejects same-path replacement", async () => {
+  const identity = expectedRoot(repository);
+  const verified = await local.data.register(repository, identity);
+
+  expect(verified).toMatchObject({
+    id: pins.repositoryId,
+    verified: true,
+    rootIdentity: identity,
+  });
+  await expect(local.data.assertRegisteredRootIdentity(verified.id)).resolves.toBe(true);
+
+  const moved = path.join(directory, "repository-original");
+  renameSync(repository, moved);
+  mkdirSync(repository);
+  execFileSync("git", ["init", "-q"], { cwd: repository });
+
+  await expect(local.data.assertRegisteredRootIdentity(verified.id)).rejects.toThrow(
+    /replaced/,
+  );
+  await expect(local.data.register(repository, identity)).rejects.toThrow(
+    /identity does not match/,
+  );
+  expect(local.store.repositoryIdentity(verified.id)).toEqual(identity);
+  await expect(
+    local.data.resolvePins(verified.id, "HEAD^", "HEAD"),
+  ).rejects.toThrow(/replaced/);
+});
+
+it("does not identity-bind a legacy repository ID after it has review history", async () => {
+  await local.store.execute(
+    command({ type: "create", title: "Legacy checkout", pins }),
+  );
+  const moved = path.join(directory, "repository-original");
+  renameSync(repository, moved);
+  mkdirSync(repository);
+  execFileSync("git", ["init", "-q"], { cwd: repository });
+
+  await expect(
+    local.data.register(repository, expectedRoot(repository)),
+  ).rejects.toThrow(/already used by reviews/);
+  expect(local.store.repositoryIdentity(pins.repositoryId)).toBeUndefined();
 });
 
 it("reads, resolves and retires a reference at its own pins in another repository", async () => {
@@ -2209,7 +2263,18 @@ it("exposes real source and resource operations through the authenticated deskto
 
     expect(
       await (await post("/repositories", { path: repository })).json(),
-    ).toEqual({ id: pins.repositoryId, name: "repository" });
+    ).toMatchObject({ id: pins.repositoryId, name: "repository", verified: false });
+    const rootIdentity = expectedRoot(repository);
+    expect(
+      await (
+        await post("/repositories", { path: repository, expectedRoot: rootIdentity })
+      ).json(),
+    ).toEqual({
+      id: pins.repositoryId,
+      name: "repository",
+      verified: true,
+      rootIdentity,
+    });
     expect(
       await (
         await post("/pins", {

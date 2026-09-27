@@ -23,7 +23,6 @@ import {
 } from '../../../platform/extensionManagement/common/extensionManagement.js';
 import { areSameExtensions } from '../../../platform/extensionManagement/common/extensionManagementUtil.js';
 import type { ServicesAccessor } from '../../../platform/instantiation/common/instantiation.js';
-import { IMainProcessService } from '../../../platform/ipc/common/mainProcessService.js';
 import { ILogService } from '../../../platform/log/common/log.js';
 import { INotificationService } from '../../../platform/notification/common/notification.js';
 import { IProgressService, ProgressLocation } from '../../../platform/progress/common/progress.js';
@@ -236,11 +235,10 @@ function optionalExtensionLabel(extensionId: string): string {
 }
 
 async function stageRustAnalyzer(
-	mainProcessService: IMainProcessService,
 	logService: ILogService
 ): Promise<void> {
 	try {
-		await mainProcessService.getChannel(REVIEW_DESKTOP_CHANNEL).call('stageRustAnalyzer');
+		await ipcRenderer.invoke(REVIEW_DESKTOP_CHANNEL, 'stageRustAnalyzer');
 	} catch (error) {
 		logService.error(`[Whiteboard extensions] Could not stage rust-analyzer: ${getErrorMessage(error)}`);
 	}
@@ -264,7 +262,6 @@ class ManageCuratedExtensionsAction extends Action2 {
 		const dialogService = accessor.get(IDialogService);
 		const notificationService = accessor.get(INotificationService);
 		const progressService = accessor.get(IProgressService);
-		const mainProcessService = accessor.get(IMainProcessService);
 		const logService = accessor.get(ILogService);
 		const reviewTelemetryService = accessor.get(IReviewTelemetryService);
 
@@ -491,7 +488,7 @@ class ManageCuratedExtensionsAction extends Action2 {
 
 		installed = await extensionManagementService.getInstalled();
 		if (newInstalls.some(extension => areSameExtensions(extension.identifier, { id: 'rust-lang.rust-analyzer' }))) {
-			await stageRustAnalyzer(mainProcessService, logService);
+			await stageRustAnalyzer(logService);
 		}
 		let enabledIds = picked
 			.filter((item): item is CuratedQuickPickItem & { kind: 'bundled' } => item.kind === 'bundled')
@@ -678,7 +675,6 @@ class CuratedExtensionDefaults implements IWorkbenchContribution {
 class OptionalExtensionPinUpgrades implements IWorkbenchContribution {
 	constructor(
 		@IExtensionManagementService private readonly extensionManagementService: IExtensionManagementService,
-		@IMainProcessService private readonly mainProcessService: IMainProcessService,
 		@ILogService private readonly logService: ILogService,
 		@IReviewTelemetryService private readonly reviewTelemetryService: IReviewTelemetryService
 	) {
@@ -705,7 +701,7 @@ class OptionalExtensionPinUpgrades implements IWorkbenchContribution {
 					pinned: true
 				});
 			},
-			stageRustAnalyzer: () => stageRustAnalyzer(this.mainProcessService, this.logService),
+			stageRustAnalyzer: () => stageRustAnalyzer(this.logService),
 			logError: (message, error) => {
 				this.logService.error(`[Whiteboard extensions] ${message}: ${getErrorMessage(error)}`);
 			},

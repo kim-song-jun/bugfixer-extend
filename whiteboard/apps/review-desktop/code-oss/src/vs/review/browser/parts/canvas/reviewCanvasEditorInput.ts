@@ -28,6 +28,13 @@ export type ReviewCanvasEditorTarget =
 		readonly selection: ReviewSourceSelection;
 		readonly title: string;
 	}
+	| {
+		readonly kind: "api-task-review";
+		readonly taskId: string;
+		readonly reviewId: string;
+		readonly version: number;
+		readonly title: string;
+	}
 	| { readonly kind: "api"; readonly reviewId: string; readonly title: string };
 
 export class ReviewCanvasEditorInput extends EditorInput {
@@ -47,7 +54,9 @@ export class ReviewCanvasEditorInput extends EditorInput {
 			scheme: "devfast-review-canvas",
 			authority: target.kind,
 			path:
-				target.kind === "api-source"
+				target.kind === "api-task-review"
+					? `/${encodeURIComponent(target.taskId)}/${encodeURIComponent(target.reviewId)}/${target.version}`
+					: target.kind === "api-source"
 					? `/${sourceSelectionIdentity(target.selection)}`
 					: target.kind === "api"
 						? `/${target.reviewId}`
@@ -60,7 +69,7 @@ export class ReviewCanvasEditorInput extends EditorInput {
 	}
 
 	setApiTitle(title: string): void {
-		if (this._target.kind !== "api" || this._target.title === title) return;
+		if ((this._target.kind !== "api" && this._target.kind !== "api-task-review") || this._target.title === title) return;
 		this._target = { ...this._target, title };
 		this._onDidChangeLabel.fire();
 	}
@@ -94,7 +103,7 @@ export class ReviewCanvasEditorInput extends EditorInput {
 
 	override getName(): string {
 		if (this.target.kind === "api-source") return this.target.selection.kind === "current" ? `Source — ${this.target.title}` : `Source — ${this.target.title} (v${this.target.selection.version})`;
-		if (this.target.kind === "api") return this.target.title;
+		if (this.target.kind === "api" || this.target.kind === "api-task-review") return this.target.title;
 		if (this.target.kind === "home") return "Home";
 		if (this.target.kind === "welcome") return "Welcome";
 		if (this.target.kind === "settings") return "Settings";

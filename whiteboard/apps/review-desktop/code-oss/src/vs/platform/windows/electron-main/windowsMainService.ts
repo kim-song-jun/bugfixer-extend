@@ -37,7 +37,7 @@ import product from '../../product/common/product.js';
 import { IProtocolMainService } from '../../protocol/electron-main/protocol.js';
 import { getRemoteAuthority } from '../../remote/common/remoteHosts.js';
 import { IStateService } from '../../state/node/state.js';
-import { IAddRemoveFoldersRequest, INativeOpenFileRequest, INativeWindowConfiguration, IOpenEmptyWindowOptions, IPath, IPathsToWaitFor, isFileToOpen, isFolderToOpen, isWorkspaceToOpen, IWindowOpenable, IWindowSettings } from '../../window/common/window.js';
+import { IAddRemoveFoldersRequest, INativeOpenFileRequest, INativeWindowConfiguration, IOpenEmptyWindowOptions, IPath, IPathsToWaitFor, isFileToOpen, isFolderToOpen, isWorkspaceToOpen, IWindowOpenable, IWindowSettings, type ReviewWindowLaunch } from '../../window/common/window.js';
 import { CodeWindow } from './windowImpl.js';
 import { IOpenConfiguration, IOpenEmptyConfiguration, IWindowsCountChangedEvent, IWindowsMainService, OpenContext, getLastFocused } from './windows.js';
 import { findWindowOnExtensionDevelopmentPath, findWindowOnFile, findWindowOnWorkspaceOrFolder } from './windowsFinder.js';
@@ -64,6 +64,7 @@ import { ResourceSet } from '../../../base/common/map.js';
 type RestoreWindowsSetting = 'preserve' | 'all' | 'folders' | 'one' | 'none';
 
 interface IOpenBrowserWindowOptions {
+	readonly reviewWindowLaunch?: ReviewWindowLaunch;
 	readonly userEnv?: IProcessEnvironment;
 	readonly cli?: NativeParsedArgs;
 
@@ -209,6 +210,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 	readonly onDidTriggerSystemContextMenu = this._onDidTriggerSystemContextMenu.event;
 
 	private readonly windows = new Map<number, ICodeWindow>();
+	private reviewProjectWorkspaceResolver: ((workspaceConfigPath: URI) => { readonly projectId: string; readonly projectName: string } | undefined) | undefined;
 
 	private readonly windowsStateHandler: WindowsStateHandler;
 
@@ -269,6 +271,40 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		}));
 	}
 
+	setReviewProjectWorkspaceResolver(resolver: ((workspaceConfigPath: URI) => { readonly projectId: string; readonly projectName: string } | undefined) | undefined): void {
+		this.reviewProjectWorkspaceResolver = resolver;
+	}
+
+	private reviewWindowLaunchForWorkspace(openConfig: IOpenConfiguration, workspace: IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier): ReviewWindowLaunch {
+		const requestedProjectWorkspace = openConfig.reviewWindowLaunch?.kind === 'project' && openConfig.urisToOpen?.length === 1 && isWorkspaceToOpen(openConfig.urisToOpen[0])
+			? openConfig.urisToOpen[0].workspaceUri
+			: undefined;
+		if (openConfig.reviewWindowLaunch?.kind === 'project' && requestedProjectWorkspace && isWorkspaceIdentifier(workspace) && extUriBiasedIgnorePathCase.isEqual(workspace.configPath, requestedProjectWorkspace)) {
+			return openConfig.reviewWindowLaunch;
+		}
+
+		if (openConfig.initialStartup && isWorkspaceIdentifier(workspace)) {
+			const project = this.reviewProjectWorkspaceResolver?.(workspace.configPath);
+			if (project?.projectId.trim() && project.projectName.trim()) {
+				return { kind: 'project', ...project };
+			}
+		}
+
+		return { kind: 'sourceNavigator' };
+	}
+
+	private sameReviewWindowLaunch(left: ReviewWindowLaunch | undefined, right: ReviewWindowLaunch): boolean {
+		if (!left) {
+			return false;
+		}
+		return left.kind === right.kind && (left.kind !== 'project' || (right.kind === 'project' && left.projectId === right.projectId));
+	}
+
+	private findWindowForReviewWorkspace(workspace: IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier, launch: ReviewWindowLaunch): ICodeWindow | undefined {
+		const workspaceUri = isWorkspaceIdentifier(workspace) ? workspace.configPath : workspace.uri;
+		return this.getWindows().find(window => findWindowOnWorkspaceOrFolder([window], workspaceUri) === window && this.sameReviewWindowLaunch(window.config?.reviewWindowLaunch, launch));
+	}
+
 	openEmptyWindow(openConfig: IOpenEmptyConfiguration, options?: IOpenEmptyWindowOptions): Promise<ICodeWindow[]> {
 		const cli = this.environmentMainService.args;
 		const remoteAuthority = options?.remoteAuthority || undefined;
@@ -293,6 +329,17 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 
 	async open(openConfig: IOpenConfiguration): Promise<ICodeWindow[]> {
 		this.logService.trace('windowsManager#open');
+		if (openConfig.reviewWindowLaunch?.kind === 'project' && (
+			openConfig.context !== OpenContext.API ||
+			openConfig.forceNewWindow !== true ||
+			openConfig.forceReuseWindow === true ||
+			openConfig.reviewWindowLaunch.projectId.trim().length === 0 ||
+			openConfig.reviewWindowLaunch.projectName.trim().length === 0 ||
+			openConfig.urisToOpen?.length !== 1 ||
+			!isWorkspaceToOpen(openConfig.urisToOpen[0])
+		)) {
+			throw new Error('Project window launches must come from the main API with one workspace descriptor and a non-empty project ID.');
+		}
 
 		// Make sure addMode/removeMode is only enabled if we have an active window
 		if ((openConfig.addMode || openConfig.removeMode) && (openConfig.initialStartup || !this.getLastActiveWindow())) {
@@ -598,7 +645,10 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		if (allWorkspacesToOpen.length > 0) {
 
 			// Check for existing instances
-			const windowsOnWorkspace = coalesce(allWorkspacesToOpen.map(workspaceToOpen => findWindowOnWorkspaceOrFolder(this.getWindows(), workspaceToOpen.workspace.configPath)));
+			const windowsOnWorkspace = coalesce(allWorkspacesToOpen.map(workspaceToOpen => this.findWindowForReviewWorkspace(
+				workspaceToOpen.workspace,
+				this.reviewWindowLaunchForWorkspace(openConfig, workspaceToOpen.workspace)
+			)));
 			if (windowsOnWorkspace.length > 0) {
 				const windowOnWorkspace = windowsOnWorkspace[0];
 				const filesToOpenInWindow = isEqualAuthority(filesToOpen?.remoteAuthority, windowOnWorkspace.remoteAuthority) ? filesToOpen : undefined;
@@ -611,7 +661,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 
 			// Open remaining ones
 			for (const workspaceToOpen of allWorkspacesToOpen) {
-				if (windowsOnWorkspace.some(window => window.openedWorkspace && window.openedWorkspace.id === workspaceToOpen.workspace.id)) {
+				if (this.findWindowForReviewWorkspace(workspaceToOpen.workspace, this.reviewWindowLaunchForWorkspace(openConfig, workspaceToOpen.workspace))) {
 					continue; // ignore folders that are already open
 				}
 
@@ -630,7 +680,10 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		if (allFoldersToOpen.length > 0) {
 
 			// Check for existing instances
-			const windowsOnFolderPath = coalesce(allFoldersToOpen.map(folderToOpen => findWindowOnWorkspaceOrFolder(this.getWindows(), folderToOpen.workspace.uri)));
+			const windowsOnFolderPath = coalesce(allFoldersToOpen.map(folderToOpen => this.findWindowForReviewWorkspace(
+				folderToOpen.workspace,
+				this.reviewWindowLaunchForWorkspace(openConfig, folderToOpen.workspace)
+			)));
 			if (windowsOnFolderPath.length > 0) {
 				const windowOnFolderPath = windowsOnFolderPath[0];
 				const filesToOpenInWindow = isEqualAuthority(filesToOpen?.remoteAuthority, windowOnFolderPath.remoteAuthority) ? filesToOpen : undefined;
@@ -643,7 +696,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 
 			// Open remaining ones
 			for (const folderToOpen of allFoldersToOpen) {
-				if (windowsOnFolderPath.some(window => isSingleFolderWorkspaceIdentifier(window.openedWorkspace) && extUriBiasedIgnorePathCase.isEqual(window.openedWorkspace.uri, folderToOpen.workspace.uri))) {
+				if (this.findWindowForReviewWorkspace(folderToOpen.workspace, this.reviewWindowLaunchForWorkspace(openConfig, folderToOpen.workspace))) {
 					continue; // ignore folders that are already open
 				}
 
@@ -742,6 +795,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		const resolved = this.resolveContextWindow(openConfig, forceNewWindow);
 
 		return this.openInBrowserWindow({
+			reviewWindowLaunch: openConfig.reviewWindowLaunch?.kind === 'project' ? undefined : openConfig.reviewWindowLaunch,
 			userEnv: openConfig.userEnv,
 			cli: openConfig.cli,
 			initialStartup: openConfig.initialStartup,
@@ -766,6 +820,7 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		}
 
 		return this.openInBrowserWindow({
+			reviewWindowLaunch: this.reviewWindowLaunchForWorkspace(openConfig, folderOrWorkspace.workspace),
 			workspace: folderOrWorkspace.workspace,
 			userEnv: openConfig.userEnv,
 			cli: openConfig.cli,
@@ -1467,6 +1522,11 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 	}
 
 	private async openInBrowserWindow(options: IOpenBrowserWindowOptions): Promise<ICodeWindow> {
+		const reviewWindowLaunch: ReviewWindowLaunch = options.reviewWindowLaunch ?? (options.workspace ? { kind: 'sourceNavigator' } : { kind: 'home' });
+		if (reviewWindowLaunch.kind === 'project' && (!reviewWindowLaunch.projectId.trim() || !reviewWindowLaunch.projectName.trim() || !options.workspace)) {
+			throw new Error('Project windows require a non-empty project ID, project name, and workspace.');
+		}
+
 		const windowConfig = this.configurationService.getValue<IWindowSettings | undefined>('window');
 
 		const lastActiveWindow = this.getLastActiveWindow();
@@ -1477,6 +1537,9 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 		let window: ICodeWindow | undefined;
 		if (!options.forceNewWindow && !options.forceNewTabbedWindow) {
 			window = options.windowToUse || (lastActiveWindow?.config?.isSessionsWindow ? undefined : lastActiveWindow);
+			if (window && !this.sameReviewWindowLaunch(window.config?.reviewWindowLaunch, reviewWindowLaunch)) {
+				window = undefined;
+			}
 			if (window) {
 				window.focus();
 			}
@@ -1489,6 +1552,9 @@ export class WindowsMainService extends Disposable implements IWindowsMainServic
 			// the specific properties from this launch if provided
 			...this.environmentMainService.args,
 			...options.cli,
+
+			// Product launch authority must win over any same-named CLI/environment field.
+			reviewWindowLaunch,
 
 			machineId: this.machineId,
 			sqmId: this.sqmId,

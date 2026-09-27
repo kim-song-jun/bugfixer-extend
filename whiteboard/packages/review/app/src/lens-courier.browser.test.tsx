@@ -129,7 +129,11 @@ const session = testReviewSession(
   },
 );
 
-const client = new ReviewApiClient(session.config, session.bridge.request);
+const client = new ReviewApiClient(
+  undefined,
+  session.bridge.request,
+  session.bridge.follow,
+);
 
 beforeEach(() => {
   app = document.createElement("div");

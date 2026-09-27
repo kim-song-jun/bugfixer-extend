@@ -229,6 +229,8 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			'vs/base/parts/sandbox/electron-browser/preload.js',
 			'vs/review/review.desktop.main.js',
 			'vs/review/review.desktop.main.css',
+			'vs/review/project.desktop.main.js',
+			'vs/review/project.desktop.main.css',
 			'vs/workbench/api/node/extensionHostProcess.js',
 			'vs/code/electron-browser/workbench/workbench.html',
 			'vs/code/electron-browser/workbench/workbench.js'

@@ -88,9 +88,7 @@ const contracts: Array<[string, ZodType, JsonObject]> = [
     "runtime config",
     ReviewRuntimeConfigSchema,
     {
-      serverUrl: "http://127.0.0.1:5570",
       reviewId: "review-1",
-      token: "",
       wasmUrl: "http://127.0.0.1:5570/libavoid.wasm",
       appVersion: "0.0.13",
       theme: "dark",
@@ -214,6 +212,20 @@ const contracts: Array<[string, ZodType, JsonObject]> = [
     { event: "themeChanged", theme: "dark" },
   ],
 ];
+
+it("rejects server credentials in desktop canvas runtime configuration", () => {
+  expect(
+    ReviewRuntimeConfigSchema.safeParse({
+      reviewId: "review-1",
+      wasmUrl: "http://127.0.0.1:5570/libavoid.wasm",
+      appVersion: "0.0.13",
+      theme: "dark",
+      host: "desktop",
+      serverUrl: "http://127.0.0.1:5570",
+      token: "secret",
+    }).success,
+  ).toBe(false);
+});
 
 describe("Review protocol Zod contracts", () => {
   it.each(contracts)("accepts a valid %s", (_name, schema, value) => {

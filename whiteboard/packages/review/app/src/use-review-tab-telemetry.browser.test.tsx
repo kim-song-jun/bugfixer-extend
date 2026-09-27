@@ -63,13 +63,11 @@ it("keeps dwell continuous through live review updates and sends the latest vers
   render({
     ...base,
     review,
-    beaconUrl: () => "http://localhost/telemetry?version=1",
   });
   now = 1000;
   render({
     ...base,
     review: { ...review, updatedAtMs: 1000 },
-    beaconUrl: () => "http://localhost/telemetry?version=2",
   });
 
   expect(request).toHaveBeenCalledTimes(1);
@@ -80,11 +78,12 @@ it("keeps dwell continuous through live review updates and sends the latest vers
   now = 2500;
   act(() => window.dispatchEvent(new Event("pagehide")));
 
-  expect(beacon).toHaveBeenCalledTimes(1);
-  expect(beacon.mock.calls[0]?.[0]).toBe(
-    "http://localhost/telemetry?version=2",
+  expect(beacon).not.toHaveBeenCalled();
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls[1]?.[0]).toBe(
+    "/reviews-api/test-review/telemetry/tab",
   );
-  expect(JSON.parse(String(beacon.mock.calls[0]?.[1]))).toEqual({
+  expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body))).toEqual({
     tab: "review",
     duration_ms: 2500,
     reason: "pagehide",

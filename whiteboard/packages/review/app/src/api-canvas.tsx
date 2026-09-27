@@ -81,7 +81,12 @@ export function ApiCanvas({
   findHost?: ReviewFindHost;
 }) {
   const client = useMemo(
-    () => new ReviewApiClient(content.bridge.config, content.bridge.request),
+    () =>
+      new ReviewApiClient(
+        undefined,
+        content.bridge.request,
+        content.bridge.follow,
+      ),
     [content.bridge],
   );
 
@@ -247,6 +252,10 @@ export function ApiCanvas({
       ...nativeSources,
       post: async (request: Parameters<ApiContent["bridge"]["post"]>[0]) => {
         if (request.name === "openReviewRevision") {
+          if (content.taskLocked) {
+            content.bridge.notify?.({ kind: "error", text: "This task review is pinned to an immutable version." });
+            return { ok: true as const };
+          }
           setVersion(
             request.args.revision === undefined
               ? undefined
@@ -352,7 +361,7 @@ export function ApiCanvas({
       error !== undefined && (
         <>
           <p role="status">{error}</p>
-          {version !== undefined && (
+          {version !== undefined && !content.taskLocked && (
             <button onClick={() => setVersion(undefined)}>
               Back to latest version
             </button>

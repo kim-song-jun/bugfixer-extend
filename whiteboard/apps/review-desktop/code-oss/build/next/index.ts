@@ -95,6 +95,7 @@ const desktopWorkerEntryPoints = [
 const desktopEntryPoints = [
 	'vs/review/review.desktop.main',
 	'vs/review/navigator.desktop.main',
+	'vs/review/project.desktop.main',
 	'vs/review/electron-utility/reviewDesktopHostMain',
 	'vs/workbench/contrib/debug/node/telemetryApp',
 	'vs/platform/files/node/watcher/watcherMain',
@@ -126,6 +127,7 @@ const entryPoints = [
 const cssBundleEntryPoints = new Set([
 	'vs/review/review.desktop.main',
 	'vs/review/navigator.desktop.main',
+	'vs/review/project.desktop.main',
 	'vs/code/electron-browser/workbench/workbench',
 ]);
 
@@ -614,7 +616,7 @@ ${tslib}`,
 
 		// Use CSS external plugin for entry points that don't need bundled CSS
 		const plugins: esbuild.Plugin[] = cssBundleEntryPoints.has(entryPoint) ? [] : [cssExternalPlugin()];
-		if (entryPoint === 'vs/review/review.desktop.main' || entryPoint === 'vs/review/navigator.desktop.main') {
+		if (entryPoint === 'vs/review/review.desktop.main' || entryPoint === 'vs/review/navigator.desktop.main' || entryPoint === 'vs/review/project.desktop.main') {
 			plugins.push(inlineReviewBrowserDependenciesPlugin());
 		}
 		// Add content mapper plugin to inject product config and builtin extensions

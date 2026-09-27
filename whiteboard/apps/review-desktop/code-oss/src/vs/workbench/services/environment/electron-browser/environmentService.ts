@@ -5,7 +5,7 @@
 
 import { PerformanceMark } from '../../../../base/common/performance.js';
 import { IBrowserWorkbenchEnvironmentService } from '../browser/environmentService.js';
-import { IColorScheme, INativeWindowConfiguration, IOSConfiguration, IPath, IPathsToWaitFor } from '../../../../platform/window/common/window.js';
+import { IColorScheme, INativeWindowConfiguration, IOSConfiguration, IPath, IPathsToWaitFor, ReviewWindowLaunch } from '../../../../platform/window/common/window.js';
 import { IEnvironmentService, INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { refineServiceDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { AbstractNativeEnvironmentService } from '../../../../platform/environment/common/environmentService.js';
@@ -23,6 +23,7 @@ export const INativeWorkbenchEnvironmentService = refineServiceDecorator<IEnviro
  * environments (Windows, Linux, macOS) but not e.g. web.
  */
 export interface INativeWorkbenchEnvironmentService extends IBrowserWorkbenchEnvironmentService, INativeEnvironmentService {
+	readonly reviewWindowLaunch: ReviewWindowLaunch;
 
 	// --- Window
 	readonly window: {
@@ -57,6 +58,8 @@ export interface INativeWorkbenchEnvironmentService extends IBrowserWorkbenchEnv
 }
 
 export class NativeWorkbenchEnvironmentService extends AbstractNativeEnvironmentService implements INativeWorkbenchEnvironmentService {
+	@memoize
+	get reviewWindowLaunch(): ReviewWindowLaunch { return this.configuration.reviewWindowLaunch; }
 
 	@memoize
 	get mainPid() { return this.configuration.mainPid; }

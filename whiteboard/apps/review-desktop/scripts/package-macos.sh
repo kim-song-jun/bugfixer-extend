@@ -82,6 +82,22 @@ node "$APP_DIR/scripts/curated-extensions.mjs" \
 # Fetch on Darwin: precompiled payloads were built on Linux.
 pnpm --dir "$MONOREPO_ROOT" --filter @dev.fast/review ensure:diffr --required
 node "$APP_DIR/scripts/stage-review-runtime.mjs" --packaged-root "$PACKAGED_APP"
+BOUND_CHECKOUT_HELPER="$PACKAGED_APP/Contents/Resources/app/review-runtime/bin/bound-checkout"
+if [[ ! -x "$BOUND_CHECKOUT_HELPER" ]]; then
+  echo "Review Desktop packaging did not stage the bound-checkout helper at $BOUND_CHECKOUT_HELPER" >&2
+  exit 1
+fi
+KEYCHAIN_VAULT_HELPER="$PACKAGED_APP/Contents/Resources/app/review-runtime/bin/keychain-vault"
+if [[ ! -x "$KEYCHAIN_VAULT_HELPER" ]]; then
+  echo "Review Desktop packaging did not stage the Keychain vault helper at $KEYCHAIN_VAULT_HELPER" >&2
+  exit 1
+fi
+NODE_RUNTIME="$PACKAGED_APP/Contents/Resources/app/review-runtime/bin/node"
+NODE_RUNTIME_LICENSE="$PACKAGED_APP/Contents/Resources/app/review-runtime/licenses/node/LICENSE"
+if [[ ! -x "$NODE_RUNTIME" || ! -s "$NODE_RUNTIME_LICENSE" ]]; then
+  echo "Review Desktop packaging did not stage the standalone Node runtime and license" >&2
+  exit 1
+fi
 
 # Installs Assets.car and rewrites CFBundleIconName, which invalidates any
 # existing signature. It must therefore run after every other bundle mutation

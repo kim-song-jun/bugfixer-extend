@@ -423,9 +423,21 @@ export class ReviewStore {
       `CREATE TABLE IF NOT EXISTS review_attention(review_id TEXT PRIMARY KEY REFERENCES reviews(id), viewed_at TEXT, dismissed_at TEXT);`,
     );
     this.db
-      .exec(`CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL);
+      .exec(`CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+        root_dev TEXT, root_ino TEXT);
       CREATE TABLE IF NOT EXISTS resources(id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES repositories(id),
         kind TEXT NOT NULL, mime_type TEXT NOT NULL, data BLOB NOT NULL);`);
+    const repositoryColumns = new Set(
+      (
+        this.db.prepare("PRAGMA table_info(repositories)").all() as {
+          name: string;
+        }[]
+      ).map((column) => column.name),
+    );
+    if (!repositoryColumns.has("root_dev"))
+      this.db.exec("ALTER TABLE repositories ADD COLUMN root_dev TEXT");
+    if (!repositoryColumns.has("root_ino"))
+      this.db.exec("ALTER TABLE repositories ADD COLUMN root_ino TEXT");
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS review_coverage(review_id TEXT REFERENCES reviews(id), file TEXT, fingerprint TEXT NOT NULL, coverage TEXT NOT NULL, PRIMARY KEY(review_id,file));",
     );
@@ -619,16 +631,95 @@ export class ReviewStore {
     return group;
   }
 
-  registerRepository(root: string) {
-    this.db
-      .prepare("INSERT OR IGNORE INTO repositories(id,path,name) VALUES(?,?,?)")
-      .run(randomUUID(), root, root.split(/[\\/]/).at(-1)!);
+  registerRepository(
+    root: string,
+    identity?: { canonicalPath: string; dev: string; ino: string },
+  ) {
+    const existing = this.db
+      .prepare("SELECT id,name,root_dev,root_ino FROM repositories WHERE path=?")
+      .get(root) as
+      | {
+          id: string;
+          name: string;
+          root_dev: string | null;
+          root_ino: string | null;
+        }
+      | undefined;
+    if (existing && identity) {
+      if (
+        identity.canonicalPath !== root ||
+        ((existing.root_dev !== null || existing.root_ino !== null) &&
+          (existing.root_dev !== identity.dev || existing.root_ino !== identity.ino))
+      )
+        throw new ReviewInputError("Repository root identity changed.", 409);
+      if (
+        existing.root_dev === null &&
+        existing.root_ino === null &&
+        this.hasRepositoryReferences(existing.id)
+      )
+        throw new ReviewInputError(
+          "This unverified repository is already used by reviews and cannot be identity-bound.",
+          409,
+        );
+      this.db
+        .prepare("UPDATE repositories SET root_dev=?,root_ino=? WHERE id=?")
+        .run(identity.dev, identity.ino, existing.id);
+    } else if (!existing) {
+      this.db
+        .prepare("INSERT INTO repositories(id,path,name,root_dev,root_ino) VALUES(?,?,?,?,?)")
+        .run(
+          randomUUID(),
+          root,
+          root.split(/[\\/]/).at(-1)!,
+          identity?.dev ?? null,
+          identity?.ino ?? null,
+        );
+    }
 
     const row = this.db
-      .prepare("SELECT id,name FROM repositories WHERE path=?")
-      .get(root)!;
+      .prepare("SELECT id,name,root_dev,root_ino FROM repositories WHERE path=?")
+      .get(root) as {
+      id: string;
+      name: string;
+      root_dev: string | null;
+      root_ino: string | null;
+    };
 
-    return { id: String(row.id), name: String(row.name) };
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      verified: row.root_dev !== null && row.root_ino !== null,
+      ...(row.root_dev !== null && row.root_ino !== null
+        ? {
+            rootIdentity: {
+              canonicalPath: root,
+              dev: String(row.root_dev),
+              ino: String(row.root_ino),
+            },
+          }
+        : {}),
+    };
+  }
+  repositoryIdentity(id: string) {
+    const row = this.db
+      .prepare("SELECT path,root_dev,root_ino FROM repositories WHERE id=?")
+      .get(id) as { path: string; root_dev: string | null; root_ino: string | null } | undefined;
+    if (!row) throw new ReviewInputError("Repository is not registered.", 404);
+    return row.root_dev !== null && row.root_ino !== null
+      ? {
+          canonicalPath: String(row.path),
+          dev: String(row.root_dev),
+          ino: String(row.root_ino),
+        }
+      : undefined;
+  }
+  private hasRepositoryReferences(id: string) {
+    return Boolean(
+      this.db
+        .prepare(`SELECT 1 AS found FROM versions WHERE instr(snapshot, ?) > 0
+          UNION ALL SELECT 1 AS found FROM resources WHERE repository_id=? LIMIT 1`)
+        .get(`"repositoryId":${JSON.stringify(id)}`, id),
+    );
   }
   unregisterRepository(id: string) {
     this.db

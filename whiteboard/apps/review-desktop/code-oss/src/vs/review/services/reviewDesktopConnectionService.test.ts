@@ -4,9 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
-import { ReviewDesktopConnectionService } from "./reviewDesktopConnectionService.js";
+const ipcRenderer = { invoke: async (_channel: string, _command: string, _arg?: { path: string; method?: string; body?: unknown }): Promise<unknown> => undefined };
+Object.assign(globalThis, { vscode: { ipcRenderer } });
+const { ReviewDesktopConnectionService } = await import("./reviewDesktopConnectionService.js");
 
 const uuid = "11111111-1111-4111-8111-111111111111";
 class TestStorage {
@@ -25,25 +27,31 @@ class TestStorage {
 	}
 }
 
-function serviceWith(storage = new TestStorage()): ReviewDesktopConnectionService {
-	const service = new ReviewDesktopConnectionService({} as never, storage as never);
+function serviceWith(storage = new TestStorage()): InstanceType<typeof ReviewDesktopConnectionService> {
+	const service = new ReviewDesktopConnectionService(storage as never);
 	Object.assign(service, {
 		connection: {
-			version: 1,
-			url: "http://127.0.0.1:5000",
-			token: "token",
+			version: 3,
 			instanceId: "instance",
+			appSessionId: "session",
 		},
 		initializePromise: Promise.resolve(),
 	});
 	return service;
 }
 
-function mockFetch(t: { after(callback: () => void): void }, handler: typeof fetch): void {
-	const original = globalThis.fetch;
-	globalThis.fetch = handler;
-	t.after(() => {
-		globalThis.fetch = original;
+function mockFetch(t: TestContext, handler: typeof fetch): void {
+	t.mock.method(ipcRenderer, "invoke", async (_channel: string, command: string, arg?: { path: string; method?: string; body?: unknown }) => {
+		if (command === "getStatus") return { version: 3, instanceId: "instance", appSessionId: "session" };
+		if (command !== "request" || !arg) throw new Error(`Unexpected Review IPC command: ${command}`);
+		const response = await handler(`http://127.0.0.1:5000${arg.path}`, {
+			method: arg.method,
+			headers: { "x-review-token": "token", ...(arg.body === undefined ? {} : { "content-type": "application/json" }) },
+			...(arg.body === undefined ? {} : { body: JSON.stringify(arg.body) }),
+		});
+		const body = await response.json().catch(() => undefined);
+		if (!response.ok) throw new Error(body?.error ?? `request failed (${response.status})`);
+		return body;
 	});
 }
 

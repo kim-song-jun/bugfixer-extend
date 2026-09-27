@@ -90,17 +90,18 @@ export class ReviewLocalLanguageFeatures extends Disposable {
 	}
 
 	private async environment(model: ITextModel, validate = false): Promise<ReviewLanguageEnvironment | undefined> {
-		const { serverUrl, token } = await this.connection.getConnection();
 		const target = sourceLocation(model.uri);
-		return this.environments.read(JSON.stringify([serverUrl, token]), target.view, target.side, async () => {
+		return this.environments.read(JSON.stringify([target.view.reviewId, target.view.version, target.view.generation, target.side]), target.view, target.side, async () => {
 			const params = new URLSearchParams({ side: target.side });
 			for (const [key, value] of Object.entries(reviewSourceQuery(target.view))) {
 				if (value !== undefined) params.set(key, String(value));
 			}
-			const response = await fetch(`${serverUrl}/reviews-api/${encodeURIComponent(model.uri.authority)}/language-context?${params}`, {
-				headers: { "x-review-token": token }, signal: AbortSignal.timeout(10_000),
-			});
-			return response.ok ? response.json() : undefined;
+			try {
+				return await this.connection.request<ReviewLanguageEnvironment>({ path: `/reviews-api/${encodeURIComponent(model.uri.authority)}/language-context?${params}` });
+			} catch (error) {
+				this.log.debug("[Whiteboard] Language environment request failed", error);
+				return undefined;
+			}
 		}, validate);
 	}
 

@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import { testReviewBridge } from "../review-session-test-utils";
 import { createReviewSession } from "./review-session";
 
-it("sends JSON requests to the displayed version with authentication, including beacon delivery", async () => {
+it("sends credential-free relative JSON requests to the displayed version", async () => {
   const request = vi.fn<ReturnType<typeof testReviewBridge>["request"]>(
     async () => Response.json({ text: "copied" }),
   );
@@ -11,23 +11,41 @@ it("sends JSON requests to the displayed version with authentication, including 
   let version = 2;
 
   const session = createReviewSession(testReviewBridge({}, { request }), {
-    jsonReview: { id: "review/id", version: () => version },
+    jsonReview: { id: "review-1", version: () => version },
   });
 
   await session.fetch("/copy-context", { method: "POST" });
   const [url, init] = request.mock.calls[0]!;
-  expect(new URL(url).pathname).toBe("/reviews-api/review%2Fid/copy-context");
-  expect(new URL(url).searchParams.get("version")).toBe("2");
-  expect(new URL(url).searchParams.has("document")).toBe(false);
-  expect(new Headers(init?.headers).get("x-review-token")).toBe("secret-token");
+  const copyUrl = new URL(url, "http://review.invalid");
+  expect(copyUrl.pathname).toBe("/reviews-api/review-1/copy-context");
+  expect(copyUrl.searchParams.get("version")).toBe("2");
+  expect(copyUrl.searchParams.has("document")).toBe(false);
+  expect(new Headers(init?.headers).has("x-review-token")).toBe(false);
 
   version = 3;
   await session.fetch("/telemetry/event", { method: "POST" });
-  expect(new URL(request.mock.calls[1]![0]).searchParams.get("version")).toBe(
-    "3",
+  const telemetryUrl = new URL(
+    request.mock.calls[1]![0],
+    "http://review.invalid",
   );
-  const beacon = new URL(session.beaconUrl("/telemetry/tab"));
-  expect(beacon.pathname).toBe("/reviews-api/review%2Fid/telemetry/tab");
-  expect(beacon.searchParams.get("version")).toBe("3");
-  expect(beacon.searchParams.get("token")).toBe("secret-token");
+  expect(telemetryUrl.pathname).toBe("/reviews-api/review-1/telemetry/event");
+  expect(telemetryUrl.searchParams.get("version")).toBe("3");
+  expect(telemetryUrl.searchParams.has("token")).toBe(false);
+});
+
+it("rejects absolute or tokenized request URLs before invoking the bridge", async () => {
+  const request = vi.fn<ReturnType<typeof testReviewBridge>["request"]>(
+    async () => Response.json({ ok: true }),
+  );
+  const session = createReviewSession(testReviewBridge({}, { request }), {
+    jsonReview: { id: "review-1", version: () => undefined },
+  });
+
+  await expect(
+    session.fetchUrl("https://example.test/reviews-api/review-1/file"),
+  ).rejects.toThrow(/relative API path/);
+  await expect(
+    session.fetchUrl("/reviews-api/review-1/file?token=secret"),
+  ).rejects.toThrow(/relative API path/);
+  expect(request).not.toHaveBeenCalled();
 });

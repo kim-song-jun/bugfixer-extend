@@ -17,7 +17,7 @@ import { ServicesAccessor, createDecorator } from '../../instantiation/common/in
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
 import { IThemeMainService } from '../../theme/electron-main/themeMainService.js';
-import { IOpenEmptyWindowOptions, IWindowOpenable, IWindowSettings, TitlebarStyle, WindowMinimumSize, hasNativeTitlebar, useNativeFullScreen, useWindowControlsOverlay, zoomLevelToZoomFactor } from '../../window/common/window.js';
+import { IOpenEmptyWindowOptions, IWindowOpenable, IWindowSettings, type ReviewWindowLaunch, TitlebarStyle, WindowMinimumSize, hasNativeTitlebar, useNativeFullScreen, useWindowControlsOverlay, zoomLevelToZoomFactor } from '../../window/common/window.js';
 import { ICodeWindow, IWindowState, WindowMode, defaultWindowState } from '../../window/electron-main/window.js';
 
 export const IWindowsMainService = createDecorator<IWindowsMainService>('windowsMainService');
@@ -37,6 +37,8 @@ export interface IWindowsMainService {
 	readonly onDidDestroyWindow: Event<ICodeWindow>;
 
 	open(openConfig: IOpenConfiguration): Promise<ICodeWindow[]>;
+	/** Register the app's synchronous, DB-backed resolver for restored project workspace descriptors. */
+	setReviewProjectWorkspaceResolver(resolver: ((workspaceConfigPath: URI) => { readonly projectId: string; readonly projectName: string } | undefined) | undefined): void;
 	openEmptyWindow(openConfig: IOpenEmptyConfiguration, options?: IOpenEmptyWindowOptions): Promise<ICodeWindow[]>;
 	openExtensionDevelopmentHostWindow(extensionDevelopmentPath: string[], openConfig: IOpenConfiguration): Promise<ICodeWindow[]>;
 	openExistingWindow(window: ICodeWindow, openConfig: IOpenConfiguration): void;
@@ -90,6 +92,8 @@ export interface IBaseOpenConfiguration {
 }
 
 export interface IOpenConfiguration extends IBaseOpenConfiguration {
+	/** Set by trusted main-process callers for product-owned window modes. */
+	readonly reviewWindowLaunch?: ReviewWindowLaunch;
 	readonly cli: NativeParsedArgs;
 	readonly userEnv?: IProcessEnvironment;
 	readonly urisToOpen?: IWindowOpenable[];

@@ -1,42 +1,44 @@
 import type { ReviewRuntimeConfig } from "@dev.fast/review-protocol";
 
 export type ReviewClientConfig = Partial<
-  Pick<ReviewRuntimeConfig, "serverUrl" | "reviewId" | "token" | "wasmUrl">
+  Pick<ReviewRuntimeConfig, "reviewId" | "wasmUrl">
 >;
 
 export interface ReviewRequestOptions {
-  tokenInQuery?: boolean;
+  version?: number;
 }
 
 export function jsonReviewApiUrl(
-  config: ReviewClientConfig,
+  _config: ReviewClientConfig,
   reviewId: string,
   endpoint: `/${string}`,
-  options: { version?: number; tokenInQuery?: boolean } = {},
+  options: ReviewRequestOptions = {},
 ): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(reviewId))
+    throw new Error("Review ID is not a valid API path segment.");
+
   const url = new URL(
-    `${config.serverUrl?.replace(/\/$/, "") ?? browserOrigin()}/reviews-api/${encodeURIComponent(reviewId)}${endpoint}`,
+    `/reviews-api/${encodeURIComponent(reviewId)}${endpoint}`,
+    "http://review.invalid",
   );
 
   if (options.version !== undefined)
     url.searchParams.set("version", String(options.version));
 
-  if (options.tokenInQuery && config.token)
-    url.searchParams.set("token", config.token);
+  if (url.searchParams.has("token"))
+    throw new Error("Review API URLs cannot contain credentials.");
+  if (!url.pathname.startsWith(`/reviews-api/${encodeURIComponent(reviewId)}/`))
+    throw new Error("Review API endpoint escaped its review path.");
 
-  return url.href;
+  return `${url.pathname}${url.search}`;
 }
 
 export async function reviewFetchUrl(
-  config: ReviewClientConfig,
+  _config: ReviewClientConfig,
   url: string | URL,
   init: RequestInit = {},
 ): Promise<Response> {
-  const headers = new Headers(init.headers);
-
-  if (config.token) headers.set("x-review-token", config.token);
-
-  return fetch(url, { ...init, headers });
+  return fetch(new URL(url, browserOrigin()), init);
 }
 
 export function reviewWasmUrl(config: ReviewClientConfig): string {
