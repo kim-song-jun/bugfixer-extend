@@ -186,13 +186,13 @@ export class ReviewMenubarMainService
       }));
     }
     const editMenuItem = new MenuItem({
-      label: localize("review.menu.edit", "Edit"),
+      label: localize("review.menu.edit", "편집"),
       role: "editMenu",
     });
     editMenuItem.submenu?.insert(
       2,
       new MenuItem({
-        label: localize("review.menu.find", "Find"),
+        label: localize("review.menu.find", "찾기"),
         accelerator: "Command+F",
         // Show the standard shortcut in the native menu, but let the focused
         // renderer resolve it. Tree, webview, notebook, source, and
@@ -204,7 +204,7 @@ export class ReviewMenubarMainService
     menubar.append(editMenuItem);
     menubar.append(
       new MenuItem({
-        label: localize("review.menu.window", "Window"),
+        label: localize("review.menu.window", "창"),
         role: "windowMenu",
       }),
     );
@@ -256,7 +256,7 @@ export class ReviewMenubarMainService
 
     menu.append(
       new MenuItem({
-        label: localize("review.menu.about", "About {0}", name),
+        label: localize("review.menu.about", "{0} 정보", name),
         role: "about",
       }),
     );
@@ -272,7 +272,7 @@ export class ReviewMenubarMainService
     const preferences = new Menu();
     preferences.append(
       new MenuItem({
-        label: localize("review.menu.settings", "Settings..."),
+        label: localize("review.menu.settings", "설정..."),
         accelerator: "Command+,",
         click: () => this.runActionInFocusedWindow("review.openSettings"),
       }),
@@ -281,7 +281,7 @@ export class ReviewMenubarMainService
     // run opens no tab of its own, so this is the durable path back.
     preferences.append(
       new MenuItem({
-        label: localize("review.menu.gettingStarted", "Getting Started..."),
+        label: localize("review.menu.gettingStarted", "시작하기..."),
         click: () => this.runActionInFocusedWindow("review.openWelcome"),
       }),
     );
@@ -290,7 +290,7 @@ export class ReviewMenubarMainService
       new MenuItem({
         label: localize(
           "review.menu.uninstall",
-          "Uninstall Whiteboard...",
+          "Whiteboard 제거...",
         ),
         click: () => this.runActionInFocusedWindow("review.uninstallApp"),
       }),
@@ -299,7 +299,7 @@ export class ReviewMenubarMainService
     menu.append(new MenuItem({ type: "separator" }));
     menu.append(
       new MenuItem({
-        label: localize("review.menu.preferences", "Preferences"),
+        label: localize("review.menu.preferences", "환경설정"),
         submenu: preferences,
       }),
     );
@@ -307,7 +307,7 @@ export class ReviewMenubarMainService
     menu.append(new MenuItem({ type: "separator" }));
     menu.append(
       new MenuItem({
-        label: localize("review.menu.services", "Services"),
+        label: localize("review.menu.services", "서비스"),
         role: "services",
         submenu: [],
       }),
@@ -315,26 +315,26 @@ export class ReviewMenubarMainService
     menu.append(new MenuItem({ type: "separator" }));
     menu.append(
       new MenuItem({
-        label: localize("review.menu.hide", "Hide {0}", name),
+        label: localize("review.menu.hide", "{0} 가리기", name),
         role: "hide",
       }),
     );
     menu.append(
       new MenuItem({
-        label: localize("review.menu.hideOthers", "Hide Others"),
+        label: localize("review.menu.hideOthers", "다른 앱 가리기"),
         role: "hideOthers",
       }),
     );
     menu.append(
       new MenuItem({
-        label: localize("review.menu.showAll", "Show All"),
+        label: localize("review.menu.showAll", "모두 보기"),
         role: "unhide",
       }),
     );
     menu.append(new MenuItem({ type: "separator" }));
     menu.append(
       new MenuItem({
-        label: localize("review.menu.quit", "Quit {0}", name),
+        label: localize("review.menu.quit", "{0} 종료", name),
         accelerator: "Command+Q",
         click: () => this.nativeHostMainService.quit(undefined),
       }),
