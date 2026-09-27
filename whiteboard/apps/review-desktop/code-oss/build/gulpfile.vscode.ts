@@ -604,7 +604,7 @@ async function stripAuthenticodeSignature(filePath: string): Promise<void> {
 }
 
 function patchWin32DependenciesTask(destinationFolderName: string) {
-	const cwd = path.join(path.dirname(root), destinationFolderName);
+	const cwd = path.join(packageOutputRoot, destinationFolderName);
 
 	return async () => {
 		const versionedResourcesFolder = util.getVersionedResourcesFolder('win32', commit!);
