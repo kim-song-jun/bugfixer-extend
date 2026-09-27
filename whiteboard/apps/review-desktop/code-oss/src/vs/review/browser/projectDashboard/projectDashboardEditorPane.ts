@@ -257,6 +257,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.render();
 	}
 
+	startTaskCreation(): void {
+		setProjectSidebarSection('dashboard');
+		this.openCreateTaskForm();
+	}
+
 	private openCreateTaskForm(): void {
 		this.createFormOpen = true;
 		this.pendingCreateTaskFocus = true;
@@ -2032,7 +2037,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const heading = shell.appendChild($('.project-dashboard__heading'));
 		const headingCopy = heading.appendChild($('.project-dashboard__heading-copy'));
 		const eyebrow = headingCopy.appendChild($('.project-dashboard__eyebrow'));
-		eyebrow.textContent = 'BUGFIXER EXTEND · 프로젝트';
+		eyebrow.textContent = '프로젝트 작업 공간';
 		const title = headingCopy.appendChild($('h1'));
 		title.id = 'project-dashboard-title';
 		title.tabIndex = -1;

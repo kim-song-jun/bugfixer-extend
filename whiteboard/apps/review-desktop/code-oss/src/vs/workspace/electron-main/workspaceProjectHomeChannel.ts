@@ -21,16 +21,18 @@ export class WorkspaceProjectHomeChannel {
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
-		const homeWindow = this.windowsMainService.getWindowByWebContents(sender);
-		if (!homeWindow?.config || homeWindow.config.reviewWindowLaunch.kind !== 'home') {
-			throw new Error('This operation requires the native project home window.');
-		}
+		const window = this.windowsMainService.getWindowByWebContents(sender);
 
 		switch (command) {
-			case 'listProjects':
+			case 'listProjects': {
 				if (arg !== undefined) { throw new Error('listProjects does not accept arguments.'); }
+				if (window?.config?.reviewWindowLaunch.kind !== 'home') { this.requireAuthorizedProjectWindow(window); }
 				return this.listProjects() as T;
+			}
 			case 'chooseFolder': {
+				if (window?.config?.reviewWindowLaunch.kind !== 'home') {
+					throw new Error('This operation requires the native project home window.');
+				}
 				if (arg !== undefined) { throw new Error('chooseFolder does not accept arguments.'); }
 				const folderPath = await this.chooseFolderPath(sender);
 				if (!folderPath) { return null as T; }
@@ -39,6 +41,7 @@ export class WorkspaceProjectHomeChannel {
 				return this.toDTO(project.project, project.binding.path) as T;
 			}
 			case 'openProject': {
+				if (window?.config?.reviewWindowLaunch.kind !== 'home') { this.requireAuthorizedProjectWindow(window); }
 				if (typeof arg !== 'string' || !isUUID(arg)) { throw new Error('A valid project ID is required.'); }
 				const project = this.database.getProject(arg);
 				if (!project) { throw new Error('The requested project does not exist.'); }
@@ -49,6 +52,22 @@ export class WorkspaceProjectHomeChannel {
 			}
 			default:
 				throw new Error(`Call not found: ${command}`);
+		}
+	}
+
+	private requireAuthorizedProjectWindow(window: ReturnType<IWindowsMainService['getWindowByWebContents']>): void {
+		if (!window?.config || window.config.reviewWindowLaunch.kind !== 'project') {
+			throw new Error('This operation requires the native project home or an open project window.');
+		}
+		const projectId = window.config.reviewWindowLaunch.projectId;
+		if (!isUUID(projectId)) { throw new Error('The project window has an invalid project ID.'); }
+		const project = this.database.getProject(projectId);
+		const view = this.database.getProjectView(projectId);
+		if (!project || !view) { throw new Error(`Project ${projectId} is unavailable.`); }
+		const openedWorkspace = window.openedWorkspace;
+		const openedDescriptorUri = openedWorkspace && 'configPath' in openedWorkspace ? openedWorkspace.configPath.toString() : undefined;
+		if (!openedDescriptorUri || openedDescriptorUri !== view.descriptorUri) {
+			throw new Error('The open workspace does not match this project.');
 		}
 	}
 

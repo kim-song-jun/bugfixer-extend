@@ -15,7 +15,7 @@ import { IPaneCompositePartService } from '../../../workbench/services/panecompo
 import { ProjectDashboardEditorInput } from './projectDashboardEditorInput.js';
 import { ProjectDashboardEditorPane } from './projectDashboardEditorPane.js';
 import { ProjectDashboardEditorSerializer } from './projectDashboardEditorSerializer.js';
-import { onDidRequestProjectSection, PROJECT_SIDEBAR_CONTAINER_ID, type ProjectSidebarSection } from './projectSidebar.contribution.js';
+import { onDidRequestNewTask, onDidRequestProjectSection, PROJECT_SIDEBAR_CONTAINER_ID, type ProjectSidebarSection } from './projectSidebar.contribution.js';
 
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(
 	ProjectDashboardEditorInput.ID, ProjectDashboardEditorSerializer,
@@ -41,10 +41,13 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		this._register(onDidRequestProjectSection(section => {
 			void this.openProjectDashboard(section).catch(error => this.notificationService.error(error));
 		}));
+		this._register(onDidRequestNewTask(() => {
+			void this.openProjectDashboard(undefined, true).catch(error => this.notificationService.error(error));
+		}));
 		void this.openProjectDashboard().catch(error => this.notificationService.error(error));
 	}
 
-	private async openProjectDashboard(section?: ProjectSidebarSection): Promise<void> {
+	private async openProjectDashboard(section?: ProjectSidebarSection, createTask = false): Promise<void> {
 		const launch = this.environment.reviewWindowLaunch;
 		if (launch.kind !== 'project') return;
 
@@ -61,7 +64,10 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 			editor instanceof ProjectDashboardEditorInput && editor.projectId === launch.projectId);
 		const input = existing ?? this.instantiationService.createInstance(ProjectDashboardEditorInput, launch.projectId);
 		const pane = await this.editorService.openEditor(input, { pinned: true, revealIfVisible: true });
-		if (section && pane instanceof ProjectDashboardEditorPane) pane.navigateToSection(section);
+		if (pane instanceof ProjectDashboardEditorPane) {
+			if (createTask) pane.startTaskCreation();
+			else if (section) pane.navigateToSection(section);
+		}
 	}
 }
 

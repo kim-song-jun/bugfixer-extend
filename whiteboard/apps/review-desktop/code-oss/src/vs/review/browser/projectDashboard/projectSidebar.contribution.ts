@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../base/common/event.js';
+import { toDisposable } from '../../../base/common/lifecycle.js';
 import * as nls from '../../../nls.js';
 import { Codicon } from '../../../base/common/codicons.js';
 import { renderIcon } from '../../../base/browser/ui/iconLabel/iconLabels.js';
@@ -28,6 +29,7 @@ import { IPaneCompositePartService } from '../../../workbench/services/panecompo
 import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../../workbench/contrib/files/common/files.js';
 import { ipcRenderer } from '../../../base/parts/sandbox/electron-browser/globals.js';
 import { WORKSPACE_DASHBOARD_CHANNEL, type WorkspaceDashboardDTO } from '../../../workspace/common/workspaceDashboardProtocol.js';
+import { WORKSPACE_PROJECT_HOME_CHANNEL, type WorkspaceProjectDTO } from '../../../workspace/common/workspaceProjectHomeProtocol.js';
 
 import './projectSidebar.css';
 
@@ -36,6 +38,8 @@ export type ProjectSidebarSection = 'dashboard' | 'references' | 'conventions';
 
 const onDidRequestProjectSectionEmitter = new Emitter<ProjectSidebarSection>();
 export const onDidRequestProjectSection: Event<ProjectSidebarSection> = onDidRequestProjectSectionEmitter.event;
+const onDidRequestNewTaskEmitter = new Emitter<void>();
+export const onDidRequestNewTask: Event<void> = onDidRequestNewTaskEmitter.event;
 const onDidChangeProjectSectionEmitter = new Emitter<ProjectSidebarSection>();
 let currentProjectSection: ProjectSidebarSection = 'dashboard';
 
@@ -56,6 +60,12 @@ class ProjectSidebarView extends ViewPane {
 	private errorMessage: string | undefined;
 	private content: HTMLElement | undefined;
 	private selectedSection: ProjectSidebarSection = currentProjectSection;
+	private switcherOpen = false;
+	private switcherLoading = false;
+	private switcherError: string | undefined;
+	private switcherProjects: readonly WorkspaceProjectDTO[] = [];
+	private switcherBusy = false;
+	private switcherLoadToken = 0;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -85,8 +95,81 @@ class ProjectSidebarView extends ViewPane {
 		this.content.className = 'project-sidebar';
 		this.content.setAttribute('aria-label', '프로젝트 탐색');
 		parent.appendChild(this.content);
+		const onOutsidePointerDown = (event: PointerEvent): void => {
+			if (this.switcherOpen && event.target instanceof Node && !this.content?.contains(event.target)) {
+				this.closeSwitcher(false);
+			}
+		};
+		document.addEventListener('pointerdown', onOutsidePointerDown);
+		this._register(toDisposable(() => document.removeEventListener('pointerdown', onOutsidePointerDown)));
+		this.content.addEventListener('keydown', event => {
+			if (event.key === 'Escape' && this.switcherOpen) {
+				event.preventDefault();
+				this.closeSwitcher(true);
+			}
+		});
 		this.renderNavigation();
 		void this.loadProjectName();
+	}
+
+	private closeSwitcher(restoreFocus: boolean): void {
+		this.switcherOpen = false;
+		this.switcherLoadToken++;
+		this.renderNavigation(restoreFocus);
+		if (restoreFocus) this.content?.querySelector<HTMLButtonElement>('button[data-project-control="switcher"]')?.focus();
+	}
+
+	private dismissSwitcherKeepingFocus(): void {
+		if (!this.switcherOpen) return;
+		this.switcherOpen = false;
+		this.switcherLoadToken++;
+		this.renderNavigation();
+	}
+
+	private async loadProjects(): Promise<void> {
+		const requestToken = ++this.switcherLoadToken;
+		this.switcherLoading = true;
+		this.switcherError = undefined;
+		this.renderNavigation();
+		try {
+			const projects = await ipcRenderer.invoke(WORKSPACE_PROJECT_HOME_CHANNEL, 'listProjects') as WorkspaceProjectDTO[];
+			if (requestToken !== this.switcherLoadToken || !this.switcherOpen) return;
+			this.switcherProjects = projects;
+		} catch (error) {
+			if (requestToken !== this.switcherLoadToken || !this.switcherOpen) return;
+			console.error('Could not load projects for project navigation.', error);
+			this.switcherProjects = [];
+			this.switcherError = '프로젝트 목록을 불러오지 못했습니다.';
+		} finally {
+			if (requestToken === this.switcherLoadToken && this.switcherOpen) {
+				this.switcherLoading = false;
+				this.renderNavigation();
+			}
+		}
+	}
+
+	private async openProject(projectId: string): Promise<void> {
+		if (this.switcherBusy) return;
+		if (this.environment.reviewWindowLaunch.kind === 'project' && projectId === this.environment.reviewWindowLaunch.projectId) {
+			this.closeSwitcher(true);
+			return;
+		}
+		this.switcherBusy = true;
+		this.switcherError = undefined;
+		const interactionToken = this.switcherLoadToken;
+		this.renderNavigation();
+		try {
+			await ipcRenderer.invoke(WORKSPACE_PROJECT_HOME_CHANNEL, 'openProject', projectId);
+			if (this.switcherOpen && interactionToken === this.switcherLoadToken) this.closeSwitcher(true);
+		} catch (error) {
+			console.error('Could not open the selected project from project navigation.', error);
+			if (this.switcherOpen && interactionToken === this.switcherLoadToken) {
+				this.switcherError = '프로젝트를 열지 못했습니다. 다시 시도해 주세요.';
+			}
+		} finally {
+			this.switcherBusy = false;
+			this.renderNavigation();
+		}
 	}
 
 	private async loadProjectName(): Promise<void> {
@@ -104,9 +187,9 @@ class ProjectSidebarView extends ViewPane {
 		this.renderNavigation();
 	}
 
-	private renderNavigation(): void {
+	private renderNavigation(restoreFocus = true): void {
 		if (!this.content) return;
-		const focusedControl = document.activeElement instanceof HTMLButtonElement
+		const focusedControl = restoreFocus && document.activeElement instanceof HTMLButtonElement
 			? document.activeElement.dataset.projectSection ?? document.activeElement.dataset.projectControl
 			: undefined;
 		this.content.replaceChildren();
@@ -143,11 +226,44 @@ class ProjectSidebarView extends ViewPane {
 			this.content.append(error, retry);
 		}
 
-		const project = document.createElement('div');
+		const project = document.createElement('button');
+		project.type = 'button';
 		project.className = 'project-sidebar__project';
-		project.textContent = this.projectName;
+		project.dataset.projectControl = 'switcher';
+		project.setAttribute('aria-expanded', String(this.switcherOpen));
+		project.setAttribute('aria-label', `프로젝트 전환, 현재 프로젝트 ${this.projectName}`);
 		project.title = this.projectName;
+		const projectName = document.createElement('span');
+		projectName.className = 'project-sidebar__project-name';
+		projectName.textContent = this.projectName;
+		const chevron = renderIcon(Codicon.chevronDown);
+		chevron.classList.add('project-sidebar__chevron');
+		chevron.setAttribute('aria-hidden', 'true');
+		project.append(projectName, chevron);
+		project.addEventListener('click', () => {
+			if (this.switcherOpen) this.closeSwitcher(true);
+			else {
+				this.switcherOpen = true;
+				void this.loadProjects();
+			}
+		});
 		this.content.appendChild(project);
+		if (this.switcherOpen) this.renderSwitcher();
+
+		const createTask = document.createElement('button');
+		createTask.type = 'button';
+		createTask.className = 'project-sidebar__create';
+		createTask.dataset.projectControl = 'create-task';
+		const createIcon = renderIcon(Codicon.add);
+		createIcon.setAttribute('aria-hidden', 'true');
+		const createText = document.createElement('span');
+		createText.textContent = '새 작업';
+		createTask.append(createIcon, createText);
+		createTask.addEventListener('click', () => {
+			this.dismissSwitcherKeepingFocus();
+			onDidRequestNewTaskEmitter.fire();
+		});
+		this.content.appendChild(createTask);
 
 		const projectLabel = document.createElement('div');
 		projectLabel.className = 'project-sidebar__label project-sidebar__label--project';
@@ -168,6 +284,7 @@ class ProjectSidebarView extends ViewPane {
 			text.textContent = item.label;
 			button.append(icon, text);
 			button.addEventListener('click', () => {
+				this.dismissSwitcherKeepingFocus();
 				setProjectSidebarSection(item.section);
 				onDidRequestProjectSectionEmitter.fire(item.section);
 			});
@@ -179,9 +296,91 @@ class ProjectSidebarView extends ViewPane {
 			(retry ?? this.content.querySelector<HTMLButtonElement>(`button[data-project-section="${this.selectedSection}"]`))?.focus();
 		} else if (focusedControl === 'files') {
 			this.content.querySelector<HTMLButtonElement>('button[data-project-control="files"]')?.focus();
+		} else if (focusedControl?.startsWith('switcher-project-')) {
+			(this.content.querySelector<HTMLButtonElement>(`button[data-project-control="${focusedControl}"]`)
+				?? this.content.querySelector<HTMLButtonElement>('button[data-project-control="switcher"]'))?.focus();
+		} else if (focusedControl === 'switcher' || focusedControl === 'switcher-retry' || focusedControl === 'create-task') {
+			(this.content.querySelector<HTMLButtonElement>(`button[data-project-control="${focusedControl}"]`)
+				?? this.content.querySelector<HTMLButtonElement>('button[data-project-control="switcher"]'))?.focus();
 		} else if (focusedControl) {
 			this.content.querySelector<HTMLButtonElement>(`button[data-project-section="${focusedControl}"]`)?.focus();
 		}
+	}
+
+	private renderSwitcher(): void {
+		if (!this.content) return;
+		const group = document.createElement('div');
+		group.className = 'project-sidebar__switcher';
+		group.id = 'project-sidebar-project-list';
+		group.setAttribute('role', 'group');
+		group.setAttribute('aria-label', '프로젝트 전환');
+		this.content.querySelector<HTMLButtonElement>('button[data-project-control="switcher"]')?.setAttribute('aria-controls', group.id);
+		if (this.switcherLoading) {
+			const status = document.createElement('p');
+			status.className = 'project-sidebar__switcher-status';
+			status.setAttribute('role', 'status');
+			status.textContent = '프로젝트를 불러오는 중입니다.';
+			group.appendChild(status);
+		} else if (this.switcherProjects.length === 0 && !this.switcherError) {
+			const empty = document.createElement('p');
+			empty.className = 'project-sidebar__switcher-status';
+			empty.textContent = '다른 프로젝트가 없습니다.';
+			group.appendChild(empty);
+		} else {
+			const currentId = this.environment.reviewWindowLaunch.kind === 'project' ? this.environment.reviewWindowLaunch.projectId : undefined;
+			for (const item of this.switcherProjects) {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = 'project-sidebar__switcher-item';
+				button.dataset.projectControl = `switcher-project-${item.id}`;
+				button.title = item.folderPath;
+				button.setAttribute('aria-label', `${item.name}, ${item.folderPath}${item.id === currentId ? ', 현재 프로젝트' : ''}`);
+				button.setAttribute('aria-current', item.id === currentId ? 'true' : 'false');
+				button.setAttribute('aria-disabled', String(this.switcherBusy));
+				const details = document.createElement('span');
+				details.className = 'project-sidebar__switcher-details';
+				const name = document.createElement('span');
+				name.className = 'project-sidebar__switcher-name';
+				name.textContent = item.name;
+				const path = document.createElement('span');
+				path.className = 'project-sidebar__switcher-path';
+				path.textContent = item.folderPath;
+				details.append(name, path);
+				button.appendChild(details);
+				if (item.id === currentId) {
+					const current = document.createElement('span');
+					current.className = 'project-sidebar__switcher-current';
+					current.textContent = '현재';
+					button.appendChild(current);
+				}
+				button.addEventListener('click', () => void this.openProject(item.id));
+				group.appendChild(button);
+			}
+		}
+		if (this.switcherBusy) {
+			const status = document.createElement('p');
+			status.className = 'project-sidebar__switcher-status';
+			status.setAttribute('role', 'status');
+			status.textContent = '프로젝트 창을 여는 중입니다.';
+			group.appendChild(status);
+		}
+		if (this.switcherError) {
+			const error = document.createElement('p');
+			error.className = 'project-sidebar__switcher-error';
+			error.setAttribute('role', 'alert');
+			error.textContent = this.switcherError;
+			group.appendChild(error);
+			if (this.switcherProjects.length === 0) {
+				const retry = document.createElement('button');
+				retry.type = 'button';
+				retry.className = 'project-sidebar__switcher-retry';
+				retry.dataset.projectControl = 'switcher-retry';
+				retry.textContent = '다시 시도';
+				retry.addEventListener('click', () => void this.loadProjects());
+				group.appendChild(retry);
+			}
+		}
+		this.content.appendChild(group);
 	}
 
 	private createFilesButton(): HTMLButtonElement {
@@ -197,7 +396,10 @@ class ProjectSidebarView extends ViewPane {
 		const filesText = document.createElement('span');
 		filesText.textContent = '파일';
 		files.append(filesIcon, filesText);
-		files.addEventListener('click', () => void this.openExplorer());
+		files.addEventListener('click', () => {
+			this.dismissSwitcherKeepingFocus();
+			void this.openExplorer();
+		});
 		return files;
 	}
 

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { WebContents } from 'electron';
+import { URI } from '../../base/common/uri.js';
 import { WorkspaceProjectHomeChannel } from './workspaceProjectHomeChannel.js';
 import { ProjectWorkspaceService } from './projectWorkspaceService.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
@@ -21,21 +22,54 @@ function setup() {
 	const database = WorkspaceDatabase.open(join(root, 'workspace.db'));
 	const workspaces = new ProjectWorkspaceService(database, join(root, 'profile'));
 	const home = { config: { reviewWindowLaunch: { kind: 'home' } }, focus() {} };
+	let activeWindow: unknown = home;
 	const windows = {
-		getWindowByWebContents: () => home,
+		getWindowByWebContents: () => activeWindow,
 		getWindows: () => [],
 	} as unknown as IWindowsMainService;
 	let selected = join(root, 'folder');
 	const opened: string[] = [];
 	const channel = new WorkspaceProjectHomeChannel(database, workspaces, windows, async () => selected, async id => { opened.push(id); database.markProjectOpened(id); });
-	return { root, database, workspaces, channel, home, windows, opened, setSelected: (path: string) => { selected = path; } };
+	return { root, database, workspaces, channel, home, windows, opened, setSelected: (path: string) => { selected = path; }, setWindow: (window: unknown) => { activeWindow = window; } };
 }
 
-test('project home only authorizes a live home window', async () => {
+test('rejects unowned callers and project windows with invalid launch IDs', async () => {
 	const state = setup();
 	try {
-		(state.windows as unknown as { getWindowByWebContents: () => unknown }).getWindowByWebContents = () => ({ config: { reviewWindowLaunch: { kind: 'project', projectId: 'x' } } });
-		await assert.rejects(state.channel.call({} as WebContents, 'listProjects'), /project home window/);
+		state.setWindow(undefined);
+		await assert.rejects(state.channel.call({} as WebContents, 'listProjects'), /requires the native project home or an open project window/);
+		state.setWindow({ config: { reviewWindowLaunch: { kind: 'sourceNavigator' } } });
+		await assert.rejects(state.channel.call({} as WebContents, 'listProjects'), /requires the native project home or an open project window/);
+		state.setWindow({ config: { reviewWindowLaunch: { kind: 'project', projectId: 'x' } } });
+		await assert.rejects(state.channel.call({} as WebContents, 'listProjects'), /invalid project ID/);
+	} finally { state.database.close(); rmSync(state.root, { recursive: true, force: true }); }
+});
+
+test('native project window can list and open projects only while its descriptor matches its launch project', async () => {
+	const state = setup();
+	try {
+		const current = state.workspaces.createProject('current', join(state.root, 'folder'));
+		mkdirSync(join(state.root, 'other-folder'));
+		const other = state.workspaces.createProject('other', join(state.root, 'other-folder'));
+		const projectWindow = (projectId: string, descriptorUri: string) => ({
+			config: { reviewWindowLaunch: { kind: 'project', projectId } },
+			openedWorkspace: { configPath: URI.parse(descriptorUri) },
+		});
+		state.setWindow(projectWindow(current.project.id, current.view.descriptorUri));
+		const listed = await state.channel.call<readonly { id: string }[]>({} as WebContents, 'listProjects');
+		assert.deepEqual(listed.map(project => project.id).sort(), [current.project.id, other.project.id].sort());
+		await state.channel.call({} as WebContents, 'openProject', other.project.id);
+		assert.deepEqual(state.opened, [other.project.id]);
+
+		state.setWindow(projectWindow(current.project.id, other.view.descriptorUri));
+		await assert.rejects(state.channel.call({} as WebContents, 'listProjects'), /does not match this project/);
+		await assert.rejects(state.channel.call({} as WebContents, 'openProject', other.project.id), /does not match this project/);
+
+		state.setWindow(projectWindow('00000000-0000-4000-8000-000000000001', current.view.descriptorUri));
+		await assert.rejects(state.channel.call({} as WebContents, 'listProjects'), /unavailable/);
+		state.setWindow(projectWindow(current.project.id, current.view.descriptorUri));
+		await assert.rejects(state.channel.call({} as WebContents, 'chooseFolder'), /requires the native project home window/);
+		assert.deepEqual(state.opened, [other.project.id]);
 	} finally { state.database.close(); rmSync(state.root, { recursive: true, force: true }); }
 });
 
@@ -52,6 +86,7 @@ test('chooseFolder reuses canonical folder and openProject orders by actual open
 		assert.equal(reused.id, project.project.id);
 		assert.equal(state.database.listProjects().length, 2);
 		await state.channel.call({} as WebContents, 'openProject', project.project.id);
+		await new Promise(resolve => setTimeout(resolve, 2));
 		await state.channel.call({} as WebContents, 'openProject', second.project.id);
 		const listed = await state.channel.call<readonly { id: string; lastOpenedAt: string | null }[]>({} as WebContents, 'listProjects');
 		assert.equal(listed[0].id, second.project.id);
