@@ -185,7 +185,8 @@ test('Notion previews stay in the main process until the reviewed snapshot is im
 		assert.deepEqual((await channel.call<WorkspaceConnectorAccountDTO[]>(sender, 'listAccounts', project.project.id)).map(item => item.label), ['Personal workspace', 'Client workspace']);
 		await assert.rejects(channel.call(sender, 'connectAccount', {
 			projectId: project.project.id, provider: 'notion', token: 'another-secret-notion-token', accountLabel: '  ',
-		}), /Notion connection label/);
+		}), /label for this Notion connection/);
+		assert.equal((await channel.call<WorkspaceConnectorAccountDTO[]>(sender, 'listAccounts', project.project.id)).length, 2);
 		const preview = await channel.call<WorkspaceConnectorPreviewDTO>(sender, 'previewNotionPage', {
 			projectId: project.project.id, accountId: account.id, pageId,
 		});
