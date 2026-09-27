@@ -2453,7 +2453,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private renderProviderRuns(panel: HTMLElement, task: WorkspaceDashboardTaskItemDTO): void {
 		const section = panel.appendChild($('.project-dashboard__provider'));
-		const heading = section.appendChild($('h3')); heading.textContent = '로컬 AI 실행';
+		const heading = section.appendChild($('h3')); heading.textContent = 'AI로 작업하기';
 		const caption = section.appendChild($('p')); caption.className = 'project-dashboard__provider-note'; caption.textContent = '작업 실행은 프로젝트 폴더의 파일을 수정할 수 있습니다. 시작 전에 프롬프트, 포함된 프로젝트 정보, 권한 요약을 확인하세요.';
 		const taskStatus = section.appendChild($('.project-dashboard__run-state'));
 		taskStatus.setAttribute('role', 'status');
@@ -2582,8 +2582,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const form = section.appendChild(createElement('details', 'project-dashboard__subagent-form'));
 		form.open = this.subagentFormOpen;
 		form.addEventListener('toggle', () => { this.subagentFormOpen = form.open; });
-		const summary = form.appendChild(createElement('summary')); summary.textContent = '범위를 지정해 하위 에이전트 실행';
-		const note = form.appendChild($('p')); note.className = 'project-dashboard__provider-note'; note.textContent = 'Codex 또는 Claude에 이 프로젝트 안에서 수행할 작업 하나를 명확히 맡기세요. 실행, 결과, 정리 상태는 별도로 기록됩니다.';
+		const summary = form.appendChild(createElement('summary')); summary.textContent = '작업을 나눠 다른 AI에게 맡기기';
+		const note = form.appendChild($('p')); note.className = 'project-dashboard__provider-note'; note.textContent = 'Codex 또는 Claude에게 이 프로젝트 안에서 수행할 작업 하나를 맡기세요. 하위 에이전트의 실행, 결과, 정리 상태는 별도로 기록됩니다.';
 		const fields = form.appendChild($('.project-dashboard__subagent-fields'));
 		const providerLabel = fields.appendChild(createElement('label')); providerLabel.htmlFor = 'subagent-provider'; providerLabel.textContent = '제공자';
 		const provider = fields.appendChild(createElement('select')); provider.id = 'subagent-provider'; provider.disabled = this.providerBusy;
@@ -2592,7 +2592,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		}
 		provider.value = this.subagentProviderId;
 		provider.addEventListener('change', () => { this.subagentProviderId = provider.value as ProviderId; this.subagentPreview = undefined; this.subagentError = undefined; this.render(); });
-		const scopeLabel = fields.appendChild(createElement('label')); scopeLabel.htmlFor = 'subagent-scope'; scopeLabel.textContent = '하위 에이전트 작업';
+		const scopeLabel = fields.appendChild(createElement('label')); scopeLabel.htmlFor = 'subagent-scope'; scopeLabel.textContent = '맡길 작업';
 		const scope = fields.appendChild(createElement('textarea')); scope.id = 'subagent-scope'; scope.rows = 3; scope.value = this.subagentScopeDraft; scope.disabled = this.providerBusy;
 		scope.placeholder = '예: 파서 변경을 살펴보고 예외 상황을 파일 경로와 함께 정리하세요.';
 		const count = fields.appendChild($('.project-dashboard__subagent-count'));
