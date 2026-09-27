@@ -1,10 +1,10 @@
 .project-sidebar {
-	--project-sidebar-bg: #FFFFFF;
+	--project-sidebar-bg: #F7F9FB;
 	--project-sidebar-fg: #191F28;
 	--project-sidebar-muted: #4E5968;
-	--project-sidebar-border: #E5E8EB;
+	--project-sidebar-border: #DDE2E8;
 	--project-sidebar-accent: #2370DE;
-	--project-sidebar-selected: #EBF3FE;
+	--project-sidebar-selected: #EAF2FE;
 	box-sizing: border-box;
 	min-height: 100%;
 	padding: 16px 12px;
@@ -15,12 +15,12 @@
 
 .vs-dark .project-sidebar,
 .hc-black .project-sidebar {
-	--project-sidebar-bg: #17171C;
+	--project-sidebar-bg: #272B34;
 	--project-sidebar-fg: #ECECEC;
 	--project-sidebar-muted: #A0A3A8;
-	--project-sidebar-border: #2C2D31;
+	--project-sidebar-border: #3A3E47;
 	--project-sidebar-accent: #5B9FF5;
-	--project-sidebar-selected: rgba(91, 159, 245, 0.15);
+	--project-sidebar-selected: #203650;
 }
 
 .project-sidebar__brand {

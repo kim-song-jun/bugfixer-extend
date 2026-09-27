@@ -2163,6 +2163,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (emptyProject) board.classList.add('project-dashboard__board--empty');
 		for (const column of columns) {
 			const lane = board.appendChild($('.project-dashboard__lane'));
+			lane.dataset.state = column.state;
 			const laneHeader = lane.appendChild($('.project-dashboard__lane-heading'));
 			const laneTitle = laneHeader.appendChild($('h3')); laneTitle.textContent = column.label;
 			const tasks = this.dashboard.tasks.filter(task => task.state === column.state);
