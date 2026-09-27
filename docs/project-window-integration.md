@@ -1,6 +1,6 @@
 # Editable project-window integration contract
 
-Status: proposed implementation design for the user's selected **one native window per project**, with dashboard, editable files, and Whiteboard reviews in Code OSS editor tabs. It is source-backed design material, not implemented product behavior. The inspected Whiteboard source is pinned at [`4ecc5704cb19d1dc04304ae6956200227d483e27`](upstream-base.md#pinned-source-and-notices).
+Status: selected integration and acceptance contract for **one native window per project**, with dashboard, editable files, and Whiteboard reviews in Code OSS editor tabs. The fork now implements separate project windows, dashboard/file tabs, and an in-app task Review bridge; an unsigned macOS package has live two-window, switcher, and file-tab restart proof. The external Review open dispatcher and single app-owned control stream below remain to be implemented. [Product acceptance](product-acceptance.md) tracks the evidence boundary. The inspected Whiteboard source was pinned at [`4ecc5704cb19d1dc04304ae6956200227d483e27`](upstream-base.md#pinned-source-and-notices).
 
 ## Three explicit window modes
 
@@ -59,4 +59,4 @@ The existing `openApiSource` action intentionally opens a separate navigator wor
 5. In a disposable profile, use SQLite-aware backup operations for both `workspace.db` and `review-api.db`, restore them, and verify task/review links and an explicitly unavailable review. A copy of only a live main DB file does not prove recovery while WAL is active.
 6. Inspect normal and narrow native windows before/after implementation, including tab order, text wrap, focus, scroll end, light/dark contrast, and actual editing. Run the selected UI verification path in [ux-flow.md](ux-flow.md#validation-when-implemented). A source-only or local TypeScript check does not prove the product window works.
 
-The dashboard's detailed placement, provider account behavior, Docker boundary, and Notion authorization still have separate pending user choices. This contract fixes the already selected window and review behavior without deciding those unrelated questions.
+The dashboard layout, first-release provider account mode, native macOS execution, later Docker target, and first-party Notion personal-token mode are selected in their linked product contracts. This document remains the selected window and external Review routing contract; incomplete proof and implementation are listed in [product acceptance](product-acceptance.md).
