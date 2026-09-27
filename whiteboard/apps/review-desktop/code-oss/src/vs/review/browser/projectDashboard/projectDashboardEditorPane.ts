@@ -53,6 +53,13 @@ function createElement<K extends keyof HTMLElementTagNameMap>(tag: K, className?
 	return element;
 }
 
+function packageTokenValidationMessage(value: string): string {
+	if ([...value].some(character => character.charCodeAt(0) <= 0x20 || character.charCodeAt(0) > 0x7e)) {
+		return '토큰은 공백 없는 ASCII 출력 가능 문자만 사용할 수 있습니다.';
+	}
+	return value.length > 0 && value.length < 16 ? '토큰은 공백 없는 ASCII 출력 가능 문자 16자 이상이어야 합니다.' : '';
+}
+
 export class ProjectDashboardEditorPane extends EditorPane {
 	static readonly ID = ProjectDashboardEditorInput.EDITOR_ID;
 	private root: HTMLElement | undefined;
@@ -997,8 +1004,16 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const connectHeading = connect.appendChild($('h5')); connectHeading.textContent = '계정 추가';
 				const label = connect.appendChild(createElement('label')); label.htmlFor = `package-account-label-${installed.packageId}`; label.textContent = '계정 이름';
 				const labelInput = connect.appendChild(document.createElement('input')); labelInput.id = label.htmlFor; labelInput.required = true; labelInput.autocomplete = 'off'; labelInput.value = this.packageConnectionLabel; labelInput.disabled = this.packageBusy;
-				const tokenLabel = connect.appendChild(createElement('label')); tokenLabel.htmlFor = `package-token-${installed.packageId}`; tokenLabel.textContent = 'Bearer token';
-				const tokenInput = connect.appendChild(document.createElement('input')); tokenInput.id = tokenLabel.htmlFor; tokenInput.type = 'password'; tokenInput.required = true; tokenInput.autocomplete = 'new-password'; tokenInput.disabled = this.packageBusy;
+				const tokenLabel = connect.appendChild(createElement('label')); tokenLabel.htmlFor = `package-token-${installed.packageId}`; tokenLabel.textContent = 'Bearer token (16자 이상)';
+				const tokenInput = connect.appendChild(document.createElement('input')); tokenInput.id = tokenLabel.htmlFor; tokenInput.type = 'password'; tokenInput.required = true; tokenInput.minLength = 16; tokenInput.pattern = '[!-~]{16,}'; tokenInput.autocomplete = 'new-password'; tokenInput.disabled = this.packageBusy;
+				const tokenHint = connect.appendChild($('p')); tokenHint.id = `package-token-hint-${installed.packageId}`; tokenHint.className = 'project-dashboard__connector-note'; tokenHint.textContent = '공백 없는 ASCII 출력 가능 문자만 사용할 수 있으며, 최소 16자여야 합니다.';
+				tokenInput.setAttribute('aria-describedby', tokenHint.id);
+				tokenInput.addEventListener('input', () => {
+					const message = packageTokenValidationMessage(tokenInput.value);
+					tokenInput.setCustomValidity(message);
+					if (message) tokenInput.setAttribute('aria-invalid', 'true');
+					else tokenInput.removeAttribute('aria-invalid');
+				});
 				const scopesHeading = connect.appendChild($('p')); scopesHeading.className = 'project-dashboard__connector-note'; scopesHeading.textContent = '허용할 권한을 확인하세요. 이 목록은 패키지 주장으로, 제공자가 검증하지 않았습니다.';
 				const scopes = connect.appendChild(createElement('div', 'project-dashboard__package-scopes'));
 				const chosenScopes = new Set(this.packageConnectionScopes.get(installed.packageId) ?? installed.requestedScopes);
@@ -1011,6 +1026,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				connect.addEventListener('submit', event => {
 					event.preventDefault();
 					const credential = tokenInput.value;
+					const tokenError = packageTokenValidationMessage(credential);
+					tokenInput.setCustomValidity(tokenError);
+					if (tokenError) { tokenInput.reportValidity(); return; }
 					this.packageConnectionLabel = labelInput.value;
 					tokenInput.value = '';
 					void this.connectInstalledPackage(installed, labelInput.value, credential, [...chosenScopes]);
