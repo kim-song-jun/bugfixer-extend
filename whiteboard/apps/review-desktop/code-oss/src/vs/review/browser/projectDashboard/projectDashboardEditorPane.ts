@@ -1692,7 +1692,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private renderReferenceViewer(panel: HTMLElement): void {
 		const preserved = this.preservedReferenceViewerElement;
-		if (preserved && preserved.dataset.referenceId === this.referenceViewerId && Number(preserved.dataset.referencePage) === this.referenceViewerPage) {
+		if (preserved?.dataset.referenceLoaded === 'true' && preserved.dataset.referenceId === this.referenceViewerId && Number(preserved.dataset.referencePage) === this.referenceViewerPage) {
 			panel.appendChild(preserved);
 			this.preservedReferenceViewerElement = undefined;
 			return;
@@ -1731,6 +1731,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const pageStatus = pagination.appendChild($('p')); pageStatus.setAttribute('aria-live', 'polite'); pageStatus.textContent = `${this.referenceViewerPage + 1} / ${pageCount}쪽`;
 		const next = pagination.appendChild(createElement('button', 'project-dashboard__secondary')); next.type = 'button'; next.textContent = '다음'; next.disabled = this.referenceViewerPage >= pageCount - 1; next.dataset.focusKey = 'reference-viewer-page-next';
 		next.addEventListener('click', () => this.changeReferenceViewerPage(this.referenceViewerPage + 1));
+		dialog.dataset.referenceLoaded = 'true';
 	}
 
 	private referencePageStarts(content: string): number[] {
@@ -2351,7 +2352,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (!this.root) return;
 		if (this.referenceViewerId && this.referenceViewer && !this.referenceViewerLoading && !this.referenceViewerError) {
 			const existingViewer = this.root.querySelector<HTMLElement>('.project-dashboard__reference-viewer');
-			if (existingViewer?.dataset.referenceId === this.referenceViewerId && Number(existingViewer.dataset.referencePage) === this.referenceViewerPage) this.preservedReferenceViewerElement = existingViewer;
+			if (existingViewer?.dataset.referenceLoaded === 'true' && existingViewer.dataset.referenceId === this.referenceViewerId && Number(existingViewer.dataset.referencePage) === this.referenceViewerPage) this.preservedReferenceViewerElement = existingViewer;
 		}
 		const activeElement = this.root.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
 		const focusId = activeElement?.id;
