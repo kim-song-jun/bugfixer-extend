@@ -454,6 +454,33 @@ test('startup replay leaves Trash visible with an actionable error for a live re
 	});
 });
 
+test('cancelling an interrupted attempt reports a live owned group and reconciles it after exit', { skip: process.platform === 'win32' }, async (t) => {
+	await withProviderChannel(async ({ channel, database, projectId, taskId, sender }) => {
+		const task = database.getTask(taskId)!;
+		const attempt = database.createProviderAttempt({
+			taskId, provider: 'codex', purpose: 'connectionTest', profileRef: 'local-default-codex',
+			folderIdentity: 'test-folder-identity', cwd: process.cwd(), mode: 'read-only', prompt: 'test',
+		});
+		const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+		assert.ok(child.pid);
+		t.diagnostic(`test-owned helper pid=${child.pid} ppid=${process.pid} port=none`);
+		t.after(() => stopTestOwnedProcessGroup(child));
+		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
+		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
+
+		await assert.rejects(
+			channel.call(sender, 'cancel', { projectId, attemptId: attempt.attemptId }),
+			/Prior provider process group.*still live or cannot be verified.*The app cannot safely signal it from the stored process group ID.*Close the verified provider process and retry/,
+		);
+		assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, false);
+
+		stopTestOwnedProcessGroup(child);
+		await new Promise<void>((resolve, reject) => { child.once('close', () => resolve()); child.once('error', reject); });
+		await channel.call(sender, 'cancel', { projectId, attemptId: attempt.attemptId });
+		assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, true);
+	});
+});
+
 test('shutdown cancels startup replay without completing pending Trash', { skip: process.platform === 'win32' }, async (t) => {
 	await withProviderChannel(async ({ channel, database, taskId }) => {
 		const task = database.getTask(taskId)!;

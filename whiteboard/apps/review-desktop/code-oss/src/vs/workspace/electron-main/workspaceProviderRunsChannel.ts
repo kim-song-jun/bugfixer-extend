@@ -509,6 +509,12 @@ export class WorkspaceProviderRunsChannel {
 		if (active) { active.controller.abort(); active.handle.cancel(); await active.settled; }
 		else if (queued) { queued.controller.abort(); await queued.settled; }
 		else if (attempt.state === 'running' || attempt.state === 'queued') { throw new Error('This run has no owned process to cancel.'); }
+		else if (!attempt.cleanupVerified && attempt.ownedPgid !== null) {
+			if (!isOwnedProcessGroupGone(attempt.ownedPgid)) {
+				throw new Error(`Prior provider process group for attempt ${attempt.attemptId} is still live or cannot be verified. The app cannot safely signal it from the stored process group ID. Close the verified provider process and retry cancellation.`);
+			}
+			this.reconcileStoppedTaskAttempts(attempt.taskId);
+		}
 	}
 
 	private async previewContext(sender: WebContents, scope: ProviderRunScope, parentAttemptId: string | null = null, childScope: string | null = null): Promise<PreviewContext> {
