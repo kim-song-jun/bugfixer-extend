@@ -245,6 +245,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private connectorOperationGeneration = 0;
 	private installedPackages: readonly WorkspaceInstalledPackageDTO[] = [];
 	private packageConnections: readonly WorkspacePackageConnectionDTO[] = [];
+	private readonly installedPackageDetailsOpen = new Set<string>();
 	private readonly packageConnectionIds = new Map<string, string>();
 	private packageConnectionLabel = '';
 	private readonly packageConnectionScopes = new Map<string, Set<string>>();
@@ -1119,17 +1120,41 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const installedHeading = section.appendChild($('.project-dashboard__knowledge-section-heading'));
 		const installedTitle = installedHeading.appendChild($('h4')); installedTitle.textContent = '설치된 패키지';
 		if (!this.installedPackages.length && !this.packageLoading) { const empty = section.appendChild($('.project-dashboard__knowledge-empty')); empty.textContent = '이 프로젝트에 설치된 로컬 커넥터 패키지가 없습니다.'; }
+		for (const packageId of this.installedPackageDetailsOpen) {
+			if (!this.installedPackages.some(installed => installed.packageId === packageId)) this.installedPackageDetailsOpen.delete(packageId);
+		}
 		for (const installed of this.installedPackages) {
 			const card = section.appendChild($('.project-dashboard__package-card'));
-			const packageTitle = card.appendChild($('h4')); packageTitle.textContent = `${installed.name} · v${installed.version}`;
-			const packageMeta = card.appendChild($('p')); packageMeta.textContent = `${installed.packageId} · 키 ${installed.fingerprint} · 업데이트 ${new Date(installed.updatedAt).toLocaleDateString()}`;
-			const auth = card.appendChild(createElement('section', 'project-dashboard__package-auth'));
+			const packageConnections = this.packageConnections.filter(connection => connection.packageId === installed.packageId);
+			const activeConnections = packageConnections.filter(connection => connection.state === 'active').length;
+			const pendingConnections = packageConnections.some(connection => connection.state === 'pending' || connection.state === 'disconnecting');
+			const packageDetails = card.appendChild(document.createElement('details'));
+			packageDetails.className = 'project-dashboard__package-disclosure';
+			packageDetails.open = this.installedPackageDetailsOpen.has(installed.packageId);
+			packageDetails.addEventListener('toggle', () => {
+				if (packageDetails.open) this.installedPackageDetailsOpen.add(installed.packageId);
+				else this.installedPackageDetailsOpen.delete(installed.packageId);
+			});
+			const packageDisclosureSummary = packageDetails.appendChild(document.createElement('summary'));
+			packageDisclosureSummary.className = 'project-dashboard__package-summary';
+			const packageSummary = packageDisclosureSummary.appendChild(createElement('span', 'project-dashboard__package-summary-info'));
+			const packageTitle = packageSummary.appendChild($('strong')); packageTitle.textContent = `${installed.name} · v${installed.version}`;
+			const packageStatus = packageSummary.appendChild($('span')); packageStatus.className = 'project-dashboard__package-status';
+			packageStatus.textContent = pendingConnections
+				? '계정 정리 필요'
+				: activeConnections
+					? `연결 계정 ${activeConnections}개`
+					: installed.accountAccess === 'bearer-token' ? '계정 연결 필요' : '익명 인증';
+			const packageAction = packageDisclosureSummary.appendChild($('span')); packageAction.className = 'project-dashboard__package-action';
+			packageAction.textContent = pendingConnections ? '계정 확인' : installed.accountAccess === 'bearer-token' && !activeConnections ? '계정 연결' : '자료 가져오기';
+			const packageContent = packageDetails.appendChild(createElement('div', 'project-dashboard__package-content'));
+			const packageMeta = packageContent.appendChild($('p')); packageMeta.textContent = `${installed.packageId} · 키 ${installed.fingerprint} · 업데이트 ${new Date(installed.updatedAt).toLocaleDateString()}`;
+			const auth = packageContent.appendChild(createElement('section', 'project-dashboard__package-auth'));
 			const authTitle = auth.appendChild($('h5')); authTitle.textContent = '계정 연결';
 			const authNote = auth.appendChild($('p')); authNote.className = 'project-dashboard__connector-note';
 			authNote.textContent = installed.accountAccess === 'bearer-token'
 				? `인증 방식: 앱이 관리하는 bearer token · 호스트: ${installed.domains[0]} · 요청 권한(패키지 주장): ${installed.requestedScopes.join(', ')}. 권한은 패키지의 주장으로, 제공자가 검증한 권한이 아닙니다.`
 				: '인증 방식: 익명 · 이 패키지의 안정적인 앱 계정이 자동으로 선택됩니다.';
-			const packageConnections = this.packageConnections.filter(connection => connection.packageId === installed.packageId);
 			if (packageConnections.length) {
 				const accountLabel = auth.appendChild(createElement('label')); accountLabel.htmlFor = `package-account-${installed.packageId}`; accountLabel.textContent = '자료 미리보기와 새로고침에 사용할 계정';
 				const accountSelect = auth.appendChild(document.createElement('select')); accountSelect.id = accountLabel.htmlFor; accountSelect.disabled = this.packageBusy;
@@ -1186,7 +1211,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					void this.connectInstalledPackage(installed, labelInput.value, credential, [...chosenScopes]);
 				});
 			}
-			const sourceForm = card.appendChild(createElement('form', 'project-dashboard__package-import'));
+			const sourceForm = packageContent.appendChild(createElement('form', 'project-dashboard__package-import'));
 			const sourceLabel = sourceForm.appendChild(createElement('label')); sourceLabel.htmlFor = `package-source-${installed.packageId}`; sourceLabel.textContent = '자료';
 			const sourceSelect = sourceForm.appendChild(createElement('select')); sourceSelect.id = `package-source-${installed.packageId}`; sourceSelect.required = true; sourceSelect.disabled = this.packageBusy;
 			for (const source of installed.sources) { const option = sourceSelect.appendChild($('option') as HTMLOptionElement); option.value = source.sourceId; option.textContent = source.label; }
@@ -1203,7 +1228,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			});
 			const preview = this.packagePreview?.packageId === installed.packageId ? this.packagePreview : undefined;
 			if (preview) {
-				const previewCard = card.appendChild($('.project-dashboard__connector-preview'));
+				const previewCard = packageContent.appendChild($('.project-dashboard__connector-preview'));
 				const previewTitle = previewCard.appendChild($('h4')); previewTitle.textContent = '가져올 자료 확인';
 				const metadata = previewCard.appendChild($('dl'));
 				const taskTitle = this.packagePreviewTaskId ? this.dashboard?.tasks.find(task => task.id === this.packagePreviewTaskId)?.title ?? this.packagePreviewTaskId : '연결할 작업 없음';
@@ -1217,7 +1242,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const actions = previewCard.appendChild($('.project-dashboard__form-actions'));
 				const confirm = actions.appendChild(createElement('button', 'project-dashboard__primary')); confirm.type = 'button'; confirm.textContent = this.packageBusy ? '확인한 자료 가져오는 중…' : '확인한 자료 가져오기'; confirm.disabled = this.packageBusy || Date.parse(preview.expiresAt) <= Date.now(); confirm.addEventListener('click', () => void this.importReviewedPackagePreview(preview));
 			}
-			const refreshCard = card.appendChild(createElement('div', 'project-dashboard__package-refresh'));
+			const refreshCard = packageContent.appendChild(createElement('div', 'project-dashboard__package-refresh'));
 			const refreshTitle = refreshCard.appendChild($('h5')); refreshTitle.textContent = '기존 자료 새로고침';
 			const refreshHint = refreshCard.appendChild($('p')); refreshHint.textContent = '이 패키지 자료의 가장 최근 스냅샷을 선택하세요. 서명된 자료 규칙과 저장된 자료 ID를 사용해 새로고침합니다.';
 			const candidates = this.packageRefreshCandidates(installed);
@@ -1266,7 +1291,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 					item.textContent = `버전 ${snapshot.version} · ${new Date(snapshot.retrievedAt).toLocaleString()}${snapshot.id === selectedCandidate.reference.id ? ' · 최신' : ''}`;
 				}
 			}
-			const uninstall = card.appendChild(createElement('button', 'project-dashboard__danger')); uninstall.type = 'button'; uninstall.disabled = this.packageBusy; uninstall.textContent = '패키지 제거'; uninstall.addEventListener('click', () => { if (!projectId) return; void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'uninstallPackage', { projectId, packageId: installed.packageId }), '패키지를 제거했습니다.'); });
+			const uninstall = packageContent.appendChild(createElement('button', 'project-dashboard__danger')); uninstall.type = 'button'; uninstall.disabled = this.packageBusy; uninstall.textContent = '패키지 제거'; uninstall.addEventListener('click', () => { if (!projectId) return; void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'uninstallPackage', { projectId, packageId: installed.packageId }), '패키지를 제거했습니다.'); });
 		}
 	}
 
