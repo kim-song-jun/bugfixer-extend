@@ -843,7 +843,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const card = previewRegion.appendChild($('.project-dashboard__connector-preview'));
 			const previewHeading = card.appendChild($('h4')); previewHeading.textContent = '자료 스냅샷 확인';
 			const metadata = card.appendChild($('dl'));
-			for (const [label, value] of [['자료', reviewedPreview.title], ['자료 URI', reviewedPreview.sourceUri], ['내용 SHA-256', reviewedPreview.contentSha256], ['미리보기 만료', new Date(reviewedPreview.expiresAt).toLocaleString()]] as const) { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; }
+			for (const [label, value] of [['자료', reviewedPreview.title], ['자료 URI', reviewedPreview.sourceUri], ['내용 SHA-256', reviewedPreview.contentSha256], ['미리보기 만료', new Date(reviewedPreview.expiresAt).toLocaleString('ko-KR')]] as const) { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; }
 			if (reviewedPreview.omissions.length) { const omitted = card.appendChild($('p')); omitted.className = 'project-dashboard__connector-note'; omitted.textContent = `미리보기에서 제외된 항목: ${reviewedPreview.omissions.join(' · ')}`; }
 			const contentLabel = card.appendChild($('h5')); contentLabel.textContent = '텍스트 미리보기';
 			const artifactNotice = card.appendChild($('p')); artifactNotice.className = 'project-dashboard__connector-preview-disclosure'; artifactNotice.textContent = '가져오면 여기에 표시되지 않은 메타데이터와 속성을 포함해 Slack 또는 Notion의 원본 응답을 저장합니다. 여기의 읽기 쉬운 텍스트는 미리보기이며, 위 SHA-256은 저장되는 전체 자료의 값입니다.';
@@ -1219,7 +1219,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const packageAction = packageDisclosureSummary.appendChild($('span')); packageAction.className = 'project-dashboard__package-action';
 			packageAction.textContent = pendingConnections ? '계정 확인' : installed.accountAccess === 'bearer-token' && !activeConnections ? '계정 연결' : '자료 가져오기';
 			const packageContent = packageDetails.appendChild(createElement('div', 'project-dashboard__package-content'));
-			const packageMeta = packageContent.appendChild($('p')); packageMeta.textContent = `${installed.packageId} · 키 ${installed.fingerprint} · 업데이트 ${new Date(installed.updatedAt).toLocaleDateString()}`;
+			const packageMeta = packageContent.appendChild($('p')); packageMeta.textContent = `${installed.packageId} · 키 ${installed.fingerprint} · 업데이트 ${new Date(installed.updatedAt).toLocaleDateString('ko-KR')}`;
 			const auth = packageContent.appendChild(createElement('section', 'project-dashboard__package-auth'));
 			const authTitle = auth.appendChild($('h5')); authTitle.textContent = '계정 연결';
 			const authNote = auth.appendChild($('p')); authNote.className = 'project-dashboard__connector-note';
@@ -1303,7 +1303,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const previewTitle = previewCard.appendChild($('h4')); previewTitle.textContent = '가져올 자료 확인';
 				const metadata = previewCard.appendChild($('dl'));
 				const taskTitle = this.packagePreviewTaskId ? this.dashboard?.tasks.find(task => task.id === this.packagePreviewTaskId)?.title ?? this.packagePreviewTaskId : '연결할 작업 없음';
-				for (const [label, value] of [['자료', preview.title], ['자료 URI', preview.sourceUri], ['내용 SHA-256', preview.contentSha256], ['미리보기 만료', new Date(preview.expiresAt).toLocaleString()], ['연결할 작업', taskTitle]] as const) {
+				for (const [label, value] of [['자료', preview.title], ['자료 URI', preview.sourceUri], ['내용 SHA-256', preview.contentSha256], ['미리보기 만료', new Date(preview.expiresAt).toLocaleString('ko-KR')], ['연결할 작업', taskTitle]] as const) {
 					const term = metadata.appendChild($('dt')); term.textContent = label;
 					const detail = metadata.appendChild($('dd')); detail.textContent = value;
 				}
@@ -1327,7 +1327,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const refreshSelect = refreshCard.appendChild(document.createElement('select')); refreshSelect.id = `package-refresh-source-${installed.packageId}`; refreshSelect.disabled = this.packageBusy || !candidates.length; refreshSelect.dataset.focusKey = `package-refresh-source:${installed.packageId}`;
 			for (const candidate of candidates) {
 				const option = refreshSelect.appendChild(document.createElement('option')); option.value = candidate.reference.id;
-				option.textContent = `${candidate.sourceLabel} · ${candidate.sourceKey} · 버전 ${candidate.reference.version} · ${new Date(candidate.reference.retrievedAt).toLocaleString()}`;
+				option.textContent = `${candidate.sourceLabel} · ${candidate.sourceKey} · 버전 ${candidate.reference.version} · ${new Date(candidate.reference.retrievedAt).toLocaleString('ko-KR')}`;
 				option.selected = candidate.reference.id === selectedReferenceId;
 			}
 			if (!candidates.length) {
@@ -1359,7 +1359,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				for (const snapshot of (this.knowledge?.references ?? []).filter(reference => reference.sourceId === selectedCandidate.reference.sourceId
 					&& reference.accountRef === this.selectedPackageConnection(installed)?.accountRef).sort((left, right) => left.version - right.version)) {
 					const item = historyList.appendChild(document.createElement('li'));
-					item.textContent = `버전 ${snapshot.version} · ${new Date(snapshot.retrievedAt).toLocaleString()}${snapshot.id === selectedCandidate.reference.id ? ' · 최신' : ''}`;
+					item.textContent = `버전 ${snapshot.version} · ${new Date(snapshot.retrievedAt).toLocaleString('ko-KR')}${snapshot.id === selectedCandidate.reference.id ? ' · 최신' : ''}`;
 				}
 			}
 			const uninstall = packageContent.appendChild(createElement('button', 'project-dashboard__danger')); uninstall.type = 'button'; uninstall.disabled = this.packageBusy; uninstall.textContent = '패키지 제거'; uninstall.addEventListener('click', () => { if (!projectId) return; void this.runPackageAction(() => ipcRenderer.invoke(WORKSPACE_PACKAGE_CONNECTOR_CHANNEL, 'uninstallPackage', { projectId, packageId: installed.packageId }), '패키지를 제거했습니다.'); });
@@ -1665,7 +1665,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				? `요청 URL: ${websitePreview.requestedUri}`
 				: `요청 URL: ${websitePreview.requestedUri} · 최종 URL: ${websitePreview.sourceUri}`;
 			const expiry = preview.appendChild($('p')); expiry.className = 'project-dashboard__connector-preview-disclosure';
-			expiry.textContent = expired ? '미리보기가 만료됐습니다. 페이지를 다시 미리보세요.' : `미리보기 저장 기한: ${new Date(expiresAt).toLocaleString()}`;
+			expiry.textContent = expired ? '미리보기가 만료됐습니다. 페이지를 다시 미리보세요.' : `미리보기 저장 기한: ${new Date(expiresAt).toLocaleString('ko-KR')}`;
 			const content = preview.appendChild(createElement('pre', 'project-dashboard__connector-preview-content')); content.textContent = websitePreview.derivedText;
 			if (websitePreview.omissions.length) {
 				const omissionLabels: Readonly<Record<string, string>> = {
@@ -1701,7 +1701,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const main = row.appendChild($('.project-dashboard__knowledge-card-main'));
 				const name = main.appendChild($('h4')); name.textContent = reference.title;
 				const sourceName = this.referenceSourceLabel(reference.connectorId);
-				const meta = main.appendChild($('p')); meta.textContent = `${sourceName} · ${reference.version}번째 버전 · 추가일 ${new Date(reference.retrievedAt).toLocaleDateString()}`;
+				const meta = main.appendChild($('p')); meta.textContent = `${sourceName} · ${reference.version}번째 버전 · 추가일 ${new Date(reference.retrievedAt).toLocaleDateString('ko-KR')}`;
 				const linked = Object.entries(knowledge.taskReferences).filter(([, refs]) => refs.some(item => item.id === reference.id)).map(([taskId]) => this.dashboard?.tasks.find(task => task.id === taskId)?.title).filter((value): value is string => !!value);
 				const linkedTo = main.appendChild($('p')); linkedTo.className = 'project-dashboard__knowledge-linked'; linkedTo.textContent = linked.length ? `연결된 작업: ${linked.join(', ')}` : '작업에 연결되지 않음';
 				const view = row.appendChild(createElement('button', 'project-dashboard__secondary')); view.type = 'button'; view.textContent = this.referenceViewerId === reference.id ? '내용 닫기' : '내용 보기';
@@ -1755,7 +1755,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const activeNeedsCheck = !!active && active.authoredBy !== 'person' && active.latestCheckVerdict !== 'pass';
 		const activeDescription = activeCard.appendChild($('p'));
 		activeDescription.textContent = active
-			? `적용 시각: ${active.lastAppliedAt ? new Date(active.lastAppliedAt).toLocaleString() : '날짜 정보 없음'}.${active.authoredBy !== 'person' ? ` 최근 검사: ${active.latestCheckVerdict === 'pass' ? '통과' : active.latestCheckVerdict === 'fail' ? '실패' : '확인하지 않음'}.` : ''} ${activeNeedsCheck ? '새 검사를 통과할 때까지 에이전트 실행이 차단됩니다.' : '이 버전이 이후 프로젝트 실행에 적용됩니다.'}`
+			? `적용 시각: ${active.lastAppliedAt ? new Date(active.lastAppliedAt).toLocaleString('ko-KR') : '날짜 정보 없음'}.${active.authoredBy !== 'person' ? ` 최근 검사: ${active.latestCheckVerdict === 'pass' ? '통과' : active.latestCheckVerdict === 'fail' ? '실패' : '확인하지 않음'}.` : ''} ${activeNeedsCheck ? '새 검사를 통과할 때까지 에이전트 실행이 차단됩니다.' : '이 버전이 이후 프로젝트 실행에 적용됩니다.'}`
 			: '작업 규칙 초안을 작성하고 준비가 끝나면 적용하세요.';
 		if (active) { const preview = activeCard.appendChild(createElement('pre', 'project-dashboard__convention-preview')); preview.textContent = active.markdown; }
 		if (activeNeedsCheck && active) {
@@ -1857,7 +1857,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const main = row.appendChild($('.project-dashboard__knowledge-card-main'));
 			const name = main.appendChild($('h4')); name.textContent = `버전 ${convention.version}${convention.active ? ' · 적용 중' : ''}`;
 			const verdict = convention.latestCheckVerdict ? `최근 검사: ${this.conventionVerdictLabel(convention.latestCheckVerdict)}` : '최근 검사: 확인 전';
-			const meta = main.appendChild($('p')); meta.textContent = `저장일 ${new Date(convention.createdAt).toLocaleDateString()} · ${convention.authoredBy === 'person' ? '직접 작성' : convention.authoredBy} · ${verdict}`;
+			const meta = main.appendChild($('p')); meta.textContent = `저장일 ${new Date(convention.createdAt).toLocaleDateString('ko-KR')} · ${convention.authoredBy === 'person' ? '직접 작성' : convention.authoredBy} · ${verdict}`;
 			const preview = main.appendChild(createElement('pre', 'project-dashboard__convention-preview')); preview.textContent = convention.markdown;
 			if (convention.authoredBy !== 'person') {
 				const check = row.appendChild(createElement('button', 'project-dashboard__secondary')); check.type = 'button'; check.textContent = '이 버전 검사'; check.disabled = this.conventionAgentBusy;
@@ -1948,7 +1948,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const metadata = dialog.appendChild(createElement('dl', 'project-dashboard__reference-viewer-meta'));
 		const addMetadata = (label: string, value: string) => { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; return detail; };
 		addMetadata('출처', reference.sourceUri ?? this.referenceSourceLabel(reference.connectorId));
-		addMetadata('가져온 시각', new Date(reference.retrievedAt).toLocaleString());
+		addMetadata('가져온 시각', new Date(reference.retrievedAt).toLocaleString('ko-KR'));
 		addMetadata('SHA-256', reference.contentSha256).className = 'project-dashboard__reference-viewer-hash';
 		if (reference.omissions.length) addMetadata('텍스트에서 제외된 항목', reference.omissions.join(' · '));
 		const pageStart = this.referenceViewerPageStarts[this.referenceViewerPage] ?? 0;
@@ -2549,7 +2549,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const copy = row.appendChild($('.project-dashboard__lifecycle-copy'));
 			const name = copy.appendChild($('h3')); name.textContent = task.title;
 			const state = copy.appendChild($('p')); state.className = 'project-dashboard__lifecycle-meta';
-			state.textContent = `${columns.find(column => column.state === task.state)?.label} · 수정일 ${new Date(task.updatedAt).toLocaleDateString()}`;
+			state.textContent = `${columns.find(column => column.state === task.state)?.label} · 수정일 ${new Date(task.updatedAt).toLocaleDateString('ko-KR')}`;
 			if (task.description) { const description = copy.appendChild($('p')); description.textContent = task.description; }
 			if (task.deletionError) { const error = copy.appendChild($('.project-dashboard__task-edit-error')); error.textContent = this.errorMessage(new Error(task.deletionError), '휴지통 이동을 완료하지 못했습니다.'); }
 			const restore = row.appendChild(createElement('button', 'project-dashboard__secondary'));
@@ -2683,6 +2683,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const detail = this.root.querySelector<HTMLElement>('.project-dashboard__detail');
 				const detailTitle = detail?.querySelector<HTMLHeadingElement>('h2');
 				if (detail && detailTitle) { detailTitle.focus({ preventScroll: true }); detail.scrollIntoView({ block: 'start' }); return; }
+			}
+			if (focusKey?.startsWith('task-state:') && this.taskMutationBusy) {
+				this.root.querySelector<HTMLElement>('#project-task-state-heading')?.focus({ preventScroll: true });
+				return;
 			}
 			if (target && !('disabled' in target && target.disabled)) target.focus({ preventScroll: true });
 		};
@@ -2871,7 +2875,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			} else {
 				const description = panel.appendChild($('p')); description.className = 'project-dashboard__detail-description'; description.textContent = detail.description || '설명이 없습니다.';
 			}
-			const meta = panel.appendChild($('.project-dashboard__detail-meta')); meta.textContent = `수정일 ${new Date(detail.updatedAt).toLocaleDateString()}`;
+			const meta = panel.appendChild($('.project-dashboard__detail-meta')); meta.textContent = `수정일 ${new Date(detail.updatedAt).toLocaleDateString('ko-KR')}`;
 			if (detail.state === 'ready' || detail.state === 'inProgress') this.renderProviderRuns(panel, detail);
 			const reviews = panel.appendChild($('.project-dashboard__flow-card'));
 			const reviewsTitle = reviews.appendChild($('h3')); reviewsTitle.textContent = '작업 리뷰';
@@ -2883,7 +2887,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const refreshReviews=reviewActions.appendChild(createElement('button','project-dashboard__secondary')); refreshReviews.type='button'; refreshReviews.textContent='연결 다시 확인'; refreshReviews.dataset.focusKey = 'task-review-recheck'; refreshReviews.disabled=this.reviewBridgeBusy; refreshReviews.addEventListener('click',()=>{this.reviewBridgeError=undefined;this.reviewLinksTaskId=undefined;void this.loadTaskReviews();});
 			for (const pending of taskPendingCreates) {
 				const row=reviews.appendChild($('.project-dashboard__review-link'));
-				const info=row.appendChild($('span')); info.textContent=`리뷰 생성 상태: ${pending.status === 'pending' ? '대기 중' : '실패'} · 요청 시각 ${new Date(pending.createdAt).toLocaleString()}${pending.lastError ? ` · ${this.errorMessage(new Error(pending.lastError), '요청 처리 중 오류가 발생했습니다.')}` : ''}`;
+				const info=row.appendChild($('span')); info.textContent=`리뷰 생성 상태: ${pending.status === 'pending' ? '대기 중' : '실패'} · 요청 시각 ${new Date(pending.createdAt).toLocaleString('ko-KR')}${pending.lastError ? ` · ${this.errorMessage(new Error(pending.lastError), '요청 처리 중 오류가 발생했습니다.')}` : ''}`;
 				const retry=row.appendChild(createElement('button','project-dashboard__secondary')); retry.type='button'; retry.textContent='같은 요청 다시 시도'; retry.disabled=this.reviewBridgeBusy || this.reviewAvailability !== 'available'; retry.addEventListener('click',()=>void this.mutateTaskReview('createTaskReview',undefined,pending.commandId));
 			}
 			if (!taskReviewLinks.length) { const empty=reviews.appendChild($('.project-dashboard__flow-status')); empty.textContent=!reviewsLoaded?'작업 리뷰 불러오는 중…':this.reviewAvailability==='unavailable'?'리뷰를 사용할 수 없어요. 시작된 뒤 연결을 다시 확인해 주세요.':'아직 연결된 리뷰가 없어요.'; }
@@ -2899,11 +2903,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const actions = row.appendChild($('.project-dashboard__flow-actions'));
 				if (link.state !== 'available' || this.reviewAvailability !== 'available') continue;
 				const open = actions.appendChild(createElement('button', 'project-dashboard__secondary'));
-				open.type = 'button'; open.textContent = '검증된 스냅샷 열기'; open.disabled = this.reviewBridgeBusy;
+				open.type = 'button'; open.textContent = '검증된 스냅샷 열기'; open.setAttribute('aria-label', `${link.reviewId} 리뷰의 검증된 스냅샷 열기`); open.disabled = this.reviewBridgeBusy;
 				open.addEventListener('click', () => void this.openTaskReview(detail.id, link.reviewId));
 				if (!link.isPrimary) {
 					const primary = actions.appendChild(createElement('button', 'project-dashboard__secondary'));
-					primary.type = 'button'; primary.textContent = '대표로 지정'; primary.disabled = this.reviewBridgeBusy;
+					primary.type = 'button'; primary.textContent = '대표로 지정'; primary.setAttribute('aria-label', `${link.reviewId} 리뷰를 대표로 지정`); primary.disabled = this.reviewBridgeBusy;
 					primary.addEventListener('click', () => void this.mutateTaskReview('choosePrimaryReview', link.reviewId));
 				}
 			}
@@ -2912,7 +2916,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if(this.reviewBridgeNotice){const notice=reviews.appendChild($('.project-dashboard__flow-status'));notice.setAttribute('role','status');notice.textContent=this.reviewBridgeNotice;}
 			if(this.selectedTaskId && this.reviewLinksTaskId !== this.selectedTaskId) void this.loadTaskReviews();
 			const stateControl = panel.appendChild($('.project-dashboard__task-state'));
-			const stateLabel = stateControl.appendChild($('h3')); stateLabel.textContent = '작업 상태';
+			const stateLabel = stateControl.appendChild($('h3')); stateLabel.id = 'project-task-state-heading'; stateLabel.tabIndex = -1; stateLabel.textContent = '작업 상태';
 			const states = stateControl.appendChild($('.project-dashboard__state-options')); states.setAttribute('role', 'group'); states.setAttribute('aria-label', '작업 상태');
 			for (const column of columns) {
 				const option = states.appendChild(createElement('button', 'project-dashboard__state-option'));
@@ -3003,7 +3007,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (this.e2eLoading && this.e2eLoadedTaskId !== task.id) latestSummary.textContent = '최근 확인 결과 불러오는 중…';
 		else if (latestEvidence) {
 			const result = latestEvidence.state === 'passed' ? '통과' : latestEvidence.state === 'failed' ? '실패' : latestEvidence.state === 'running' ? '확인 중' : latestEvidence.state === 'cleanupFailed' ? '정리 확인 필요' : '취소됨';
-			latestSummary.textContent = `최근 결과: ${result} · ${new Date(latestEvidence.createdAt).toLocaleString()} · ${e2eEnvironmentLabel(latestEvidence.environmentIdentity)}`;
+			latestSummary.textContent = `최근 결과: ${result} · ${new Date(latestEvidence.createdAt).toLocaleString('ko-KR')} · ${e2eEnvironmentLabel(latestEvidence.environmentIdentity)}`;
 		} else latestSummary.textContent = this.e2eLoadedTaskId === task.id ? '아직 확인 결과가 없습니다.' : '최근 확인 상태가 여기에 표시됩니다.';
 		const formDisclosure = section.appendChild(createElement('details', 'project-dashboard__e2e-disclosure'));
 		formDisclosure.open = this.e2eFormOpen;
@@ -3014,7 +3018,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const attemptLabel = form.appendChild(createElement('label')); attemptLabel.htmlFor = 'e2e-attempt'; attemptLabel.textContent = '완료된 에이전트 실행';
 		const attemptSelect = form.appendChild(createElement('select')); attemptSelect.id = 'e2e-attempt'; attemptSelect.required = true; attemptSelect.disabled = this.e2eBusy;
 		const attemptPlaceholder = attemptSelect.appendChild(createElement('option')); attemptPlaceholder.value = ''; attemptPlaceholder.textContent = eligible.length ? '실행 선택' : '완료된 작업 실행이 없습니다';
-		for (const attempt of eligible) { const option = attemptSelect.appendChild(createElement('option')); option.value = attempt.id; option.textContent = `${attempt.providerId === 'codex' ? 'Codex' : 'Claude'} · ${this.stateLabel(attempt.state)} · ${new Date(attempt.updatedAt).toLocaleString()}`; }
+		for (const attempt of eligible) { const option = attemptSelect.appendChild(createElement('option')); option.value = attempt.id; option.textContent = `${attempt.providerId === 'codex' ? 'Codex' : 'Claude'} · ${this.stateLabel(attempt.state)} · ${new Date(attempt.updatedAt).toLocaleString('ko-KR')}`; }
 		const latestSuccessful = eligible.find(attempt => attempt.state === 'succeeded');
 		if (this.e2eAttemptChosenByUser && eligible.some(attempt => attempt.id === this.e2eDraftAttemptId)) attemptSelect.value = this.e2eDraftAttemptId;
 		else if (latestSuccessful) { this.e2eDraftAttemptId = latestSuccessful.id; attemptSelect.value = latestSuccessful.id; }
@@ -3054,7 +3058,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const result = evidence.state === 'passed' ? '통과' : evidence.state === 'failed' ? '실패' : evidence.state === 'running' ? '실행 중' : evidence.state === 'cleanupFailed' ? '정리 확인 필요' : '취소됨';
 			const screenshotSaved = !!(evidence.screenshotSha256 && evidence.screenshotPath);
 			const logSaved = !!(evidence.logSha256 && evidence.logPath);
-			const info = row.appendChild($('span')); info.textContent = `${result} · ${new Date(evidence.createdAt).toLocaleString()} · ${e2eEnvironmentLabel(evidence.environmentIdentity)} · ${evidence.targetUrl}`;
+			const info = row.appendChild($('span')); info.textContent = `${result} · ${new Date(evidence.createdAt).toLocaleString('ko-KR')} · ${e2eEnvironmentLabel(evidence.environmentIdentity)} · ${evidence.targetUrl}`;
 			const artifactStatus = row.appendChild(createElement('span', 'project-dashboard__e2e-artifacts'));
 			artifactStatus.textContent = evidence.state === 'running' ? '확인이 끝나면 스크린샷과 로그를 볼 수 있습니다.' : `스크린샷 ${screenshotSaved ? '저장됨' : '저장되지 않음'} · 로그 ${logSaved ? '저장됨' : '저장되지 않음'}`;
 			const audit = row.appendChild(createElement('details', 'project-dashboard__e2e-audit'));
@@ -3139,7 +3143,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const source = this.knowledge?.references.find(reference => reference.id === item.sourceSnapshotId);
 			const sourceLabel = row.appendChild($('strong')); sourceLabel.textContent = `${source?.title ?? '자료 스냅샷'} · v${item.sourceVersion}`;
 			const exact = row.appendChild(createElement('p')); exact.textContent = item.excerpt;
-			const meta = row.appendChild(createElement('small')); meta.textContent = `승인 ${new Date(item.approvedAt).toLocaleString()} · SHA-256 ${item.sourceContentSha256}`;
+			const meta = row.appendChild(createElement('small')); meta.textContent = `승인 ${new Date(item.approvedAt).toLocaleString('ko-KR')} · SHA-256 ${item.sourceContentSha256}`;
 			const withdraw = row.appendChild(createElement('button', 'project-dashboard__secondary')); withdraw.type = 'button'; withdraw.textContent = '승인 취소'; withdraw.disabled = this.taskPromotionBusy;
 			withdraw.setAttribute('aria-label', `${source?.title ?? '자료'}에서 승인한 작업 지시 취소`);
 			withdraw.addEventListener('click', () => void this.withdrawReferenceExcerpt(item.id));
@@ -3151,7 +3155,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			for (const item of withdrawn) {
 				const row = history.appendChild($('p'));
 				const source = this.knowledge?.references.find(reference => reference.id === item.sourceSnapshotId);
-				row.textContent = `${source?.title ?? '자료 스냅샷'} · v${item.sourceVersion} · ${item.excerpt} · 취소 ${item.withdrawnAt ? new Date(item.withdrawnAt).toLocaleString() : '기록 확인 필요'}`;
+				row.textContent = `${source?.title ?? '자료 스냅샷'} · v${item.sourceVersion} · ${item.excerpt} · 취소 ${item.withdrawnAt ? new Date(item.withdrawnAt).toLocaleString('ko-KR') : '기록 확인 필요'}`;
 			}
 		}
 		if (this.taskPromotionError) {
@@ -3236,7 +3240,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const row = preview.appendChild($('.project-dashboard__run-reference'));
 				const source = this.preview.references.find(reference => reference.id === instruction.sourceSnapshotId);
 				const label = row.appendChild($('strong')); label.textContent = `${source?.title ?? '자료 스냅샷'} · v${instruction.sourceVersion}`;
-				const meta = row.appendChild($('.project-dashboard__run-snapshot-meta')); meta.textContent = `사람이 승인 · ${new Date(instruction.approvedAt).toLocaleString()} · 원본 SHA-256 ${instruction.sourceContentSha256}`;
+				const meta = row.appendChild($('.project-dashboard__run-snapshot-meta')); meta.textContent = `사람이 승인 · ${new Date(instruction.approvedAt).toLocaleString('ko-KR')} · 원본 SHA-256 ${instruction.sourceContentSha256}`;
 				const exact = row.appendChild(createElement('pre', 'project-dashboard__run-context')); exact.textContent = instruction.excerpt;
 			}
 			if (this.preview.permission.blockedReason) {
@@ -3263,7 +3267,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const item = list.appendChild(createElement('li', 'project-dashboard__attempt'));
 				const main = item.appendChild($('.project-dashboard__attempt-main'));
 				const name = main.appendChild($('strong')); name.textContent = `${attempt.providerId === 'codex' ? 'Codex' : 'Claude'} · ${this.stateLabel(attempt.state)}`;
-				const time = main.appendChild(createElement('time')); time.dateTime = attempt.updatedAt; time.textContent = new Date(attempt.updatedAt).toLocaleString();
+				const time = main.appendChild(createElement('time')); time.dateTime = attempt.updatedAt; time.textContent = new Date(attempt.updatedAt).toLocaleString('ko-KR');
 				const detail = item.appendChild($('.project-dashboard__attempt-detail')); detail.textContent = `${attempt.mode === 'mutating' ? '파일 수정 실행' : '읽기 전용 연결 확인'} · ${attempt.accountLabel} · ${attempt.cwd}`;
 				if (attempt.orchestrationPhase === 'waiting') { const waiting = item.appendChild($('.project-dashboard__attempt-detail')); waiting.textContent = this.attempts.some(child => child.parentAttemptId === attempt.id) ? '하위 에이전트와 정리가 끝날 때까지 리뷰를 기다리는 중입니다.' : '실행 정리가 끝날 때까지 리뷰를 기다리는 중입니다.'; }
 				if (attempt.sessionId) { const session = item.appendChild($('.project-dashboard__attempt-detail')); session.textContent = `세션 ${attempt.sessionId}`; }
@@ -3431,7 +3435,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		for (const child of children) {
 			const row = list.appendChild(createElement('li', 'project-dashboard__subagent'));
 			const title = row.appendChild($('strong')); title.textContent = `${child.providerId === 'codex' ? 'Codex' : 'Claude'} · ${this.stateLabel(child.state)}`;
-			const when = row.appendChild(createElement('time')); when.dateTime = child.updatedAt; when.textContent = new Date(child.updatedAt).toLocaleString();
+			const when = row.appendChild(createElement('time')); when.dateTime = child.updatedAt; when.textContent = new Date(child.updatedAt).toLocaleString('ko-KR');
 			const scope = row.appendChild($('p')); scope.textContent = this.subagentScopeText(child.childScope ?? null);
 			if (child.errorSummary) { const error = row.appendChild($('.project-dashboard__attempt-error')); error.textContent = this.errorMessage(new Error(child.errorSummary), '하위 에이전트 실행이 완료되지 않았습니다. 자세한 내용은 오류 로그를 확인해 주세요.', false); }
 			if (child.resultText !== null && child.resultText !== undefined) {
