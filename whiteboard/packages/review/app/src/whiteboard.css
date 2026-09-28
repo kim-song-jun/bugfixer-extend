@@ -2757,7 +2757,7 @@ button:focus-visible > .review-chevron {
   width: 136px;
 }
 .review-home-col-action {
-  width: 56px;
+  width: 96px;
 }
 
 .review-home-table th {
@@ -2898,14 +2898,42 @@ button:focus-visible > .review-chevron {
 
 .review-home-row-actions {
   display: flex;
+  align-items: center;
+  gap: 4px;
   justify-content: center;
+}
+.review-home-row-actions .review-home-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.review-home-row-actions .review-home-dismiss svg {
+  width: 16px;
+  height: 16px;
+}
+.review-home-row-actions .review-home-dismiss:hover {
+  background: var(--well);
+}
+.review-home-table tr:hover .review-home-row-actions .review-home-dismiss,
+.review-home-table tr:focus-within .review-home-row-actions .review-home-dismiss {
+  opacity: 1;
 }
 .review-home-row-menu-trigger {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: 0;
   border-radius: 6px;
@@ -2952,7 +2980,7 @@ button:focus-visible > .review-chevron {
   }
 
   .review-home-col-action {
-    width: 40px;
+    width: 84px;
   }
 
   .review-home-table th,

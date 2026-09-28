@@ -310,9 +310,12 @@ describe("ReviewHome", () => {
     expect(container.querySelector('[title^="/repo/other"]')).not.toBeNull();
   });
 
-  it("opens the row menu without opening the review and requires confirmation to delete", async () => {
+  it("keeps archive beside the delete menu without opening the review", async () => {
     const review = summary({ title: "Menu review" });
     const onOpen = vi.fn<(review: ReviewApiSummary) => void>();
+    const onDismiss = vi.fn<(review: ReviewApiSummary) => Promise<void>>(
+      async () => undefined,
+    );
 
     const onDelete = vi.fn<(review: ReviewApiSummary) => Promise<void>>(
       async () => undefined,
@@ -320,9 +323,25 @@ describe("ReviewHome", () => {
 
     await act(async () =>
       root.render(
-        <ReviewHome reviews={[review]} onOpen={onOpen} onDelete={onDelete} />,
+        <ReviewHome
+          reviews={[review]}
+          onOpen={onOpen}
+          onDismiss={onDismiss}
+          onDelete={onDelete}
+        />,
       ),
     );
+    const archive = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Menu review 보관"]',
+    );
+    expect(archive).not.toBeNull();
+    expect(archive?.closest('[role="menu"]')).toBeNull();
+    await act(async () => archive!.click());
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    expect(onDismiss).toHaveBeenCalledWith(review);
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
@@ -332,6 +351,19 @@ describe("ReviewHome", () => {
     );
     expect(container.querySelector('[role="menu"]')).not.toBeNull();
     expect(onOpen).not.toHaveBeenCalled();
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Menu review 작업"]',
+    )!;
+    const actions = trigger.parentElement!;
+    await act(async () => {
+      actions.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    await act(async () => trigger.click());
 
     const remove =
       container.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
@@ -342,6 +374,7 @@ describe("ReviewHome", () => {
     await act(async () => remove.click());
     expect(onDelete).toHaveBeenCalledWith(review);
     expect(onOpen).not.toHaveBeenCalled();
+    expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
   it("deletes a review after an arming click without opening it", async () => {

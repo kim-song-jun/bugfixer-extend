@@ -560,7 +560,7 @@ function ReviewTable({
 }
 
 function ReviewRowActions({ review }: { review: ReviewApiSummary }) {
-  const { onDelete } = useContext(AttentionActionsContext);
+  const { onDelete, onDismiss } = useContext(AttentionActionsContext);
   const [open, setOpen] = useState(false);
   const control = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -582,6 +582,7 @@ function ReviewRowActions({ review }: { review: ReviewApiSummary }) {
         }
       }}
     >
+      {onDismiss ? <DismissReviewButton review={review} /> : null}
       <button
         ref={trigger}
         type="button"
