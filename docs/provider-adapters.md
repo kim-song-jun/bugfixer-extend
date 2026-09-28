@@ -4,7 +4,7 @@ Status: source now implements native Codex and Claude task-run paths, app-owned 
 
 ## Local and documented capabilities
 
-The installed help/version commands inspected on 2026-09-26 reported Claude Code `2.1.283`, Codex CLI `0.157.1`, and Antigravity CLI `1.2.3`. These versions are observations, not a pinned application dependency. The isolated Codex and Claude task runs provide real runtime evidence for those selected existing local profiles; they do not prove concurrent account isolation or the full matrix of launch-contract cases. No real Slack or Notion account run has been demonstrated, and there is no packaged Ego capture proof.
+The installed help/version commands inspected on 2026-09-26 reported Claude Code `2.1.283`, Codex CLI `0.157.1`, and Antigravity CLI `1.2.3`. These versions are observations, not a pinned application dependency. The isolated Codex and Claude task runs provide real runtime evidence for those selected existing local profiles; they do not prove concurrent account isolation or the full matrix of launch-contract cases. No real Slack or Notion account run has been demonstrated. Packaged Ego selected-text capture has been shown from a user-selected local page into a task-linked immutable reference; remote signed-in capture remains unverified.
 
 | Adapter | Headless event path | Resume identity | Account boundary to prove |
 | --- | --- | --- | --- |
