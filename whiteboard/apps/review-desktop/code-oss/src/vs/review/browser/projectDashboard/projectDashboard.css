@@ -25,7 +25,7 @@
 	container: dashboard / inline-size;
 	color: var(--dashboard-ink);
 	background: var(--dashboard-page);
-	font-family: "Pretendard Variable", Pretendard, Geist, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", var(--vscode-font-family), sans-serif;
+	font-family: "Pretendard Variable", Pretendard, Geist, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
 	font-size: 13px;
 }
 .project-dashboard__shell { max-width: 1520px; margin: 0 auto; padding: 24px clamp(18px, 2.5vw, 32px) 40px; }

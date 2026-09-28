@@ -10,7 +10,7 @@
 	padding: 20px 12px;
 	color: var(--project-sidebar-fg);
 	background: var(--project-sidebar-bg);
-	font: 13px/1.45 "Pretendard Variable", Pretendard, Geist, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", var(--vscode-font-family), sans-serif;
+	font: 13px/1.45 "Pretendard Variable", Pretendard, Geist, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
 }
 
 .vs-dark .project-sidebar,
