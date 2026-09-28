@@ -25,13 +25,14 @@ export function useTraceList(
 ): TraceListState {
   const session = useReviewSession();
   const reviewFetch = session.fetch;
+  const enabled = session.review?.kind !== "scratchpad";
 
   const [storedList, setStoredList] = useState<TraceListState>({
     status: "loading",
   });
 
   useEffect(() => {
-    if (provided && !storageOverride) return;
+    if (!enabled || (provided && !storageOverride)) return;
     const controller = new AbortController();
 
     const url: `/${string}` = storageOverride
@@ -70,7 +71,18 @@ export function useTraceList(
       });
 
     return () => controller.abort();
-  }, [reviewFetch, storageOverride, session.review, provided]);
+  }, [reviewFetch, storageOverride, session.review, provided, enabled]);
+
+  if (!enabled) {
+    return {
+      status: "loaded",
+      configured: false,
+      storage: null,
+      sources: [],
+      storageError: null,
+      sessions: [],
+    };
+  }
 
   return provided && !storageOverride ? provided : storedList;
 }

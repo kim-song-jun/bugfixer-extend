@@ -21,6 +21,112 @@ afterEach(async () => {
 });
 
 describe("ReviewDiffFilesProvider", () => {
+  it("does not request diff files for the scratchpad", async () => {
+    const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>();
+    const session = testReviewSession(
+      {},
+      {
+        diffView: {
+          create: () => {
+            throw new Error("unused");
+          },
+          files,
+        },
+      },
+    );
+    session.review = { ...session.review!, kind: "scratchpad", pins: undefined };
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    function Probe() {
+      const state = useReviewDiffFiles();
+      return <span>{state.status}</span>;
+    }
+
+    await act(async () => {
+      root!.render(
+        <ReviewSessionProvider session={session}>
+          <ReviewDiffFilesProvider documentKey="scratchpad">
+            <Probe />
+          </ReviewDiffFilesProvider>
+        </ReviewSessionProvider>,
+      );
+    });
+
+    expect(container.textContent).toBe("loaded");
+    expect(files).not.toHaveBeenCalled();
+  });
+
+  it("isolates same-key snapshots when switching between review and scratchpad", async () => {
+    const file: ReviewDiffFileWire = {
+      path: "src/review.ts",
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+    };
+    const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>(async () => [file]);
+    const reviewSession = testReviewSession(
+      {},
+      {
+        diffView: {
+          create: () => {
+            throw new Error("unused");
+          },
+          files,
+        },
+      },
+    );
+    const scratchpadSession = {
+      ...reviewSession,
+      review: { ...reviewSession.review!, kind: "scratchpad" as const, pins: undefined },
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const committedStates: string[] = [];
+
+    function Probe() {
+      const state = useReviewDiffFiles();
+      const label =
+        state.status === "loaded"
+          ? `loaded:${state.files.map(({ path }) => path).join(",")}`
+          : state.status;
+      useLayoutEffect(() => {
+        committedStates.push(label);
+      });
+      return <span>{label}</span>;
+    }
+
+    const renderSession = (session: typeof reviewSession) =>
+      root!.render(
+        <ReviewSessionProvider session={session}>
+          <ReviewDiffFilesProvider documentKey="same-document">
+            <Probe />
+          </ReviewDiffFilesProvider>
+        </ReviewSessionProvider>,
+      );
+
+    await act(async () => renderSession(reviewSession));
+    expect(container.textContent).toBe("loaded:src/review.ts");
+    expect(files).toHaveBeenCalledTimes(1);
+
+    const beforeScratchpad = committedStates.length;
+    await act(async () => renderSession(scratchpadSession));
+    expect(container.textContent).toBe("loaded:");
+    expect(committedStates.slice(beforeScratchpad)).not.toContain(
+      "loaded:src/review.ts",
+    );
+    expect(files).toHaveBeenCalledTimes(1);
+
+    const beforeReview = committedStates.length;
+    await act(async () => renderSession(reviewSession));
+    expect(container.textContent).toBe("loaded:src/review.ts");
+    expect(committedStates.slice(beforeReview)).not.toContain("loaded:");
+    expect(files).toHaveBeenCalledTimes(2);
+  });
+
   it("reads the desktop's prefetched diff without a network request", async () => {
     const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>(async () => [
       {

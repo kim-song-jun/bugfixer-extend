@@ -44,7 +44,13 @@ import {
 	REVIEW_STRUCTURAL_DIFF_SETTING,
 	REVIEW_TELEMETRY_SETTING,
 } from "../../../common/reviewConfigurationDefaults.js";
-import { resolveReviewSourceView, reviewSourceAnchor, type ReviewSourceView, type ReviewSourceSelection } from "../../../common/reviewProtocol.js";
+import {
+	resolveReviewSourceView,
+	reviewSourceAnchor,
+	SCRATCHPAD_REVIEW_ID,
+	type ReviewSourceView,
+	type ReviewSourceSelection,
+} from "../../../common/reviewProtocol.js";
 import type {
 	ReviewCanvasBridge,
 	ReviewCanvasContent,
@@ -368,9 +374,11 @@ export class ReviewCanvasEditorPane extends EditorPane {
 				this.renderedInput = input;
 				this.setCanvasState("active", reviewId);
 				this.sessionTelemetry.start(reviewId);
-				void this.apiCatalog
-					.attention(reviewId, "view")
-					.catch((error) => this.logService.warn("[Whiteboard] Could not mark session viewed:", error));
+				if (reviewId !== SCRATCHPAD_REVIEW_ID) {
+					void this.apiCatalog
+						.attention(reviewId, "view")
+						.catch((error) => this.logService.warn("[Whiteboard] Could not mark session viewed:", error));
+				}
 				let sourceSelection: ReviewSourceSelection = taskReview
 					? { reviewId, kind: "version", version: taskReview.version }
 					: { reviewId, kind: "current" };

@@ -80,6 +80,28 @@ describe("ReviewTraceView", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not list agent traces for the scratchpad", async () => {
+    const request = vi.fn<ReviewCanvasBridge["request"]>();
+    const session = testReviewSession({}, { request });
+    session.review = { ...session.review!, kind: "scratchpad", pins: undefined };
+
+    function Probe() {
+      const list = useTraceList();
+      return <span>{list.status}</span>;
+    }
+
+    await act(async () =>
+      root?.render(
+        <ReviewSessionProvider session={session}>
+          <Probe />
+        </ReviewSessionProvider>,
+      ),
+    );
+
+    expect(container.textContent).toBe("loaded");
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("shares an in-flight listing with the Trace view and reuses it after reopening", async () => {
     const pending = Promise.withResolvers<Response>();
 

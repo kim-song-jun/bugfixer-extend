@@ -22,11 +22,16 @@ const ReviewDiffFilesContext = createContext<ReviewDiffFilesState>({
 
 interface ReviewDiffFilesSnapshot {
   documentKey: string;
+  enabled: boolean;
   state: ReviewDiffFilesState;
 }
 
 const LOADING_REVIEW_DIFF_FILES_STATE: ReviewDiffFilesState = {
   status: "loading",
+};
+const EMPTY_REVIEW_DIFF_FILES_STATE: ReviewDiffFilesState = {
+  status: "loaded",
+  files: [],
 };
 
 export function ReviewDiffFilesProvider({
@@ -39,24 +44,41 @@ export function ReviewDiffFilesProvider({
   const session = useReviewSession();
   const diffView = session.bridge.diffView;
   const container = useReviewContainer();
+  const enabled = session.review?.kind !== "scratchpad";
 
   const [snapshot, setSnapshot] = useState<ReviewDiffFilesSnapshot>(() => ({
     documentKey,
+    enabled,
     state: LOADING_REVIEW_DIFF_FILES_STATE,
   }));
 
-  const state =
-    snapshot.documentKey === documentKey
+  const snapshotMatches =
+    snapshot.documentKey === documentKey && snapshot.enabled === enabled;
+  const state = !enabled
+    ? EMPTY_REVIEW_DIFF_FILES_STATE
+    : snapshotMatches
       ? snapshot.state
       : LOADING_REVIEW_DIFF_FILES_STATE;
 
   useEffect(() => {
+    if (!enabled) {
+      setSnapshot({
+        documentKey,
+        enabled,
+        state: EMPTY_REVIEW_DIFF_FILES_STATE,
+      });
+      return;
+    }
+
     const controller = new AbortController();
     setSnapshot((current) =>
-      current.documentKey === documentKey && current.state.status === "loading"
+      current.documentKey === documentKey &&
+      current.enabled === enabled &&
+      current.state.status === "loading"
         ? current
         : {
             documentKey,
+            enabled,
             state: LOADING_REVIEW_DIFF_FILES_STATE,
           },
     );
@@ -69,6 +91,7 @@ export function ReviewDiffFilesProvider({
         if (controller.signal.aborted) return;
         setSnapshot({
           documentKey,
+          enabled,
           state: { status: "loaded", files },
         });
         recordDiffSummaryReady(container);
@@ -77,6 +100,7 @@ export function ReviewDiffFilesProvider({
         if (controller.signal.aborted) return;
         setSnapshot({
           documentKey,
+          enabled,
           state: {
             status: "error",
             error: cause instanceof Error ? cause.message : String(cause),
@@ -85,7 +109,7 @@ export function ReviewDiffFilesProvider({
       });
 
     return () => controller.abort();
-  }, [container, diffView, documentKey]);
+  }, [container, diffView, documentKey, enabled]);
 
   const value = useMemo(() => state, [state]);
 
