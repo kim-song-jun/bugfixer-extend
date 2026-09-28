@@ -23,7 +23,7 @@ jobs:
   review-desktop:
     name: Review Desktop
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: whiteboard
@@ -163,6 +163,20 @@ jobs:
       - name: Bundled diffr integration
         run: pnpm --filter @dev.fast/review test:integration:diffr
 
+      - name: Compile macOS package payload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash apps/review-desktop/scripts/compile-darwin-payload.sh
+
+      - name: Upload macOS package payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-desktop-darwin-payload
+          path: whiteboard/apps/review-desktop/dist/darwin-payload.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
       - name: Upload browser test diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -173,3 +187,69 @@ jobs:
             whiteboard/packages/review/**/__screenshots__
             whiteboard/packages/review/**/__traces__
           if-no-files-found: ignore
+
+  review-desktop-macos-package:
+    name: Review Desktop macOS ARM64 Package
+    needs: review-desktop
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: whiteboard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 11.1.2
+
+      - name: Setup monorepo Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: whiteboard/.nvmrc
+          cache: pnpm
+          cache-dependency-path: whiteboard/pnpm-lock.yaml
+
+      - name: Install monorepo dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download macOS package payload
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v4
+        with:
+          name: review-desktop-darwin-payload
+          path: ${{ runner.temp }}/review-desktop-payload
+
+      - name: Restore Linux-built macOS payload
+        run: zstd -d -c "$RUNNER_TEMP/review-desktop-payload/darwin-payload.tar.zst" | tar -xf -
+
+      - name: Remove downloaded payload archive
+        run: rm "$RUNNER_TEMP/review-desktop-payload/darwin-payload.tar.zst"
+
+      - name: Setup Code OSS Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: whiteboard/apps/review-desktop/code-oss/.nvmrc
+
+      - name: Assemble and verify unsigned macOS app
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEW_DESKTOP_PRECOMPILED: "1"
+          REVIEW_DESKTOP_PACKAGE_ROOT: ${{ runner.temp }}/review-desktop-package
+          SKIP_NOTARIZE: "1"
+        run: pnpm --filter @dev.fast/review-desktop app:package:macos
+
+      - name: Archive unsigned macOS app
+        run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-macos-arm64-unsigned.zip"
+
+      - name: Upload unsigned macOS app for native QA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-desktop-macos-arm64-unsigned
+          path: ${{ runner.temp }}/review-desktop-macos-arm64-unsigned.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
