@@ -4,11 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { WebContents } from 'electron';
 import { URI } from '../../base/common/uri.js';
@@ -17,8 +19,9 @@ import type { ICodeWindow } from '../../platform/window/electron-main/window.js'
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
 import type { ProviderRunPreviewDTO } from '../common/workspaceProviderRunProtocol.js';
 import type { ProviderCommandSpec, ProviderRunEvent, ProviderRunHandle, ProviderRunRequest, ProviderRunResult } from './providerRuns/providerRunTypes.js';
-import type { ProviderProcessSupervisor } from './providerRuns/providerProcessSupervisor.js';
+import { isOwnedProcessGroupGone, type ProviderProcessSupervisor } from './providerRuns/providerProcessSupervisor.js';
 import type { TaskFolderWriterLock } from './providerRuns/taskFolderWriterLock.js';
+import { createProviderGroupControlPaths, removeProviderControlSocketIfPresent } from './providerRuns/providerGroupControlClient.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
 import { WorkspaceProviderRunsChannel } from './workspaceProviderRunsChannel.js';
@@ -66,12 +69,96 @@ async function waitForLaunchedAttempt(database: WorkspaceDatabase, attemptId: st
 	assert.ok(launched.length >= expectedCount, 'the supervisor must receive the queued attempt');
 }
 
+async function waitForLaunchedCount(launched: readonly unknown[], expectedCount: number): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	while (launched.length < expectedCount && Date.now() < deadline) { await new Promise<void>(resolve => setTimeout(resolve, 10)); }
+	assert.ok(launched.length >= expectedCount, 'the supervisor must receive the queued attempt');
+}
+
 function stopTestOwnedProcessGroup(child: ChildProcess): void {
 	if (!child.pid || child.exitCode !== null || child.signalCode !== null) { return; }
 	try { process.kill(-child.pid, 'SIGKILL'); }
 	catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== 'ESRCH') { throw error; }
 	}
+}
+
+function currentTestUserId(): number {
+	if (typeof process.getuid !== 'function') { throw new Error('The provider recovery tests require a Unix user ID.'); }
+	return process.getuid();
+}
+
+interface TestRecoveryHelper {
+	readonly child: ChildProcess;
+	readonly pgid: number;
+	readonly providerPid: number;
+	readonly providerPidPath: string;
+	readonly socketPath: string;
+}
+
+async function spawnRecoveryHelper(attemptId: string, nonce: string, helperScript: string): Promise<TestRecoveryHelper> {
+	const directory = join('/tmp', `bfx-ctrl-${currentTestUserId()}`);
+	const socketPath = join(directory, attemptId);
+	const providerPidPath = join(directory, `${attemptId}.provider-pid`);
+	const providerCode = `require('node:fs').writeFileSync(${JSON.stringify(providerPidPath)}, String(process.pid)); setInterval(() => {}, 1000);`;
+	const group = spawn(process.execPath, ['-e', 'process.argv[4] = String(process.pid); import(process.argv[1]);', helperScript, socketPath, attemptId, '0', process.execPath, '-e', providerCode], {
+		detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ignore', 'ignore', 'pipe'],
+	});
+	const groupPgid = group.pid;
+	assert.ok(groupPgid);
+	((group.stdio as unknown as Array<Writable | null>)[5]!).end(`${nonce}\n`);
+	const deadline = Date.now() + 3_000;
+	while (Date.now() < deadline) {
+		try {
+			if (lstatSync(socketPath).isSocket()) {
+				const providerPid = Number(readFileSync(providerPidPath, 'utf8'));
+				if (Number.isSafeInteger(providerPid) && providerPid > 1) { return { child: group, pgid: groupPgid, providerPid, providerPidPath, socketPath }; }
+			}
+		}
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } }
+		await new Promise<void>(resolve => setTimeout(resolve, 10));
+	}
+	let providerPid = -1;
+	try { providerPid = Number(readFileSync(providerPidPath, 'utf8')); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } }
+	await stopTestRecoveryHelper({ child: group, pgid: groupPgid, providerPid, providerPidPath, socketPath });
+	throw new Error('Timed out waiting for the provider control helper socket.');
+}
+
+function processGroupForTestPid(pid: number): number | undefined {
+	let output: string;
+	try { output = execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+	catch (error) {
+		if (typeof error === 'object' && error !== null && 'status' in error && error.status === 1) { return undefined; }
+		throw error;
+	}
+	if (!output) { return undefined; }
+	const pgid = Number(output);
+	return Number.isSafeInteger(pgid) && pgid > 1 ? pgid : undefined;
+}
+
+async function stopTestRecoveryHelper(helper: TestRecoveryHelper): Promise<void> {
+	const { child, pgid, providerPid, providerPidPath, socketPath } = helper;
+	if (!isOwnedProcessGroupGone(pgid)) {
+		if (child.exitCode === null && child.signalCode === null) {
+			stopTestOwnedProcessGroup(child);
+		} else if (providerPid > 1 && processGroupForTestPid(providerPid) === pgid) {
+			process.kill(providerPid, 'SIGKILL');
+		} else if (!isOwnedProcessGroupGone(pgid)) {
+			throw new Error(`Could not prove a surviving test provider belongs to owned group ${pgid}.`);
+		}
+	}
+	const deadline = Date.now() + 3_000;
+	while (!isOwnedProcessGroupGone(pgid) && Date.now() < deadline) {
+		await new Promise<void>(resolve => setTimeout(resolve, 10));
+	}
+	assert.equal(isOwnedProcessGroupGone(pgid), true, `test-owned process group ${pgid} must exit before socket cleanup`);
+	if (child.exitCode === null && child.signalCode === null) {
+		await new Promise<void>(resolve => child.once('close', () => resolve()));
+	}
+	removeProviderControlSocketIfPresent(socketPath);
+	try { unlinkSync(providerPidPath); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } }
 }
 
 test('provider preview is bound to the live project window and exact task revision', async () => {
@@ -258,6 +345,10 @@ test('subagent listing exposes only children of the authorized root with durable
 test('subagent start owns a distinct attempt on an In Progress task and cancellation cleans that child', { skip: process.platform !== 'darwin' }, async () => {
 	await withProviderChannel(async ({ channel, database, projectId, taskId, sender, dashboardChannel }) => {
 		const profile = mkdtempSync(join(tmpdir(), 'workspace-subagent-profile-'));
+		const oldEnv = { dev: process.env['VSCODE_DEV'], node: process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'], helper: process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] };
+		process.env['VSCODE_DEV'] = '1';
+		process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'] = process.execPath;
+		process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = fileURLToPath(new URL('../../../../../scripts/provider-group-control.mjs', import.meta.url));
 		try {
 			const root = database.createProviderAttempt({
 				taskId, provider: 'codex', purpose: 'task', profileRef: 'local-default-codex',
@@ -272,6 +363,8 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 			const binding = database.listFolderBindings(projectId)[0];
 			database.updateFolderBinding(binding.id, { expectedPath: binding.path, vcsKind: 'git', vcsRoot: binding.path });
 			const launched: { request: ProviderRunRequest; resolve: (result: ProviderRunResult) => void; emit: (event: ProviderRunEvent) => void; cancel: () => void }[] = [];
+			let noHandleOnNextRun = false;
+			let nextCancelCleanupVerified = true;
 			const internals = channel as unknown as {
 				supervisor: ProviderProcessSupervisor;
 				writerLock: TaskFolderWriterLock;
@@ -294,14 +387,23 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 				reserveGlobal: () => ({ release() { } }),
 			} as unknown as TaskFolderWriterLock;
 			internals.supervisor = {
-				async run(request: ProviderRunRequest, _spec: ProviderCommandSpec, onEvent: (event: ProviderRunEvent) => void, onOwnedProcessSpawned: (pgid: number) => Promise<void> | void): Promise<ProviderRunHandle> {
+				async run(request: ProviderRunRequest, _spec: ProviderCommandSpec, onEvent: (event: ProviderRunEvent) => void, onOwnedProcessSpawned: (pgid: number, controlNonce?: string) => Promise<void> | void): Promise<ProviderRunHandle> {
 					const allowed = await request.preflight(request);
 					assert.equal(allowed.allowed, true);
+					if (noHandleOnNextRun) {
+						noHandleOnNextRun = false;
+						let resolve!: (result: ProviderRunResult) => void;
+						const result = new Promise<ProviderRunResult>(done => resolve = done);
+						const entry = { request, resolve, emit: onEvent, cancel: () => resolve({ attemptId: request.attemptId, providerId: request.providerId, state: 'interrupted', cleanupVerified: false, exitCode: null, signal: 'SIGTERM', error: 'simulated aborted cleanup failure' }) };
+						request.signal?.addEventListener('abort', entry.cancel, { once: true });
+						launched.push(entry);
+						return { pid: undefined, result, cancel: entry.cancel };
+					}
 					const pgid = 2_000_000_100 + launched.length;
-					await onOwnedProcessSpawned(pgid);
+					await onOwnedProcessSpawned(pgid, request.recoveryControl?.nonce);
 					let resolve!: (result: ProviderRunResult) => void;
 					const result = new Promise<ProviderRunResult>(done => resolve = done);
-					const entry = { request, resolve, emit: onEvent, cancel: () => resolve({ attemptId: request.attemptId, providerId: request.providerId, state: 'cancelled', cleanupVerified: true, exitCode: null, signal: 'SIGTERM' }) };
+					const entry = { request, resolve, emit: onEvent, cancel: () => resolve({ attemptId: request.attemptId, providerId: request.providerId, state: nextCancelCleanupVerified ? 'cancelled' : 'interrupted', cleanupVerified: nextCancelCleanupVerified, exitCode: null, signal: 'SIGTERM', ...(nextCancelCleanupVerified ? {} : { error: 'simulated aborted cleanup failure' }) }) };
 					request.signal?.addEventListener('abort', entry.cancel, { once: true });
 					launched.push(entry);
 					return { pid: pgid, result, cancel: entry.cancel };
@@ -329,7 +431,7 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 			await waitForLaunchedAttempt(database, secondStart.attempt.id, launched, 2);
 			launched[1].resolve({ attemptId: secondStart.attempt.id, providerId: 'codex', state: 'failed', cleanupVerified: false, exitCode: 1, signal: null, error: 'simulated cleanup failure' });
 			for (let index = 0; index < 20 && database.getProviderAttempt(secondStart.attempt.id)?.state === 'running'; index++) { await new Promise<void>(resolve => setImmediate(resolve)); }
-			assert.equal(database.getProviderAttempt(secondStart.attempt.id)?.state, 'failed');
+			assert.equal(database.getProviderAttempt(secondStart.attempt.id)?.state, 'interrupted');
 			assert.equal(database.getProviderAttempt(secondStart.attempt.id)?.cleanupVerified, false);
 			await channel.reconcileTaskCleanup(taskId);
 
@@ -364,13 +466,44 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 				assert.equal(deniedAttempt.errorSummary, 'Provider action was blocked by the configured permission policy.');
 				assert.equal(database.listProviderAttemptEvents(denialStart.attempt.id).find(event => event.type === eventType)?.metadata.itemOutcome, 'denied');
 			}
+
+			const noHandleScope = { ...scope, scope: 'Check cleanup after an aborted launch without a handle.' };
+			const noHandlePreview = await channel.call<ProviderRunPreviewDTO>(sender, 'previewSubagent', noHandleScope);
+			const noHandleCount = launched.length + 1;
+			noHandleOnNextRun = true;
+			const noHandleStart = await channel.call<{ attempt: import('../common/workspaceProviderRunProtocol.js').ProviderAttemptDTO }>(sender, 'startSubagent', { ...noHandleScope, digest: noHandlePreview.digest });
+			await waitForLaunchedCount(launched, noHandleCount);
+			await channel.call(sender, 'cancel', { projectId, attemptId: noHandleStart.attempt.id });
+			const noHandleAttempt = database.getProviderAttempt(noHandleStart.attempt.id)!;
+			assert.equal(noHandleAttempt.state, 'interrupted');
+			assert.equal(noHandleAttempt.cleanupVerified, false);
+			assert.equal(noHandleAttempt.errorSummary, 'simulated aborted cleanup failure');
+
+			const abortedScope = { ...scope, providerId: 'codex' as const, scope: 'Check cleanup after an aborted active run.' };
+			const abortedPreview = await channel.call<ProviderRunPreviewDTO>(sender, 'previewSubagent', abortedScope);
+			const abortedCount = launched.length + 1;
+			const abortedStart = await channel.call<{ attempt: import('../common/workspaceProviderRunProtocol.js').ProviderAttemptDTO }>(sender, 'startSubagent', { ...abortedScope, digest: abortedPreview.digest });
+			await waitForLaunchedAttempt(database, abortedStart.attempt.id, launched, abortedCount);
+			nextCancelCleanupVerified = false;
+			try { await channel.call(sender, 'cancel', { projectId, attemptId: abortedStart.attempt.id }); }
+			finally { nextCancelCleanupVerified = true; }
+			const abortedAttempt = database.getProviderAttempt(abortedStart.attempt.id)!;
+			assert.equal(abortedAttempt.state, 'interrupted');
+			assert.equal(abortedAttempt.cleanupVerified, false);
+			assert.equal(abortedAttempt.errorSummary, 'simulated aborted cleanup failure');
+
 			database.finishProviderAttempt(root.attemptId, 'failed', null, undefined, 'Test root complete.', true);
 			await channel.shutdown();
 			const restarted = new WorkspaceProviderRunsChannel(database, dashboardChannel, { error() { } } as unknown as ILogService);
 			try {
 				assert.equal(database.getProviderAttempt(secondStart.attempt.id)?.cleanupVerified, true);
 			} finally { await restarted.shutdown(); }
-		} finally { rmSync(profile, { recursive: true, force: true }); }
+		} finally {
+			if (oldEnv.dev === undefined) { delete process.env['VSCODE_DEV']; } else { process.env['VSCODE_DEV'] = oldEnv.dev; }
+			if (oldEnv.node === undefined) { delete process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE']; } else { process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'] = oldEnv.node; }
+			if (oldEnv.helper === undefined) { delete process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT']; } else { process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = oldEnv.helper; }
+			rmSync(profile, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -519,6 +652,120 @@ test('a stopped recorded process group can be reconciled before Trash', { skip: 
 		const trashed = await channel.deleteTask(projectId, taskId, task.revision, randomUUID());
 		assert.ok(trashed.trashedAt);
 		assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, true);
+	});
+});
+
+test('a restarted channel uses authenticated recovery without current helper runtime for direct and pending Trash', { skip: process.platform !== 'darwin' }, async (t) => {
+	await withProviderChannel(async ({ channel, database, projectId, taskId, sender, dashboardChannel }) => {
+		const oldEnv = { dev: process.env['VSCODE_DEV'], node: process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'], helper: process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'], grace: process.env['BFX_PROVIDER_CONTROL_GRACE_MS'] };
+		const helperScript = fileURLToPath(new URL('../../../../../scripts/provider-group-control.mjs', import.meta.url));
+		process.env['VSCODE_DEV'] = '1';
+		process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'] = process.execPath;
+		process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = helperScript;
+		process.env['BFX_PROVIDER_CONTROL_GRACE_MS'] = '100';
+		try {
+			const task = database.getTask(taskId)!;
+			const attempt = database.createProviderAttempt({
+				taskId, provider: 'codex', purpose: 'connectionTest', profileRef: 'local-default-codex',
+				folderIdentity: 'restart-control-test', cwd: process.cwd(), mode: 'read-only', prompt: 'test',
+			});
+			const control = createProviderGroupControlPaths(process.execPath, helperScript, attempt.attemptId);
+			const helper = await spawnRecoveryHelper(attempt.attemptId, control.nonce, helperScript);
+			t.diagnostic(`test-owned helper pid=${helper.pgid} ppid=${process.pid} socket=${control.socketPath}`);
+			t.after(() => stopTestRecoveryHelper(helper));
+			process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = join(tmpdir(), 'missing-recovery-helper-after-update.mjs');
+			database.setProviderAttemptRunning(attempt.attemptId, task.revision, helper.pgid, control.nonce);
+			database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
+			await channel.shutdown();
+			const restarted = new WorkspaceProviderRunsChannel(database, dashboardChannel, { error() { } } as unknown as ILogService);
+			try {
+				const trashedTask = await restarted.deleteTask(projectId, taskId, database.getTask(taskId)!.revision, 'trash-direct-control-test');
+				assert.ok(trashedTask.trashedAt);
+				assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, true);
+				assert.throws(() => lstatSync(control.socketPath), { code: 'ENOENT' });
+				const binding = database.listFolderBindings(projectId)[0];
+				const trashTask = database.createTask({ projectId, bindingId: binding.id, title: 'Recover pending Trash' });
+				const trashAttempt = database.createProviderAttempt({
+					taskId: trashTask.id, provider: 'codex', purpose: 'connectionTest', profileRef: 'local-default-codex',
+					folderIdentity: 'pending-trash-recovery-test', cwd: process.cwd(), mode: 'read-only', prompt: 'test',
+				});
+				const trashControl = createProviderGroupControlPaths(process.execPath, helperScript, trashAttempt.attemptId);
+				const trashHelper = await spawnRecoveryHelper(trashAttempt.attemptId, trashControl.nonce, helperScript);
+				t.after(() => stopTestRecoveryHelper(trashHelper));
+				database.setProviderAttemptRunning(trashAttempt.attemptId, trashTask.revision, trashHelper.pgid, trashControl.nonce);
+				database.finishProviderAttempt(trashAttempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
+				const trashRequest = database.beginTaskDeletion(trashTask.id, database.getTask(trashTask.id)!.revision, 'trash-authenticated-replay');
+				assert.equal(trashRequest.request.status, 'pending');
+				await restarted.recoverPendingTaskDeletions();
+				assert.equal(database.getTaskDeletionRequest('trash-authenticated-replay')?.status, 'complete');
+				assert.ok(database.getTask(trashTask.id)?.trashedAt);
+				assert.equal(database.getProviderAttempt(trashAttempt.attemptId)?.cleanupVerified, true);
+			} finally { await restarted.shutdown(); }
+		} finally {
+			if (oldEnv.dev === undefined) { delete process.env['VSCODE_DEV']; } else { process.env['VSCODE_DEV'] = oldEnv.dev; }
+			if (oldEnv.node === undefined) { delete process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE']; } else { process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'] = oldEnv.node; }
+			if (oldEnv.helper === undefined) { delete process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT']; } else { process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = oldEnv.helper; }
+			if (oldEnv.grace === undefined) { delete process.env['BFX_PROVIDER_CONTROL_GRACE_MS']; } else { process.env['BFX_PROVIDER_CONTROL_GRACE_MS'] = oldEnv.grace; }
+		}
+	});
+});
+
+test('an interrupted live attempt remains unresolved when its recovery socket is missing or rejects its nonce', { skip: process.platform !== 'darwin' }, async (t) => {
+	await withProviderChannel(async ({ channel, database, projectId, taskId, sender, dashboardChannel }) => {
+		const oldEnv = { dev: process.env['VSCODE_DEV'], node: process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'], helper: process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] };
+		const helperScript = fileURLToPath(new URL('../../../../../scripts/provider-group-control.mjs', import.meta.url));
+		process.env['VSCODE_DEV'] = '1';
+		process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'] = process.execPath;
+		process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = helperScript;
+		try {
+			for (const helperMode of ['wrong-nonce', 'missing'] as const) {
+				const task = database.getTask(taskId)!;
+				const attempt = database.createProviderAttempt({
+					taskId, provider: 'codex', purpose: 'connectionTest', profileRef: 'local-default-codex',
+					folderIdentity: `restart-control-${helperMode}`, cwd: process.cwd(), mode: 'read-only', prompt: 'test',
+				});
+				const savedNonce = randomUUID().replaceAll('-', '').padEnd(64, 'a').slice(0, 64);
+				let pgid: number;
+				if (helperMode === 'missing') {
+					const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+					assert.ok(child.pid);
+					const childPgid = child.pid;
+					pgid = childPgid;
+					t.after(async () => {
+						stopTestOwnedProcessGroup(child);
+						const deadline = Date.now() + 3_000;
+						while (!isOwnedProcessGroupGone(childPgid) && Date.now() < deadline) { await new Promise<void>(resolve => setTimeout(resolve, 10)); }
+						assert.equal(isOwnedProcessGroupGone(childPgid), true, `test-owned process group ${childPgid} must exit`);
+					});
+				} else {
+					const actualNonce = Buffer.alloc(32, 7).toString('hex');
+					const helper = await spawnRecoveryHelper(attempt.attemptId, actualNonce, helperScript);
+					pgid = helper.pgid;
+					t.after(() => stopTestRecoveryHelper(helper));
+				}
+				database.setProviderAttemptRunning(attempt.attemptId, task.revision, pgid, savedNonce);
+				database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
+				await channel.shutdown();
+				const restarted = new WorkspaceProviderRunsChannel(database, dashboardChannel, { error() { } } as unknown as ILogService);
+				try {
+					await assert.rejects(restarted.call(sender, 'cancel', { projectId, attemptId: attempt.attemptId }), /ENOENT|socket|helper|control/i);
+					assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, false);
+					assert.ok((restarted as unknown as { restartBarrier?: unknown }).restartBarrier);
+					if (helperMode === 'missing') {
+						const pendingTask = database.getTask(taskId)!;
+						database.beginTaskDeletion(taskId, pendingTask.revision, `trash-recovery-${helperMode}`);
+						await restarted.recoverPendingTaskDeletions();
+						assert.equal(database.getTaskDeletionRequest(`trash-recovery-${helperMode}`)?.status, 'pending');
+						assert.equal(database.getTask(taskId)?.trashedAt, null);
+						assert.match(database.getTask(taskId)?.deletionError ?? '', /ENOENT|socket|helper|control/i);
+					}
+				} finally { await restarted.shutdown(); }
+			}
+		} finally {
+			if (oldEnv.dev === undefined) { delete process.env['VSCODE_DEV']; } else { process.env['VSCODE_DEV'] = oldEnv.dev; }
+			if (oldEnv.node === undefined) { delete process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE']; } else { process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE'] = oldEnv.node; }
+			if (oldEnv.helper === undefined) { delete process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT']; } else { process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT'] = oldEnv.helper; }
+		}
 	});
 });
 

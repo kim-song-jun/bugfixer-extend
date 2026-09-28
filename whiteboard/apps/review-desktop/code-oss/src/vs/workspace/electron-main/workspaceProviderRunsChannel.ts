@@ -15,6 +15,7 @@ import type { WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKn
 import type { CancelProviderRunRequest, OrdinaryFolderMutationGrantDTO, OrdinaryFolderMutationRequest, ProviderAttemptDTO, ProviderAttemptsRequest, ProviderId, ProviderRunPreviewDTO, ProviderRunPreviewRequest, ProviderRunScope, StartProviderRunRequest, StartSubagentRequest, SubagentAttemptsRequest, SubagentPreviewRequest } from '../common/workspaceProviderRunProtocol.js';
 import { createClaudeProviderCommand } from './providerRuns/providerClaudeAdapter.js';
 import { createCodexCommandSpec } from './providerRuns/providerCodexAdapter.js';
+import { cancelProviderProcessGroup, createProviderGroupControlPaths, providerGroupControlSocketPath, providerGroupRecoveryEndpoint, removeProviderControlSocketIfPresent, type ProviderGroupControl } from './providerRuns/providerGroupControlClient.js';
 import { isOwnedProcessGroupGone, ProviderProcessSupervisor } from './providerRuns/providerProcessSupervisor.js';
 import { TaskFolderWriterLock, WriterLockCancelledError, writerLockRootForFolder, type TaskFolderWriterLease } from './providerRuns/taskFolderWriterLock.js';
 import { captureOrdinaryFolderInventory, compareOrdinaryFolderInventories, parseOrdinaryFolderChangeReport, unverifiedOrdinaryFolderChanges, type InventorySnapshot, type OrdinaryFolderChangeReport } from './providerRuns/ordinaryFolderInventory.js';
@@ -54,7 +55,7 @@ interface PreviewContext {
 
 const maximumTaskPromptBytes = 16 * 1024 * 1024;
 const pendingDeletionReplayIntervalMs = 50;
-const pendingDeletionReplayTimeoutMs = 1_000;
+const pendingDeletionReplayTimeoutMs = 10_000;
 
 interface ActiveRun {
 	readonly taskId: string;
@@ -113,32 +114,43 @@ export class WorkspaceProviderRunsChannel {
 		const controller = new AbortController();
 		this.deletionReplayController?.abort();
 		this.deletionReplayController = controller;
-		const deadline = Date.now() + pendingDeletionReplayTimeoutMs;
 		try {
 			for (const request of this.database.listPendingTaskDeletions()) {
 				if (controller.signal.aborted) { break; }
+				const deadline = Date.now() + pendingDeletionReplayTimeoutMs;
 				const task = this.database.getTask(request.taskId);
 				if (!task) { continue; }
 				let live: ProviderAttempt | undefined;
+				let recoveryError: string | null = null;
 				do {
 					this.reconcileStoppedTaskAttempts(task.id);
 					live = this.database.listProviderAttempts(task.id).find(attempt =>
-						!attempt.cleanupVerified && attempt.ownedPgid !== null && !isOwnedProcessGroupGone(attempt.ownedPgid),
+						this.needsRecoveryCancellation(attempt),
 					);
 					if (!live || controller.signal.aborted || Date.now() >= deadline) { break; }
+					try {
+						await this.cancelOwnedAttempt(live, Math.max(0, deadline - Date.now()), controller.signal);
+					} catch (error) {
+						recoveryError = this.safeError(error, 'The provider control helper could not verify cancellation.');
+						break;
+					}
 					await new Promise<void>(resolve => {
 						const done = (): void => { controller.signal.removeEventListener('abort', onAbort); resolve(); };
 						const timer = setTimeout(done, Math.min(pendingDeletionReplayIntervalMs, Math.max(0, deadline - Date.now())));
 						const onAbort = (): void => { clearTimeout(timer); done(); };
 						controller.signal.addEventListener('abort', onAbort, { once: true });
 					});
-				} while (!controller.signal.aborted);
+				} while (!controller.signal.aborted && Date.now() < deadline);
 				if (controller.signal.aborted) { break; }
+				this.reconcileStoppedTaskAttempts(task.id);
+				live = this.database.listProviderAttempts(task.id).find(attempt =>
+					this.needsRecoveryCancellation(attempt),
+				);
 				this.database.finalizeTaskDeletion(
 					task.id,
 					request.requestId,
-					!live,
-					live ? `Owned provider process group for attempt ${live.attemptId} is still live or cannot be verified. Stop it safely, then retry Trash.` : null,
+					!live && !recoveryError,
+					recoveryError ?? (live ? `Owned provider process group for attempt ${live.attemptId} is still live or cannot be verified. Stop it safely, then retry Trash.` : null),
 				);
 			}
 		} finally {
@@ -196,6 +208,16 @@ export class WorkspaceProviderRunsChannel {
 		if (!task || task.projectId !== projectId) { throw new Error('The task does not belong to this project.'); }
 		const pending = this.database.beginTaskDeletion(taskId, expectedRevision, requestId);
 		if (pending.request.status === 'complete' || pending.task.trashedAt) { return pending.task; }
+		let recoveryError: string | null = null;
+		for (const attempt of this.database.listProviderAttempts(taskId)) {
+			if (!this.needsRecoveryCancellation(attempt)) { continue; }
+			try { await this.cancelOwnedAttempt(attempt); }
+			catch (error) { recoveryError = this.safeError(error, 'The provider control helper could not verify cancellation.'); break; }
+		}
+		if (recoveryError) {
+			this.database.finalizeTaskDeletion(taskId, requestId, false, recoveryError);
+			throw new Error(`Task deletion is waiting for owned run cleanup: ${recoveryError}`);
+		}
 		await this.cancelTaskRunsAndWait(taskId);
 		this.reconcileStoppedTaskAttempts(taskId);
 		const trashed = this.database.finalizeTaskDeletion(taskId, requestId, true);
@@ -210,14 +232,31 @@ export class WorkspaceProviderRunsChannel {
 
 	private reconcileStoppedTaskAttempts(taskId: string): void {
 		for (const attempt of this.database.listProviderAttempts(taskId)) {
-			if (attempt.cleanupVerified || attempt.ownedPgid === null || attempt.state === 'queued' || attempt.state === 'running') { continue; }
+			if (attempt.cleanupVerified || attempt.ownedPgid === null
+				|| ((attempt.state === 'queued' || attempt.state === 'running') && (this.active.has(attempt.attemptId) || this.queuedRuns.has(attempt.attemptId)))) { continue; }
 			if (isOwnedProcessGroupGone(attempt.ownedPgid)) {
-				this.database.confirmProviderAttemptCleanup(attempt.attemptId);
+				this.confirmProviderAttemptCleanup(attempt);
 				this.uncertainLeases.get(attempt.attemptId)?.release();
 				this.uncertainLeases.delete(attempt.attemptId);
 			}
 		}
 		this.refreshRestartBarrier();
+	}
+
+	private needsRecoveryCancellation(attempt: ProviderAttempt): boolean {
+		if (attempt.cleanupVerified) { return false; }
+		if ((attempt.state === 'queued' || attempt.state === 'running')
+			&& !this.active.has(attempt.attemptId) && !this.queuedRuns.has(attempt.attemptId)) {
+			return attempt.ownedPgid === null;
+		}
+		return attempt.ownedPgid !== null && !isOwnedProcessGroupGone(attempt.ownedPgid);
+	}
+
+	private confirmProviderAttemptCleanup(attempt: ProviderAttempt): void {
+		this.database.confirmProviderAttemptCleanup(attempt.attemptId);
+		if (attempt.controlVersion !== 1) { return; }
+		try { removeProviderControlSocketIfPresent(providerGroupControlSocketPath(attempt.attemptId)); }
+		catch (error) { this.logService.error(`Provider attempt ${attempt.attemptId} exited, but its stale control socket could not be removed: ${this.safeError(error, 'unsafe socket')}`); }
 	}
 
 	private refreshRestartBarrier(): void {
@@ -230,7 +269,7 @@ export class WorkspaceProviderRunsChannel {
 					// uncertain runs; the global barrier is only for prior-process rows.
 					if (this.active.has(attempt.attemptId) || this.queuedRuns.has(attempt.attemptId) || this.uncertainLeases.has(attempt.attemptId)) { continue; }
 					if (attempt.state !== 'queued' && attempt.state !== 'running' && attempt.ownedPgid !== null && isOwnedProcessGroupGone(attempt.ownedPgid)) {
-						this.database.confirmProviderAttemptCleanup(attempt.attemptId);
+						this.confirmProviderAttemptCleanup(attempt);
 						continue;
 					}
 					unresolved = true;
@@ -356,6 +395,7 @@ export class WorkspaceProviderRunsChannel {
 				providerId: context.providerId, attemptId: queued.attemptId, cwd: context.cwd, prompt: context.prompt,
 				profileDirectory: context.profileDirectory, permissionPolicy: { mode: 'mutating', approval: 'on-request' },
 				captureFinalText: true,
+				recoveryControl: this.providerGroupControlPaths(queued.attemptId),
 				signal: queuedRun.controller.signal,
 				boundFolder: { rootPath: context.cwd, dev: context.folderDev, ino: context.folderIno, helperExecutable: context.helperPath!, helperMode },
 				preflight: async () => {
@@ -397,17 +437,19 @@ export class WorkspaceProviderRunsChannel {
 				if (event.providerSessionId) { providerSessionId = event.providerSessionId; }
 				if (event.type === 'permission.denied' || event.metadata?.itemOutcome === 'denied') { permissionDenied = true; }
 				this.database.appendProviderAttemptEvent(queued.attemptId, { type: event.type, metadata: event.metadata });
-			}, async pgid => {
+			}, async (pgid, controlNonce) => {
 				await acquiredLease.attachOwnedProcessGroup(pgid);
-				running = this.database.setProviderAttemptRunning(queued.attemptId, context.task.revision, pgid);
+				if (!controlNonce || controlNonce !== runRequest.recoveryControl?.nonce) { throw new Error('The provider supervisor did not supply the configured authenticated recovery nonce.'); }
+				running = this.database.setProviderAttemptRunning(queued.attemptId, context.task.revision, pgid, controlNonce);
 				runningTaskRevision = this.database.getTask(context.task.id)?.revision;
 			});
 			if (!handle.pid || !running) {
 				const result = await handle.result;
 				const reportPersisted = await this.persistOrdinaryFolderChanges(queued.attemptId, context, inventoryBefore, inventoryFailure);
-				const terminalState = result.state === 'succeeded' && !reportPersisted ? 'failed' : queuedRun.controller.signal.aborted ? 'cancelled' : result.state;
-				const terminalError = result.state === 'succeeded' && !reportPersisted ? 'Changes unverified: the durable change report could not be saved.'
-					: queuedRun.controller.signal.aborted ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result, permissionDenied) : null);
+				const terminalState = !result.cleanupVerified ? 'interrupted' : result.state === 'succeeded' && !reportPersisted ? 'failed' : queuedRun.controller.signal.aborted ? 'cancelled' : result.state;
+				const terminalError = !result.cleanupVerified ? result.error ?? 'Owned provider process cleanup could not be verified.'
+					: result.state === 'succeeded' && !reportPersisted ? 'Changes unverified: the durable change report could not be saved.'
+						: queuedRun.controller.signal.aborted ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result, permissionDenied) : null);
 				if (terminalState === 'succeeded' && result.finalText !== undefined) { this.database.persistProviderAttemptResult(queued.attemptId, result.finalText); }
 				this.database.finishProviderAttempt(queued.attemptId, terminalState, providerSessionId, undefined, terminalError, result.cleanupVerified);
 				if (!result.cleanupVerified) { this.uncertainLeases.set(queued.attemptId, lease); lease = undefined; }
@@ -415,9 +457,10 @@ export class WorkspaceProviderRunsChannel {
 			}
 			const settled = handle.result.then(async result => {
 				const reportPersisted = await this.persistOrdinaryFolderChanges(queued.attemptId, context, inventoryBefore, inventoryFailure);
-				let terminalState = result.state === 'succeeded' && !reportPersisted ? 'failed' as const : queuedRun.controller.signal.aborted ? 'cancelled' as const : result.state;
-				let terminalError = result.state === 'succeeded' && !reportPersisted ? 'Changes unverified: the durable change report could not be saved.'
-					: terminalState === 'cancelled' ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result, permissionDenied) : null);
+				let terminalState = !result.cleanupVerified ? 'interrupted' as const : result.state === 'succeeded' && !reportPersisted ? 'failed' as const : queuedRun.controller.signal.aborted ? 'cancelled' as const : result.state;
+				let terminalError = !result.cleanupVerified ? result.error ?? 'Owned provider process cleanup could not be verified.'
+					: result.state === 'succeeded' && !reportPersisted ? 'Changes unverified: the durable change report could not be saved.'
+						: terminalState === 'cancelled' ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result, permissionDenied) : null);
 				if (terminalState === 'succeeded' && result.finalText !== undefined) {
 					try { this.database.persistProviderAttemptResult(queued.attemptId, result.finalText); }
 					catch (error) {
@@ -432,6 +475,10 @@ export class WorkspaceProviderRunsChannel {
 				} catch { this.logService.error(`Could not persist the terminal state for provider attempt ${queued.attemptId}.`); }
 				finally {
 					this.active.delete(queued.attemptId);
+					if (result.cleanupVerified && runRequest.recoveryControl) {
+						try { removeProviderControlSocketIfPresent(runRequest.recoveryControl.socketPath); }
+						catch (error) { this.logService.error(`Could not remove the verified provider control socket for attempt ${queued.attemptId}: ${this.safeError(error, 'unsafe socket')}`); }
+					}
 					if (!result.cleanupVerified && lease) { this.uncertainLeases.set(queued.attemptId, lease); lease = undefined; }
 				}
 				if (result.cleanupVerified) { lease?.release(); lease = undefined; }
@@ -503,7 +550,7 @@ export class WorkspaceProviderRunsChannel {
 		await this.cancelOwnedAttempt(attempt);
 	}
 
-	private async cancelOwnedAttempt(attempt: ProviderAttempt): Promise<void> {
+	private async cancelOwnedAttempt(attempt: ProviderAttempt, recoveryTimeoutMs?: number, signal?: AbortSignal): Promise<void> {
 		const active = this.active.get(attempt.attemptId);
 		const queued = this.queuedRuns.get(attempt.attemptId);
 		if (active) { active.controller.abort(); active.handle.cancel(); await active.settled; }
@@ -511,7 +558,11 @@ export class WorkspaceProviderRunsChannel {
 		else if (attempt.state === 'running' || attempt.state === 'queued') { throw new Error('This run has no owned process to cancel.'); }
 		else if (!attempt.cleanupVerified && attempt.ownedPgid !== null) {
 			if (!isOwnedProcessGroupGone(attempt.ownedPgid)) {
-				throw new Error(`Prior provider process group for attempt ${attempt.attemptId} is still live or cannot be verified. The app cannot safely signal it from the stored process group ID. Close the verified provider process and retry cancellation.`);
+				if (attempt.controlVersion !== 1 || !attempt.controlNonce) {
+					throw new Error(`Prior provider process group for attempt ${attempt.attemptId} has no authenticated recovery control record.`);
+				}
+				const socketCleanupError = await cancelProviderProcessGroup(providerGroupRecoveryEndpoint(attempt.attemptId, attempt.controlNonce), attempt.attemptId, attempt.ownedPgid, recoveryTimeoutMs, signal);
+				if (socketCleanupError) { this.logService.error(socketCleanupError); }
 			}
 			this.reconcileStoppedTaskAttempts(attempt.taskId);
 		}
@@ -605,6 +656,24 @@ export class WorkspaceProviderRunsChannel {
 			? process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE']
 			: resourcesPath ? join(resourcesPath, 'app', 'review-runtime', 'bin', 'node') : undefined;
 		return this.validExecutable(candidate);
+	}
+
+	private providerGroupControlPaths(attemptId: string, nonce?: string): ProviderGroupControl {
+		const resourcesPath = process.resourcesPath;
+		const nodeCandidate = process.env['VSCODE_DEV']
+			? process.env['DEV_FAST_REVIEW_NODE_EXECUTABLE']
+			: resourcesPath ? join(resourcesPath, 'app', 'review-runtime', 'bin', 'node') : undefined;
+		const helperCandidate = process.env['VSCODE_DEV']
+			? process.env['DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT']
+			: resourcesPath ? join(resourcesPath, 'app', 'review-runtime', 'bin', 'provider-group-control.mjs') : undefined;
+		const nodeExecutable = this.validExecutable(nodeCandidate);
+		let helperScript: string | undefined;
+		try {
+			const resolved = helperCandidate ? realpathSync(helperCandidate) : undefined;
+			if (resolved && statSync(resolved).isFile()) { helperScript = resolved; }
+		} catch { /* Reported below as an unavailable recovery runtime. */ }
+		if (!nodeExecutable || !helperScript) { throw new Error('The packaged provider group control runtime is unavailable.'); }
+		return createProviderGroupControlPaths(nodeExecutable, helperScript, attemptId, nonce);
 	}
 
 	private validExecutable(candidate: string | undefined): string | undefined {
