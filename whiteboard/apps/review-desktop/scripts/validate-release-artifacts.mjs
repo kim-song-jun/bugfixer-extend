@@ -42,6 +42,7 @@ const BUILTIN_EXTENSION_INVENTORY = JSON.parse(
     "utf8",
   ),
 );
+
 const CURATED_EXTENSION_LEGAL_INVENTORY = JSON.parse(
   readFileSync(
     new URL("./packaged-curated-extension-legal-inventory.json", import.meta.url),
@@ -51,41 +52,76 @@ const CURATED_EXTENSION_LEGAL_INVENTORY = JSON.parse(
 
 const LEGAL_FILE_PATTERN = /^(license|licence|notice|copying|copyright|thirdpartynotices)([-_.]|$)/i;
 
+function parseLegalFilePath(id, value) {
+  let relative;
+
+  try {
+    relative = String.prototype.valueOf.call(value);
+  } catch {
+    throw new Error(`${id}: unsafe relative legal-file path ${JSON.stringify(value)}`);
+  }
+
+  if (value !== relative) {
+    throw new Error(`${id}: unsafe relative legal-file path ${JSON.stringify(value)}`);
+  }
+
+  if (
+    relative.length === 0 ||
+    relative.includes("\\") ||
+    relative.startsWith("/") ||
+    relative.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new Error(`${id}: unsafe relative legal-file path ${JSON.stringify(relative)}`);
+  }
+
+  return relative;
+}
+
 function collectExtensionDirs(root) {
   const directories = [];
+
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const absolute = path.join(root, entry.name);
     const metadata = lstatSync(absolute);
+
     if (entry.name === "node_modules") {
       if (!metadata.isDirectory()) {
         throw new Error(`${absolute} must be a real shared node_modules directory`);
       }
+
       continue;
     }
+
     if (!metadata.isDirectory()) {
       throw new Error(`${absolute} is not a real packaged extension directory`);
     }
 
     const manifest = path.join(absolute, "package.json");
     let manifestMetadata;
+
     try {
       manifestMetadata = lstatSync(manifest);
     } catch {
       throw new Error(`${absolute} is an unexpected extension directory without package.json`);
     }
+
     if (!manifestMetadata.isFile()) {
       throw new Error(`${manifest} must be a regular, non-symlink file`);
     }
+
     directories.push(absolute);
   }
+
   return directories;
 }
 
 function collectLegalFiles(root) {
   const files = [];
+
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolute = path.join(directory, entry.name);
+
       if (entry.isDirectory()) {
         walk(absolute);
       } else if (entry.isFile() && LEGAL_FILE_PATTERN.test(entry.name)) {
@@ -93,15 +129,19 @@ function collectLegalFiles(root) {
       }
     }
   };
+
   walk(root);
+
   return files.sort();
 }
 
 function collectFiles(root) {
   const files = [];
+
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolute = path.join(directory, entry.name);
+
       if (entry.isDirectory()) {
         walk(absolute);
       } else if (entry.isFile()) {
@@ -109,13 +149,16 @@ function collectFiles(root) {
       }
     }
   };
+
   walk(root);
+
   return files.sort();
 }
 
 function containsRegularFile(directory) {
   return readdirSync(directory, { withFileTypes: true }).some((entry) => {
     if (entry.isFile()) return true;
+
     return entry.isDirectory() && containsRegularFile(path.join(directory, entry.name));
   });
 }
@@ -124,9 +167,11 @@ function assertNoSymlinksRecursively(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const absolute = path.join(directory, entry.name);
     const metadata = lstatSync(absolute);
+
     if (metadata.isSymbolicLink()) {
       throw new Error(`${absolute} is a symlink inside a packaged extension payload`);
     }
+
     if (metadata.isDirectory()) assertNoSymlinksRecursively(absolute);
     else if (!metadata.isFile()) {
       throw new Error(`${absolute} is not a regular file inside a packaged extension payload`);
@@ -137,12 +182,16 @@ function assertNoSymlinksRecursively(directory) {
 function findPylancePath(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const absolute = path.join(directory, entry.name);
+
     if (/pylance/i.test(entry.name)) return absolute;
+
     if (entry.isDirectory()) {
       const nested = findPylancePath(absolute);
+
       if (nested) return nested;
     }
   }
+
   return undefined;
 }
 
@@ -156,9 +205,11 @@ export function assertPackagedExtensionNoticeClosure(
   },
 ) {
   const extensionsRoot = path.join(appResourcesApp, "extensions");
+
   if (!lstatSync(extensionsRoot).isDirectory()) {
     throw new Error(`${extensionsRoot} must be a real extension directory`);
   }
+
   const dirs = collectExtensionDirs(extensionsRoot);
   const actual = new Map();
 
@@ -166,7 +217,9 @@ export function assertPackagedExtensionNoticeClosure(
     const manifest = JSON.parse(
       readFileSync(path.join(directory, "package.json"), "utf8"),
     );
+
     const id = `${manifest.publisher}.${manifest.name}`.toLowerCase();
+
     if (actual.has(id)) throw new Error(`duplicate packaged extension id ${id}`);
     actual.set(id, directory);
   }
@@ -174,6 +227,7 @@ export function assertPackagedExtensionNoticeClosure(
   const expected = new Set([...builtinIds, ...curatedIds].map((id) => id.toLowerCase()));
   const missing = [...expected].filter((id) => !actual.has(id)).sort();
   const extra = [...actual.keys()].filter((id) => !expected.has(id)).sort();
+
   if (missing.length || extra.length) {
     throw new Error(
       `packaged extension inventory mismatch${missing.length ? `; missing: ${missing.join(", ")}` : ""}${extra.length ? `; unexpected: ${extra.join(", ")}` : ""}`,
@@ -182,21 +236,26 @@ export function assertPackagedExtensionNoticeClosure(
 
   const appLegalFiles = collectLegalFiles(appResourcesApp);
   const requiredAppFiles = ["LICENSE.txt", "ThirdPartyNotices.txt"];
+
   const invalidAppFiles = requiredAppFiles.filter((file) => {
     try {
       const metadata = lstatSync(path.join(appResourcesApp, file));
+
       return !metadata.isFile() || metadata.size === 0;
     } catch {
       return true;
     }
   });
+
   const licensesDir = path.join(appResourcesApp, "licenses");
   let hasLicenseDirectory = false;
+
   try {
     hasLicenseDirectory = lstatSync(licensesDir).isDirectory() && containsRegularFile(licensesDir);
   } catch {
     // Reported below as part of the package's legal closure.
   }
+
   if (invalidAppFiles.length || !hasLicenseDirectory) {
     throw new Error(
       `packaged app legal files are incomplete${invalidAppFiles.length ? `; missing, empty, or non-regular: ${invalidAppFiles.join(", ")}` : ""}${!hasLicenseDirectory ? "; missing non-empty licenses/ directory" : ""}`,
@@ -204,15 +263,19 @@ export function assertPackagedExtensionNoticeClosure(
   }
 
   const curatedIdSet = new Set(curatedIds.map((id) => id.toLowerCase()));
+
   for (const id of curatedIdSet) {
     if (!Array.isArray(curatedLegalInventory[id])) {
       throw new Error(`${id}: no pinned legal-file inventory is defined`);
     }
   }
+
   const sharedNodeModules = path.join(extensionsRoot, "node_modules");
+
   for (const directory of dirs) assertNoSymlinksRecursively(directory);
   assertNoSymlinksRecursively(sharedNodeModules);
   const pylancePath = findPylancePath(extensionsRoot);
+
   if (pylancePath) {
     throw new Error(
       `packaged extensions contain a Pylance path: ${path.relative(extensionsRoot, pylancePath)}`,
@@ -220,30 +283,28 @@ export function assertPackagedExtensionNoticeClosure(
   }
 
   const perExtension = [];
+
   for (const [id, directory] of [...actual].sort(([left], [right]) => left.localeCompare(right))) {
     const files = collectLegalFiles(directory);
+
     if (curatedIdSet.has(id)) {
-      for (const relative of curatedLegalInventory[id]) {
-        if (
-          typeof relative !== "string" ||
-          relative.length === 0 ||
-          relative.includes("\\") ||
-          relative.startsWith("/") ||
-          relative.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
-        ) {
-          throw new Error(`${id}: unsafe relative legal-file path ${JSON.stringify(relative)}`);
-        }
+      for (const value of curatedLegalInventory[id]) {
+        const relative = parseLegalFilePath(id, value);
+
         let metadata;
+
         try {
           metadata = lstatSync(path.join(directory, relative));
         } catch {
           throw new Error(`${id}: required legal file is missing: ${relative}`);
         }
+
         if (!metadata.isFile() || metadata.size === 0) {
           throw new Error(`${id}: required legal file is empty or non-regular: ${relative}`);
         }
       }
     }
+
     perExtension.push({ id, files: files.map((file) => `extensions/${path.basename(directory)}/${file}`) });
   }
 
@@ -394,6 +455,7 @@ function run(command, args) {
 
 function writeFileAtomically(file, content) {
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+
   try {
     writeFileSync(temporary, content, { flag: "wx" });
     renameSync(temporary, file);
@@ -462,9 +524,11 @@ async function main() {
     target: "darwin-arm64",
   });
   const appResourcesApp = path.join(app, "Contents", "Resources", "app");
+
   const noticeIndex = assertPackagedExtensionNoticeClosure(appResourcesApp, {
     curatedIds: bundledExtensions.map((extension) => extension.id),
   });
+
   const noticeIndexPath = path.join(artifactDir, "extension-notice-index.json");
 
   run("xcrun", ["stapler", "validate", app]);

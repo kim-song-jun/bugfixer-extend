@@ -6,10 +6,10 @@ import { after, test } from "node:test";
 
 import { releaseIdentityFor } from "./release-channel.mjs";
 import {
+  assertPackagedExtensionNoticeClosure,
   assertPackagedProduct,
   assertReleaseChannel,
   assertUpdaterCompatibleApp,
-  assertPackagedExtensionNoticeClosure,
   buildManifest,
 } from "./validate-release-artifacts.mjs";
 
@@ -148,6 +148,7 @@ async function makeNoticeFixture({
   const extensions = path.join(root, "extensions");
   await mkdir(extensions, { recursive: true });
   await mkdir(path.join(extensions, "node_modules"));
+
   const addExtension = async (folder, publisher, name, legalPath) => {
     const directory = path.join(extensions, folder);
     await mkdir(directory, { recursive: true });
@@ -155,25 +156,31 @@ async function makeNoticeFixture({
       path.join(directory, "package.json"),
       JSON.stringify({ publisher, name }),
     );
+
     if (legalPath) {
       const legalFile = path.join(directory, legalPath);
       await mkdir(path.dirname(legalFile), { recursive: true });
       await writeFile(legalFile, "license");
     }
   };
+
   await addExtension("curated", "fixture", "curated", includeLegal ? curatedLegalPath : undefined);
+
   if (includeBuiltin) await addExtension("builtin", "fixture", "builtin", undefined);
+
   if (includeAppLegal) {
     await writeFile(path.join(root, "LICENSE.txt"), "app license");
     await writeFile(path.join(root, "ThirdPartyNotices.txt"), emptyThirdPartyNotice ? "" : "app notices");
     await mkdir(path.join(root, "licenses"));
     await writeFile(path.join(root, "licenses", "MIT.txt"), "MIT");
   }
+
   if (includeSharedLegal) {
     const sharedLegal = path.join(extensions, "node_modules", "@fixture", "support", "LICENSE.txt");
     await mkdir(path.dirname(sharedLegal), { recursive: true });
     await writeFile(sharedLegal, "shared extension dependency license");
   }
+
   return root;
 }
 
@@ -226,6 +233,7 @@ test("packaged extension notice closure rejects missing legal files", async () =
 
 test("packaged extension notice closure requires secondary curated notices", async () => {
   const root = await makeNoticeFixture();
+
   const secondaryNotice = path.join(
     root,
     "extensions",
@@ -233,6 +241,7 @@ test("packaged extension notice closure requires secondary curated notices", asy
     "nested",
     "ThirdPartyNotices.txt",
   );
+
   await mkdir(path.dirname(secondaryNotice), { recursive: true });
   await writeFile(secondaryNotice, "secondary notice");
   await rm(secondaryNotice);
@@ -312,6 +321,7 @@ test("packaged extension notice closure rejects Pylance anywhere under extension
 
 test("packaged extension notice closure rejects unsafe pinned legal paths", async () => {
   const root = await makeNoticeFixture();
+
   assert.throws(
     () =>
       assertPackagedExtensionNoticeClosure(root, {
@@ -319,6 +329,15 @@ test("packaged extension notice closure rejects unsafe pinned legal paths", asyn
         curatedLegalInventory: { "fixture.curated": ["../LICENSE.txt"] },
       }),
     /unsafe relative legal-file path/,
+  );
+
+  assert.throws(
+    () =>
+      assertPackagedExtensionNoticeClosure(root, {
+        ...fixtureClosure,
+        curatedLegalInventory: { "fixture.curated": [42] },
+      }),
+    /unsafe relative legal-file path 42/,
   );
 });
 
@@ -335,12 +354,14 @@ test("packaged extension notice index includes nested and shared legal files", a
     curatedLegalPath: "nested/licenses/NOTICE.txt",
     includeSharedLegal: true,
   });
+
   const index = assertPackagedExtensionNoticeClosure(root, {
     ...fixtureClosure,
     curatedLegalInventory: {
       "fixture.curated": ["nested/licenses/NOTICE.txt"],
     },
   });
+
   assert.deepEqual(index.extensions.find((extension) => extension.id === "fixture.curated").files, [
     "extensions/curated/nested/licenses/NOTICE.txt",
   ]);
