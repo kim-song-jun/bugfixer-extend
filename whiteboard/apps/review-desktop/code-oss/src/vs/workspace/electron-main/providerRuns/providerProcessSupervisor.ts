@@ -5,6 +5,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { isAbsolute } from 'node:path';
+import type { Writable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import {
 	type ProviderCommandSpec,
@@ -25,6 +26,7 @@ const GROUP_CHECK_INTERVAL_MS = 25;
 // the whole group. Reaping the leader first would make a later numeric-PGID
 // signal unsafe because the kernel may already have reused that identifier.
 const LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; "$@" 4>&- <&0 & provider_pid=$!; wait "$provider_pid"; provider_status=$?; printf "%s\\n" "$provider_status" >&4 || exit 125; while :; do sleep 1; done';
+const CONTROLLED_LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; node_executable=$1; helper_script=$2; socket_path=$3; attempt_id=$4; shift 4; "$node_executable" "$helper_script" "$socket_path" "$attempt_id" "$$" "$@"; helper_status=$?; kill -TERM -$$ 2>/dev/null; kill -KILL -$$ 2>/dev/null; exit "$helper_status"';
 
 /** Windows process-tree ownership is not implemented, so provider execution is unavailable there. */
 export function isProviderProcessPlatformSupported(platform: NodeJS.Platform = process.platform): boolean {
@@ -54,7 +56,7 @@ export class ProviderProcessSupervisor {
 		request: ProviderRunRequest,
 		spec: ProviderCommandSpec,
 		onEvent: (event: ProviderRunEvent) => void,
-		onOwnedProcessSpawned: (pgid: number) => Promise<void> | void,
+		onOwnedProcessSpawned: (pgid: number, controlNonce?: string) => Promise<void> | void,
 	): Promise<ProviderRunHandle> {
 		if (request.signal?.aborted) { return rejectedHandle(request, 'Provider run was cancelled before launch.'); }
 		if (!isProviderProcessPlatformSupported()) {
@@ -84,8 +86,18 @@ export class ProviderProcessSupervisor {
 		if (!spec.executable.trim() || !Array.isArray(spec.args)) {
 			return rejectedHandle(request, 'Provider adapter returned an invalid command specification.');
 		}
+		if (request.recoveryControl && (process.platform !== 'darwin' || !isValidRecoveryControl(request.recoveryControl, request.attemptId))) {
+			return rejectedHandle(request, 'Provider recovery control is invalid or unavailable on this platform.');
+		}
 		return launch(request, spec, onEvent, onOwnedProcessSpawned, this.cancelGraceMs, this.maxLineBytes);
 	}
+}
+
+function isValidRecoveryControl(control: NonNullable<ProviderRunRequest['recoveryControl']>, attemptId: string): boolean {
+	return [control.nodeExecutable, control.helperScript, control.socketPath].every(value => typeof value === 'string' && isAbsolute(value))
+		&& /^[a-f0-9]{64}$/.test(control.nonce)
+		&& /^[A-Za-z0-9_-]{1,128}$/.test(attemptId)
+		&& Buffer.byteLength(control.socketPath, 'utf8') <= 103;
 }
 
 function hasBoundHelperInvocation(request: ProviderRunRequest, spec: ProviderCommandSpec): boolean {
@@ -120,7 +132,7 @@ async function launch(
 	request: ProviderRunRequest,
 	spec: ProviderCommandSpec,
 	onEvent: (event: ProviderRunEvent) => void,
-	onOwnedProcessSpawned: (pgid: number) => Promise<void> | void,
+	onOwnedProcessSpawned: (pgid: number, controlNonce?: string) => Promise<void> | void,
 	cancelGraceMs: number,
 	maxLineBytes: number,
 ): Promise<ProviderRunHandle> {
@@ -128,24 +140,34 @@ async function launch(
 	let spawnFailed = false;
 	let launchGateFailed = false;
 	let launchGateWriteAttempted = false;
+	let controlNonceWriteFailed = false;
+	const recoveryControl = request.recoveryControl;
+	const shellCommand = recoveryControl ? CONTROLLED_LAUNCH_GATE_SCRIPT : LAUNCH_GATE_SCRIPT;
+	const shellArgs = recoveryControl
+		? ['-c', shellCommand, 'provider-launch-gate', recoveryControl.nodeExecutable, recoveryControl.helperScript, recoveryControl.socketPath, request.attemptId, spec.executable, ...spec.args]
+		: ['-c', shellCommand, 'provider-launch-gate', spec.executable, ...spec.args];
 	try {
-		child = spawn('/bin/sh', ['-c', LAUNCH_GATE_SCRIPT, 'provider-launch-gate', spec.executable, ...spec.args], {
+		child = spawn('/bin/sh', shellArgs, {
 			cwd: request.cwd,
 			env: childEnvironment(spec.env, request.providerId),
 			shell: false,
 			windowsHide: true,
 			detached: process.platform !== 'win32',
-			stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
+			stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...(recoveryControl ? ['pipe' as const] : [])],
 		});
 	} catch {
 		return rejectedHandle(request, 'Provider process could not be started.');
 	}
 	child.once('error', () => { spawnFailed = true; });
 	const launchGate = child.stdio[3] as NodeJS.WritableStream | null;
+	const nonceInput = recoveryControl ? (child.stdio as Array<Writable | null | undefined>).at(5) ?? null : null;
+	let nonceInputEndRequested = false;
 	// Attach before any async persistence callback: a shell that exits early can
 	// close fd3 while the callback is pending, and EPIPE must never be unhandled.
 	launchGate?.on('error', () => { launchGateFailed = true; });
 	launchGate?.on('close', () => { if (!launchGateWriteAttempted) launchGateFailed = true; });
+	nonceInput?.on('error', () => { controlNonceWriteFailed = true; });
+	nonceInput?.on('close', () => { if (!nonceInputEndRequested) controlNonceWriteFailed = true; });
 
 	let terminalState: ProviderTerminalState | undefined;
 	let exitCode: number | null = null;
@@ -326,7 +348,7 @@ async function launch(
 	void result.then(removeAbortListener);
 	if (!child.pid) { return { ...handle, pid: undefined }; }
 	try {
-		await onOwnedProcessSpawned(child.pid);
+		await onOwnedProcessSpawned(child.pid, recoveryControl?.nonce);
 	} catch {
 		handle.cancel();
 		await result;
@@ -343,6 +365,30 @@ async function launch(
 		handle.cancel();
 		await result;
 		return { ...handle, pid: undefined };
+	}
+	if (recoveryControl) {
+		if (!nonceInput || controlNonceWriteFailed) {
+			handle.cancel();
+			await result;
+			return { ...handle, pid: undefined };
+		}
+		try {
+			await new Promise<void>((resolve, reject) => {
+				nonceInput.once('error', reject);
+				nonceInputEndRequested = true;
+				nonceInput.end(`${recoveryControl.nonce}\n`, resolve);
+			});
+		} catch {
+			controlNonceWriteFailed = true;
+			handle.cancel();
+			await result;
+			return { ...handle, pid: undefined };
+		}
+		if (controlNonceWriteFailed) {
+			handle.cancel();
+			await result;
+			return { ...handle, pid: undefined };
+		}
 	}
 	launchGateWriteAttempted = true;
 	try { launchGate.end('GO\n'); }

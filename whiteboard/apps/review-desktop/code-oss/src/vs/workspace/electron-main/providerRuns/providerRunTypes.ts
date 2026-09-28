@@ -24,6 +24,13 @@ export interface ProviderBoundFolder {
 	readonly helperMode: 'claude' | 'codex-node';
 }
 
+export interface ProviderRecoveryControl {
+	readonly nodeExecutable: string;
+	readonly helperScript: string;
+	readonly socketPath: string;
+	readonly nonce: string;
+}
+
 export interface ProviderRunRequest {
 	readonly providerId: ProviderId;
 	readonly attemptId: string;
@@ -37,6 +44,8 @@ export interface ProviderRunRequest {
 	readonly signal?: AbortSignal;
 	/** Required for mutating task runs; the helper binds and rechecks this exact folder identity before CLI exec. */
 	readonly boundFolder?: ProviderBoundFolder;
+	/** macOS-only recovery endpoint for a provider group that may outlive the app. */
+	readonly recoveryControl?: ProviderRecoveryControl;
 	/** Must prove the selected folder identity and the effective policy for this attempt. */
 	readonly preflight: (request: ProviderRunRequest) => Promise<ProviderRunPreflight>;
 }

@@ -4,11 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { isOwnedProcessGroupGone, isProviderMutatingPlatformSupported, isProviderProcessPlatformSupported, ProviderProcessSupervisor } from './providerProcessSupervisor.js';
 import { PROVIDER_MAX_FINAL_TEXT_BYTES, type ProviderCommandSpec, type ProviderRunEvent, type ProviderRunRequest } from './providerRunTypes.js';
@@ -507,6 +508,101 @@ test('does not execute the provider when the persisted-PGID gate callback fails'
 	assert.equal(handle.pid, undefined);
 	assert.equal(result.cleanupVerified, true);
 	assert.throws(() => readFileSync(marker), { code: 'ENOENT' });
+});
+
+test('controlled macOS launch persists nonce and binds its socket before provider output', { skip: process.platform !== 'darwin' }, async (t) => {
+	const directory = mkdtempSync(join(tmpdir(), 'provider-controlled-launch-'));
+	chmodSync(directory, 0o700);
+	const socketPath = join(directory, 'control.sock');
+	const helperScript = fileURLToPath(new URL('../../../../../../scripts/provider-group-control.mjs', import.meta.url));
+	const nonce = 'a'.repeat(64);
+	let callbackPgid: number | undefined;
+	let callbackNonce: string | undefined;
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const events: string[] = [];
+	const handle = await new ProviderProcessSupervisor().run(
+		{ ...request, recoveryControl: { nodeExecutable: process.execPath, helperScript, socketPath, nonce } },
+		spec('process.stdout.write(require("node:fs").existsSync(process.argv[1]) ? "socket-ready\\n" : "socket-missing\\n"); process.stdout.write("succeeded\\n");', line => line === 'succeeded' ? { terminalState: 'succeeded' } : { event: { type: line } }, [socketPath]),
+		event => events.push(event.type),
+		(pgid, persistedNonce) => { callbackPgid = pgid; callbackNonce = persistedNonce; },
+	);
+	const result = await handle.result;
+	assert.equal(callbackPgid, handle.pid);
+	assert.equal(callbackNonce, nonce);
+	assert.deepEqual(events, ['socket-ready']);
+	assert.equal(result.state, 'succeeded');
+	assert.equal(result.cleanupVerified, true);
+});
+
+test('controlled launch does not start its helper when durable ownership persistence fails', { skip: process.platform !== 'darwin' }, async (t) => {
+	const directory = mkdtempSync(join(tmpdir(), 'provider-controlled-fail-closed-'));
+	chmodSync(directory, 0o700);
+	const socketPath = join(directory, 'control.sock');
+	const providerMarker = join(directory, 'provider-started');
+	const helperScript = fileURLToPath(new URL('../../../../../../scripts/provider-group-control.mjs', import.meta.url));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const handle = await new ProviderProcessSupervisor({ cancelGraceMs: 100 }).run(
+		{ ...request, recoveryControl: { nodeExecutable: process.execPath, helperScript, socketPath, nonce: 'b'.repeat(64) } },
+		spec(`require('node:fs').writeFileSync(${JSON.stringify(providerMarker)}, 'started');`, () => ({})),
+		() => assert.fail('provider output must not be produced'),
+		() => { throw new Error('durable persistence failed'); },
+	);
+	const result = await handle.result;
+	assert.equal(handle.pid, undefined);
+	assert.equal(result.cleanupVerified, true);
+	assert.equal(existsSync(socketPath), false, 'the helper must not bind before persistence succeeds and GO is sent');
+	assert.equal(existsSync(providerMarker), false, 'the provider must not start before persistence succeeds and GO is sent');
+});
+
+test('controlled shell kills its owned group if the helper exits with a surviving descendant', { skip: process.platform !== 'darwin' }, async (t) => {
+	const directory = mkdtempSync(join(tmpdir(), 'provider-controlled-helper-loss-'));
+	chmodSync(directory, 0o700);
+	const helperPath = join(directory, 'helper.mjs');
+	const childPidPath = join(directory, 'child.pid');
+	const descendantIdentity = `provider-orphan-${process.pid}-${Date.now()}`;
+	const helperSource = `
+		import { spawn } from 'node:child_process';
+		import { writeFileSync } from 'node:fs';
+	const child = spawn(process.execPath, ['-e', ${JSON.stringify(`process.on("SIGTERM", () => {}); setInterval(() => { void ${JSON.stringify(descendantIdentity)}; }, 1000)`)}], { stdio: 'ignore' });
+		child.unref();
+		writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));
+		process.exit(0);
+	`;
+	writeFileSync(helperPath, helperSource);
+	let pgid: number | undefined;
+	let childPid: number | undefined;
+	const commandForPid = (pid: number): string => {
+		try { return execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }); }
+		catch (error) {
+			if (typeof error === 'object' && error !== null && 'status' in error && error.status === 1) return '';
+			throw error;
+		}
+	};
+	const descendantIsStillTestOwned = (): boolean => childPid !== undefined && commandForPid(childPid).includes(descendantIdentity);
+	t.after(async () => {
+		if (childPid === undefined && existsSync(childPidPath)) childPid = Number(readFileSync(childPidPath, 'utf8'));
+		if (pgid !== undefined && !isOwnedProcessGroupGone(pgid)) {
+			if (descendantIsStillTestOwned()) {
+				process.kill(childPid!, 'SIGTERM');
+				for (let attempt = 0; attempt < 8 && descendantIsStillTestOwned(); attempt++) await delay(25);
+				if (descendantIsStillTestOwned()) process.kill(childPid!, 'SIGKILL');
+			}
+			for (let attempt = 0; attempt < 80 && !isOwnedProcessGroupGone(pgid); attempt++) await delay(25);
+			assert.equal(isOwnedProcessGroupGone(pgid), true, 'test-owned group should be gone after exact descendant cleanup');
+		}
+		rmSync(directory, { recursive: true, force: true });
+	});
+	const handle = await new ProviderProcessSupervisor().run(
+		{ ...request, attemptId: `orphan-test-${process.pid}-${Date.now()}`, recoveryControl: { nodeExecutable: process.execPath, helperScript: helperPath, socketPath: join(directory, 'control.sock'), nonce: 'c'.repeat(64) } },
+		spec('process.stdout.write("provider-ran\\n");', line => ({ event: { type: line } })),
+		() => undefined,
+		ownedPgid => { pgid = ownedPgid; },
+	);
+	const result = await handle.result;
+	childPid = Number(readFileSync(childPidPath, 'utf8'));
+	assert.equal(result.cleanupVerified, true);
+	assert.equal(isOwnedProcessGroupGone(pgid!), true, 'the pinned shell must terminate all members when its helper exits');
+	assert.throws(() => process.kill(childPid!, 0), { code: 'ESRCH' }, 'helper descendant must not survive its helper');
 });
 
 test('a parent crash closes the gate pipe before provider execution', { skip: process.platform === 'win32' }, async (t) => {
