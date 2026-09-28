@@ -113,6 +113,19 @@
 .project-dashboard__provider h3 { margin: 0 0 6px; font-size: 16px; }
 .project-dashboard__provider h4 { margin: 13px 0 7px; font-size: 12px; }
 .project-dashboard__provider-note { margin: 0 0 11px; color: var(--dashboard-muted); font-size: 13px; line-height: 1.5; }
+.project-dashboard__task-instructions { margin: 10px 0 16px; padding: 12px 0 16px; border-top: 1px solid var(--dashboard-line); border-bottom: 1px solid var(--dashboard-line); }
+.project-dashboard__task-instructions-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.project-dashboard__task-instructions-heading h4 { margin: 0; font-size: 13px; }
+.project-dashboard__task-instructions-heading span, .project-dashboard__task-instructions-note { color: var(--dashboard-muted); font-size: 12px; line-height: 1.5; }
+.project-dashboard__task-instructions-note { margin: 8px 0 11px; }
+.project-dashboard__task-instruction { display: grid; gap: 5px; min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--dashboard-line); }
+.project-dashboard__task-instruction strong { font-size: 12px; overflow-wrap: anywhere; }
+.project-dashboard__task-instruction p { margin: 0; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.project-dashboard__task-instruction small { color: var(--dashboard-muted); font-size: 11px; overflow-wrap: anywhere; }
+.project-dashboard__task-instruction button { justify-self: start; }
+.project-dashboard__task-instruction-history { margin: 10px 0; color: var(--dashboard-muted); font-size: 12px; }
+.project-dashboard__task-instruction-history summary { cursor: pointer; }
+.project-dashboard__task-instruction-history p { margin: 8px 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .project-dashboard__provider-controls, .project-dashboard__provider-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
 .project-dashboard__provider-controls > label { font-size: 12px; font-weight: 600; }
 .project-dashboard__provider-segmented { display: inline-flex; padding: 3px; border: 1px solid var(--dashboard-line); border-radius: 8px; background: var(--dashboard-page); }
@@ -245,6 +258,15 @@
 .project-dashboard__reference-viewer-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px; }
 .project-dashboard__reference-viewer-pagination p { margin: 0; color: var(--dashboard-muted); font-size: 12px; text-align: center; overflow-wrap: anywhere; }
 .project-dashboard__reference-viewer-error { margin: 0; color: var(--dashboard-danger, #a33); font-size: 12px; line-height: 1.5; }
+.project-dashboard__reference-promotion { display: grid; gap: 9px; padding-top: 15px; border-top: 1px solid var(--dashboard-line); }
+.project-dashboard__reference-promotion h4, .project-dashboard__reference-promotion p { margin: 0; }
+.project-dashboard__reference-promotion h4 { font-size: 13px; }
+.project-dashboard__reference-promotion > p, .project-dashboard__reference-promotion-form > p { color: var(--dashboard-muted); font-size: 12px; line-height: 1.5; }
+.project-dashboard__reference-promotion-form { display: grid; justify-items: start; gap: 8px; max-width: 720px; }
+.project-dashboard__reference-promotion-form label { font-size: 12px; font-weight: 600; }
+.project-dashboard__reference-promotion-form textarea { box-sizing: border-box; width: 100%; min-height: 100px; padding: 10px; border: 1px solid var(--dashboard-input-border); border-radius: 6px; color: var(--dashboard-ink); background: var(--dashboard-card); font: inherit; font-size: 12px; line-height: 1.5; resize: vertical; }
+.project-dashboard__reference-promotion-form textarea:focus-visible { outline: 2px solid var(--dashboard-accent); outline-offset: 0; }
+.project-dashboard__reference-promotion-form .project-dashboard__reference-viewer-error:empty { display: none; }
 .project-dashboard__knowledge-empty { margin: 0 0 13px; padding: 13px; border: 1px dashed var(--dashboard-line); border-radius: 8px; color: var(--dashboard-muted); font-size: 12px; line-height: 1.5; }
 .project-dashboard__knowledge-success { margin-bottom: 12px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--dashboard-accent) 35%, var(--dashboard-line)); border-radius: 7px; color: var(--dashboard-ink); background: color-mix(in srgb, var(--dashboard-accent) 8%, var(--dashboard-card)); font-size: 12px; }
 .project-dashboard__knowledge-form { display: grid; gap: 8px; max-width: 760px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--dashboard-line); }

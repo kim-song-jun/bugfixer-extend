@@ -15,7 +15,7 @@ import type { ReorderWorkspaceDashboardTasksRequest, TrashWorkspaceDashboardTask
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import type { OrdinaryFolderMutationGrantDTO, ProviderAttemptDTO, ProviderAttemptEventDTO, ProviderId, ProviderRunPreviewDTO } from '../../../workspace/common/workspaceProviderRunProtocol.js';
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../../workspace/common/workspaceProviderRunProtocol.js';
-import type { WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
+import type { WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO, WorkspaceTaskInstructionPromotionDTO } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_WEBSITE_CHANNEL, type WorkspaceWebsitePreviewDTO } from '../../../workspace/common/workspaceWebsiteProtocol.js';
 import type { PreviewNotionPageRequest, PreviewSlackConversationRequest, WorkspaceConnectorAccountDTO, WorkspaceConnectorId, WorkspaceConnectorPreviewDTO } from '../../../workspace/common/workspaceConnectorProtocol.js';
@@ -173,6 +173,15 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private knowledgeLoading = false;
 	private knowledgeError: string | undefined;
 	private knowledgeMessage: string | undefined;
+	private taskPromotions: readonly WorkspaceTaskInstructionPromotionDTO[] = [];
+	private taskPromotionsTaskId: string | undefined;
+	private taskPromotionRequestTaskId: string | undefined;
+	private taskPromotionGeneration = 0;
+	private taskPromotionLoading = false;
+	private taskPromotionLoadFailed = false;
+	private taskPromotionBusy = false;
+	private taskPromotionError: string | undefined;
+	private promotionExcerptDraft = '';
 	private referenceViewerId: string | undefined;
 	private referenceViewer: WorkspaceReferenceContentDTO | undefined;
 	private referenceViewerLoading = false;
@@ -265,7 +274,10 @@ export class ProjectDashboardEditorPane extends EditorPane {
 	private readonly packageRefreshStates = new Map<string, PackageRefreshState>();
 	private packageRefreshGeneration = 0;
 	private readonly refreshOnReturn = () => {
-		if (document.visibilityState === 'visible' && this.selectedTaskId) void this.loadAttempts();
+		if (document.visibilityState === 'visible' && this.selectedTaskId) {
+			void this.loadAttempts();
+			void this.loadTaskPromotions(this.selectedTaskId, true);
+		}
 	};
 	private readonly persistScrollPosition = () => {
 		if (!this.inputActive || this.activeSection !== 'dashboard' || this.taskView !== 'board') return;
@@ -426,6 +438,15 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.trashConfirmationTaskId = undefined;
 		this.selectedTaskId = undefined;
 		this.preview = undefined;
+		++this.taskPromotionGeneration;
+		this.taskPromotions = [];
+		this.taskPromotionsTaskId = undefined;
+		this.taskPromotionRequestTaskId = undefined;
+		this.taskPromotionLoading = false;
+		this.taskPromotionLoadFailed = false;
+		this.taskPromotionBusy = false;
+		this.taskPromotionError = undefined;
+		this.promotionExcerptDraft = '';
 		this.folderMutationGrant = undefined;
 		this.attempts = [];
 		this.e2eEvidence = []; this.e2eLoadedTaskId = undefined; this.e2eError = undefined; this.e2eScenarioDraft = [{ type: 'assertText', selector: 'h1', value: '' }];
@@ -1314,6 +1335,93 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		}
 	}
 
+	private async loadTaskPromotions(taskId: string, force = false): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId || (!force && (this.taskPromotionsTaskId === taskId || this.taskPromotionRequestTaskId === taskId))) return;
+		const generation = ++this.taskPromotionGeneration;
+		this.taskPromotionRequestTaskId = taskId;
+		this.taskPromotionLoading = true;
+		this.taskPromotionLoadFailed = false;
+		this.taskPromotionError = undefined;
+		if (this.taskPromotionsTaskId !== taskId) this.taskPromotions = [];
+		this.render();
+		try {
+			const promotions = await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'listTaskInstructionPromotions', { projectId, taskId }) as readonly WorkspaceTaskInstructionPromotionDTO[];
+			if (generation === this.taskPromotionGeneration && this.projectId === projectId && this.selectedTaskId === taskId) {
+				this.taskPromotions = promotions;
+				this.taskPromotionsTaskId = taskId;
+			}
+		} catch (error) {
+			if (generation === this.taskPromotionGeneration && this.projectId === projectId && this.selectedTaskId === taskId) {
+				this.taskPromotionError = this.errorMessage(error, '승인한 작업 지시를 불러오지 못했습니다.');
+				this.taskPromotionLoadFailed = true;
+				this.taskPromotionsTaskId = taskId;
+				this.invalidateReferenceViewer();
+			}
+		} finally {
+			if (generation === this.taskPromotionGeneration) {
+				this.taskPromotionRequestTaskId = undefined;
+				this.taskPromotionLoading = false;
+				if (this.projectId === projectId && this.selectedTaskId === taskId) this.render();
+			}
+		}
+	}
+
+	private invalidateReferenceViewer(): void {
+		this.root?.querySelector<HTMLElement>('.project-dashboard__reference-viewer')?.removeAttribute('data-reference-loaded');
+		this.preservedReferenceViewerElement = undefined;
+	}
+
+	private async promoteReferenceExcerpt(reference: WorkspaceReferenceContentDTO): Promise<void> {
+		const projectId = this.projectId;
+		const taskId = this.selectedTaskId;
+		if (!projectId || !taskId || this.taskPromotionBusy) return;
+		const excerpt = this.promotionExcerptDraft;
+		if (!excerpt.trim()) { this.taskPromotionError = '승인할 자료 문장을 선택하거나 입력해 주세요.'; this.invalidateReferenceViewer(); this.render(); return; }
+		this.taskPromotionBusy = true;
+		this.taskPromotionError = undefined;
+		this.taskPromotionLoadFailed = false;
+		this.invalidateReferenceViewer(); this.render();
+		try {
+			await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'promoteReferenceExcerpt', { projectId, taskId, sourceSnapshotId: reference.id, excerpt });
+			if (this.projectId === projectId && this.selectedTaskId === taskId) {
+				this.promotionExcerptDraft = '';
+				this.knowledgeMessage = '선택한 문장을 이 작업의 지시로 승인했습니다. 다음 실행 미리보기에서 전달될 내용을 확인하세요.';
+				this.preview = undefined;
+				this.subagentPreview = undefined;
+				await this.loadTaskPromotions(taskId, true);
+			}
+		} catch (error) {
+			if (this.projectId === projectId && this.selectedTaskId === taskId) this.taskPromotionError = this.errorMessage(error, '선택한 문장을 작업 지시로 승인하지 못했습니다.');
+		} finally {
+			this.taskPromotionBusy = false;
+			this.invalidateReferenceViewer(); this.render();
+		}
+	}
+
+	private async withdrawReferenceExcerpt(promotionId: string): Promise<void> {
+		const projectId = this.projectId;
+		const taskId = this.selectedTaskId;
+		if (!projectId || !taskId || this.taskPromotionBusy) return;
+		this.taskPromotionBusy = true;
+		this.taskPromotionError = undefined;
+		this.taskPromotionLoadFailed = false;
+		this.render();
+		try {
+			await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'withdrawReferenceExcerpt', { projectId, taskId, promotionId });
+			if (this.projectId === projectId && this.selectedTaskId === taskId) {
+				this.preview = undefined;
+				this.subagentPreview = undefined;
+				await this.loadTaskPromotions(taskId, true);
+			}
+		} catch (error) {
+			if (this.projectId === projectId && this.selectedTaskId === taskId) this.taskPromotionError = this.errorMessage(error, '작업 지시 승인을 취소하지 못했습니다.');
+		} finally {
+			this.taskPromotionBusy = false;
+			this.render();
+		}
+	}
+
 	private async mutateKnowledge(operation: () => Promise<unknown>, successMessage: string): Promise<void> {
 		if (this.knowledgeBusy) return;
 		this.knowledgeBusy = true;
@@ -1323,6 +1431,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		try {
 			await operation();
 			this.knowledgeMessage = successMessage;
+			this.invalidateReferenceViewer();
 			await this.loadKnowledge();
 		} catch (error) {
 			this.knowledgeError = this.errorMessage(error, '프로젝트 자료를 저장하지 못했습니다.');
@@ -1723,6 +1832,8 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.referenceViewerError = undefined;
 		this.referenceViewerPage = 0;
 		this.referenceViewerPageStarts = [0];
+		this.promotionExcerptDraft = '';
+		this.taskPromotionError = undefined;
 		this.render();
 		this.root?.querySelector<HTMLElement>('.project-dashboard__reference-viewer')?.scrollIntoView({ block: 'nearest' });
 		this.root?.querySelector<HTMLElement>('[data-focus-key="reference-viewer-close"]')?.focus({ preventScroll: true });
@@ -1800,7 +1911,49 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const pageStatus = pagination.appendChild($('p')); pageStatus.setAttribute('aria-live', 'polite'); pageStatus.textContent = `${this.referenceViewerPage + 1} / ${pageCount}쪽`;
 		const next = pagination.appendChild(createElement('button', 'project-dashboard__secondary')); next.type = 'button'; next.textContent = '다음'; next.disabled = this.referenceViewerPage >= pageCount - 1; next.dataset.focusKey = 'reference-viewer-page-next';
 		next.addEventListener('click', () => this.changeReferenceViewerPage(this.referenceViewerPage + 1));
+		this.renderReferencePromotion(dialog, content, reference);
 		dialog.dataset.referenceLoaded = 'true';
+	}
+
+	private renderReferencePromotion(dialog: HTMLElement, content: HTMLElement, reference: WorkspaceReferenceContentDTO): void {
+		const taskId = this.selectedTaskId;
+		const task = this.dashboard?.tasks.find(candidate => candidate.id === taskId);
+		if (!taskId || !task) return;
+		const section = dialog.appendChild(createElement('section', 'project-dashboard__reference-promotion'));
+		const title = section.appendChild($('h4')); title.textContent = `${task.title} · 작업 지시`;
+		const linked = this.knowledge?.taskReferences[taskId]?.some(candidate => candidate.id === reference.id);
+		if (!linked) {
+			const note = section.appendChild($('p')); note.textContent = '이 자료를 작업에 연결하면 필요한 문장만 지시로 승인할 수 있습니다.';
+			const attach = section.appendChild(createElement('button', 'project-dashboard__secondary')); attach.type = 'button'; attach.textContent = '이 작업에 자료 연결'; attach.disabled = this.knowledgeBusy;
+			attach.addEventListener('click', () => { if (this.projectId) void this.mutateKnowledge(() => ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'attachTaskReference', { projectId: this.projectId, taskId, snapshotId: reference.id }), '참고자료를 작업에 연결했습니다.'); });
+			return;
+		}
+		const intro = section.appendChild($('p')); intro.textContent = '원문에서 필요한 문장을 선택해 승인하세요. 승인한 문장만 에이전트의 작업 지시로 전달되며, 나머지 자료는 참고용입니다.';
+		const form = section.appendChild(createElement('form', 'project-dashboard__reference-promotion-form'));
+		const selectionButton = form.appendChild(createElement('button', 'project-dashboard__secondary')); selectionButton.type = 'button'; selectionButton.textContent = '선택한 문장 넣기'; selectionButton.disabled = this.taskPromotionBusy;
+		const label = form.appendChild(createElement('label')); label.htmlFor = 'reference-promotion-excerpt'; label.textContent = '승인할 원문';
+		const excerpt = form.appendChild(createElement('textarea')); excerpt.id = 'reference-promotion-excerpt'; excerpt.rows = 4; excerpt.maxLength = 4000; excerpt.required = true; excerpt.value = this.promotionExcerptDraft; excerpt.disabled = this.taskPromotionBusy; excerpt.dataset.focusKey = 'reference-promotion-excerpt';
+		excerpt.addEventListener('input', () => { this.promotionExcerptDraft = excerpt.value; });
+		const guide = form.appendChild($('p')); guide.textContent = '저장된 자료에 그대로 들어 있는 문장만 승인할 수 있습니다. 최대 4,000자입니다.';
+		const error = form.appendChild($('.project-dashboard__reference-viewer-error'));
+		if (this.taskPromotionError) { error.setAttribute('role', 'alert'); error.textContent = this.taskPromotionError; }
+		selectionButton.addEventListener('click', () => {
+			const selection = window.getSelection();
+			const range = selection?.rangeCount === 1 ? selection.getRangeAt(0) : undefined;
+			const selected = selection?.toString() ?? '';
+			if (!range || !selected || !content.contains(range.startContainer) || !content.contains(range.endContainer)) {
+				error.setAttribute('role', 'alert'); error.textContent = '위 자료에서 사용할 문장을 먼저 선택해 주세요.'; return;
+			}
+			if (selected.length > excerpt.maxLength) {
+				error.setAttribute('role', 'alert'); error.textContent = '선택한 문장이 너무 깁니다. 4,000자 이하로 다시 선택해 주세요.'; return;
+			}
+			this.promotionExcerptDraft = selected;
+			excerpt.value = selected;
+			error.textContent = '';
+			excerpt.focus({ preventScroll: true });
+		});
+		const submit = form.appendChild(createElement('button', 'project-dashboard__primary')); submit.type = 'submit'; submit.disabled = this.taskPromotionBusy; submit.textContent = this.taskPromotionBusy ? '승인 중…' : '이 문장을 작업 지시로 승인'; submit.dataset.focusKey = 'reference-promotion-submit';
+		form.addEventListener('submit', event => { event.preventDefault(); if (!form.reportValidity()) return; this.promotionExcerptDraft = excerpt.value; void this.promoteReferenceExcerpt(reference); });
 	}
 
 	private referenceSourceLabel(connectorId: string): string {
@@ -2910,10 +3063,52 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		finally { this.e2eBusy = false; this.render(); }
 	}
 
+	private renderTaskInstructions(parent: HTMLElement, task: WorkspaceDashboardTaskItemDTO): void {
+		const section = parent.appendChild(createElement('section', 'project-dashboard__task-instructions'));
+		const header = section.appendChild(createElement('div', 'project-dashboard__task-instructions-heading'));
+		const title = header.appendChild($('h4')); title.textContent = '자료에서 승인한 지시'; title.tabIndex = -1; title.dataset.focusKey = 'task-instructions-title';
+		const unavailable = this.taskPromotionLoadFailed && this.taskPromotionsTaskId === task.id;
+		const current = !unavailable && this.taskPromotionsTaskId === task.id ? this.taskPromotions : [];
+		const active = current.filter(item => item.active);
+		const count = header.appendChild($('span')); count.textContent = unavailable ? '확인할 수 없음' : this.taskPromotionLoading && this.taskPromotionRequestTaskId === task.id ? '불러오는 중' : `${active.length}개 승인`;
+		if (this.taskPromotionLoading && this.taskPromotionRequestTaskId === task.id) {
+			const loading = section.appendChild($('p')); loading.className = 'project-dashboard__task-instructions-note'; loading.setAttribute('role', 'status'); loading.textContent = '승인 기록을 불러오는 중…';
+		} else if (!active.length && !unavailable) {
+			const empty = section.appendChild($('p')); empty.className = 'project-dashboard__task-instructions-note'; empty.textContent = '승인한 지시가 없습니다. 연결한 자료는 실행할 때 참고용으로만 전달됩니다.';
+		}
+		for (const item of active) {
+			const row = section.appendChild(createElement('div', 'project-dashboard__task-instruction'));
+			const source = this.knowledge?.references.find(reference => reference.id === item.sourceSnapshotId);
+			const sourceLabel = row.appendChild($('strong')); sourceLabel.textContent = `${source?.title ?? '자료 스냅샷'} · v${item.sourceVersion}`;
+			const exact = row.appendChild(createElement('p')); exact.textContent = item.excerpt;
+			const meta = row.appendChild(createElement('small')); meta.textContent = `승인 ${new Date(item.approvedAt).toLocaleString()} · SHA-256 ${item.sourceContentSha256}`;
+			const withdraw = row.appendChild(createElement('button', 'project-dashboard__secondary')); withdraw.type = 'button'; withdraw.textContent = '승인 취소'; withdraw.disabled = this.taskPromotionBusy;
+			withdraw.setAttribute('aria-label', `${source?.title ?? '자료'}에서 승인한 작업 지시 취소`);
+			withdraw.addEventListener('click', () => void this.withdrawReferenceExcerpt(item.id));
+		}
+		const withdrawn = current.filter(item => !item.active);
+		if (withdrawn.length) {
+			const history = section.appendChild(createElement('details', 'project-dashboard__task-instruction-history'));
+			const summary = history.appendChild(createElement('summary')); summary.textContent = `취소한 지시 ${withdrawn.length}개`;
+			for (const item of withdrawn) {
+				const row = history.appendChild($('p'));
+				const source = this.knowledge?.references.find(reference => reference.id === item.sourceSnapshotId);
+				row.textContent = `${source?.title ?? '자료 스냅샷'} · v${item.sourceVersion} · ${item.excerpt} · 취소 ${item.withdrawnAt ? new Date(item.withdrawnAt).toLocaleString() : '기록 확인 필요'}`;
+			}
+		}
+		if (this.taskPromotionError) {
+			const error = section.appendChild($('.project-dashboard__provider-error')); error.setAttribute('role', 'alert'); error.textContent = this.taskPromotionError;
+			if (this.taskPromotionLoadFailed) { const retry = section.appendChild(createElement('button', 'project-dashboard__secondary')); retry.type = 'button'; retry.textContent = '승인 기록 다시 불러오기'; retry.addEventListener('click', () => void this.loadTaskPromotions(task.id, true)); }
+		}
+		const sourceAction = section.appendChild(createElement('button', 'project-dashboard__secondary')); sourceAction.type = 'button'; sourceAction.textContent = this.knowledge?.taskReferences[task.id]?.length ? '자료에서 문장 선택' : '참고자료 연결하기';
+		sourceAction.addEventListener('click', () => this.navigateToSection('references'));
+	}
+
 	private renderProviderRuns(panel: HTMLElement, task: WorkspaceDashboardTaskItemDTO): void {
 		const section = panel.appendChild($('.project-dashboard__provider'));
 		const heading = section.appendChild($('h3')); heading.textContent = 'AI로 작업하기';
 		const caption = section.appendChild($('p')); caption.className = 'project-dashboard__provider-note'; caption.textContent = '작업 실행은 프로젝트 폴더의 파일을 수정할 수 있습니다. 시작 전에 프롬프트, 포함된 프로젝트 정보, 권한 요약을 확인하세요.';
+		this.renderTaskInstructions(section, task);
 		const taskStatus = section.appendChild($('.project-dashboard__run-state'));
 		taskStatus.setAttribute('role', 'status');
 		taskStatus.textContent = `작업 상태: ${columns.find(column => column.state === task.state)?.label ?? task.state}. ${task.state === 'done' ? '완료한 작업은 자동으로 실행되지 않습니다.' : task.state === 'ready' ? '실행 전에 작업 미리보기를 확인하세요.' : task.state === 'inProgress' ? '상위 실행이 진행 중이면 범위를 지정해 하위 에이전트를 실행할 수 있습니다.' : '완료 처리하기 전에 실행 결과를 검토하세요.'}`;
@@ -2976,6 +3171,15 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const referenceTitle = snapshot.appendChild($('strong')); referenceTitle.textContent = `${reference.title} · v${reference.version}`;
 				const referenceHash = snapshot.appendChild($('.project-dashboard__run-snapshot-meta')); referenceHash.textContent = `${reference.contentType} · SHA-256 ${reference.contentSha256}`;
 				const referenceContent = snapshot.appendChild(createElement('pre', 'project-dashboard__run-context')); referenceContent.textContent = reference.content;
+			}
+			const instructionsHeading = preview.appendChild($('h4')); instructionsHeading.textContent = `승인한 작업 지시 · ${this.preview.approvedInstructions.length}개`;
+			if (!this.preview.approvedInstructions.length) { const none = preview.appendChild($('.project-dashboard__run-snapshot-meta')); none.textContent = '자료에서 작업 지시로 승인한 문장이 없습니다.'; }
+			for (const instruction of this.preview.approvedInstructions) {
+				const row = preview.appendChild($('.project-dashboard__run-reference'));
+				const source = this.preview.references.find(reference => reference.id === instruction.sourceSnapshotId);
+				const label = row.appendChild($('strong')); label.textContent = `${source?.title ?? '자료 스냅샷'} · v${instruction.sourceVersion}`;
+				const meta = row.appendChild($('.project-dashboard__run-snapshot-meta')); meta.textContent = `사람이 승인 · ${new Date(instruction.approvedAt).toLocaleString()} · 원본 SHA-256 ${instruction.sourceContentSha256}`;
+				const exact = row.appendChild(createElement('pre', 'project-dashboard__run-context')); exact.textContent = instruction.excerpt;
 			}
 			if (this.preview.permission.blockedReason) {
 				const blocked = preview.appendChild($('.project-dashboard__run-blocked')); blocked.setAttribute('role', 'alert'); blocked.textContent = this.errorMessage(new Error(this.preview.permission.blockedReason), '현재 권한 설정으로는 실행할 수 없습니다. 폴더 권한을 확인하세요.', false);
@@ -3334,6 +3538,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 
 	private async loadAttempts(refreshDashboardOnStateChange = true): Promise<void> {
 		if (!this.projectId || !this.selectedTaskId) return;
+		void this.loadTaskPromotions(this.selectedTaskId);
 		if (this.polling) {
 			this.attemptRefreshPending = true;
 			this.refreshDashboardAfterPendingAttemptRefresh = this.refreshDashboardAfterPendingAttemptRefresh && refreshDashboardOnStateChange;
