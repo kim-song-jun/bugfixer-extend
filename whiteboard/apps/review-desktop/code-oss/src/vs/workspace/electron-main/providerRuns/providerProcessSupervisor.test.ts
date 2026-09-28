@@ -184,6 +184,184 @@ test('a provider parent that exits successfully cannot leave an owned helper beh
 	assert.throws(() => process.kill(-handle.pid!, 0), { code: 'ESRCH' });
 });
 
+test('guardian loss with a surviving child leaves cleanup unverified', { skip: process.platform === 'win32' }, async (t) => {
+	let helperPid: number | undefined;
+	let providerPid: number | undefined;
+	let guardianPid: number | undefined;
+	let notifyHelperReady!: () => void;
+	const helperReady = new Promise<void>(resolve => notifyHelperReady = resolve);
+	t.after(async () => {
+		if (helperPid !== undefined) {
+			try { process.kill(helperPid, 'SIGKILL'); } catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+			}
+		}
+		if (guardianPid !== undefined) {
+			for (let attempt = 0; attempt < 80 && !isOwnedProcessGroupGone(guardianPid); attempt++) await delay(25);
+			assert.equal(isOwnedProcessGroupGone(guardianPid), true, 'test-owned helper process group should be gone after PID cleanup');
+		}
+	});
+	const handle = await new ProviderProcessSupervisor().run(
+		request,
+		spec(
+			`const { spawn } = require('node:child_process'); const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); helper.unref(); process.stdout.write('provider:' + process.pid + '\\nhelper:' + helper.pid + '\\n'); setInterval(() => {}, 1000);`,
+			line => ({ event: { type: line } }),
+		),
+		event => {
+			if (event.type.startsWith('provider:')) providerPid = Number(event.type.slice('provider:'.length));
+			if (event.type.startsWith('helper:')) {
+				helperPid = Number(event.type.slice('helper:'.length));
+				// The leader is known to be alive from the persisted launch callback.
+				// Kill only that PID, then the provider PID; the helper remains alive.
+				if (guardianPid !== undefined) process.kill(guardianPid, 'SIGKILL');
+				if (providerPid !== undefined) process.kill(providerPid, 'SIGKILL');
+				notifyHelperReady();
+			}
+		},
+		pgid => { guardianPid = pgid; },
+	);
+	assert.ok(handle.pid);
+	await Promise.race([
+		helperReady,
+		new Promise<void>((_, reject) => setTimeout(() => reject(new Error('owned helper did not become ready')), 2_000)),
+	]);
+	const result = await handle.result;
+	assert.equal(result.state, 'interrupted');
+	assert.equal(result.cleanupVerified, false);
+});
+
+test('guardian loss with inherited child stdio settles while leaving cleanup unverified', { skip: process.platform === 'win32' }, async (t) => {
+	let helperPid: number | undefined;
+	let providerPid: number | undefined;
+	let guardianPid: number | undefined;
+	let lateOutputSeen = false;
+	let helperReceivedTerm = false;
+	let notifyHelperReady!: () => void;
+	const helperReady = new Promise<void>(resolve => notifyHelperReady = resolve);
+	t.after(async () => {
+		if (helperPid === undefined) return;
+		try { process.kill(helperPid, 'SIGKILL'); } catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+		}
+		if (guardianPid !== undefined) {
+			for (let attempt = 0; attempt < 80 && !isOwnedProcessGroupGone(guardianPid); attempt++) await delay(25);
+			assert.equal(isOwnedProcessGroupGone(guardianPid), true, 'test-owned inherited-stdio helper group should be gone after PID cleanup');
+		}
+	});
+	const handle = await new ProviderProcessSupervisor().run(
+		request,
+		spec(
+			`const { spawn } = require('node:child_process'); const helper = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => console.log('helper-term')); setTimeout(() => console.log('late-descendant-output'), 150); setInterval(() => {}, 1000)"], { stdio: 'inherit' }); helper.unref(); process.stdout.write('provider:' + process.pid + '\\nhelper:' + helper.pid + '\\n'); setInterval(() => {}, 1000);`,
+			line => ({ event: { type: line } }),
+		),
+		event => {
+			if (event.type === 'late-descendant-output') lateOutputSeen = true;
+			if (event.type === 'helper-term') helperReceivedTerm = true;
+			if (event.type.startsWith('provider:')) providerPid = Number(event.type.slice('provider:'.length));
+			if (event.type.startsWith('helper:')) {
+				helperPid = Number(event.type.slice('helper:'.length));
+				if (guardianPid !== undefined) process.kill(guardianPid, 'SIGKILL');
+				if (providerPid !== undefined) process.kill(providerPid, 'SIGKILL');
+				notifyHelperReady();
+			}
+		},
+		pgid => { guardianPid = pgid; },
+	);
+	assert.ok(handle.pid);
+	await Promise.race([
+		helperReady,
+		new Promise<void>((_, reject) => setTimeout(() => reject(new Error('owned helper did not become ready')), 2_000)),
+	]);
+	for (let attempt = 0; attempt < 80; attempt++) {
+		try {
+			process.kill(guardianPid!, 0);
+			await delay(25);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+			break;
+		}
+	}
+	assert.throws(() => process.kill(guardianPid!, 0), { code: 'ESRCH' }, 'guardian must be gone before cancellation is requested');
+	handle.cancel();
+	await delay(100);
+	assert.equal(helperReceivedTerm, false, 'late cancellation must not signal the unowned process group');
+	const result = await Promise.race([
+		handle.result,
+		delay(3_500).then(() => undefined),
+	]);
+	assert.ok(result, 'guardian exit must settle after the bounded stdio drain');
+	assert.equal(result.state, 'interrupted');
+	assert.equal(result.cleanupVerified, false);
+	assert.equal(lateOutputSeen, true, 'output written by the inherited-stdio descendant during the drain must be parsed');
+	assert.doesNotThrow(() => process.kill(helperPid!, 0), 'the inherited helper must remain alive until test teardown');
+});
+
+test('in-flight group termination does not escalate after guardian loss', { skip: process.platform === 'win32' }, async (t) => {
+	let helperPid: number | undefined;
+	let providerPid: number | undefined;
+	let guardianPid: number | undefined;
+	let notifyHelperReady!: () => void;
+	let notifyHelperTerm!: () => void;
+	let providerKillAttempted = false;
+	const helperReady = new Promise<void>(resolve => notifyHelperReady = resolve);
+	const helperTerm = new Promise<void>(resolve => notifyHelperTerm = resolve);
+	let heartbeatCount = 0;
+	t.after(async () => {
+		for (const pid of [helperPid, providerKillAttempted ? undefined : providerPid]) {
+			if (pid === undefined) continue;
+			try { process.kill(pid, 'SIGKILL'); } catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+			}
+		}
+		if (guardianPid !== undefined) {
+			for (let attempt = 0; attempt < 160 && !isOwnedProcessGroupGone(guardianPid); attempt++) await delay(25);
+			assert.equal(isOwnedProcessGroupGone(guardianPid), true, 'test-owned in-flight helper group should be gone after PID cleanup');
+		}
+	});
+	const helperScript = "process.on('SIGTERM', () => console.log('helper-term')); console.log('helper-ready'); setInterval(() => console.log('helper-heartbeat'), 20)";
+	const handle = await new ProviderProcessSupervisor({ cancelGraceMs: 100 }).run(
+		request,
+		spec(
+			`const { spawn } = require('node:child_process'); process.on('SIGTERM', () => {}); const helper = spawn(process.execPath, ['-e', ${JSON.stringify(helperScript)}], { stdio: 'inherit' }); helper.unref(); process.stdout.write('provider:' + process.pid + '\\nhelper:' + helper.pid + '\\n'); setInterval(() => {}, 1000);`,
+			line => ({ event: { type: line } }),
+		),
+		event => {
+			if (event.type.startsWith('provider:')) providerPid = Number(event.type.slice('provider:'.length));
+			if (event.type.startsWith('helper:')) {
+				helperPid = Number(event.type.slice('helper:'.length));
+			}
+			if (event.type === 'helper-ready') notifyHelperReady();
+			if (event.type === 'helper-heartbeat') heartbeatCount++;
+			if (event.type === 'helper-term') {
+				notifyHelperTerm();
+				if (guardianPid !== undefined) process.kill(guardianPid, 'SIGKILL');
+				if (providerPid !== undefined) {
+					providerKillAttempted = true;
+					process.kill(providerPid, 'SIGKILL');
+				}
+			}
+		},
+		pgid => { guardianPid = pgid; },
+	);
+	assert.ok(handle.pid);
+	await Promise.race([
+		helperReady,
+		new Promise<void>((_, reject) => setTimeout(() => reject(new Error('owned helper did not become ready')), 2_000)),
+	]);
+	handle.cancel();
+	await Promise.race([
+		helperTerm,
+		new Promise<void>((_, reject) => setTimeout(() => reject(new Error('owned helper did not receive the initial TERM')), 2_000)),
+	]);
+	const heartbeatCountAfterTerm = heartbeatCount;
+	await delay(300);
+	assert.ok(heartbeatCount > heartbeatCountAfterTerm, 'the helper must remain alive after guardian loss and the cleanup grace period');
+	const result = await Promise.race([handle.result, delay(3_500).then(() => undefined)]);
+	assert.ok(result, 'guardian exit must settle after the bounded stdio drain');
+	assert.equal(result.state, 'interrupted');
+	assert.equal(result.cleanupVerified, false);
+});
+
 test('a closed launch gate is handled as a failed launch without executing provider input', { skip: process.platform === 'win32' }, async (t) => {
 	const directory = mkdtempSync(join(tmpdir(), 'provider-launch-early-close-'));
 	const marker = join(directory, 'provider-started');

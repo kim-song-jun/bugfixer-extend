@@ -153,14 +153,21 @@ async function launch(
 	let exitSignal: NodeJS.Signals | null = null;
 	let cancelled = false;
 	let closeSeen = false;
+	let guardianExited = false;
 	let cleanupPromise: Promise<GroupCleanupResult> | undefined;
 	let parserError: string | undefined;
 	let finalText: string | undefined;
 	let resolveResult!: (result: ProviderRunResult) => void;
 	const result = new Promise<ProviderRunResult>((resolve) => resolveResult = resolve);
+	let guardianStreamDrainTimer: NodeJS.Timeout | undefined;
+	const guardianIsGone = (): boolean => guardianExited || closeSeen || child.exitCode !== null || child.signalCode !== null;
 	const requestTermination = (): Promise<GroupCleanupResult> => {
+		if (guardianIsGone()) {
+			cleanupPromise ??= Promise.resolve(child.pid ? verifyProcessGroupAfterGuardianExit(child.pid) : { verified: true });
+			return cleanupPromise;
+		}
 		cleanupPromise ??= child.pid
-			? terminateOwnedGroup(child.pid, cancelGraceMs)
+			? terminateOwnedGroup(child.pid, cancelGraceMs, guardianIsGone)
 			: Promise.resolve({ verified: true });
 		return cleanupPromise;
 	};
@@ -214,6 +221,7 @@ async function launch(
 	const attachLines = (stream: NodeJS.ReadableStream, name: 'stdout' | 'stderr'): void => {
 		const decoder = new StringDecoder('utf8');
 		let pending = '';
+		let finalized = false;
 		stream.on('data', (chunk: Buffer | string) => {
 			pending += typeof chunk === 'string' ? chunk : decoder.write(chunk);
 			if (Buffer.byteLength(pending, 'utf8') > maxLineBytes && !pending.includes('\n')) {
@@ -240,16 +248,33 @@ async function launch(
 				pending = '';
 			}
 		});
-		stream.on('end', () => {
+		const finalize = (): void => {
+			if (finalized) return;
+			finalized = true;
 			pending += decoder.end();
 			if (pending.length > 0 && Buffer.byteLength(pending, 'utf8') <= maxLineBytes) acceptLine(pending, name);
 			else if (pending.length > 0) parserError = 'Provider emitted a line larger than the configured limit.';
-		});
+		};
+		stream.on('end', finalize);
+		stream.on('close', finalize);
 	};
 
 	if (child.stdout) attachLines(child.stdout, 'stdout');
 	if (child.stderr) attachLines(child.stderr, 'stderr');
+	child.once('exit', () => {
+		guardianExited = true;
+		// A descendant can inherit stdout/stderr and keep Node's `close` event
+		// pending forever after the guardian exits. Let buffered output drain,
+		// then close only our local pipe ends; never signal the now-unowned PGID.
+		guardianStreamDrainTimer = setTimeout(() => {
+			for (const stream of child.stdio) {
+				if (stream && 'destroy' in stream && typeof stream.destroy === 'function') stream.destroy();
+			}
+		}, GROUP_CLEANUP_TIMEOUT_MS);
+		guardianStreamDrainTimer.unref();
+	});
 	child.once('close', (code, signal) => {
+		if (guardianStreamDrainTimer) clearTimeout(guardianStreamDrainTimer);
 		closeSeen = true;
 			exitCode = providerExitCode ?? code;
 		exitSignal = signal;
@@ -257,7 +282,7 @@ async function launch(
 			// The guardian owns the PGID until termination completes. Never signal
 			// after close: at that point a numeric PGID may identify another group.
 			const unexpectedDescendants = !cleanupPromise && child.pid !== undefined && ownedGroupExists(child.pid);
-			const cleanup: GroupCleanupResult = cleanupPromise ? await cleanupPromise : { verified: true };
+			const cleanup: GroupCleanupResult = cleanupPromise ? await cleanupPromise : { verified: !unexpectedDescendants };
 			const state: ProviderTerminalState = !cleanup.verified || unexpectedDescendants
 				? 'interrupted'
 				: cancelled
@@ -292,7 +317,7 @@ async function launch(
 		pid: child.pid,
 		result,
 		cancel() {
-			if (closeSeen || cancelled) return;
+			if (guardianIsGone() || cancelled) return;
 			cancelled = true;
 			requestTermination();
 		},
@@ -344,6 +369,12 @@ export function isOwnedProcessGroupGone(pgid: number): boolean {
 	return !ownedGroupExists(pgid);
 }
 
+function verifyProcessGroupAfterGuardianExit(pgid: number): GroupCleanupResult {
+	return isOwnedProcessGroupGone(pgid)
+		? { verified: true }
+		: { verified: false, error: 'The provider guardian exited before its process group cleanup was verified.' };
+}
+
 async function waitForOwnedGroupExit(pgid: number, timeoutMs: number): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs;
 	while (ownedGroupExists(pgid) && Date.now() < deadline) {
@@ -352,14 +383,17 @@ async function waitForOwnedGroupExit(pgid: number, timeoutMs: number): Promise<b
 	return !ownedGroupExists(pgid);
 }
 
-async function terminateOwnedGroup(pgid: number, graceMs: number): Promise<GroupCleanupResult> {
+async function terminateOwnedGroup(pgid: number, graceMs: number, guardianIsGone: () => boolean): Promise<GroupCleanupResult> {
+	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid); }
 	if (!ownedGroupExists(pgid)) { return { verified: true }; }
+	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid); }
 	try { process.kill(-pgid, 'SIGTERM'); }
 	catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ESRCH') { return { verified: true }; }
 		return { verified: false, error: 'The owned provider process group could not be signalled.' };
 	}
 	if (await waitForOwnedGroupExit(pgid, graceMs)) { return { verified: true }; }
+	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid); }
 	try { process.kill(-pgid, 'SIGKILL'); }
 	catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ESRCH') { return { verified: true }; }
