@@ -59,6 +59,7 @@ export interface WorkspaceConnectorPreviewDTO {
 
 export interface ImportConnectorPreviewRequest extends WorkspaceConnectorAccountRequest {
 	readonly previewId: string;
+	readonly taskId?: string;
 }
 
 export interface WorkspaceConnectorOperations {

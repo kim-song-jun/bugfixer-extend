@@ -152,6 +152,6 @@ export function richText(value: unknown): string {
 }
 
 export function safeTitle(value: string, fallback: string): string {
-	const title = value.trim().replace(/[\r\n\t]+/g, ' ').slice(0, 500);
+	const title = value.trim().replace(/[\r\n\t]+/g, ' ').slice(0, 500).trim();
 	return title || fallback;
 }

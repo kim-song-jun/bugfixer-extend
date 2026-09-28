@@ -17,7 +17,7 @@ import type { IWindowsMainService } from '../../platform/windows/electron-main/w
 import type { WorkspaceConnectorAccountDTO, WorkspaceConnectorPreviewDTO } from '../common/workspaceConnectorProtocol.js';
 import type { WorkspaceReferenceDTO } from '../common/workspaceKnowledgeProtocol.js';
 import type { ConnectorTransport } from './connectors/index.js';
-import { encodeSourceArtifact } from './connectors/types.js';
+import { encodeSourceArtifact, safeTitle } from './connectors/types.js';
 import { WorkspaceConnectorChannel } from './workspaceConnectorChannel.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
@@ -31,6 +31,8 @@ test('connector IPC previews a project-scoped Slack snapshot before importing th
 		const descriptor = URI.file(join(directory, 'one.code-workspace')).toString();
 		const one = database.createProjectWorkspace('One', directory, descriptor);
 		const two = database.createProjectWorkspace('Two', directory, URI.file(join(directory, 'two.code-workspace')).toString());
+		const archivedTask = database.createTask({ projectId: one.project.id, bindingId: one.binding.id, title: 'Archived task' });
+		const selectedTask = database.createTask({ projectId: one.project.id, bindingId: one.binding.id, title: 'Selected task' });
 		const sender = { id: 1 } as WebContents;
 		const otherSender = { id: 2 } as WebContents;
 		const projectWindow = {
@@ -105,6 +107,26 @@ test('connector IPC previews a project-scoped Slack snapshot before importing th
 		assert.equal(createHash('sha256').update(importedSnapshot.content).digest('hex'), preview.contentSha256);
 		assert.equal('derivedText' in reference, false);
 		assert.equal(requests.length, 2);
+		assert.equal(safeTitle(`${'x'.repeat(499)} tail`, 'fallback'), 'x'.repeat(499), 'truncation must trim whitespace at the 500-character boundary');
+		const titleAtLimit = 'x'.repeat(500);
+		const taskPreview = await channel.call<WorkspaceConnectorPreviewDTO>(sender, 'previewSlackConversation', {
+			projectId: one.project.id, accountId: account.id, channelId: 'C123', title: titleAtLimit,
+		});
+		assert.equal(taskPreview.title, titleAtLimit);
+		database.archiveTask(archivedTask.id, archivedTask.revision);
+		await assert.rejects(channel.call(sender, 'importPreview', {
+			projectId: one.project.id, accountId: account.id, previewId: taskPreview.previewId, taskId: archivedTask.id,
+		}), /same project/);
+		assert.equal(database.knowledge.listProjectReferences(one.project.id).length, 1, 'failed task links must not persist an extra snapshot version');
+		assert.deepEqual(database.knowledge.listTaskReferences(archivedTask.id), []);
+		const retriedReference = await channel.call<WorkspaceReferenceDTO>(sender, 'importPreview', {
+			projectId: one.project.id, accountId: account.id, previewId: taskPreview.previewId, taskId: selectedTask.id,
+		});
+		assert.equal(retriedReference.externalId, taskPreview.externalId);
+		assert.equal(retriedReference.title, taskPreview.title);
+		assert.deepEqual(database.knowledge.listTaskReferences(selectedTask.id).map(item => item.id), [retriedReference.id]);
+		assert.equal(database.knowledge.readReference(retriedReference.id)?.version, 2);
+		assert.deepEqual(database.knowledge.listProjectReferences(one.project.id).map(item => item.version).sort(), [1, 2], 'the failed link must add no version and the successful retry must add exactly one');
 		for (const databaseFile of readdirSync(directory).filter(name => name.startsWith('workspace.db'))) {
 			assert.equal(readFileSync(join(directory, databaseFile)).includes(Buffer.from('xoxb-test-secret')), false, `${databaseFile} contains a connector credential`);
 		}

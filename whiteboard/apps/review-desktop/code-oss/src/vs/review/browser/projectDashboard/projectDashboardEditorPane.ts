@@ -619,7 +619,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		this.render();
 		try {
 			const reference = await ipcRenderer.invoke(WORKSPACE_CONNECTOR_CHANNEL, 'importPreview', {
-				projectId, accountId, previewId: preview.previewId,
+				projectId, accountId, previewId: preview.previewId, ...(taskId ? { taskId } : {}),
 			}) as WorkspaceReferenceDTO;
 			if (reference.connectorId !== preview.connectorId || reference.externalId !== preview.externalId
 				|| reference.sourceUri !== preview.sourceUri || reference.title !== preview.title
@@ -631,24 +631,17 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			this.connectorImportIdDraft = '';
 			this.connectorImportTitleDraft = '';
 			this.connectorImportMessageTsDraft = '';
-			if (taskId) {
-				try {
-					await ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'attachTaskReference', { projectId, taskId, snapshotId: reference.id });
-				} catch (error) {
-					this.connectorPreviewError = `자료를 가져왔지만 선택한 작업에 연결하지 못했습니다: ${this.errorMessage(error, '연결 실패')}`;
-					this.connectorMessage = '자료를 가져왔습니다. 자료 목록에서 작업에 연결할 수 있습니다.';
-					await this.loadKnowledge();
-					return;
-				}
-			}
 			this.connectorMessage = taskId ? '자료를 가져와 원래 작업에 연결했습니다.' : '자료를 가져왔습니다. 작업을 선택해 연결하세요.';
 			await this.loadKnowledge();
 		} catch (error) {
 			if (this.projectId === projectId) {
-				const expired = /source preview (?:expired|is no longer available)/i.test(this.rawErrorMessage(error));
+				const rawMessage = this.rawErrorMessage(error);
+				const expired = /source preview (?:expired|is no longer available)/i.test(rawMessage);
 				const message = this.errorMessage(error, '확인한 자료를 가져오지 못했습니다.');
 				if (expired) this.clearConnectorPreview();
-				this.connectorPreviewError = message;
+				this.connectorPreviewError = taskId && /reference and active task must belong to the same project/i.test(rawMessage)
+					? `자료를 선택한 작업에 연결하지 못했습니다. 미리보기는 유지되니 작업을 확인한 뒤 다시 시도하세요. ${message}`
+					: message;
 			}
 		} finally {
 			if (this.connectorOperationGeneration === operation) {

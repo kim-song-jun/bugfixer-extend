@@ -96,7 +96,7 @@ export class WorkspaceConnectorChannel {
 						this.previews.delete(preview.previewId);
 						throw new Error('The reviewed source changed in memory. Preview it again before importing.');
 					}
-					const { content: _content, derivedText: _derivedText, ...metadata } = this.database.knowledge.importReference({ projectId, ...preview.source });
+					const { content: _content, derivedText: _derivedText, ...metadata } = this.database.knowledge.importReferenceWithTask({ projectId, ...preview.source }, request.taskId);
 					if (metadata.contentSha256 !== preview.contentSha256
 						|| metadata.connectorId !== preview.source.connectorId
 						|| metadata.externalId !== preview.source.externalId
@@ -239,6 +239,7 @@ export class WorkspaceConnectorChannel {
 	private previewImportRequest(value: unknown): ImportConnectorPreviewRequest {
 		const record = this.accountRequest(value) as unknown as Record<string, unknown>;
 		if (typeof record.previewId !== 'string' || !isUUID(record.previewId)) { throw new Error('A valid source preview is required before importing.'); }
+		if (record.taskId !== undefined && (typeof record.taskId !== 'string' || !isUUID(record.taskId))) { throw new Error('A valid task ID is required when linking imported material.'); }
 		return record as unknown as ImportConnectorPreviewRequest;
 	}
 
