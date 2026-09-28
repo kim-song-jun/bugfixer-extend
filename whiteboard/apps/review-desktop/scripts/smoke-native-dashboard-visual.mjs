@@ -124,7 +124,18 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
       for (const page of context.pages()) watchPage(page);
     }
 
-    const page = await waitFor(() => browser.contexts().flatMap(context => context.pages()).find(candidate => candidate.url() !== 'about:blank'), 'the packaged renderer page');
+    const selector = descriptor ? '.project-sidebar' : '.project-home__intro h1';
+
+    const page = await waitFor(async () => {
+      for (const candidate of browser.contexts().flatMap(context => context.pages())) {
+        if (candidate.url() === 'about:blank') continue;
+
+        if (await candidate.locator(selector).isVisible()) return candidate;
+      }
+
+      return undefined;
+    }, `the packaged renderer with ${selector}`, 90_000);
+
     watchPage(page);
 
     return { child, exited, browser, page, port, targetId: target.id, stderr, owned };
@@ -232,6 +243,7 @@ try {
       'window.autoDetectColorScheme': false,
       'workbench.colorTheme': theme,
       'telemetry.telemetryLevel': 'off',
+      'review.telemetry.enabled': false,
       'update.mode': 'none',
       'security.workspace.trust.enabled': false,
     }));
@@ -241,7 +253,11 @@ try {
 
     try {
 
-      await session.page.locator('.review-onboarding-headline').waitFor({ timeout: 90_000 });
+      const projectHomeHeading = session.page.locator('.project-home__intro h1');
+
+      await projectHomeHeading.waitFor({ timeout: 90_000 });
+
+      assert.equal(await projectHomeHeading.innerText(), '어떤 프로젝트를 열까요?', 'Fresh profile must show the Korean project picker');
 
       assert.ok((await session.page.locator('main').innerText()).trim().length > 0, 'Onboarding must render visible content');
 
@@ -416,7 +432,7 @@ console.log(`Native dashboard smoke captured ${diagnostics.pageErrors.length} ru
 async function dismissStartupInvitations(page) {
 
   await page.getByRole('button', { name: 'Not now', exact: true })
-    .or(page.locator('.review-onboarding-headline')).first()
+    .or(page.locator('.project-home__intro h1')).first()
     .waitFor({ state: 'visible', timeout: 90_000 });
 
   for (let prompt = 0; prompt < 5; prompt++) {
