@@ -102,7 +102,8 @@ function parseClaudeProviderEventWithState(line: string, stream: 'stdout' | 'std
 		return {};
 	}
 
-	const permissionDenials = Array.isArray(message.permission_denials) && message.permission_denials.length > 0;
+	const permissionDenials = (Array.isArray(message.permission_denials) && message.permission_denials.length > 0)
+		|| (typeof message.permission_denials_count === 'number' && Number.isFinite(message.permission_denials_count) && message.permission_denials_count > 0);
 	const denied = state.permissionDenied || permissionDenials;
 	const succeeded = message.subtype === 'success' && message.is_error !== true && !denied;
 	const metadata: Record<string, string | number | boolean | null> = {};

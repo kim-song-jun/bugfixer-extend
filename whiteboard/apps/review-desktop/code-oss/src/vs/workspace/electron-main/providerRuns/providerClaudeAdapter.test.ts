@@ -153,6 +153,17 @@ test('fails a result containing structured permission denials in the stateless p
 	});
 });
 
+test('fails a successful-looking result with a positive permission denial count', () => {
+	const command = createClaudeProviderCommand(request());
+	assert.deepEqual(command.parseEvent(JSON.stringify({
+		type: 'result', subtype: 'success', is_error: false, result: 'must not escape',
+		permission_denials_count: 1,
+	}), 'stdout'), {
+		event: { type: 'turn.completed', metadata: { itemOutcome: 'denied', subtype: 'success' } },
+		terminalState: 'failed',
+	});
+});
+
 test('does not make recoverable tool errors sticky and preserves a clean success', () => {
 	const command = createClaudeProviderCommand(request());
 	assert.deepEqual(command.parseEvent(JSON.stringify({
