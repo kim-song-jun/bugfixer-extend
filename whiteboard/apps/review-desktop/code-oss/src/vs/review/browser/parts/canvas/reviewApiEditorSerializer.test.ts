@@ -5,9 +5,22 @@ import { Event } from "../../../../base/common/event.js";
 import { Registry } from "../../../../platform/registry/common/platform.js";
 import { EditorExtensions, EditorsOrder, type IEditorFactoryRegistry } from "../../../../workbench/common/editor.js";
 import { EditorGroupModel } from "../../../../workbench/common/editor/editorGroupModel.js";
+import { SCRATCHPAD_REVIEW_ID } from "../../../common/reviewProtocol.js";
 import { ReviewCanvasEditorTabsService } from "../../../services/reviewCanvasEditorTabsService.js";
 import { ReviewApiEditorSerializer } from "./reviewApiEditorSerializer.js";
 import { ReviewCanvasEditorInput } from "./reviewCanvasEditorInput.js";
+
+test("native editor tab localizes only the API scratchpad name", () => {
+	const scratchpad = new ReviewCanvasEditorInput({ kind: "api", reviewId: SCRATCHPAD_REVIEW_ID, title: "Scratchpad" }, {} as never);
+	const ordinaryReview = new ReviewCanvasEditorInput({ kind: "api", reviewId: "review-1", title: "Scratchpad" }, {} as never);
+	try {
+		assert.equal(scratchpad.getName(), "메모장");
+		assert.equal(ordinaryReview.getName(), "Scratchpad");
+	} finally {
+		scratchpad.dispose();
+		ordinaryReview.dispose();
+	}
+});
 
 test("opening historical source requests its version and opens a separate native workspace only after success", async (t) => {
 	const opened: unknown[][] = [];

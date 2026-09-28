@@ -103,7 +103,8 @@ export class ReviewCanvasEditorInput extends EditorInput {
 
 	override getName(): string {
 		if (this.target.kind === "api-source") return this.target.selection.kind === "current" ? `자료 — ${this.target.title}` : `자료 — ${this.target.title} (v${this.target.selection.version})`;
-		if (this.target.kind === "api" || this.target.kind === "api-task-review") return this.target.title;
+		if (this.target.kind === "api") return this.target.reviewId === SCRATCHPAD_REVIEW_ID ? "메모장" : this.target.title;
+		if (this.target.kind === "api-task-review") return this.target.title;
 		if (this.target.kind === "home") return "홈";
 		if (this.target.kind === "welcome") return "시작하기";
 		if (this.target.kind === "settings") return "설정";
