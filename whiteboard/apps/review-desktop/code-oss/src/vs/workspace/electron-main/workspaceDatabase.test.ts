@@ -501,6 +501,53 @@ test('version 5 databases migrate gate-less attempts without claiming cleanup pr
 	}
 });
 
+test('provider control identity migrates, persists across reopen, and stays absent on legacy attempts', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-provider-control-'));
+	const path = join(directory, 'workspace.db');
+	let database = WorkspaceDatabase.open(path);
+	try {
+		const { task } = createProjectAndTask(database, 'Provider control');
+		const legacy = database.createProviderAttempt({ taskId: task.id, provider: 'codex', purpose: 'connectionTest', profileRef: null, folderIdentity: '/work/project', cwd: '/work/project', mode: 'connectionTest', prompt: 'Test provider connection.' });
+		database.close();
+
+		const oldSchema = new DatabaseSync(path);
+		try {
+			const columns = new Set(oldSchema.prepare('PRAGMA table_info(provider_attempts)').all().map(row => String(row.name)));
+			if (columns.has('control_nonce')) { oldSchema.exec('ALTER TABLE provider_attempts DROP COLUMN control_nonce;'); }
+			if (columns.has('control_version')) { oldSchema.exec('ALTER TABLE provider_attempts DROP COLUMN control_version;'); }
+			oldSchema.exec('PRAGMA user_version = 20;');
+		} finally { oldSchema.close(); }
+
+		database = WorkspaceDatabase.open(path);
+		const migratedLegacy = database.getProviderAttempt(legacy.attemptId)!;
+		assert.equal(migratedLegacy.controlVersion, null);
+		assert.equal(migratedLegacy.controlNonce, null);
+
+		const controlled = database.createProviderAttempt({ taskId: task.id, provider: 'claude', purpose: 'connectionTest', profileRef: null, folderIdentity: '/work/project', cwd: '/work/project', mode: 'connectionTest', prompt: 'Test controlled provider connection.' });
+		const nonce = 'a'.repeat(64);
+		assert.throws(() => database.setProviderAttemptRunning(controlled.attemptId, task.revision, 74011, 'A'.repeat(64)), /64-character lowercase hexadecimal/);
+		const running = database.setProviderAttemptRunning(controlled.attemptId, task.revision, 74011, nonce);
+		assert.equal(running.ownedPgid, 74011);
+		assert.equal(running.controlVersion, 1);
+		assert.equal(running.controlNonce, nonce);
+		const direct = new DatabaseSync(path);
+		try {
+			assert.throws(() => direct.prepare('UPDATE provider_attempts SET control_version = NULL, control_nonce = ? WHERE attempt_id = ?').run(nonce, controlled.attemptId), /CHECK constraint failed/);
+			assert.throws(() => direct.prepare('UPDATE provider_attempts SET control_version = 1, control_nonce = NULL WHERE attempt_id = ?').run(controlled.attemptId), /CHECK constraint failed/);
+		} finally { direct.close(); }
+		database.close();
+
+		database = WorkspaceDatabase.open(path);
+		const reopened = database.getProviderAttempt(controlled.attemptId)!;
+		assert.equal(reopened.controlVersion, 1);
+		assert.equal(reopened.controlNonce, nonce);
+		assert.equal(database.getProviderAttempt(legacy.attemptId)?.controlNonce, null);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
 test('provider attempt transitions are audited, task moves are conditional, and event content is rejected', () => {
 	withDatabase((path, database) => {
 		const { task } = createProjectAndTask(database);

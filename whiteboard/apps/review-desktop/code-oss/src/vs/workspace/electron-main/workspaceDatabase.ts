@@ -51,6 +51,8 @@ export interface ProviderAttempt {
 	readonly cleanupVerified: boolean;
 	readonly ownedPgid: number | null;
 	readonly launchGateVersion: 1 | null;
+	readonly controlVersion: 1 | null;
+	readonly controlNonce: string | null;
 	readonly parentAttemptId: string | null;
 	readonly childScope: string | null;
 	readonly resultText: string | null;
@@ -297,7 +299,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 20;
+const schemaVersion = 21;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -356,6 +358,7 @@ export class WorkspaceDatabase {
 				if (version < 18) { WorkspaceDatabase.migrateV18(db); }
 				if (version < 19) { WorkspaceDatabase.migrateV19(db); }
 				if (version < 20) { WorkspaceDatabase.migrateV20(db); }
+				if (version < 21) { WorkspaceDatabase.migrateV21(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -740,6 +743,17 @@ export class WorkspaceDatabase {
 			BEGIN SELECT RAISE(ABORT, 'task instruction withdrawals are immutable'); END;
 			ALTER TABLE provider_attempts ADD COLUMN approved_instructions_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(approved_instructions_json));
 			PRAGMA user_version = 20;
+		`);
+	}
+
+	private static migrateV21(db: DatabaseSync): void {
+		db.exec(`
+			ALTER TABLE provider_attempts ADD COLUMN control_version INTEGER CHECK (control_version = 1 OR control_version IS NULL);
+			ALTER TABLE provider_attempts ADD COLUMN control_nonce TEXT CHECK (
+				(control_nonce IS NULL AND control_version IS NULL)
+				OR (control_version IS 1 AND control_nonce IS NOT NULL AND length(control_nonce) = 64 AND control_nonce NOT GLOB '*[^0-9a-f]*')
+			);
+			PRAGMA user_version = 21;
 		`);
 	}
 
@@ -1271,9 +1285,11 @@ export class WorkspaceDatabase {
 		});
 	}
 
-	setProviderAttemptRunning(attemptId: string, expectedTaskRevision: number, ownedPgid?: number): ProviderAttempt {
+	setProviderAttemptRunning(attemptId: string, expectedTaskRevision: number, ownedPgid?: number, controlNonce?: string): ProviderAttempt {
 		this.assertOpen();
 		if (ownedPgid !== undefined && (!Number.isSafeInteger(ownedPgid) || ownedPgid < 2)) { throw new Error('An owned process group ID must be a positive integer.'); }
+		if (controlNonce !== undefined && !/^[0-9a-f]{64}$/.test(controlNonce)) { throw new Error('A provider control nonce must be a 64-character lowercase hexadecimal string.'); }
+		if (controlNonce !== undefined && ownedPgid === undefined) { throw new Error('A provider control nonce requires an owned process group ID.'); }
 		return this.transaction(() => {
 			const attempt = this.getProviderAttempt(attemptId);
 			if (!attempt) { throw new Error(`Unknown provider attempt ${attemptId}.`); }
@@ -1287,7 +1303,10 @@ export class WorkspaceDatabase {
 			if (attempt.launchGateVersion === 1 && ownedPgid === undefined) { throw new Error('The launch gate process group must be persisted before an attempt can run.'); }
 			const markRunning = (): ProviderAttempt => {
 				this.transitionProviderAttempt(attemptId, 'running');
-				if (ownedPgid !== undefined) { this.db.prepare('UPDATE provider_attempts SET owned_pgid = ? WHERE attempt_id = ?').run(ownedPgid, attemptId); }
+				if (ownedPgid !== undefined) {
+					this.db.prepare('UPDATE provider_attempts SET owned_pgid = ?, control_version = ?, control_nonce = ? WHERE attempt_id = ?')
+						.run(ownedPgid, controlNonce === undefined ? null : 1, controlNonce ?? null, attemptId);
+				}
 				return this.getProviderAttempt(attemptId)!;
 			};
 			if (isChild) {
@@ -2295,6 +2314,7 @@ export class WorkspaceDatabase {
 			providerSessionId: row.provider_session_id as string | null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
 			startedAt: row.started_at as string | null, finishedAt: row.finished_at as string | null, errorSummary: row.error_summary as string | null,
 			cleanupVerified: Number(row.cleanup_verified) === 1, ownedPgid: row.owned_pgid === null ? null : Number(row.owned_pgid), launchGateVersion: row.launch_gate_version === null ? null : 1,
+			controlVersion: row.control_version === null ? null : 1, controlNonce: row.control_nonce as string | null,
 			parentAttemptId: row.parent_attempt_id as string | null, childScope: row.child_scope_json as string | null,
 			resultText: row.result_text as string | null, resultSha256: row.result_sha256 as string | null,
 			orchestrationPhase: row.orchestration_phase as ProviderAttempt['orchestrationPhase'],
