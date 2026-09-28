@@ -41,14 +41,14 @@ function row(state: ReviewDiffProgressFile['state'] | undefined, counts?: Struct
 
 test('a folded file reads as done: greyed like a viewed one, "Folded" in place of its counts', () => {
 	const folded = row('folded');
-	assert.equal(folded.counts, 'Folded');
+	assert.equal(folded.counts, '접음');
 	assert.ok(folded.row.classList.contains('review-file-folded'));
 	assert.ok(!folded.row.classList.contains('review-file-viewed'));
 });
 
 test('a viewed file says "Viewed" in place of its counts', () => {
 	const viewed = row('viewed');
-	assert.equal(viewed.counts, 'Viewed');
+	assert.equal(viewed.counts, '확인함');
 	assert.ok(viewed.row.classList.contains('review-file-viewed'));
 });
 

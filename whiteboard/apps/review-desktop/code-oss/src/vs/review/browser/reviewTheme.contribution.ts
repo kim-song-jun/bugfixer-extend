@@ -19,7 +19,7 @@ class SelectReviewThemeAction extends Action2 {
 	constructor() {
 		super({
 			id: 'review.selectTheme',
-			title: localize2('review.selectTheme', "Whiteboard: Theme"),
+			title: localize2('review.selectTheme', "Whiteboard: 테마"),
 			f1: true
 		});
 	}
@@ -30,14 +30,14 @@ class SelectReviewThemeAction extends Action2 {
 		const themeService = accessor.get(IThemeService);
 		const currentChoice = currentReviewThemeChoice(configurationService, themeService);
 		const items: IReviewThemeQuickPickItem[] = [
-			{ choice: 'light', label: localize('review.theme.light', "Light"), picked: currentChoice === 'light' },
-			{ choice: 'dark', label: localize('review.theme.dark', "Dark"), picked: currentChoice === 'dark' },
-			{ choice: 'system', label: localize('review.theme.system', "System"), picked: currentChoice === 'system' }
+			{ choice: 'light', label: localize('review.theme.light', "밝게"), picked: currentChoice === 'light' },
+			{ choice: 'dark', label: localize('review.theme.dark', "어둡게"), picked: currentChoice === 'dark' },
+			{ choice: 'system', label: localize('review.theme.system', "시스템"), picked: currentChoice === 'system' }
 		];
 
 		const picked = await quickInputService.pick(items, {
-			title: localize('review.theme.title', "Whiteboard: Theme"),
-			placeHolder: localize('review.theme.placeholder', "Select a theme")
+			title: localize('review.theme.title', "Whiteboard: 테마"),
+			placeHolder: localize('review.theme.placeholder', "테마 선택")
 		});
 		if (!picked) {
 			return;
@@ -52,7 +52,7 @@ registerAction2(SelectReviewThemeAction);
 MenuRegistry.appendMenuItem(MenuId.MenubarPreferencesMenu, {
 	command: {
 		id: 'review.selectTheme',
-		title: localize('review.selectTheme.menu', "Theme...")
+		title: localize('review.selectTheme.menu', "테마…")
 	},
 	order: 0
 });

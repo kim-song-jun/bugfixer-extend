@@ -37,7 +37,7 @@ registerColor(
     hcDark: "#a1e3ad",
     hcLight: "#374e06",
   },
-  localize("review.gitDecoration.added", "Color for added file resources."),
+  localize("review.gitDecoration.added", "추가된 파일 리소스의 색상."),
 );
 registerColor(
   "gitDecoration.modifiedResourceForeground",
@@ -47,7 +47,7 @@ registerColor(
     hcDark: "#E2C08D",
     hcLight: "#895503",
   },
-  localize("review.gitDecoration.modified", "Color for modified file resources."),
+  localize("review.gitDecoration.modified", "수정된 파일 리소스의 색상."),
 );
 registerColor(
   "gitDecoration.deletedResourceForeground",
@@ -57,7 +57,7 @@ registerColor(
     hcDark: "#c74e39",
     hcLight: "#ad0707",
   },
-  localize("review.gitDecoration.deleted", "Color for deleted file resources."),
+  localize("review.gitDecoration.deleted", "삭제된 파일 리소스의 색상."),
 );
 registerColor(
   "gitDecoration.renamedResourceForeground",
@@ -67,7 +67,7 @@ registerColor(
     hcDark: "#73C991",
     hcLight: "#007100",
   },
-  localize("review.gitDecoration.renamed", "Color for renamed file resources."),
+  localize("review.gitDecoration.renamed", "이름이 변경된 파일 리소스의 색상."),
 );
 
 const CHANGED_FILE_ROW_HEIGHT = 22;
@@ -155,28 +155,28 @@ export class ChangedFilesTreeRenderer
 		template.countsTooltip.content = undefined;
 		if (isFile) {
 			const progress = this.progress.get(element.file.path);
-			const compact = (n: number) => new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n).toLowerCase();
+			const compact = (n: number) => new Intl.NumberFormat('ko-KR', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 			const additions = progress?.remaining.additions ?? this.counts.get(element.file.path)?.added;
 			const deletions = progress?.remaining.deletions ?? this.counts.get(element.file.path)?.removed;
-			if (element.file.status === 'unchanged') template.counts.textContent = 'Unchanged';
-			else if (progress?.state === 'viewed') template.counts.textContent = 'Viewed';
-			else if (progress?.state === 'folded') template.counts.textContent = 'Folded';
+			if (element.file.status === 'unchanged') template.counts.textContent = '변경 없음';
+			else if (progress?.state === 'viewed') template.counts.textContent = '확인함';
+			else if (progress?.state === 'folded') template.counts.textContent = '접음';
 			else if (additions !== undefined && deletions !== undefined) {
 				const added = append(template.counts, $('span.review-tree-added')); added.textContent = `+${compact(additions)}`;
 				const removed = append(template.counts, $('span.review-tree-removed')); removed.textContent = `−${compact(deletions)}`;
 			}
 			const total = progress?.total ?? { additions: this.counts.get(element.file.path)?.added ?? 0, deletions: this.counts.get(element.file.path)?.removed ?? 0 };
 			template.countsTooltip.content = element.file.status === "unchanged"
-				? { label: "Referenced context; no changed lines" }
+				? { label: "참조 컨텍스트 · 변경된 줄 없음" }
 				: additions === undefined || deletions === undefined
 					? REVIEW_COUNTS_PENDING_TOOLTIP
 					: progress?.state === "folded"
-						? { label: "Folded by default; counted as done", detail: `+${total.additions} −${total.deletions} total` }
+						? { label: "기본으로 접혀 있으며 완료로 계산", detail: `+${total.additions} −${total.deletions} 전체` }
 						: reviewCountsTooltip({ remaining: { additions, deletions }, total });
 		}
 		const state = isFile ? this.states.get(element.file.path) : undefined;
 		if (state) template.icon.className = `review-changed-files-icon codicon codicon-${state.status === "loading" ? "loading codicon-modifier-spin" : "error"}`;
-		template.row.title = state?.message ?? (state?.status === "loading" ? "Loading diff…" : "");
+		template.row.title = state?.message ?? (state?.status === "loading" ? "변경 내역을 불러오는 중…" : "");
 		template.row.setAttribute("aria-busy", String(state?.status === "loading"));
     template.label.textContent = isFile
       ? element.name
@@ -253,7 +253,7 @@ export class ReviewChangedFilesTree extends Disposable {
             getAriaLabel: (element) =>
               element.kind === "file" ? element.file.path : element.path,
             getWidgetAriaLabel: () =>
-              localize("review.changedFiles.ariaLabel", "Changed files"),
+              localize("review.changedFiles.ariaLabel", "변경된 파일"),
           },
           alwaysConsumeMouseWheel: false,
           horizontalScrolling: false,
@@ -368,4 +368,3 @@ function collectFileElements(
     }
   }
 }
-

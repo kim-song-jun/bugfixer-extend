@@ -180,8 +180,8 @@ export class ReviewTitlebarPart extends Part implements ITitlebarPart {
 		const toggle = append(this.leftContent, $('div.review-titlebar-file-tree-toggle', {
 			role: 'button',
 			tabindex: '0',
-			title: localize('review.toggleFileTree.tooltip', "Toggle File Tree"),
-			'aria-label': localize('review.toggleFileTree.tooltip', "Toggle File Tree"),
+			title: localize('review.toggleFileTree.tooltip', "파일 트리 표시 전환"),
+			'aria-label': localize('review.toggleFileTree.tooltip', "파일 트리 표시 전환"),
 		}));
 
 		append(toggle, renderIcon(Codicon.layoutSidebarLeft)).classList.add('review-file-tree-icon-open');

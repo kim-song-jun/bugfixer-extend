@@ -83,17 +83,17 @@ export function reviewCountsTooltip(counts: {
 	readonly total: { readonly additions: number; readonly deletions: number };
 }): ReviewTooltipContent {
 	return {
-		label: `${signedPair(counts.remaining.additions, counts.remaining.deletions)} remaining`,
-		detail: `of ${signedPair(counts.total.additions, counts.total.deletions)} total`,
+		label: `${signedPair(counts.remaining.additions, counts.remaining.deletions)} 남음`,
+		detail: `전체 ${signedPair(counts.total.additions, counts.total.deletions)}`,
 	};
 }
 
 /** A count that has no coverage yet: the structural diff's own totals. */
 export function reviewChangesTooltip(added: number, removed: number): ReviewTooltipContent {
-	return { label: `${signedPair(added, removed)} changed` };
+	return { label: `${signedPair(added, removed)} 변경됨` };
 }
 
-export const REVIEW_COUNTS_PENDING_TOOLTIP: ReviewTooltipContent = { label: "Waiting for structural coverage" };
+export const REVIEW_COUNTS_PENDING_TOOLTIP: ReviewTooltipContent = { label: "구조 차이 분석 대기 중" };
 
 /**
  * The one viewed checkbox: a 14px box whose dash and check are drawn in CSS,
@@ -121,7 +121,7 @@ export class ReviewViewedCheckbox extends Disposable {
 	update(state: ReviewDiffProgressState | undefined, subject: string, empty: boolean): void {
 		const viewed = state === "viewed";
 		this.element.setAttribute("aria-checked", state === "partial" ? "mixed" : String(viewed));
-		this.element.setAttribute("aria-label", `${viewed ? "Mark unviewed" : "Mark viewed"}: ${subject}`);
+		this.element.setAttribute("aria-label", `${viewed ? "확인 전으로 표시" : "확인함으로 표시"}: ${subject}`);
 		this.element.classList.toggle("is-empty", empty);
 		this.element.disabled = empty;
 		this.tooltip.content = empty ? undefined : { label: reviewViewedTooltip(state) };
@@ -130,8 +130,8 @@ export class ReviewViewedCheckbox extends Disposable {
 
 export function reviewViewedTooltip(state: ReviewDiffProgressState | undefined): string {
 	return state === "viewed"
-		? "Click to mark as unviewed"
+		? "클릭하여 확인 전으로 표시"
 		: state === "partial"
-			? "Click to mark all as viewed"
-			: "Click to mark as viewed";
+			? "클릭하여 모두 확인함으로 표시"
+			: "클릭하여 확인함으로 표시";
 }

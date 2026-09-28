@@ -36,8 +36,8 @@ export class ReviewLinuxTitlebar extends Disposable {
 	) {
 		super();
 		const menu = append(left, $('button.review-application-menu', {
-			type: 'button', title: localize('review.menu.title', "Whiteboard menu (F10)"),
-			'aria-label': localize('review.menu.label', "Whiteboard menu"), 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+			type: 'button', title: localize('review.menu.title', "Whiteboard 메뉴 (F10)"),
+			'aria-label': localize('review.menu.label', "Whiteboard 메뉴"), 'aria-haspopup': 'menu', 'aria-expanded': 'false',
 		}));
 		append(menu, renderIcon(Codicon.menu));
 		let dialogOpen = false;
@@ -51,15 +51,15 @@ export class ReviewLinuxTitlebar extends Disposable {
 				getAnchor: () => menu,
 				autoSelectFirstItem: true,
 				getActions: () => [
-					command('workbench.action.showCommands', localize('review.menu.commands', "Command Palette...")),
-					command('review.openSettings', localize('review.menu.settings', "Settings...")),
-					command('review.manageExtensions', localize('review.menu.extensions', "Manage Extensions...")),
-					command('review.openWelcome', localize('review.menu.welcome', "Getting Started...")),
+					command('workbench.action.showCommands', localize('review.menu.commands', "명령 팔레트…")),
+					command('review.openSettings', localize('review.menu.settings', "설정…")),
+					command('review.manageExtensions', localize('review.menu.extensions', "확장 프로그램 관리…")),
+					command('review.openWelcome', localize('review.menu.welcome', "시작하기…")),
 					new Separator(),
-					command('review.checkForUpdates', localize('review.menu.updates', "Check for Updates...")),
-					toAction({ id: 'review.about', label: localize('review.menu.about', "About Whiteboard"), run: () => dialogService.about() }),
+					command('review.checkForUpdates', localize('review.menu.updates', "업데이트 확인…")),
+					toAction({ id: 'review.about', label: localize('review.menu.about', "Whiteboard 정보"), run: () => dialogService.about() }),
 					new Separator(),
-					command('workbench.action.quit', localize('review.menu.quit', "Quit Whiteboard")),
+					command('workbench.action.quit', localize('review.menu.quit', "Whiteboard 종료")),
 				],
 				getKeyBinding: action => keybindingService.lookupKeybinding(action.id),
 				onHide: () => { menu.setAttribute('aria-expanded', 'false'); menu.focus(); },
@@ -83,19 +83,19 @@ export class ReviewLinuxTitlebar extends Disposable {
 			this._register(addDisposableListener(element, 'click', () => { void run().catch(error => notificationService.error(error)); }));
 			return element;
 		};
-		button(localize('review.window.minimize', "Minimize"), Codicon.chromeMinimize, () => nativeHostService.minimizeWindow(options));
+		button(localize('review.window.minimize', "최소화"), Codicon.chromeMinimize, () => nativeHostService.minimizeWindow(options));
 		let maximized = false;
-		const maximize = button(localize('review.window.maximize', "Maximize"), Codicon.chromeMaximize,
+		const maximize = button(localize('review.window.maximize', "최대화"), Codicon.chromeMaximize,
 			() => maximized ? nativeHostService.unmaximizeWindow(options) : nativeHostService.maximizeWindow(options));
 		const updateMaximized = (value: boolean) => {
 			maximized = value;
 			maximize.replaceChildren(renderIcon(value ? Codicon.chromeRestore : Codicon.chromeMaximize));
-			const label = value ? localize('review.window.restore', "Restore") : localize('review.window.maximize', "Maximize");
+			const label = value ? localize('review.window.restore', "복원") : localize('review.window.maximize', "최대화");
 			maximize.title = label; maximize.setAttribute('aria-label', label);
 		};
 		this._register(nativeHostService.onDidMaximizeWindow(id => { if (id === options.targetWindowId) { updateMaximized(true); } }));
 		this._register(nativeHostService.onDidUnmaximizeWindow(id => { if (id === options.targetWindowId) { updateMaximized(false); } }));
 		void nativeHostService.isMaximized(options).then(updateMaximized, error => notificationService.error(error));
-		button(localize('review.window.close', "Close"), Codicon.chromeClose, () => nativeHostService.closeWindow(options), true);
+		button(localize('review.window.close', "닫기"), Codicon.chromeClose, () => nativeHostService.closeWindow(options), true);
 	}
 }

@@ -19,7 +19,7 @@ dom.window.matchMedia = () => ({ matches: false, addEventListener() { }, removeE
 registerHooks({ load(url, context, next) {
 	return url.endsWith('.css') ? { format: 'module', source: '', shortCircuit: true } : next(url, context);
 } });
-const { ReviewTooltip, ReviewViewedCheckbox } = await import('./reviewTooltip.js');
+const { ReviewTooltip, ReviewViewedCheckbox, reviewCountsTooltip } = await import('./reviewTooltip.js');
 
 function hoverService() {
 	const shown: IHoverOptions[] = [];
@@ -41,11 +41,16 @@ test('the tooltip shows the moment the pointer lands and goes on click', () => {
 	const hovers = hoverService();
 	const target = document.createElement('span');
 	document.body.append(target);
-	const tooltip = new ReviewTooltip(hovers.service, target, { label: '+4 −1 remaining', detail: 'of +9 −2 total' });
+	const content = reviewCountsTooltip({
+		remaining: { additions: 4, deletions: 1 },
+		total: { additions: 9, deletions: 2 },
+	});
+	assert.deepEqual(content, { label: '+4 −1 남음', detail: '전체 +9 −2' });
+	const tooltip = new ReviewTooltip(hovers.service, target, content);
 
 	target.dispatchEvent(new MouseEvent('mouseenter'));
 	assert.equal(hovers.visible(), 1);
-	assert.equal((hovers.shown[0].content as HTMLElement).textContent, '+4 −1 remaining' + 'of +9 −2 total');
+	assert.equal((hovers.shown[0].content as HTMLElement).textContent, '+4 −1 남음' + '전체 +9 −2');
 
 	target.dispatchEvent(new MouseEvent('click'));
 	assert.equal(hovers.visible(), 0);
