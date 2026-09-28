@@ -17,9 +17,7 @@
     "bundled/libs/ruff_lsp-0.0.62.dist-info/licenses/LICENSE",
     "bundled/libs/typing_extensions-4.13.2.dist-info/licenses/LICENSE"
   ],
-  "ms-ceintl.vscode-language-pack-ko": [
-    "LICENSE.txt"
-  ],
+  "ms-ceintl.vscode-language-pack-ko": ["LICENSE.txt"],
   "ms-python.python": [
     "LICENSE.txt",
     "ThirdPartyNotices-Repository.txt",
@@ -46,10 +44,6 @@
     "python_files/lib/python/typing_extensions-4.15.0.dist-info/licenses/LICENSE",
     "python_files/lib/python/zipp-3.21.0.dist-info/LICENSE"
   ],
-  "tuttieee.emacs-mcx": [
-    "LICENSE.txt"
-  ],
-  "vscodevim.vim": [
-    "LICENSE.txt"
-  ]
+  "tuttieee.emacs-mcx": ["LICENSE.txt"],
+  "vscodevim.vim": ["LICENSE.txt"]
 }
