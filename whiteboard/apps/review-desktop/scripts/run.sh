@@ -56,7 +56,9 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     BOUND_CHECKOUT_BINARY="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/bound-checkout"
     KEYCHAIN_VAULT_BINARY="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/keychain-vault"
     REVIEW_NODE_EXECUTABLE="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/node"
+    PROVIDER_GROUP_CONTROL_SCRIPT="$(cd "$PACKAGED_ROOT/../Resources/app/review-runtime/bin" && pwd -P)/provider-group-control.mjs"
   else
+    PROVIDER_GROUP_CONTROL_SCRIPT="$APP_DIR/scripts/provider-group-control.mjs"
     BOUND_CHECKOUT_SOURCE="$APP_DIR/native/bound-checkout/bound-checkout.c"
     BOUND_CHECKOUT_BINARY="$CHECKOUT/.build/dev-fast/bound-checkout"
     mkdir -p "$(dirname "$BOUND_CHECKOUT_BINARY")"
@@ -69,6 +71,11 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     chmod 755 "$KEYCHAIN_VAULT_BINARY"
     REVIEW_NODE_EXECUTABLE="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
   fi
+  if [[ ! -s "$PROVIDER_GROUP_CONTROL_SCRIPT" ]]; then
+    echo "Review Desktop provider group control script is missing at $PROVIDER_GROUP_CONTROL_SCRIPT" >&2
+    exit 1
+  fi
+  export DEV_FAST_REVIEW_GROUP_CONTROL_SCRIPT="$PROVIDER_GROUP_CONTROL_SCRIPT"
   if [[ ! -x "$BOUND_CHECKOUT_BINARY" ]]; then
     echo "Review Desktop bound-checkout helper is missing or not executable at $BOUND_CHECKOUT_BINARY" >&2
     exit 1

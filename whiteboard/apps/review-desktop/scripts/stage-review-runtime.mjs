@@ -63,6 +63,8 @@ export const NODE_RUNTIME = "bin/node";
 
 export const NODE_RUNTIME_LICENSE = "licenses/node/LICENSE";
 
+export const PROVIDER_GROUP_CONTROL_SCRIPT = "bin/provider-group-control.mjs";
+
 export function runtimeRootForPackagedRoot(packagedRoot) {
   const resolved = path.resolve(packagedRoot);
 
@@ -96,6 +98,7 @@ export function requiredPackagedArtifacts(packagedRoot) {
     entries.push(path.join(RUNTIME_DIRECTORY_NAME, KEYCHAIN_VAULT_HELPER));
     entries.push(path.join(RUNTIME_DIRECTORY_NAME, NODE_RUNTIME));
     entries.push(path.join(RUNTIME_DIRECTORY_NAME, NODE_RUNTIME_LICENSE));
+    entries.push(path.join(RUNTIME_DIRECTORY_NAME, PROVIDER_GROUP_CONTROL_SCRIPT));
   }
 
   if (!path.resolve(packagedRoot).endsWith(".app")) {
@@ -211,6 +214,7 @@ export async function stageReviewRuntime(packagedRoot) {
     await stageBoundCheckoutHelper(runtimeRoot);
     await stageKeychainVaultHelper(runtimeRoot);
     await stageNodeRuntime(runtimeRoot);
+    await stageProviderGroupControlScript(runtimeRoot);
   }
 
   await makeTreeOwnerWritable(path.join(runtimeRoot, "tutorial", "git-stub"));
@@ -397,6 +401,25 @@ export async function stageNodeRuntime(runtimeRoot, source = process.execPath) {
       `The staged Node runtime version differs (${stagedVersion} != ${sourceVersion}).`,
     );
   }
+
+  return destination;
+}
+
+export async function stageProviderGroupControlScript(
+  runtimeRoot,
+  source = path.join(appDirectory, "scripts/provider-group-control.mjs"),
+) {
+  const sourceInfo = await stat(source).catch(error => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!sourceInfo?.isFile()) {
+    throw new Error(`Missing provider group control script: ${source}`);
+  }
+
+  const destination = path.join(runtimeRoot, PROVIDER_GROUP_CONTROL_SCRIPT);
+  await mkdir(path.dirname(destination), { recursive: true });
+  await copyFile(source, destination);
 
   return destination;
 }

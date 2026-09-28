@@ -166,6 +166,22 @@ test("final package verification requires the CLI and rechecks archives outside 
     await assertRuntimeClosure(runtime);
     await assertPackagedArtifacts(packaged);
 
+    const providerGroupControl = path.join(
+      runtime,
+      "bin/provider-group-control.mjs",
+    );
+    assert.ok(
+      requiredPackagedArtifacts(packaged).includes(providerGroupControl),
+      "macOS artifact validation must require the provider group control script",
+    );
+    await rm(providerGroupControl, { force: true });
+    await assert.rejects(
+      assertPackagedArtifacts(packaged),
+      /missing .*bin\/provider-group-control\.mjs/,
+    );
+    await writeFile(providerGroupControl, "export {};\n");
+    await assertPackagedArtifacts(packaged);
+
     const diffr = path.join(runtime, "bin", "diffr");
     await rm(diffr, { force: true });
     await assert.rejects(assertRuntimeClosure(runtime), /missing bin\/diffr/);

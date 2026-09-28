@@ -148,6 +148,11 @@ if [[ ! -x "$NODE_RUNTIME" || ! -s "$NODE_RUNTIME_LICENSE" ]]; then
   echo "Review Desktop packaging did not stage the standalone Node runtime and license" >&2
   exit 1
 fi
+PROVIDER_GROUP_CONTROL_SCRIPT="$PACKAGED_APP/Contents/Resources/app/review-runtime/bin/provider-group-control.mjs"
+if [[ ! -s "$PROVIDER_GROUP_CONTROL_SCRIPT" ]]; then
+  echo "Review Desktop packaging did not stage the provider group control script at $PROVIDER_GROUP_CONTROL_SCRIPT" >&2
+  exit 1
+fi
 
 # Installs Assets.car and rewrites CFBundleIconName, which invalidates any
 # existing signature. It must therefore run after every other bundle mutation
