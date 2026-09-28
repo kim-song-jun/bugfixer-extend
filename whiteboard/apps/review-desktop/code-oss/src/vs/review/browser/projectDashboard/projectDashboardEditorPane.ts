@@ -1144,10 +1144,19 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			const title = review.appendChild($('h4')); title.textContent = `${this.packageReview.name} · v${this.packageReview.version}`;
 			const description = review.appendChild($('p')); description.textContent = this.packageReview.description;
 			const metadata = review.appendChild($('dl'));
+			const trustStatusLabels: Record<WorkspacePackageReviewDTO['trustStatus'], string> = {
+				'first-install': '새 패키지',
+				installed: '설치된 패키지',
+				'same-key-update': '같은 서명 키로 업데이트',
+			};
+			const accountAccessLabels: Record<WorkspacePackageReviewDTO['accountAccess'], string> = {
+				none: '익명 (계정 정보 없음)',
+				'bearer-token': '앱에서 관리하는 토큰',
+			};
 			for (const [label, value] of [
-				['패키지 ID', this.packageReview.packageId], ['신뢰 상태', this.packageReview.trustStatus],
+				['패키지 ID', this.packageReview.packageId], ['신뢰 상태', trustStatusLabels[this.packageReview.trustStatus]],
 				['서명 지문', this.packageReview.fingerprint], ['매니페스트 해시 (SHA-256)', this.packageReview.manifestDigest],
-				['인증 방식', this.packageReview.accountAccess === 'bearer-token' ? '앱이 관리하는 bearer token' : '익명 (계정 정보 없음)'],
+				['인증 방식', accountAccessLabels[this.packageReview.accountAccess]],
 				['요청 권한 (패키지 주장)', this.packageReview.requestedScopes.length ? this.packageReview.requestedScopes.join(', ') : '없음'],
 			] as const) { const term = metadata.appendChild($('dt')); term.textContent = label; const detail = metadata.appendChild($('dd')); detail.textContent = value; }
 			const domainsTitle = review.appendChild($('h5')); domainsTitle.textContent = '전체 네트워크 도메인';
