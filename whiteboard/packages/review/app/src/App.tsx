@@ -812,17 +812,19 @@ function ReviewLayoutContent({
                 }}
               />
             )}
-            <div
-              aria-hidden={activeView !== "diff" || diffScope !== null}
-              className={
-                activeView === "diff" && diffScope === null
-                  ? "review-diff-view"
-                  : "review-diff-view review-diff-view--preloaded"
-              }
-            >
-              <ReviewDiffView />
-            </div>
-            {activeView === "diff" && diffScope !== null && (
+            {!scratchpad && (
+              <div
+                aria-hidden={activeView !== "diff" || diffScope !== null}
+                className={
+                  activeView === "diff" && diffScope === null
+                    ? "review-diff-view"
+                    : "review-diff-view review-diff-view--preloaded"
+                }
+              >
+                <ReviewDiffView />
+              </div>
+            )}
+            {!scratchpad && activeView === "diff" && diffScope !== null && (
               <div className="review-diff-view review-diff-view--scoped">
                 <CommitDiffScopeBar
                   commit={diffScope.commit}
