@@ -170,6 +170,7 @@ test("final package verification requires the CLI and rechecks archives outside 
       runtime,
       "bin/provider-group-control.mjs",
     );
+
     assert.ok(
       requiredPackagedArtifacts(packaged).includes(providerGroupControl),
       "macOS artifact validation must require the provider group control script",

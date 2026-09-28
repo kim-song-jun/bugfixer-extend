@@ -5,8 +5,11 @@ import { execFileSync, spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 
 const MAX_NONCE_BYTES = 66;
+
 const MAX_REQUEST_BYTES = 4096;
+
 const MAX_SOCKET_PATH_BYTES = process.platform === 'darwin' ? 103 : 107;
+
 const DEFAULT_GRACE_MS = 5000;
 
 function fail(message) {
@@ -25,11 +28,17 @@ function diagnostic(message) {
 function parseArguments(argv) {
   if (argv.length < 4) throw new Error('expected socket path, attempt id, process group id, executable, and optional arguments');
   const [socketPath, attemptId, pgidText, executable, ...args] = argv;
+
   if (!socketPath.startsWith('/') || Buffer.byteLength(socketPath) > MAX_SOCKET_PATH_BYTES) throw new Error('invalid socket path');
+
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(attemptId)) throw new Error('invalid attempt id');
+
   if (!/^[1-9][0-9]*$/.test(pgidText)) throw new Error('invalid process group id');
+
   if (!Number.isSafeInteger(Number(pgidText))) throw new Error('invalid process group id');
+
   if (!executable || executable.includes('\0')) throw new Error('invalid provider executable');
+
   return { socketPath, attemptId, pgid: Number(pgidText), executable, args };
 }
 
@@ -37,34 +46,56 @@ function readNonceFromFd5() {
   const fd = 5;
   let bytes = Buffer.alloc(0);
   const chunk = Buffer.alloc(128);
+
   try {
     while (bytes.length <= MAX_NONCE_BYTES) {
       let count;
+
       try {
         count = readSync(fd, chunk, 0, Math.min(chunk.length, MAX_NONCE_BYTES + 1 - bytes.length), null);
       } catch (error) {
         if (error.code === 'EINTR') continue;
         throw error;
       }
+
       if (count === 0) break;
       bytes = Buffer.concat([bytes, chunk.subarray(0, count)]);
+
       if (bytes.includes(0x0a)) break;
     }
-  } finally {
-    try { closeSync(fd); } catch (error) { if (error.code !== 'EBADF') throw error; }
+  } catch (error) {
+    try {
+      closeSync(fd);
+    } catch (closeError) {
+      if (closeError.code !== 'EBADF') diagnostic(`could not close nonce descriptor (${closeError.code ?? 'error'})`);
+    }
+
+    throw error;
   }
+
+  try {
+    closeSync(fd);
+  } catch (error) {
+    if (error.code !== 'EBADF') throw error;
+  }
+
   const lineEnd = bytes.indexOf(0x0a);
+
   if (lineEnd < 0 || lineEnd !== bytes.length - 1) throw new Error('invalid nonce input');
   const nonce = bytes.subarray(0, lineEnd).toString('ascii');
+
   if (!/^[a-f0-9]{64}$/.test(nonce)) throw new Error('invalid nonce input');
+
   return nonce;
 }
 
 function validatePrivateDirectory(socketPath) {
   const parent = dirname(socketPath);
   const fd = openSync(parent, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0));
+
   try {
     const info = fstatSync(fd);
+
     if (info.uid !== process.getuid() || (info.mode & 0o777) !== 0o700) throw new Error('socket directory must be owned by the current user with mode 0700');
   } finally { closeSync(fd); }
 }
@@ -72,8 +103,10 @@ function validatePrivateDirectory(socketPath) {
 function sendProviderExitCode(code) {
   if (!Number.isInteger(code)) return;
   const payload = Buffer.from(`${code}\n`, 'ascii');
+
   try {
     const fdInfo = fstatSync(4);
+
     if (!fdInfo.isFIFO() && !fdInfo.isSocket()) return;
     writeSync(4, payload);
   } catch (error) {
@@ -92,8 +125,29 @@ function verifyOwnProcessGroup(pgid) {
     maxBuffer: 128,
     stdio: ['ignore', 'pipe', 'ignore']
   }).trim();
+
   if (!/^[1-9][0-9]*$/.test(output) || Number(output) !== pgid) {
     throw new Error('process group identity does not match the launch group');
+  }
+}
+
+function parseControlRequest(input) {
+  try {
+    const value = JSON.parse(input);
+
+    if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== 3) return null;
+
+    const nonceText = JSON.stringify(value.nonce);
+
+    if (!nonceText?.startsWith('"') || !/^[a-f0-9]{64}$/.test(nonceText.slice(1, -1))) return null;
+
+    return {
+      attemptId: value.attemptId,
+      command: value.command,
+      nonce: Buffer.from(nonceText.slice(1, -1), 'ascii')
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -120,11 +174,13 @@ async function main() {
   const beginCancellation = () => {
     if (cancelStarted) return;
     cancelStarted = true;
+
     try {
       process.kill(-config.pgid, 'SIGTERM');
     } catch (error) {
       if (error.code !== 'ESRCH') diagnostic(`SIGTERM failed (${error.code ?? 'error'})`);
     }
+
     setTimeout(() => {
       try {
         process.kill(-config.pgid, 'SIGKILL');
@@ -133,6 +189,7 @@ async function main() {
       }
     }, graceMs).unref();
   };
+
   process.on('SIGTERM', beginCancellation);
   process.on('SIGINT', beginCancellation);
 
@@ -142,42 +199,56 @@ async function main() {
     socket.on('error', error => {
       handled = true;
       socket.destroy();
+
       if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE') diagnostic(`control client socket failed (${error.code ?? 'error'})`);
     });
     socket.setTimeout(1500, () => socket.destroy());
     socket.on('data', chunk => {
       if (handled) return;
       input = Buffer.concat([input, chunk]);
+
       if (input.length > MAX_REQUEST_BYTES) {
         handled = true;
         socket.setTimeout(0);
         socket.end('rejected\n');
+
         return;
       }
+
       const newline = input.indexOf(0x0a);
+
       if (newline < 0) return;
       handled = true;
       socket.setTimeout(0);
+
       if (newline !== input.length - 1) {
         socket.end('rejected\n');
+
         return;
       }
-      let request;
-      try { request = JSON.parse(input.subarray(0, newline).toString('utf8')); } catch {
+
+      const request = parseControlRequest(input.subarray(0, newline).toString('utf8'));
+
+      if (!request) {
         socket.end('rejected\n');
+
         return;
       }
-      const requestNonce = typeof request?.nonce === 'string' ? Buffer.from(request.nonce, 'ascii') : Buffer.alloc(0);
+
       const expectedNonce = Buffer.from(nonce, 'ascii');
+
       const authenticated = request && Object.keys(request).length === 3
         && request.attemptId === config.attemptId
         && request.command === 'cancel'
-        && requestNonce.length === expectedNonce.length
-        && timingSafeEqual(requestNonce, expectedNonce);
+        && request.nonce.length === expectedNonce.length
+        && timingSafeEqual(request.nonce, expectedNonce);
+
       if (!authenticated) {
         socket.end('rejected\n');
+
         return;
       }
+
       socket.end('accepted\n', () => setImmediate(beginCancellation));
     });
   });
@@ -190,6 +261,7 @@ async function main() {
     listeningServer.once('error', reject);
     listeningServer.listen(config.socketPath, resolve);
   });
+
   try {
     chmodSync(config.socketPath, 0o600);
     provider = spawn(config.executable, config.args, {
@@ -200,6 +272,7 @@ async function main() {
     beginCancellation();
     throw error;
   }
+
   provider.once('error', error => {
     diagnostic(`provider spawn failed (${error.code ?? 'error'})`);
     sendProviderExitCode(127);

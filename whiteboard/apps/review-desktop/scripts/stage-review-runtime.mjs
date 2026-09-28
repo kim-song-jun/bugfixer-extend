@@ -413,6 +413,7 @@ export async function stageProviderGroupControlScript(
     if (error.code === "ENOENT") return null;
     throw error;
   });
+
   if (!sourceInfo?.isFile()) {
     throw new Error(`Missing provider group control script: ${source}`);
   }
