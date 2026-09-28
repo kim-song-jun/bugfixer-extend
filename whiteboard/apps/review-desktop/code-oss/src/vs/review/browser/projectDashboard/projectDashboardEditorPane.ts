@@ -3293,8 +3293,14 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				}
 				this.renderSubagentHistory(item, task, attempt);
 				const hasActiveChildren = this.attempts.some(child => child.parentAttemptId === attempt.id && this.isActive(child.state));
-				if (this.isActive(attempt.state) || (attempt.orchestrationPhase === 'waiting' && hasActiveChildren)) {
-					const cancel = item.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = this.isActive(attempt.state) ? '실행 취소' : '하위 에이전트 취소'; cancel.disabled = this.providerBusy;
+				const cleanupRetry = !this.isActive(attempt.state) && !attempt.cleanupVerified;
+				if (cleanupRetry) {
+					const cleanup = item.appendChild($('.project-dashboard__attempt-detail'));
+					cleanup.setAttribute('role', 'status');
+					cleanup.textContent = '이전 실행의 정리를 확인하지 못했습니다. 정리를 다시 시도한 뒤 새 실행을 시작하세요.';
+				}
+				if (cleanupRetry || this.isActive(attempt.state) || (attempt.orchestrationPhase === 'waiting' && hasActiveChildren)) {
+					const cancel = item.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = cleanupRetry ? '정리 다시 시도' : this.isActive(attempt.state) ? '실행 취소' : '하위 에이전트 취소'; cancel.disabled = this.providerBusy;
 					cancel.dataset.focusKey = `cancel:${attempt.id}`;
 					cancel.addEventListener('click', () => void this.cancelRun(attempt));
 				}
@@ -3585,7 +3591,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		try {
 			await ipcRenderer.invoke(WORKSPACE_PROVIDER_RUNS_CHANNEL, 'cancel', { projectId: this.projectId, attemptId: attempt.id });
 			await this.loadAttempts();
-		} catch (error) { this.providerError = this.errorMessage(error, '실행을 취소하지 못했습니다.'); this.providerErrorKind = 'operation'; }
+		} catch (error) { this.providerError = this.errorMessage(error, !this.isActive(attempt.state) && !attempt.cleanupVerified ? '실행 정리를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.' : '실행을 취소하지 못했습니다.'); this.providerErrorKind = 'operation'; }
 		finally { this.providerBusy = false; this.render(); this.updatePolling(); }
 	}
 
@@ -3688,6 +3694,9 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (normalized.includes('already active') && normalized.includes('capture')) return 'Ego 가져오기 세션이 이미 열려 있습니다. 현재 세션을 닫은 뒤 다시 시도해 주세요.';
 		if (normalized.includes('being completed') && normalized.includes('capture')) return 'Ego 가져오기가 진행 중입니다. 잠시 기다린 뒤 다시 시도해 주세요.';
 		if (normalized.includes('native bound-checkout helper') || normalized.includes('trusted node runtime')) return '안전한 에이전트 실행에 필요한 로컬 도구를 사용할 수 없습니다. 설치 상태를 확인해 주세요.';
+		if (normalized.includes('rejected authenticated cancellation')) return '이전 실행의 정리 요청이 거부되었습니다. 실행 기록을 확인해 주세요.';
+		if (normalized.includes('recovery timeout')) return '이전 실행이 아직 종료되지 않았습니다. 잠시 후 정리를 다시 시도해 주세요.';
+		if (normalized.includes('provider control helper') || normalized.includes('provider control socket') || normalized.includes('recovery control')) return '이전 실행의 정리 도우미에 연결하지 못했습니다. 실행 기록을 확인한 뒤 다시 시도해 주세요.';
 		if (normalized.includes('provider did not return') || normalized.includes('provider returned an empty')) return '에이전트가 결과를 반환하지 않았습니다. 실행 기록을 확인하고 다시 시도해 주세요.';
 		if (normalized.includes('this notion token was rejected') || normalized.includes('reconnect with a new personal access token')) return 'Notion 토큰이 거부되었습니다. 만료되었거나 폐기되었을 수 있으니 새 개인 액세스 토큰으로 다시 연결해 주세요.';
 		if (normalized.includes('review and approve the exact connector package')) return '설치 전에 검토한 패키지의 설치를 승인해 주세요.';
