@@ -263,7 +263,7 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 			});
 			const binding = database.listFolderBindings(projectId)[0];
 			database.updateFolderBinding(binding.id, { expectedPath: binding.path, vcsKind: 'git', vcsRoot: binding.path });
-			const launched: { request: ProviderRunRequest; resolve: (result: ProviderRunResult) => void; cancel: () => void }[] = [];
+			const launched: { request: ProviderRunRequest; resolve: (result: ProviderRunResult) => void; emit: (event: ProviderRunEvent) => void; cancel: () => void }[] = [];
 			const internals = channel as unknown as {
 				supervisor: ProviderProcessSupervisor;
 				writerLock: TaskFolderWriterLock;
@@ -286,14 +286,14 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 				reserveGlobal: () => ({ release() { } }),
 			} as unknown as TaskFolderWriterLock;
 			internals.supervisor = {
-				async run(request: ProviderRunRequest, _spec: ProviderCommandSpec, _onEvent: (event: ProviderRunEvent) => void, onOwnedProcessSpawned: (pgid: number) => Promise<void> | void): Promise<ProviderRunHandle> {
+				async run(request: ProviderRunRequest, _spec: ProviderCommandSpec, onEvent: (event: ProviderRunEvent) => void, onOwnedProcessSpawned: (pgid: number) => Promise<void> | void): Promise<ProviderRunHandle> {
 					const allowed = await request.preflight(request);
 					assert.equal(allowed.allowed, true);
 					const pgid = 2_000_000_100 + launched.length;
 					await onOwnedProcessSpawned(pgid);
 					let resolve!: (result: ProviderRunResult) => void;
 					const result = new Promise<ProviderRunResult>(done => resolve = done);
-					const entry = { request, resolve, cancel: () => resolve({ attemptId: request.attemptId, providerId: request.providerId, state: 'cancelled', cleanupVerified: true, exitCode: null, signal: 'SIGTERM' }) };
+					const entry = { request, resolve, emit: onEvent, cancel: () => resolve({ attemptId: request.attemptId, providerId: request.providerId, state: 'cancelled', cleanupVerified: true, exitCode: null, signal: 'SIGTERM' }) };
 					request.signal?.addEventListener('abort', entry.cancel, { once: true });
 					launched.push(entry);
 					return { pid: pgid, result, cancel: entry.cancel };
@@ -341,6 +341,21 @@ test('subagent start owns a distinct attempt on an In Progress task and cancella
 			assert.equal(persistenceFailed.cleanupVerified, true);
 			assert.match(persistenceFailed.errorSummary ?? '', /Provider result could not be saved: Injected result persistence failure\./);
 			database.persistProviderAttemptResult = persistResult;
+			for (const [providerId, eventType] of [['codex', 'item.completed'], ['claude', 'permission.denied']] as const) {
+				const denialScope = { ...scope, providerId, scope: `Check denied ${providerId} request.` };
+				const denialPreview = await channel.call<ProviderRunPreviewDTO>(sender, 'previewSubagent', denialScope);
+				const expectedLaunchCount = launched.length + 1;
+				const denialStart = await channel.call<{ attempt: import('../common/workspaceProviderRunProtocol.js').ProviderAttemptDTO }>(sender, 'startSubagent', { ...denialScope, digest: denialPreview.digest });
+				await waitForLaunchedAttempt(database, denialStart.attempt.id, launched, expectedLaunchCount);
+				const run = launched.at(-1)!;
+				run.emit({ type: eventType, providerId, attemptId: denialStart.attempt.id, timestamp: Date.now(), metadata: { itemOutcome: 'denied' } });
+				run.resolve({ attemptId: denialStart.attempt.id, providerId, state: 'failed', cleanupVerified: true, exitCode: 0, signal: null });
+				for (let index = 0; index < 20 && database.getProviderAttempt(denialStart.attempt.id)?.state === 'running'; index++) { await new Promise<void>(resolve => setImmediate(resolve)); }
+				const deniedAttempt = database.getProviderAttempt(denialStart.attempt.id)!;
+				assert.equal(deniedAttempt.state, 'failed');
+				assert.equal(deniedAttempt.errorSummary, 'Provider action was blocked by the configured permission policy.');
+				assert.equal(database.listProviderAttemptEvents(denialStart.attempt.id).find(event => event.type === eventType)?.metadata.itemOutcome, 'denied');
+			}
 			database.finishProviderAttempt(root.attemptId, 'failed', null, undefined, 'Test root complete.', true);
 			await channel.shutdown();
 			const restarted = new WorkspaceProviderRunsChannel(database, dashboardChannel, { error() { } } as unknown as ILogService);

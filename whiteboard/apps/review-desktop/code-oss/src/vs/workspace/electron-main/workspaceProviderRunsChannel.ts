@@ -395,7 +395,7 @@ export class WorkspaceProviderRunsChannel {
 			const acquiredLease = lease;
 			const handle = await this.supervisor.run(runRequest, spec, event => {
 				if (event.providerSessionId) { providerSessionId = event.providerSessionId; }
-				if (event.type === 'permission.denied' || (event.type === 'turn.completed' && event.metadata?.itemOutcome === 'denied')) { permissionDenied = true; }
+				if (event.type === 'permission.denied' || event.metadata?.itemOutcome === 'denied') { permissionDenied = true; }
 				this.database.appendProviderAttemptEvent(queued.attemptId, { type: event.type, metadata: event.metadata });
 			}, async pgid => {
 				await acquiredLease.attachOwnedProcessGroup(pgid);
