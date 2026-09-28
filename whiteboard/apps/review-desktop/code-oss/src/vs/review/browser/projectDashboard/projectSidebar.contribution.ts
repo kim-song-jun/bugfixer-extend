@@ -15,6 +15,7 @@ import { IContextMenuService } from '../../../platform/contextview/browser/conte
 import { IKeybindingService } from '../../../platform/keybinding/common/keybinding.js';
 import { IContextKeyService } from '../../../platform/contextkey/common/contextkey.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
+import { ICommandService } from '../../../platform/commands/common/commands.js';
 import { IInstantiationService } from '../../../platform/instantiation/common/instantiation.js';
 import { IOpenerService } from '../../../platform/opener/common/opener.js';
 import { IThemeService } from '../../../platform/theme/common/themeService.js';
@@ -25,8 +26,6 @@ import { ViewPaneContainer } from '../../../workbench/browser/parts/views/viewPa
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewDescriptor, IViewsRegistry, ViewContainerLocation } from '../../../workbench/common/views.js';
 import { IViewDescriptorService } from '../../../workbench/common/views.js';
 import { INativeWorkbenchEnvironmentService } from '../../../workbench/services/environment/electron-browser/environmentService.js';
-import { IPaneCompositePartService } from '../../../workbench/services/panecomposite/browser/panecomposite.js';
-import { VIEWLET_ID as EXPLORER_VIEWLET_ID } from '../../../workbench/contrib/files/common/files.js';
 import { ipcRenderer } from '../../../base/parts/sandbox/electron-browser/globals.js';
 import { WORKSPACE_DASHBOARD_CHANNEL, type WorkspaceDashboardDTO } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_PROJECT_HOME_CHANNEL, type WorkspaceProjectDTO } from '../../../workspace/common/workspaceProjectHomeProtocol.js';
@@ -79,7 +78,7 @@ class ProjectSidebarView extends ViewPane {
 		@IThemeService themeService: IThemeService,
 		@IHoverService hoverService: IHoverService,
 		@INativeWorkbenchEnvironmentService private readonly environment: INativeWorkbenchEnvironmentService,
-		@IPaneCompositePartService private readonly paneCompositePartService: IPaneCompositePartService,
+		@ICommandService private readonly commandService: ICommandService,
 		@INotificationService private readonly notificationService: INotificationService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
@@ -388,28 +387,27 @@ class ProjectSidebarView extends ViewPane {
 		files.type = 'button';
 		files.className = 'project-sidebar__item';
 		files.dataset.projectControl = 'files';
-		files.title = '프로젝트 파일 보기';
-		files.setAttribute('aria-label', '프로젝트 파일 보기');
+		files.title = '파일 열기';
+		files.setAttribute('aria-label', '파일 열기');
 		const filesIcon = renderIcon(Codicon.files);
 		filesIcon.classList.add('project-sidebar__icon');
 		filesIcon.setAttribute('aria-hidden', 'true');
 		const filesText = document.createElement('span');
-		filesText.textContent = '파일';
+		filesText.textContent = '파일 열기';
 		files.append(filesIcon, filesText);
 		files.addEventListener('click', () => {
 			this.dismissSwitcherKeepingFocus();
-			void this.openExplorer();
+			void this.openFileQuickOpen();
 		});
 		return files;
 	}
 
-	private async openExplorer(): Promise<void> {
+	private async openFileQuickOpen(): Promise<void> {
 		try {
-			const explorer = await this.paneCompositePartService.openPaneComposite(EXPLORER_VIEWLET_ID, ViewContainerLocation.Sidebar, true);
-			if (!explorer) throw new Error('파일 탐색기를 열 수 없습니다.');
+			await this.commandService.executeCommand('workbench.action.quickOpen');
 		} catch (error) {
-			console.error('Could not open the Explorer from project navigation.', error);
-			this.notificationService.error('파일 탐색기를 열지 못했습니다.');
+			console.error('Could not open Quick Open from project navigation.', error);
+			this.notificationService.error('파일 선택 창을 열지 못했습니다.');
 		}
 	}
 }

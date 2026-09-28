@@ -2643,6 +2643,25 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			});
 			close.disabled = !!this.taskMutationBusy;
 			close.dataset.focusKey = 'detail-close';
+			if (this.editingTaskId === detail.id) {
+				const editForm = panel.appendChild(createElement('form', 'project-dashboard__edit-form'));
+				const titleLabel = editForm.appendChild(createElement('label')); titleLabel.htmlFor = 'task-edit-title'; titleLabel.textContent = '작업 제목';
+				const titleInput = editForm.appendChild(createElement('input')); titleInput.id = 'task-edit-title'; titleInput.required = true; titleInput.maxLength = 160; titleInput.value = this.editTitleDraft; titleInput.disabled = this.taskEditBusy; titleInput.dataset.focusKey = 'task-edit-title';
+				titleInput.addEventListener('input', () => { this.editTitleDraft = titleInput.value; });
+				const descriptionLabel = editForm.appendChild(createElement('label')); descriptionLabel.htmlFor = 'task-edit-description'; descriptionLabel.textContent = '설명';
+				const descriptionInput = editForm.appendChild(createElement('textarea')); descriptionInput.id = 'task-edit-description'; descriptionInput.rows = 4; descriptionInput.maxLength = 2000; descriptionInput.value = this.editDescriptionDraft; descriptionInput.disabled = this.taskEditBusy; descriptionInput.dataset.focusKey = 'task-edit-description';
+				descriptionInput.addEventListener('input', () => { this.editDescriptionDraft = descriptionInput.value; });
+				if (this.taskEditError) { const error = editForm.appendChild($('.project-dashboard__task-edit-error')); error.setAttribute('role', 'alert'); error.textContent = this.taskEditError; }
+				const actions = editForm.appendChild($('.project-dashboard__edit-actions'));
+				const save = actions.appendChild(createElement('button', 'project-dashboard__primary')); save.type = 'submit'; save.textContent = this.taskEditBusy ? '저장 중…' : '저장'; save.disabled = this.taskEditBusy || !!this.taskMutationBusy; save.dataset.focusKey = 'task-save';
+				const cancel = actions.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = '취소'; cancel.disabled = this.taskEditBusy; cancel.dataset.focusKey = 'task-cancel';
+				cancel.addEventListener('click', () => { this.editingTaskId = undefined; this.editTitleDraft = ''; this.editDescriptionDraft = ''; this.taskEditError = undefined; this.render(); this.root?.querySelector<HTMLElement>('[data-focus-key="task-edit"]')?.focus({ preventScroll: true }); });
+				editForm.addEventListener('submit', event => { event.preventDefault(); void this.saveTaskDetails(detail); });
+			} else {
+				const description = panel.appendChild($('p')); description.className = 'project-dashboard__detail-description'; description.textContent = detail.description || '설명이 없습니다.';
+			}
+			const meta = panel.appendChild($('.project-dashboard__detail-meta')); meta.textContent = `수정일 ${new Date(detail.updatedAt).toLocaleDateString()}`;
+			if (detail.state === 'ready' || detail.state === 'inProgress') this.renderProviderRuns(panel, detail);
 			const reviews = panel.appendChild($('.project-dashboard__flow-card'));
 			const reviewsTitle = reviews.appendChild($('h3')); reviewsTitle.textContent = '작업 리뷰';
 			const reviewsLoaded = this.reviewLinksTaskId === detail.id;
@@ -2691,29 +2710,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				option.dataset.focusKey = `task-state:${column.state}`;
 				option.addEventListener('click', () => void this.updateTaskState(detail, column.state));
 			}
-			if (this.editingTaskId === detail.id) {
-				const editForm = panel.appendChild(createElement('form', 'project-dashboard__edit-form'));
-				const titleLabel = editForm.appendChild(createElement('label')); titleLabel.htmlFor = 'task-edit-title'; titleLabel.textContent = '작업 제목';
-				const titleInput = editForm.appendChild(createElement('input')); titleInput.id = 'task-edit-title'; titleInput.required = true; titleInput.maxLength = 160; titleInput.value = this.editTitleDraft; titleInput.disabled = this.taskEditBusy; titleInput.dataset.focusKey = 'task-edit-title';
-				titleInput.addEventListener('input', () => { this.editTitleDraft = titleInput.value; });
-				const descriptionLabel = editForm.appendChild(createElement('label')); descriptionLabel.htmlFor = 'task-edit-description'; descriptionLabel.textContent = '설명';
-				const descriptionInput = editForm.appendChild(createElement('textarea')); descriptionInput.id = 'task-edit-description'; descriptionInput.rows = 4; descriptionInput.maxLength = 2000; descriptionInput.value = this.editDescriptionDraft; descriptionInput.disabled = this.taskEditBusy; descriptionInput.dataset.focusKey = 'task-edit-description';
-				descriptionInput.addEventListener('input', () => { this.editDescriptionDraft = descriptionInput.value; });
-				if (this.taskEditError) { const error = editForm.appendChild($('.project-dashboard__task-edit-error')); error.setAttribute('role', 'alert'); error.textContent = this.taskEditError; }
-				const actions = editForm.appendChild($('.project-dashboard__edit-actions'));
-				const save = actions.appendChild(createElement('button', 'project-dashboard__primary')); save.type = 'submit'; save.textContent = this.taskEditBusy ? '저장 중…' : '저장'; save.disabled = this.taskEditBusy || !!this.taskMutationBusy; save.dataset.focusKey = 'task-save';
-				const cancel = actions.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = '취소'; cancel.disabled = this.taskEditBusy; cancel.dataset.focusKey = 'task-cancel';
-				cancel.addEventListener('click', () => { this.editingTaskId = undefined; this.editTitleDraft = ''; this.editDescriptionDraft = ''; this.taskEditError = undefined; this.render(); this.root?.querySelector<HTMLElement>('[data-focus-key="task-edit"]')?.focus({ preventScroll: true }); });
-				editForm.addEventListener('submit', event => { event.preventDefault(); void this.saveTaskDetails(detail); });
-			} else {
-				const description = panel.appendChild($('p')); description.textContent = detail.description || '설명이 없습니다.';
-			}
-			const meta = panel.appendChild($('.project-dashboard__detail-meta')); meta.textContent = `수정일 ${new Date(detail.updatedAt).toLocaleDateString()}`;
+			this.renderWorkspaceE2e(panel, detail);
+			if (detail.state === 'review' || detail.state === 'done') this.renderProviderRuns(panel, detail);
 			const management = panel.appendChild($('.project-dashboard__task-management'));
 			const managementTitle = management.appendChild($('h3')); managementTitle.textContent = '작업 관리';
 			this.renderTaskManagementControls(management, detail);
-			this.renderProviderRuns(panel, detail);
-			this.renderWorkspaceE2e(panel, detail);
 		}
 		this.renderCreateForm(shell);
 		restorePosition();
