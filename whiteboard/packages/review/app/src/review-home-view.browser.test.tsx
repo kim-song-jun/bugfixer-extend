@@ -199,6 +199,27 @@ describe("ReviewHome", () => {
     expect(onOpen).toHaveBeenCalledWith(pad);
   });
 
+  it("shows the scratchpad instead of the Welcome rail when it is the only item", async () => {
+    const { pins: _pins, repositoryPath: _path, ...base } = summary({
+      reviewId: "scratchpad",
+      title: "Scratchpad",
+      repositoryName: "",
+    });
+    const pad: ReviewApiSummary = {
+      ...base,
+      kind: "scratchpad",
+      contents: { blocks: 1, diagrams: 0 },
+    };
+
+    await act(async () =>
+      root.render(<ReviewHome reviews={[pad]} onOpen={() => {}} />),
+    );
+
+    expect(container.querySelector(".review-home-scratchpad")).not.toBeNull();
+    expect(container.textContent).toContain("Scratchpad");
+    expect(container.textContent).toContain("1개 항목");
+  });
+
   it("opens API reviews without a checkout path", async () => {
     const { repositoryPath: _, ...review } = summary({ title: "API review" });
     const item = { ...review, repositoryName: "Review repository" };

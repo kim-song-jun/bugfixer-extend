@@ -198,6 +198,7 @@ export function ReviewHome({
   if (
     !onboardingDismissed &&
     listed.length === 0 &&
+    scratchpad === undefined &&
     deletions.size === 0 &&
     !deleteError
   ) {
