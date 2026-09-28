@@ -116,7 +116,7 @@ function subagentEventLabel(event: ProviderAttemptEventDTO): string {
 		case 'item.started': return `${itemType} 시작`;
 		case 'item.updated': return `${itemType} 진행`;
 		case 'item.completed': return outcome ? `${itemType} ${outcome}` : `${itemType} 완료`;
-		case 'turn.completed': return event.metadata.itemOutcome === 'denied' ? '권한 요청 거부' : event.metadata.itemOutcome === 'failed' ? '검증 실패' : '작업 완료';
+		case 'turn.completed': return event.metadata.itemOutcome === 'denied' ? '권한 거부로 실행 실패' : event.metadata.itemOutcome === 'failed' ? '검증 실패' : '작업 완료';
 		case 'turn.failed': return '작업 실패';
 		case 'permission.denied': return '권한 요청 거부';
 		case 'error': return '오류 발생';
