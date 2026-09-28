@@ -587,6 +587,68 @@ describe("ReviewHome", () => {
     expect(reviewButton!.textContent).toContain("Native review");
   });
 
+  it("reports failed archive and restore actions and allows retry", async () => {
+    const review = summary({ title: "Retryable review" });
+    const dismissed = {
+      ...review,
+      dismissedAt: "2026-09-02T00:00:00Z",
+    };
+    const onDismiss = vi
+      .fn<(item: ReviewApiSummary) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockResolvedValue(undefined);
+    const onRestore = vi
+      .fn<(item: ReviewApiSummary) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockResolvedValue(undefined);
+
+    const render = async (item: ReviewApiSummary) =>
+      act(async () =>
+        root.render(
+          <ReviewHome
+            reviews={[item]}
+            onOpen={() => {}}
+            onDismiss={onDismiss}
+            onRestore={onRestore}
+          />,
+        ),
+      );
+
+    await render(review);
+    const archive = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Retryable review 보관"]',
+      )!;
+    await act(async () => archive().click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "보관하지 못했습니다",
+    );
+    expect(archive().disabled).toBe(false);
+
+    await act(async () => archive().click());
+    expect(onDismiss).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    await render(dismissed);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(".review-home-dismissed-toggle")!
+        .click(),
+    );
+    const restore = container.querySelector<HTMLButtonElement>(
+      ".review-home-restore",
+    )!;
+    await act(async () => restore.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "복원하지 못했습니다",
+    );
+    expect(restore.disabled).toBe(false);
+
+    await act(async () => restore.click());
+    expect(onRestore).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it.each([
     { platform: "MacIntel", find: { metaKey: true }, other: { ctrlKey: true } },
     { platform: "Win32", find: { ctrlKey: true }, other: { metaKey: true } },

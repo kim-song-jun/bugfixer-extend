@@ -99,6 +99,7 @@ export function ReviewHome({
   );
 
   const [deleteError, setDeleteError] = useState<string>();
+  const [attentionError, setAttentionError] = useState<string>();
 
   // Keep successful deletions hidden until the catalog acknowledges removal.
   useEffect(() => {
@@ -146,6 +147,38 @@ export function ReviewHome({
     [onDelete],
   );
 
+  const dismissReview = useCallback(
+    async (review: ReviewApiSummary) => {
+      if (!onDismiss) return;
+      setAttentionError(undefined);
+
+      try {
+        await onDismiss(review);
+      } catch {
+        setAttentionError(
+          `“${reviewTitle(review)}” 리뷰를 보관하지 못했습니다. 다시 시도해 주세요.`,
+        );
+      }
+    },
+    [onDismiss],
+  );
+
+  const restoreReview = useCallback(
+    async (review: ReviewApiSummary) => {
+      if (!onRestore) return;
+      setAttentionError(undefined);
+
+      try {
+        await onRestore(review);
+      } catch {
+        setAttentionError(
+          `“${reviewTitle(review)}” 리뷰를 복원하지 못했습니다. 다시 시도해 주세요.`,
+        );
+      }
+    },
+    [onRestore],
+  );
+
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60_000);
 
@@ -154,11 +187,18 @@ export function ReviewHome({
 
   const actions = useMemo(
     () => ({
-      onDismiss,
-      onRestore,
+      onDismiss: onDismiss ? dismissReview : undefined,
+      onRestore: onRestore ? restoreReview : undefined,
       onDelete: onDelete ? deleteReview : undefined,
     }),
-    [onDismiss, onRestore, onDelete, deleteReview],
+    [
+      onDismiss,
+      onRestore,
+      onDelete,
+      dismissReview,
+      restoreReview,
+      deleteReview,
+    ],
   );
 
   const needle = query.trim();
@@ -200,7 +240,8 @@ export function ReviewHome({
     listed.length === 0 &&
     scratchpad === undefined &&
     deletions.size === 0 &&
-    !deleteError
+    !deleteError &&
+    !attentionError
   ) {
     return (
       <WelcomePage
@@ -224,6 +265,7 @@ export function ReviewHome({
             </div>
           </div>
           {deleteError ? <p role="alert">{deleteError}</p> : null}
+          {attentionError ? <p role="alert">{attentionError}</p> : null}
           {/* Keyed off the active list, not the whole result: a query that hits
               only dismissed reviews empties the main area, and the collapsed
               Dismissed count alone does not explain why. */}
@@ -400,9 +442,7 @@ function RestoreReviewButton({ review }: { review: ReviewApiSummary }) {
       onClick={(event) => {
         event.stopPropagation();
         setBusy(true);
-        void onRestore(review)
-          .catch(() => undefined)
-          .finally(() => setBusy(false));
+        void onRestore(review).finally(() => setBusy(false));
       }}
     >
       복원
@@ -749,9 +789,7 @@ function DismissReviewButton({ review }: { review: ReviewApiSummary }) {
       onClick={(event) => {
         event.stopPropagation();
         setBusy(true);
-        void onDismiss(review)
-          .catch(() => undefined)
-          .finally(() => setBusy(false));
+        void onDismiss(review).finally(() => setBusy(false));
       }}
     >
       <ArchiveIcon />
