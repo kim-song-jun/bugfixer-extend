@@ -221,7 +221,9 @@ describe("ConnectCard", () => {
     expect(copyButton(container)?.getAttribute("aria-label")).toBe(
       "복사: Codex용 안내문",
     );
-    await act(async () => clickTarget(copyButton(container), "Copy setup text"));
+    await act(async () =>
+      clickTarget(copyButton(container), "Copy setup text"),
+    );
     expect(writeText).toHaveBeenLastCalledWith("CODEX PROMPT");
     expect(copyButton(container)?.textContent).toBe("복사됨");
 
@@ -231,7 +233,9 @@ describe("ConnectCard", () => {
     expect(copyButton(container)?.getAttribute("aria-label")).toBe(
       "복사: Codex용 설치 명령",
     );
-    await act(async () => clickTarget(copyButton(container), "Copy setup text"));
+    await act(async () =>
+      clickTarget(copyButton(container), "Copy setup text"),
+    );
     expect(writeText).toHaveBeenLastCalledWith("CODEX COMMAND");
     expect(copyButton(container)?.textContent).toBe("복사됨");
     writeText.mockRestore();
@@ -248,7 +252,9 @@ describe("ConnectCard", () => {
       <ConnectCard install={content()} onCopied={onCopied} />,
     );
 
-    await act(async () => clickTarget(copyButton(container), "Copy setup text"));
+    await act(async () =>
+      clickTarget(copyButton(container), "Copy setup text"),
+    );
     expect(onCopied).toHaveBeenCalledOnce();
     writeText.mockRestore();
   });
@@ -282,7 +288,9 @@ describe("ConnectCard", () => {
       />,
     );
 
-    expect(bare.textContent).toContain("먼저 PATH에 whiteboard CLI를 설치하세요.");
+    expect(bare.textContent).toContain(
+      "먼저 PATH에 whiteboard CLI를 설치하세요.",
+    );
     expect(bare.querySelector("a")).toBeNull();
     expect(bare.querySelector("button")).toBeNull();
   });

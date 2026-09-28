@@ -79,13 +79,9 @@ async function mount() {
 
 async function open() {
   await act(async () => {
-    await page
-      .getByText("diff 표시 및 AI 요약", { exact: true })
-      .click();
+    await page.getByText("diff 표시 및 AI 요약", { exact: true }).click();
   });
-  await expect
-    .element(page.getByLabelText("테스트 본문 접기"))
-    .toBeVisible();
+  await expect.element(page.getByLabelText("테스트 본문 접기")).toBeVisible();
 }
 
 test("starts collapsed and reads only on first expansion", async () => {
@@ -95,9 +91,7 @@ test("starts collapsed and reads only on first expansion", async () => {
   await open();
   expect(actions.read).toHaveBeenCalledOnce();
   await act(async () => {
-    await page
-      .getByText("diff 표시 및 AI 요약", { exact: true })
-      .click();
+    await page.getByText("diff 표시 및 AI 요약", { exact: true }).click();
   });
   await open();
   expect(actions.read).toHaveBeenCalledOnce();
@@ -114,12 +108,12 @@ test("writes the selected key and keeps reload visible when collapsed", async ()
     false,
   );
   await expect
-    .element(page.getByRole("button", { name: "창 다시 불러오기", exact: true }))
+    .element(
+      page.getByRole("button", { name: "창 다시 불러오기", exact: true }),
+    )
     .toBeVisible();
   await act(async () => {
-    await page
-      .getByText("diff 표시 및 AI 요약", { exact: true })
-      .click();
+    await page.getByText("diff 표시 및 AI 요약", { exact: true }).click();
   });
   await act(async () => {
     await page
@@ -154,7 +148,9 @@ test("tests draft settings without saving, then saves and clears the key", async
     await page.getByLabelText("API 키", { exact: true }).fill("test-secret");
   });
   await act(async () => {
-    await page.getByRole("button", { name: "설정 테스트", exact: true }).click();
+    await page
+      .getByRole("button", { name: "설정 테스트", exact: true })
+      .click();
   });
   await expect
     .element(page.getByLabelText("요약 예시"))
@@ -225,10 +221,14 @@ test("does not prompt for reload after a no-op and disables reload while testing
       }),
   );
   await act(async () => {
-    await page.getByRole("button", { name: "설정 테스트", exact: true }).click();
+    await page
+      .getByRole("button", { name: "설정 테스트", exact: true })
+      .click();
   });
   await expect
-    .element(page.getByRole("button", { name: "창 다시 불러오기", exact: true }))
+    .element(
+      page.getByRole("button", { name: "창 다시 불러오기", exact: true }),
+    )
     .toBeDisabled();
   await act(async () => finish("summary"));
 });
@@ -254,6 +254,8 @@ test("shows partial save errors with authoritative values and a reload prompt", 
     .element(page.getByLabelText("모델", { exact: true }))
     .toHaveValue("test-model");
   await expect
-    .element(page.getByRole("button", { name: "창 다시 불러오기", exact: true }))
+    .element(
+      page.getByRole("button", { name: "창 다시 불러오기", exact: true }),
+    )
     .toBeVisible();
 });

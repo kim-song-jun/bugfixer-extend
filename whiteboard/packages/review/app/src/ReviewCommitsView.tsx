@@ -12,9 +12,9 @@ import { CodeIcon, DisclosureChevron } from "./icons";
 import { shortRef } from "./review-branch-range";
 import { ReviewUnavailable } from "./review-empty-state";
 import { countLabel } from "./review-home-view";
+import { isKoreanReviewUi } from "./review-locale";
 import { captureUiEvent } from "./ui-telemetry";
 import { useTooltip } from "./use-tooltip";
-import { isKoreanReviewUi } from "./review-locale";
 
 type OpenCommitDiff = (
   commit: ReviewCommitSummary,
@@ -285,7 +285,9 @@ export function groupCommitsByDate(commits: readonly ReviewCommitSummary[]) {
     } else {
       groups.push({
         key,
-        label: korean ? formatter.format(date) : formatter.format(date).toUpperCase(),
+        label: korean
+          ? formatter.format(date)
+          : formatter.format(date).toUpperCase(),
         commits: [commit],
       });
     }

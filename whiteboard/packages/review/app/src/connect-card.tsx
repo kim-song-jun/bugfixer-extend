@@ -382,9 +382,7 @@ export function LegacySkillsRow({
       ) : null}
       {removed.length > 0 ? (
         <>
-          <p>
-            Skills {removed.length}개 제거됨
-          </p>
+          <p>Skills {removed.length}개 제거됨</p>
           <ul>
             {removed.map((path) => (
               <li key={path}>

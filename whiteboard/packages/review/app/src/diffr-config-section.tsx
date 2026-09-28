@@ -118,9 +118,7 @@ export function DiffrConfigSection({
   return (
     <div className="review-settings-diffr">
       <details>
-        <summary onClick={() => setOpened(true)}>
-          diff 표시 및 AI 요약
-        </summary>
+        <summary onClick={() => setOpened(true)}>diff 표시 및 AI 요약</summary>
         {opened && (
           <>
             <p className="review-settings-row-description">
@@ -184,7 +182,8 @@ export function DiffrConfigSection({
                 ))}
                 <h3>AI 요약</h3>
                 <p className="review-settings-row-description">
-                  소스 파일 내용을 Gemini에 보내 새 함수와 테스트가 긴 경우 요약합니다.
+                  소스 파일 내용을 Gemini에 보내 새 함수와 테스트가 긴 경우
+                  요약합니다.
                 </p>
                 {unavailable && (
                   <p className="review-settings-unavailable">
@@ -225,7 +224,8 @@ export function DiffrConfigSection({
                         : config.credentialSource === "environment"
                           ? "환경 변수에 키가 있습니다"
                           : "설정되지 않음"}
-                      . 새 키는 diffr 설정 파일에 저장됩니다. 현재 키를 유지하려면 비워 두세요.
+                      . 새 키는 diffr 설정 파일에 저장됩니다. 현재 키를
+                      유지하려면 비워 두세요.
                     </p>
                     <SettingRow label="모델">
                       <input
@@ -279,7 +279,8 @@ export function DiffrConfigSection({
                       </button>
                     </div>
                     <p className="review-settings-row-description">
-                      설정 테스트는 예시 코드를 보내며 현재 설정을 저장하지 않습니다.
+                      설정 테스트는 예시 코드를 보내며 현재 설정을 저장하지
+                      않습니다.
                     </p>
                   </fieldset>
                 )}
@@ -318,7 +319,10 @@ export function DiffrConfigSection({
         </p>
       )}
       {confirmReload && (
-        <div role="alertdialog" aria-label="저장하지 않은 요약 설정을 버릴까요?">
+        <div
+          role="alertdialog"
+          aria-label="저장하지 않은 요약 설정을 버릴까요?"
+        >
           <p>저장하지 않은 요약 설정을 버리고 다시 불러올까요?</p>
           <button
             className="review-settings-button"

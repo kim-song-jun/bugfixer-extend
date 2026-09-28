@@ -83,7 +83,11 @@ describe("ReviewTraceView", () => {
   it("does not list agent traces for the scratchpad", async () => {
     const request = vi.fn<ReviewCanvasBridge["request"]>();
     const session = testReviewSession({}, { request });
-    session.review = { ...session.review!, kind: "scratchpad", pins: undefined };
+    session.review = {
+      ...session.review!,
+      kind: "scratchpad",
+      pins: undefined,
+    };
 
     function Probe() {
       const list = useTraceList();
