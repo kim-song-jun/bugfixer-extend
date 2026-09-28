@@ -45,6 +45,12 @@ interface ReviewAttentionActions {
   onRestore?(review: ReviewApiSummary): Promise<void>;
 }
 
+interface ReviewAttentionError {
+  reviewId: string;
+  expectedDismissed: boolean;
+  message: string;
+}
+
 /* Passed by context rather than through every list and card signature: the
    actions are optional and only leaf controls use them. */
 const AttentionActionsContext = createContext<ReviewAttentionActions>({});
@@ -99,7 +105,10 @@ export function ReviewHome({
   );
 
   const [deleteError, setDeleteError] = useState<string>();
-  const [attentionError, setAttentionError] = useState<string>();
+  const [attentionError, setAttentionError] =
+    useState<ReviewAttentionError>();
+  const latestReviews = useRef(reviews);
+  latestReviews.current = reviews;
 
   // Keep successful deletions hidden until the catalog acknowledges removal.
   useEffect(() => {
@@ -118,6 +127,22 @@ export function ReviewHome({
       return next.size === current.size ? current : next;
     });
   }, [reviews, deletions]);
+
+  useEffect(() => {
+    setAttentionError((current) => {
+      if (!current) return current;
+      const review = reviews.find((item) => item.reviewId === current.reviewId);
+
+      if (
+        !review ||
+        Boolean(review.dismissedAt) === current.expectedDismissed
+      ) {
+        return undefined;
+      }
+
+      return current;
+    });
+  }, [reviews]);
 
   const deleteReview = useCallback(
     async (review: ReviewApiSummary) => {
@@ -155,9 +180,17 @@ export function ReviewHome({
       try {
         await onDismiss(review);
       } catch {
-        setAttentionError(
-          `“${reviewTitle(review)}” 리뷰를 보관하지 못했습니다. 다시 시도해 주세요.`,
+        const latest = latestReviews.current.find(
+          (item) => item.reviewId === review.reviewId,
         );
+
+        if (latest && Boolean(latest.dismissedAt) !== true) {
+          setAttentionError({
+            reviewId: review.reviewId,
+            expectedDismissed: true,
+            message: `“${reviewTitle(review)}” 리뷰를 보관하지 못했습니다. 다시 시도해 주세요.`,
+          });
+        }
       }
     },
     [onDismiss],
@@ -171,9 +204,17 @@ export function ReviewHome({
       try {
         await onRestore(review);
       } catch {
-        setAttentionError(
-          `“${reviewTitle(review)}” 리뷰를 복원하지 못했습니다. 다시 시도해 주세요.`,
+        const latest = latestReviews.current.find(
+          (item) => item.reviewId === review.reviewId,
         );
+
+        if (latest && Boolean(latest.dismissedAt) !== false) {
+          setAttentionError({
+            reviewId: review.reviewId,
+            expectedDismissed: false,
+            message: `“${reviewTitle(review)}” 리뷰를 복원하지 못했습니다. 다시 시도해 주세요.`,
+          });
+        }
       }
     },
     [onRestore],
@@ -265,7 +306,9 @@ export function ReviewHome({
             </div>
           </div>
           {deleteError ? <p role="alert">{deleteError}</p> : null}
-          {attentionError ? <p role="alert">{attentionError}</p> : null}
+          {attentionError ? (
+            <p role="alert">{attentionError.message}</p>
+          ) : null}
           {/* Keyed off the active list, not the whole result: a query that hits
               only dismissed reviews empties the main area, and the collapsed
               Dismissed count alone does not explain why. */}

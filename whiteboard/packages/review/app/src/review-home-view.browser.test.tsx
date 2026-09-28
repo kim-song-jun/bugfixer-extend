@@ -649,6 +649,64 @@ describe("ReviewHome", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
+  it("clears action feedback when catalog state reconciles or the review disappears", async () => {
+    const review = summary({ title: "Reconciled review" });
+    const dismissed = {
+      ...review,
+      dismissedAt: "2026-09-02T00:00:00Z",
+    };
+    const onDismiss = vi.fn<(item: ReviewApiSummary) => Promise<void>>(
+      async () => {
+        throw new Error("Offline");
+      },
+    );
+    const onRestore = vi.fn<(item: ReviewApiSummary) => Promise<void>>(
+      async () => {
+        throw new Error("Offline");
+      },
+    );
+
+    const render = async (reviews: ReviewApiSummary[]) =>
+      act(async () =>
+        root.render(
+          <ReviewHome
+            reviews={reviews}
+            onOpen={() => {}}
+            onDismiss={onDismiss}
+            onRestore={onRestore}
+          />,
+        ),
+      );
+
+    await render([review]);
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[aria-label="Reconciled review 보관"]',
+        )!
+        .click(),
+    );
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+
+    await render([dismissed]);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(".review-home-dismissed-toggle")!
+        .click(),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(".review-home-restore")!
+        .click(),
+    );
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+
+    await render([]);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector(".review-welcome-page")).not.toBeNull();
+  });
+
   it.each([
     { platform: "MacIntel", find: { metaKey: true }, other: { ctrlKey: true } },
     { platform: "Win32", find: { ctrlKey: true }, other: { metaKey: true } },
