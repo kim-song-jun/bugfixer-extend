@@ -189,7 +189,10 @@ export class WorkspacePackageConnectorChannel {
 					const source = await importDeclarativePackageSource(approved, request, this.transportFactory(), await this.connectionBinding(connection));
 					// Recheck after network I/O, immediately before the synchronous store transaction.
 					const latest = this.database.knowledge.listProjectReferences(projectId)
-						.filter(reference => reference.sourceId === previous.sourceId)
+						.filter(reference => reference.connectorId === previous.connectorId
+							&& reference.accountRef === previous.accountRef
+							&& reference.sourceId === previous.sourceId
+							&& reference.externalId === previous.externalId)
 						.sort((left, right) => right.version - left.version)[0];
 					if (latest?.id !== previous.id) { throw new Error('Refresh the latest version of this connector source.'); }
 					this.requireActiveConnection(projectId, this.requireInstalled(projectId, request.packageId), request.connectionId, request.sourceId, previous.accountRef);

@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -199,6 +199,126 @@ test('signed package install requires native consent, pins updates, and imports 
 			projectId: one.project.id, packageId: installed.packageId, connectionId, previewId: staleOnUninstall.previewId,
 		}), /unavailable in this project window/i);
 		assert.ok(database.knowledge.readReference(imported.id));
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('bearer package accounts keep identical source refreshes and credentials isolated', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-package-account-isolation-'));
+	const databasePath = join(directory, 'workspace.db');
+	const database = WorkspaceDatabase.open(databasePath);
+	try {
+		const descriptor = URI.file(join(directory, 'project.code-workspace')).toString();
+		const project = database.createProjectWorkspace('Project', directory, descriptor);
+		const sender = { id: 31 } as WebContents;
+		const projectWindow = {
+			config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } },
+			openedWorkspace: { configPath: URI.parse(descriptor) },
+		} as unknown as ICodeWindow;
+		const windows = { getWindowByWebContents: () => projectWindow } as unknown as IWindowsMainService;
+		const key = generateKeyPairSync('ed25519');
+		const manifestBytes = Buffer.from(JSON.stringify({
+			schemaVersion: 1, packageId: 'private-issues', version: '1.0.0', name: 'Private issues', description: 'Selected private issue records.',
+			domains: ['api.example.org'], accountAccess: 'bearer-token', requestedScopes: ['issues:read'],
+			sources: [{ sourceId: 'issues', label: 'Issues', domain: 'api.example.org', path: '/issues/{sourceKey}', textPaths: ['title'], requiredScope: 'issues:read' }],
+		}));
+		const publicDer = Buffer.from(key.publicKey.export({ type: 'spki', format: 'der' }));
+		const envelope: WorkspaceSignedPackageEnvelope = {
+			manifestBytesBase64: manifestBytes.toString('base64'),
+			signatureBase64: sign(null, manifestBytes, key.privateKey).toString('base64'),
+			publicKeyBase64: publicDer.subarray(-32).toString('base64'),
+		};
+		const credentials = new Map<string, string>();
+		const vault = {
+			put: async (_service: string, accountRef: string, credential: string) => { credentials.set(accountRef, credential); },
+			get: async (_service: string, accountRef: string) => credentials.get(accountRef),
+			delete: async (_service: string, accountRef: string) => { credentials.delete(accountRef); },
+		};
+		const observedRequests: string[] = [];
+		const transport: DeclarativePackageTransport = {
+			get: async (url, domain, token) => {
+				assert.equal(url.href, 'https://api.example.org/issues/same_issue');
+				assert.equal(domain, 'api.example.org');
+				assert.ok(token === 'account-alpha-token-71' || token === 'account-beta-token-82', 'request must carry one live account credential');
+				observedRequests.push(token);
+				return { title: token.startsWith('account-alpha') ? 'Alpha issue content' : 'Beta issue content' };
+			},
+		};
+		const channel = new WorkspacePackageConnectorChannel(
+			database, new WorkspaceDashboardChannel(database, windows), async () => true,
+			() => transport, Date.now, () => vault, async () => true,
+		);
+		const review = await channel.call<WorkspacePackageReviewDTO>(sender, 'reviewPackage', { projectId: project.project.id, envelope });
+		const approval = { packageId: review.packageId, version: review.version, fingerprint: review.fingerprint, manifestDigest: review.manifestDigest };
+		const installed = await channel.call<WorkspaceInstalledPackageDTO>(sender, 'installPackage', { projectId: project.project.id, envelope, approval });
+		const alpha = await channel.call<WorkspacePackageConnectionDTO>(sender, 'connectPackageConnection', {
+			projectId: project.project.id, packageId: installed.packageId, host: 'api.example.org', label: 'Alpha',
+			credential: 'account-alpha-token-71', grantedScopes: ['issues:read'],
+		});
+		const beta = await channel.call<WorkspacePackageConnectionDTO>(sender, 'connectPackageConnection', {
+			projectId: project.project.id, packageId: installed.packageId, host: 'api.example.org', label: 'Beta',
+			credential: 'account-beta-token-82', grantedScopes: ['issues:read'],
+		});
+		assert.notEqual(alpha.accountRef, beta.accountRef);
+		const connectionDTOs = await channel.call<WorkspacePackageConnectionDTO[]>(sender, 'listPackageConnections', {
+			projectId: project.project.id, packageId: installed.packageId,
+		});
+		assert.equal(connectionDTOs.length, 2);
+		assert.doesNotMatch(JSON.stringify(connectionDTOs), /account-(?:alpha|beta)-token/);
+
+		const alphaPreview = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: alpha.connectionId, sourceId: 'issues', sourceKey: 'same_issue',
+		});
+		const betaPreview = await channel.call<WorkspacePackagePreviewDTO>(sender, 'previewPackageSource', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: beta.connectionId, sourceId: 'issues', sourceKey: 'same_issue',
+		});
+		assert.notEqual(alphaPreview.externalId, betaPreview.externalId);
+		assert.match(alphaPreview.content, /Alpha issue content/);
+		assert.match(betaPreview.content, /Beta issue content/);
+		const binding = database.listFolderBindings(project.project.id)[0];
+		const task = database.createTask({ projectId: project.project.id, bindingId: binding.id, title: 'Import both accounts' });
+		const alphaImported = await channel.call<WorkspaceReferenceDTO>(sender, 'importPackagePreview', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: alpha.connectionId, previewId: alphaPreview.previewId, taskId: task.id,
+		});
+		const betaImported = await channel.call<WorkspaceReferenceDTO>(sender, 'importPackagePreview', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: beta.connectionId, previewId: betaPreview.previewId, taskId: task.id,
+		});
+		assert.equal(alphaImported.accountRef, alpha.accountRef);
+		assert.equal(betaImported.accountRef, beta.accountRef);
+		assert.notEqual(alphaImported.externalId, betaImported.externalId);
+		assert.equal(observedRequests.join(','), 'account-alpha-token-71,account-beta-token-82', 'preview requests use only the selected account token; import reuses preview bytes');
+
+		let alphaLatest = await channel.call<WorkspaceReferenceDTO>(sender, 'refreshPackageSource', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: alpha.connectionId, sourceId: 'issues', sourceKey: 'same_issue', previousReferenceId: alphaImported.id,
+		});
+		let betaLatest = await channel.call<WorkspaceReferenceDTO>(sender, 'refreshPackageSource', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: beta.connectionId, sourceId: 'issues', sourceKey: 'same_issue', previousReferenceId: betaImported.id,
+		});
+		assert.equal(alphaLatest.previousId, alphaImported.id);
+		assert.equal(betaLatest.previousId, betaImported.id);
+		assert.equal(alphaLatest.accountRef, alpha.accountRef);
+		assert.equal(betaLatest.accountRef, beta.accountRef);
+		assert.deepEqual(observedRequests, [
+			'account-alpha-token-71', 'account-beta-token-82', 'account-alpha-token-71', 'account-beta-token-82',
+		]);
+		await channel.call(sender, 'disconnectPackageConnection', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: alpha.connectionId,
+		});
+		assert.equal(credentials.has(alpha.accountRef), false);
+		assert.equal(credentials.get(beta.accountRef), 'account-beta-token-82');
+		await assert.rejects(channel.call(sender, 'refreshPackageSource', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: alpha.connectionId, sourceId: 'issues', sourceKey: 'same_issue', previousReferenceId: alphaLatest.id,
+		}), /active matching account/i);
+		const betaAfterRevocation = await channel.call<WorkspaceReferenceDTO>(sender, 'refreshPackageSource', {
+			projectId: project.project.id, packageId: installed.packageId, connectionId: beta.connectionId, sourceId: 'issues', sourceKey: 'same_issue', previousReferenceId: betaLatest.id,
+		});
+		assert.equal(betaAfterRevocation.previousId, betaLatest.id);
+		assert.equal(betaAfterRevocation.accountRef, beta.accountRef);
+		assert.deepEqual(observedRequests.slice(4), ['account-beta-token-82']);
+		assert.doesNotMatch(JSON.stringify(database.knowledge.listProjectReferences(project.project.id)), /account-(?:alpha|beta)-token/);
+		assert.doesNotMatch(readFileSync(databasePath).toString('utf8'), /account-(?:alpha|beta)-token/);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
