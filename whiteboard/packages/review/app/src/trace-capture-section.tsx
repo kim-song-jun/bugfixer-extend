@@ -11,30 +11,30 @@ type TraceCredentials = Exclude<InstallApplyRequest["trace"], true | undefined>;
 /** One line naming the selected trace store and where its setup lives. */
 function traceStorageSummary(trace: ReviewCliInstallStatus["trace"]): string {
   if (trace.storageMode === "hosted") {
-    return "Storage: hosted trace store selected. Manage it with `review login`, `review trace allow`, and `review trace storage use` in a terminal.";
+    return "저장소: 호스팅 트레이스 저장소를 선택했습니다. 터미널에서 `review login`, `review trace allow`, `review trace storage use` 명령으로 관리할 수 있습니다.";
   }
 
   if (trace.storageMode === "none" || !trace.configured) {
-    return "Storage: none selected. Enter S3/R2 credentials below, or select the hosted store with `review trace storage use hosted`.";
+    return "저장소: 선택된 저장소가 없습니다. 아래에 S3/R2 인증 정보를 입력하거나 `review trace storage use hosted` 명령으로 호스팅 저장소를 선택하세요.";
   }
 
   const source =
     trace.credentialsSource === "profile"
       ? "config.json"
       : trace.credentialsSource === "process-env"
-        ? "environment variables"
-        : "the legacy env file";
+        ? "환경 변수"
+        : "기존 환경 변수 파일";
 
-  return `Storage: S3/R2 bucket "${trace.bucket ?? ""}" (credentials from ${source}).`;
+  return `저장소: S3/R2 버킷 "${trace.bucket ?? ""}" (인증 정보 출처: ${source}).`;
 }
 
 /** What capture records and where, for the selected store. */
 function traceDestinationCopy(trace: ReviewCliInstallStatus["trace"]): string {
   if (trace.storageMode === "hosted") {
-    return "Records agent sessions from allowed repositories to the hosted /dev/fast trace store so Whiteboard sessions can quote them. Session hooks activate each Git or Jujutsu repository when an agent session starts.";
+    return "허용된 저장소의 에이전트 세션을 호스팅 /dev/fast 트레이스 저장소에 기록해 Whiteboard 세션에서 인용할 수 있게 합니다. 에이전트 세션이 시작될 때 세션 훅이 각 Git 또는 Jujutsu 저장소에서 트레이스 수집을 시작합니다.";
   }
 
-  return "Records agent sessions to your own S3/R2 bucket so Whiteboard sessions can quote them. Session hooks activate each Git or Jujutsu repository when an agent session starts.";
+  return "에이전트 세션을 개인 S3/R2 버킷에 기록해 Whiteboard 세션에서 인용할 수 있게 합니다. 에이전트 세션이 시작될 때 세션 훅이 각 Git 또는 Jujutsu 저장소에서 트레이스 수집을 시작합니다.";
 }
 
 /**
@@ -97,7 +97,7 @@ export function TraceCaptureSection({
   return (
     <div className="review-agent-setup-terminal review-agent-setup-trace">
       <div className="review-agent-setup-terminal-info">
-        <span className="review-agent-setup-name">Trace capture</span>
+        <span className="review-agent-setup-name">트레이스 수집</span>
         <span
           className="review-agent-setup-state"
           data-installed={status.trace.enabled}
@@ -105,13 +105,13 @@ export function TraceCaptureSection({
         >
           {status.trace.enabled
             ? status.trace.error
-              ? "enabled, storage check failed"
+              ? "켜짐, 저장소 확인 실패"
               : status.trace.storageMode === "hosted"
-                ? "enabled (hosted)"
-                : "enabled"
+                ? "켜짐 (호스팅)"
+                : "켜짐"
             : status.trace.configured
-              ? "ready to enable"
-              : "off"}
+              ? "켜기 준비됨"
+              : "꺼짐"}
         </span>
         <span className="review-agent-setup-cli">
           {traceDestinationCopy(status.trace)}
@@ -123,40 +123,40 @@ export function TraceCaptureSection({
       {hosted ? null : (
         <div className="review-agent-setup-trace-fields">
           <input
-            aria-label="S3/R2 endpoint URL"
-            placeholder="S3/R2 endpoint URL"
+            aria-label="S3/R2 엔드포인트 URL"
+            placeholder="S3/R2 엔드포인트 URL"
             value={traceEndpoint}
             onChange={(event) => setTraceEndpoint(event.currentTarget.value)}
           />
           <input
-            aria-label="S3/R2 bucket"
-            placeholder="S3/R2 bucket"
+            aria-label="S3/R2 버킷"
+            placeholder="S3/R2 버킷"
             value={traceBucket}
             onChange={(event) => setTraceBucket(event.currentTarget.value)}
           />
           <input
-            aria-label="S3/R2 region"
-            placeholder="Region (auto for R2)"
+            aria-label="S3/R2 리전"
+            placeholder="리전 (R2는 자동)"
             value={traceRegion}
             onChange={(event) => setTraceRegion(event.currentTarget.value)}
           />
           <input
-            aria-label="S3/R2 access key ID"
+            aria-label="S3/R2 액세스 키 ID"
             placeholder={
               status.trace.accessKeyIdPrefix
-                ? `Access key (${status.trace.accessKeyIdPrefix}…)`
-                : "S3/R2 access key ID"
+                ? `액세스 키 (${status.trace.accessKeyIdPrefix}…)`
+                : "S3/R2 액세스 키 ID"
             }
             value={traceKey}
             onChange={(event) => setTraceKey(event.currentTarget.value)}
           />
           <input
-            aria-label="S3/R2 secret access key"
+            aria-label="S3/R2 비밀 액세스 키"
             type="password"
             placeholder={
               status.trace.configured
-                ? "Secret key (unchanged)"
-                : "S3/R2 secret access key"
+                ? "비밀 키 (변경하지 않음)"
+                : "S3/R2 비밀 액세스 키"
             }
             value={traceSecret}
             onChange={(event) => setTraceSecret(event.currentTarget.value)}
@@ -171,7 +171,7 @@ export function TraceCaptureSection({
             void run("trace-remove", () => install.remove({ trace: true }))
           }
         >
-          {busy === "trace-remove" ? "Disabling…" : "Disable"}
+          {busy === "trace-remove" ? "끄는 중…" : "끄기"}
         </button>
       ) : null}
       {hosted ? null : (
@@ -204,10 +204,10 @@ export function TraceCaptureSection({
           }
         >
           {busy === "trace"
-            ? "Checking…"
+            ? "확인 중…"
             : status.trace.enabled
-              ? "Repair"
-              : "Enable"}
+              ? "복구"
+              : "켜기"}
         </button>
       )}
       {error ? <p className="review-agent-setup-error">{error}</p> : null}

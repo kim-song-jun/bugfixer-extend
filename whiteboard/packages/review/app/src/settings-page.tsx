@@ -11,13 +11,13 @@ import { DiffrConfigSection } from "./diffr-config-section";
 import { TraceCaptureSection } from "./trace-capture-section";
 
 const THEME_LABELS: Record<ReviewThemeChoice, string> = {
-  light: "Light",
-  dark: "Dark",
-  system: "System",
+  light: "밝게",
+  dark: "어둡게",
+  system: "시스템",
 };
 
 const KEYMAP_LABELS: Record<ReviewKeymapChoice, string> = {
-  none: "Default",
+  none: "기본",
   vim: "Vim",
   emacs: "Emacs",
 };
@@ -93,14 +93,14 @@ export function SettingsPage({
       <div className="review-home-scroll">
         <div className="review-home-content review-settings-page">
           <div className="review-home-page-header">
-            <h1>Settings</h1>
+            <h1>설정</h1>
           </div>
           <p className="review-settings-lede">
-            Settings apply to Whiteboard on this machine.
+            이 설정은 이 컴퓨터의 Whiteboard에 적용됩니다.
           </p>
 
           {install ? (
-            <Section label="Agents">
+            <Section label="에이전트">
               <LegacySkillsRow
                 install={install}
                 onStatusChange={setInstallStatus}
@@ -110,13 +110,13 @@ export function SettingsPage({
           ) : null}
 
           {install?.status.cli ? (
-            <Section label="Command line">
+            <Section label="명령줄">
               <Row
-                label="whiteboard command"
+                label="whiteboard 명령"
                 description={
                   install.status.shim.installed
-                    ? `Installed at ${install.status.shim.path}. Your agents and trace capture run it.`
-                    : "Adds whiteboard to your shell PATH. Your agents and trace capture run it."
+                    ? `설치 경로: ${install.status.shim.path}. 에이전트와 트레이스 수집이 이 명령을 사용합니다.`
+                    : "셸 PATH에 whiteboard를 추가합니다. 에이전트와 트레이스 수집이 이 명령을 사용합니다."
                 }
               >
                 {install.status.shim.installer ? null : (
@@ -135,21 +135,21 @@ export function SettingsPage({
                       )
                     }
                   >
-                    {install.status.shim.installed ? "Remove" : "Install"}
+                    {install.status.shim.installed ? "제거" : "설치"}
                   </button>
                 )}
               </Row>
             </Section>
           ) : null}
 
-          <Section label="Privacy">
+          <Section label="개인정보">
             <Row
-              label="Share anonymous usage data"
-              description="Counts and timings only. Never code, file paths, or repository names."
+              label="익명 사용 데이터 공유"
+              description="횟수와 소요 시간만 공유합니다. 코드, 파일 경로, 저장소 이름은 보내지 않습니다."
             >
               <label
                 className="review-settings-toggle"
-                aria-label="Share anonymous usage data"
+                aria-label="익명 사용 데이터 공유"
               >
                 <input
                   type="checkbox"
@@ -168,10 +168,10 @@ export function SettingsPage({
             </Row>
           </Section>
 
-          <Section label="Editor">
-            <Row label="Theme" description="How Whiteboard looks.">
+          <Section label="편집기">
+            <Row label="테마" description="Whiteboard의 화면 모양을 설정합니다.">
               <Choice
-                label="Theme"
+                label="테마"
                 value={theme}
                 labels={THEME_LABELS}
                 disabled={busy !== null}
@@ -181,11 +181,11 @@ export function SettingsPage({
               />
             </Row>
             <Row
-              label="Keymap"
-              description="Vim and Emacs keys come from a bundled extension. A change needs a reload."
+              label="키맵"
+              description="Vim 및 Emacs 키는 포함된 확장 프로그램에서 제공합니다. 변경 사항을 적용하려면 다시 불러와야 합니다."
             >
               <Choice
-                label="Keymap"
+                label="키맵"
                 value={keymap}
                 labels={KEYMAP_LABELS}
                 disabled={busy !== null}
@@ -200,30 +200,30 @@ export function SettingsPage({
             </Row>
           </Section>
 
-          <Section label="Tools">
+          <Section label="도구">
             <Row
-              label="Extensions"
-              description="Install or turn on language extensions."
+              label="확장 프로그램"
+              description="언어 확장 프로그램을 설치하거나 켭니다."
             >
               <button
                 type="button"
                 className="review-settings-button"
                 onClick={settings.manageExtensions}
               >
-                Manage…
+                관리…
               </button>
             </Row>
           </Section>
 
-          <Section label="Experimental Features">
+          <Section label="실험 기능">
             <Row
-              label="Structural Diffs"
-              description="Replace the standard diff view with syntax-aware diffs and linked folds."
+              label="구조 인식 diff"
+              description="기본 diff 화면을 구문을 인식하는 diff와 연결된 접기 영역으로 바꿉니다."
             >
               <label className="review-settings-toggle">
                 <input
                   type="checkbox"
-                  aria-label="Structural Diffs"
+                  aria-label="구조 인식 diff"
                   checked={structuralDiffEnabled}
                   disabled={busy !== null}
                   onChange={(event) => {
@@ -244,13 +244,13 @@ export function SettingsPage({
               />
             ) : null}
             <Row
-              label="Software Map"
-              description="Show the experimental Software Map view in sessions."
+              label="소프트웨어 맵"
+              description="세션에서 실험 기능인 소프트웨어 맵 화면을 표시합니다."
             >
               <label className="review-settings-toggle">
                 <input
                   type="checkbox"
-                  aria-label="Software Map"
+                  aria-label="소프트웨어 맵"
                   checked={softwareMapEnabled}
                   disabled={busy !== null}
                   onChange={(event) => {
@@ -265,13 +265,13 @@ export function SettingsPage({
               </label>
             </Row>
             <Row
-              label="Scratchpad"
-              description="Show the experimental scratchpad on Home. Agents draw on it through Whiteboard's MCP tools."
+              label="스크래치패드"
+              description="홈 화면에 실험 기능인 스크래치패드를 표시합니다. 에이전트는 Whiteboard MCP 도구로 여기에 그릴 수 있습니다."
             >
               <label className="review-settings-toggle">
                 <input
                   type="checkbox"
-                  aria-label="Scratchpad"
+                  aria-label="스크래치패드"
                   checked={scratchpadEnabled}
                   disabled={busy !== null}
                   onChange={(event) => {

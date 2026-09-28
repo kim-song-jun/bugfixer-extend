@@ -8,13 +8,13 @@ import {
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 const displaySettings = [
-  ["context.enabled", "Collapse unchanged lines"],
-  ["test-bodies.enabled", "Collapse test bodies"],
-  ["deleted-bodies.enabled", "Collapse deleted function bodies"],
-  ["removed-runs.enabled", "Collapse long removed stretches"],
-  ["group.enabled", "Group adjacent folds"],
-  ["hide-files.enabled", "Hide files by tag"],
-  ["hide-files.deleted", "Hide deleted files"],
+  ["context.enabled", "변경되지 않은 줄 접기"],
+  ["test-bodies.enabled", "테스트 본문 접기"],
+  ["deleted-bodies.enabled", "삭제된 함수 본문 접기"],
+  ["removed-runs.enabled", "길게 삭제된 구간 접기"],
+  ["group.enabled", "인접한 접기 영역 묶기"],
+  ["hide-files.enabled", "태그로 파일 숨기기"],
+  ["hide-files.deleted", "삭제된 파일 숨기기"],
 ] as const;
 
 function setting(
@@ -67,7 +67,7 @@ export function DiffrConfigSection({
       () => {
         if (!cancelled)
           setError(
-            "Could not read diffr settings. Reopen Settings to try again.",
+            "diffr 설정을 읽지 못했습니다. 다시 설정을 열어 시도해 주세요.",
           );
       },
     );
@@ -89,7 +89,7 @@ export function DiffrConfigSection({
       setError(
         cause instanceof Error
           ? cause.message
-          : "Could not update diffr settings.",
+          : "diffr 설정을 업데이트하지 못했습니다.",
       );
     } finally {
       pending.current = false;
@@ -119,17 +119,17 @@ export function DiffrConfigSection({
     <div className="review-settings-diffr">
       <details>
         <summary onClick={() => setOpened(true)}>
-          Diff display and AI summaries
+          diff 표시 및 AI 요약
         </summary>
         {opened && (
           <>
             <p className="review-settings-row-description">
-              Shared with the diffr CLI. Applies to all repositories.
+              diffr CLI와 설정을 공유하며 모든 저장소에 적용됩니다.
             </p>
-            {!config && !error && <p role="status">Reading diffr settings…</p>}
+            {!config && !error && <p role="status">diffr 설정을 읽는 중…</p>}
             {config && (
               <>
-                <h3>Display</h3>
+                <h3>표시</h3>
                 {displaySettings.map(([key, label]) => (
                   <div key={key}>
                     <SettingRow label={label}>
@@ -153,11 +153,11 @@ export function DiffrConfigSection({
                     </SettingRow>
                     {setting(config, key) === undefined && (
                       <p className="review-settings-unavailable">
-                        Not available in this configuration.
+                        현재 설정에서는 사용할 수 없습니다.
                       </p>
                     )}
                     {key === "context.enabled" && (
-                      <SettingRow label="Context lines">
+                      <SettingRow label="주변 줄 수">
                         <ContextLines
                           value={setting(config, "context.lines")}
                           disabled={busy || setting(config, key) !== true}
@@ -177,19 +177,18 @@ export function DiffrConfigSection({
                     {key === "hide-files.enabled" &&
                       Array.isArray(hiddenTags) && (
                         <p className="review-settings-row-description">
-                          Tags: {hiddenTags.join(", ")}
+                          태그: {hiddenTags.join(", ")}
                         </p>
                       )}
                   </div>
                 ))}
-                <h3>AI summaries</h3>
+                <h3>AI 요약</h3>
                 <p className="review-settings-row-description">
-                  Sends source-file contents to Gemini to summarize large new
-                  functions and tests.
+                  소스 파일 내용을 Gemini에 보내 새 함수와 테스트가 긴 경우 요약합니다.
                 </p>
                 {unavailable && (
                   <p className="review-settings-unavailable">
-                    The summarizer is not available in this configuration.
+                    현재 설정에서는 요약 기능을 사용할 수 없습니다.
                   </p>
                 )}
                 {draft && (
@@ -197,9 +196,9 @@ export function DiffrConfigSection({
                     disabled={busy || unavailable}
                     className="review-settings-summary-fields"
                   >
-                    <SettingRow label="Enable summaries">
+                    <SettingRow label="요약 사용">
                       <input
-                        aria-label="Enable summaries"
+                        aria-label="요약 사용"
                         type="checkbox"
                         checked={draft.enabled}
                         onChange={(event) =>
@@ -207,13 +206,13 @@ export function DiffrConfigSection({
                         }
                       />
                     </SettingRow>
-                    <SettingRow label="API key">
+                    <SettingRow label="API 키">
                       <input
                         className="review-settings-input"
-                        aria-label="API key"
+                        aria-label="API 키"
                         type="password"
                         autoComplete="off"
-                        placeholder="Enter replacement key"
+                        placeholder="새 API 키 입력"
                         value={draft.apiKey}
                         onChange={(event) =>
                           setDraft({ ...draft, apiKey: event.target.value })
@@ -222,27 +221,26 @@ export function DiffrConfigSection({
                     </SettingRow>
                     <p className="review-settings-row-description">
                       {config.credentialSource === "config"
-                        ? "Saved key"
+                        ? "저장된 키"
                         : config.credentialSource === "environment"
-                          ? "Environment key available"
-                          : "Not configured"}
-                      . Replacement keys are stored in diffr’s config. Leave
-                      blank to keep the current key.
+                          ? "환경 변수에 키가 있습니다"
+                          : "설정되지 않음"}
+                      . 새 키는 diffr 설정 파일에 저장됩니다. 현재 키를 유지하려면 비워 두세요.
                     </p>
-                    <SettingRow label="Model">
+                    <SettingRow label="모델">
                       <input
                         className="review-settings-input"
-                        aria-label="Model"
+                        aria-label="모델"
                         value={draft.model}
                         onChange={(event) =>
                           setDraft({ ...draft, model: event.target.value })
                         }
                       />
                     </SettingRow>
-                    <SettingRow label="Include tests">
+                    <SettingRow label="테스트 포함">
                       <input
                         type="checkbox"
-                        aria-label="Include tests"
+                        aria-label="테스트 포함"
                         checked={draft.tests}
                         onChange={(event) =>
                           setDraft({ ...draft, tests: event.target.checked })
@@ -261,7 +259,7 @@ export function DiffrConfigSection({
                           })
                         }
                       >
-                        Test setup
+                        설정 테스트
                       </button>
                       <button
                         type="button"
@@ -277,19 +275,18 @@ export function DiffrConfigSection({
                           })
                         }
                       >
-                        Save summaries
+                        요약 설정 저장
                       </button>
                     </div>
                     <p className="review-settings-row-description">
-                      Test setup sends synthetic code without saving your
-                      settings.
+                      설정 테스트는 예시 코드를 보내며 현재 설정을 저장하지 않습니다.
                     </p>
                   </fieldset>
                 )}
                 {summary && (
                   <pre
                     className="review-settings-summary-result"
-                    aria-label="Sample summary"
+                    aria-label="요약 예시"
                   >
                     {summary}
                   </pre>
@@ -299,7 +296,7 @@ export function DiffrConfigSection({
           </>
         )}
       </details>
-      {busy && <p role="status">Working…</p>}
+      {busy && <p role="status">처리 중…</p>}
       {error && (
         <p role="alert" className="review-settings-error">
           {error}
@@ -307,7 +304,7 @@ export function DiffrConfigSection({
       )}
       {changed && (
         <p role="status">
-          Reload the window to see changes.{" "}
+          변경 사항을 적용하려면 창을 다시 불러오세요.{" "}
           <button
             className="review-settings-button"
             disabled={busy}
@@ -316,25 +313,25 @@ export function DiffrConfigSection({
               else void run(reloadWindow);
             }}
           >
-            Reload window
+            창 다시 불러오기
           </button>
         </p>
       )}
       {confirmReload && (
-        <div role="alertdialog" aria-label="Discard summary changes?">
-          <p>Discard unsaved summary settings and reload?</p>
+        <div role="alertdialog" aria-label="저장하지 않은 요약 설정을 버릴까요?">
+          <p>저장하지 않은 요약 설정을 버리고 다시 불러올까요?</p>
           <button
             className="review-settings-button"
             disabled={busy}
             onClick={() => void run(reloadWindow)}
           >
-            Discard and reload
+            버리고 다시 불러오기
           </button>{" "}
           <button
             className="review-settings-button"
             onClick={() => setConfirmReload(false)}
           >
-            Cancel
+            취소
           </button>
         </div>
       )}
@@ -395,7 +392,7 @@ function ContextLines({
     <div>
       <input
         className="review-settings-input"
-        aria-label="Context lines"
+        aria-label="주변 줄 수"
         type="number"
         min={0}
         max={0xffff_ffff}
@@ -409,7 +406,7 @@ function ContextLines({
           if (event.key === "Enter") save();
         }}
       />
-      {error && <p role="alert">Enter a nonnegative whole number.</p>}
+      {error && <p role="alert">0 이상의 정수를 입력하세요.</p>}
     </div>
   );
 }

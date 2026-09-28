@@ -46,7 +46,7 @@ describe("TraceCaptureSection", () => {
     );
     await act(async () => {
       [...container.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent === "Enable")
+        .find((button) => button.textContent === "켜기")
         ?.click();
     });
 
@@ -86,10 +86,10 @@ describe("TraceCaptureSection", () => {
     );
     expect(
       container.querySelector(".review-agent-setup-state")?.textContent,
-    ).toBe("enabled (hosted)");
+    ).toBe("켜짐 (호스팅)");
     expect(
       container.querySelector('[data-testid="trace-storage"]')?.textContent,
-    ).toContain("hosted trace store selected");
+    ).toContain("호스팅 트레이스 저장소를 선택했습니다");
   });
 
   it("disables capture through the shared remove action", async () => {
@@ -119,7 +119,7 @@ describe("TraceCaptureSection", () => {
     );
     await act(async () => {
       [...container.querySelectorAll<HTMLButtonElement>("button")]
-        .find((button) => button.textContent === "Disable")
+        .find((button) => button.textContent === "끄기")
         ?.click();
     });
 
@@ -153,17 +153,17 @@ describe("TraceCaptureSection", () => {
       root.render(<TraceCaptureSection install={install} />),
     );
     expect(
-      container.querySelector('input[aria-label="S3/R2 endpoint URL"]'),
+      container.querySelector('input[aria-label="S3/R2 엔드포인트 URL"]'),
     ).toBeNull();
     expect(container.textContent).toContain(
-      "to the hosted /dev/fast trace store",
+      "호스팅 /dev/fast 트레이스 저장소에 기록해",
     );
-    expect(container.textContent).not.toContain("your own S3/R2 bucket");
+    expect(container.textContent).not.toContain("개인 S3/R2 버킷");
     expect(
       [...container.querySelectorAll<HTMLButtonElement>("button")].map(
         (button) => button.textContent,
       ),
-    ).not.toContain("Repair");
+    ).not.toContain("복구");
   });
 });
 
