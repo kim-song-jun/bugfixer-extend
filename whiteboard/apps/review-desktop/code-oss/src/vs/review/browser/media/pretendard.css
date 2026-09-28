@@ -3,10 +3,11 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import './review.common.main.js';
-import './editor.desktop.main.js';
-import './browser/media/pretendard.css';
-import './contrib/update/reviewUpdate.contribution.js';
-import './browser/projectHome/projectHomeEditor.contribution.js';
-
-export { main } from './electron-browser/review.main.js';
+/* Loaded by both native entry points so Korean UI uses the same bundled font offline. */
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("./PretendardVariable.woff2") format("woff2-variations");
+  font-style: normal;
+  font-weight: 45 920;
+  font-display: swap;
+}
