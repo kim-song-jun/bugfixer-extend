@@ -242,6 +242,18 @@ jobs:
           SKIP_NOTARIZE: "1"
         run: pnpm --filter @dev.fast/review-desktop app:package:macos
 
+      - name: Native project dashboard smoke
+        run: node apps/review-desktop/scripts/smoke-native-dashboard-visual.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-ui-smoke"
+
+      - name: Upload native UI smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-desktop-native-ui-smoke
+          path: ${{ runner.temp }}/review-desktop-native-ui-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Archive unsigned macOS app
         run: ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-macos-arm64-unsigned.zip"
 
