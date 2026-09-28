@@ -13,6 +13,11 @@
 	font: 13px/1.45 "Pretendard Variable", Pretendard, Geist, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
 }
 
+/* Keep the native sidebar caption in the same type family as project navigation. */
+.monaco-workbench .part.sidebar > .title > .title-label h2 {
+	font-family: "Pretendard Variable", Pretendard, Geist, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
+}
+
 .vs-dark .project-sidebar,
 .hc-black .project-sidebar {
 	--project-sidebar-bg: #171C20;
