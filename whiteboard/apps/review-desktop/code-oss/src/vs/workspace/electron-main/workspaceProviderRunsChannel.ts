@@ -53,6 +53,8 @@ interface PreviewContext {
 }
 
 const maximumTaskPromptBytes = 16 * 1024 * 1024;
+const pendingDeletionReplayIntervalMs = 50;
+const pendingDeletionReplayTimeoutMs = 1_000;
 
 interface ActiveRun {
 	readonly taskId: string;
@@ -79,6 +81,7 @@ export class WorkspaceProviderRunsChannel {
 	private readonly queuedRuns = new Map<string, QueuedRun>();
 	private readonly uncertainLeases = new Map<string, TaskFolderWriterLease>();
 	private restartBarrier: TaskFolderWriterLease | undefined;
+	private deletionReplayController: AbortController | undefined;
 	private closing = false;
 
 	constructor(
@@ -106,20 +109,40 @@ export class WorkspaceProviderRunsChannel {
 	}
 
 	/** Resume durable Trash requests before project-window IPC is exposed. */
-	recoverPendingTaskDeletions(): void {
-		for (const request of this.database.listPendingTaskDeletions()) {
-			const task = this.database.getTask(request.taskId);
-			if (!task) { continue; }
-			this.reconcileStoppedTaskAttempts(task.id);
-			const live = this.database.listProviderAttempts(task.id).find(attempt =>
-				!attempt.cleanupVerified && attempt.ownedPgid !== null && !isOwnedProcessGroupGone(attempt.ownedPgid),
-			);
-			this.database.finalizeTaskDeletion(
-				task.id,
-				request.requestId,
-				!live,
-				live ? `Owned provider process group for attempt ${live.attemptId} is still live or cannot be verified. Stop it safely, then retry Trash.` : null,
-			);
+	async recoverPendingTaskDeletions(): Promise<void> {
+		const controller = new AbortController();
+		this.deletionReplayController?.abort();
+		this.deletionReplayController = controller;
+		const deadline = Date.now() + pendingDeletionReplayTimeoutMs;
+		try {
+			for (const request of this.database.listPendingTaskDeletions()) {
+				if (controller.signal.aborted) { break; }
+				const task = this.database.getTask(request.taskId);
+				if (!task) { continue; }
+				let live: ProviderAttempt | undefined;
+				do {
+					this.reconcileStoppedTaskAttempts(task.id);
+					live = this.database.listProviderAttempts(task.id).find(attempt =>
+						!attempt.cleanupVerified && attempt.ownedPgid !== null && !isOwnedProcessGroupGone(attempt.ownedPgid),
+					);
+					if (!live || controller.signal.aborted || Date.now() >= deadline) { break; }
+					await new Promise<void>(resolve => {
+						const done = (): void => { controller.signal.removeEventListener('abort', onAbort); resolve(); };
+						const timer = setTimeout(done, Math.min(pendingDeletionReplayIntervalMs, Math.max(0, deadline - Date.now())));
+						const onAbort = (): void => { clearTimeout(timer); done(); };
+						controller.signal.addEventListener('abort', onAbort, { once: true });
+					});
+				} while (!controller.signal.aborted);
+				if (controller.signal.aborted) { break; }
+				this.database.finalizeTaskDeletion(
+					task.id,
+					request.requestId,
+					!live,
+					live ? `Owned provider process group for attempt ${live.attemptId} is still live or cannot be verified. Stop it safely, then retry Trash.` : null,
+				);
+			}
+		} finally {
+			if (this.deletionReplayController === controller) { this.deletionReplayController = undefined; }
 		}
 	}
 
@@ -157,6 +180,7 @@ export class WorkspaceProviderRunsChannel {
 	/** Joined by the main-process shutdown event so owned process groups finish cleanup. */
 	async shutdown(): Promise<void> {
 		this.closing = true;
+		this.deletionReplayController?.abort();
 		for (const run of this.queuedRuns.values()) { run.controller.abort(); }
 		for (const run of this.pendingStarts.values()) { run.controller.abort(); }
 		await Promise.allSettled([...this.pendingStarts.keys()]);

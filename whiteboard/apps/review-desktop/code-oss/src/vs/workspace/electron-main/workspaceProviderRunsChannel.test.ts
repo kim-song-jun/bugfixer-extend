@@ -382,9 +382,30 @@ test('startup replay finalizes a pending Trash request after gate recovery prove
 		database.interruptLiveProviderAttempts();
 		assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, true);
 
-		channel.recoverPendingTaskDeletions();
+		await channel.recoverPendingTaskDeletions();
 		assert.ok(database.getTask(taskId)?.trashedAt);
 		assert.equal(database.getTaskDeletionRequest('trash-startup-replay')?.status, 'complete');
+	});
+});
+
+test('startup replay completes Trash and verifies cleanup when a live recorded group exits', { skip: process.platform === 'win32' }, async (t) => {
+	await withProviderChannel(async ({ channel, database, taskId }) => {
+		const task = database.getTask(taskId)!;
+		const attempt = database.createProviderAttempt({
+			taskId, provider: 'codex', purpose: 'connectionTest', profileRef: 'local-default-codex',
+			folderIdentity: 'test-folder-identity', cwd: process.cwd(), mode: 'read-only', prompt: 'test',
+		});
+		const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 180)'], { detached: true, stdio: 'ignore' });
+		assert.ok(child.pid);
+		t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* Test-owned process group already exited. */ } });
+		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
+		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
+		database.beginTaskDeletion(taskId, task.revision, 'trash-exiting-replay');
+
+		await channel.recoverPendingTaskDeletions();
+		assert.ok(database.getTask(taskId)?.trashedAt);
+		assert.equal(database.getTaskDeletionRequest('trash-exiting-replay')?.status, 'complete');
+		assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, true);
 	});
 });
 
@@ -402,11 +423,33 @@ test('startup replay leaves Trash visible with an actionable error for a live re
 		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
 		database.beginTaskDeletion(taskId, task.revision, 'trash-live-replay');
 
-		channel.recoverPendingTaskDeletions();
+		await channel.recoverPendingTaskDeletions();
 		const stillVisible = database.getTask(taskId)!;
 		assert.equal(stillVisible.trashedAt, null);
 		assert.ok(stillVisible.deletionPendingAt);
 		assert.match(stillVisible.deletionError ?? '', /still live or cannot be verified.*retry Trash/);
+	});
+});
+
+test('shutdown cancels startup replay without completing pending Trash', { skip: process.platform === 'win32' }, async (t) => {
+	await withProviderChannel(async ({ channel, database, taskId }) => {
+		const task = database.getTask(taskId)!;
+		const attempt = database.createProviderAttempt({
+			taskId, provider: 'codex', purpose: 'connectionTest', profileRef: 'local-default-codex',
+			folderIdentity: 'test-folder-identity', cwd: process.cwd(), mode: 'read-only', prompt: 'test',
+		});
+		const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+		assert.ok(child.pid);
+		t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* Test-owned process group already exited. */ } });
+		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
+		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
+		database.beginTaskDeletion(taskId, task.revision, 'trash-cancelled-replay');
+
+		const replay = channel.recoverPendingTaskDeletions();
+		await channel.shutdown();
+		await replay;
+		assert.equal(database.getTaskDeletionRequest('trash-cancelled-replay')?.status, 'pending');
+		assert.equal(database.getTask(taskId)?.trashedAt, null);
 	});
 });
 
