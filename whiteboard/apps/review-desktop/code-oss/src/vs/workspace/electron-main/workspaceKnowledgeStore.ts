@@ -13,6 +13,7 @@ const maximumReferenceContentBytes = 16 * 1024 * 1024;
 const maximumConventionBytes = 256 * 1024;
 const maximumPromotedExcerptCharacters = 4000;
 const maximumPromotedExcerptBytes = 16 * 1024;
+const maximumActiveTaskInstructionPromotions = 100;
 
 export type ReferenceSnapshotSummary = Omit<ReferenceSnapshot, 'content' | 'derivedText'>;
 
@@ -156,8 +157,21 @@ export class WorkspaceKnowledgeStore {
 			const reference = this.readReference(snapshotId);
 			if (!reference) { throw new Error('The source snapshot is unavailable.'); }
 			const normalizeNewlines = (text: string) => text.replace(/\r\n?/g, '\n');
-			if (!normalizeNewlines(reference.derivedText).includes(normalizeNewlines(excerpt))) {
+			const normalizedExcerpt = normalizeNewlines(excerpt);
+			if (!normalizeNewlines(reference.derivedText).includes(normalizedExcerpt)) {
 				throw new Error('The approved excerpt must exactly match a contiguous passage in the source snapshot.');
+			}
+			const activeForSource = this.db.prepare(`SELECT p.excerpt FROM task_reference_instruction_promotions p
+				LEFT JOIN task_reference_instruction_withdrawals w ON w.promotion_id = p.id
+				WHERE p.task_id = ? AND p.snapshot_id = ? AND w.action_id IS NULL`).all(taskId, snapshotId) as Array<{ excerpt: string }>;
+			if (activeForSource.some(item => normalizeNewlines(item.excerpt) === normalizedExcerpt)) {
+				throw new Error('This exact excerpt is already an active instruction for the task.');
+			}
+			const activeCount = Number(this.db.prepare(`SELECT COUNT(*) AS count FROM task_reference_instruction_promotions p
+				LEFT JOIN task_reference_instruction_withdrawals w ON w.promotion_id = p.id
+				WHERE p.task_id = ? AND w.action_id IS NULL`).get(taskId)!.count);
+			if (activeCount >= maximumActiveTaskInstructionPromotions) {
+				throw new Error(`A task may have at most ${maximumActiveTaskInstructionPromotions} active approved reference instructions.`);
 			}
 			const id = randomUUID();
 			const approvedAt = new Date().toISOString();

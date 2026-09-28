@@ -178,6 +178,7 @@ test('reference excerpt promotion requires an attached exact passage and preserv
 		assert.equal(approval.sourceSnapshotId, reference.id);
 		assert.equal(approval.sourceVersion, 1);
 		assert.equal(approval.active, true);
+		assert.throws(() => database.knowledge.promoteReferenceExcerpt(first.task.id, reference.id, approval.excerpt), /already an active instruction/);
 		const attempt = database.createProviderAttempt({
 			taskId: first.task.id, provider: 'codex', purpose: 'task', profileRef: 'profile:local',
 			folderIdentity: `/work/${first.project.id}`, cwd: `/work/${first.project.id}`, mode: 'mutating',
@@ -187,12 +188,37 @@ test('reference excerpt promotion requires an attached exact passage and preserv
 		assert.equal(withdrawn.active, false);
 		assert.ok(withdrawn.withdrawalActionId);
 		assert.equal(database.knowledge.listTaskInstructionPromotions(first.task.id)[0].active, false);
+		const reapproved = database.knowledge.promoteReferenceExcerpt(first.task.id, reference.id, approval.excerpt);
+		assert.notEqual(reapproved.id, approval.id);
+		assert.equal(reapproved.active, true);
+		assert.equal(database.knowledge.listTaskInstructionPromotions(first.task.id).filter(item => item.active).length, 1);
 		assert.deepEqual(database.getProviderAttempt(attempt.attemptId)?.approvedInstructions, [approval]);
 		assert.equal(database.getProviderAttempt(attempt.attemptId)?.prompt, `Approved instruction ${approval.id}:\n${approval.excerpt}`);
 		assert.throws(() => database.knowledge.withdrawReferenceExcerpt(first.task.id, approval.id), /already been withdrawn/);
 		const sqlite = Reflect.get(database, 'db') as DatabaseSync;
 		assert.throws(() => sqlite.prepare('UPDATE task_reference_instruction_promotions SET excerpt = ? WHERE id = ?').run('altered', approval.id), /immutable/);
 		assert.throws(() => sqlite.prepare('DELETE FROM task_reference_instruction_withdrawals WHERE promotion_id = ?').run(approval.id), /immutable/);
+	});
+});
+
+test('task instruction promotions cap active approvals at 100 while allowing replacement after withdrawal', () => {
+	withDatabase(database => {
+		const { project, task } = createProjectAndTask(database, 'Promotion limit');
+		const excerpts = Array.from({ length: 101 }, (_, index) => `Approved passage ${index}.`);
+		const reference = database.knowledge.importReference({
+			projectId: project.id, connectorId: 'manual-text', connectorVersion: '1', externalId: 'promotion-limit',
+			title: 'Promotion limit source', contentType: 'text/plain; charset=utf-8',
+			content: new TextEncoder().encode(excerpts.join('\n')),
+		});
+		database.knowledge.attachReferenceToTask(task.id, reference.id);
+		const approvals = excerpts.slice(0, 100).map(excerpt => database.knowledge.promoteReferenceExcerpt(task.id, reference.id, excerpt));
+		assert.equal(approvals.length, 100);
+		assert.throws(() => database.knowledge.promoteReferenceExcerpt(task.id, reference.id, excerpts[100]), /at most 100 active/);
+		database.knowledge.withdrawReferenceExcerpt(task.id, approvals[0].id);
+		const replacement = database.knowledge.promoteReferenceExcerpt(task.id, reference.id, approvals[0].excerpt);
+		assert.notEqual(replacement.id, approvals[0].id);
+		assert.equal(database.knowledge.listTaskInstructionPromotions(task.id).filter(item => item.active).length, 100);
+		assert.throws(() => database.knowledge.promoteReferenceExcerpt(task.id, reference.id, excerpts[100]), /at most 100 active/);
 	});
 });
 
