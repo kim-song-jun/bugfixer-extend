@@ -11,6 +11,7 @@ import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import { WorkspaceKnowledgeStore } from './workspaceKnowledgeStore.js';
 import { validateDeclarativePackage } from './connectors/declarativePackage.js';
 import type { WorkspaceE2eStep } from '../common/workspaceE2eProtocol.js';
+import type { WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKnowledgeProtocol.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -39,6 +40,7 @@ export interface ProviderAttempt {
 	readonly conventionSnapshotId: string | null;
 	readonly refSnapshotId: string | null;
 	readonly refSnapshotIds: readonly string[];
+	readonly approvedInstructions: readonly WorkspaceTaskInstructionPromotionDTO[];
 	readonly state: ProviderAttemptState;
 	readonly providerSessionId: string | null;
 	readonly createdAt: string;
@@ -295,7 +297,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 19;
+const schemaVersion = 20;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -353,6 +355,7 @@ export class WorkspaceDatabase {
 				if (version < 17) { WorkspaceDatabase.migrateV17(db); }
 				if (version < 18) { WorkspaceDatabase.migrateV18(db); }
 				if (version < 19) { WorkspaceDatabase.migrateV19(db); }
+				if (version < 20) { WorkspaceDatabase.migrateV20(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -708,6 +711,35 @@ export class WorkspaceDatabase {
 			) STRICT;
 			CREATE INDEX package_connections_scope ON package_connections(project_id, package_id, state, created_at);
 			PRAGMA user_version = 19;
+		`);
+	}
+
+	private static migrateV20(db: DatabaseSync): void {
+		db.exec(`
+			CREATE TABLE task_reference_instruction_promotions (
+				id TEXT PRIMARY KEY NOT NULL,
+				task_id TEXT NOT NULL,
+				snapshot_id TEXT NOT NULL,
+				excerpt TEXT NOT NULL CHECK (length(trim(excerpt)) > 0 AND length(excerpt) <= 4000 AND length(CAST(excerpt AS BLOB)) <= 16384),
+				excerpt_sha256 TEXT NOT NULL CHECK (length(excerpt_sha256) = 64),
+				approved_at TEXT NOT NULL,
+				FOREIGN KEY (task_id, snapshot_id) REFERENCES task_reference_links(task_id, snapshot_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE TABLE task_reference_instruction_withdrawals (
+				action_id TEXT PRIMARY KEY NOT NULL,
+				promotion_id TEXT NOT NULL UNIQUE REFERENCES task_reference_instruction_promotions(id) ON DELETE RESTRICT,
+				withdrawn_at TEXT NOT NULL
+			) STRICT;
+			CREATE TRIGGER task_instruction_promotion_immutable_update BEFORE UPDATE ON task_reference_instruction_promotions
+			BEGIN SELECT RAISE(ABORT, 'task instruction promotions are immutable'); END;
+			CREATE TRIGGER task_instruction_promotion_immutable_delete BEFORE DELETE ON task_reference_instruction_promotions
+			BEGIN SELECT RAISE(ABORT, 'task instruction promotions are immutable'); END;
+			CREATE TRIGGER task_instruction_withdrawal_immutable_update BEFORE UPDATE ON task_reference_instruction_withdrawals
+			BEGIN SELECT RAISE(ABORT, 'task instruction withdrawals are immutable'); END;
+			CREATE TRIGGER task_instruction_withdrawal_immutable_delete BEFORE DELETE ON task_reference_instruction_withdrawals
+			BEGIN SELECT RAISE(ABORT, 'task instruction withdrawals are immutable'); END;
+			ALTER TABLE provider_attempts ADD COLUMN approved_instructions_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(approved_instructions_json));
+			PRAGMA user_version = 20;
 		`);
 	}
 
@@ -1099,7 +1131,7 @@ export class WorkspaceDatabase {
 		});
 	}
 
-	createProviderAttempt(input: { attemptId?: string; taskId: string; provider: ProviderKind; purpose: ProviderAttemptPurpose; profileRef: string | null; folderIdentity: string; cwd: string; mode: string; prompt: string; conventionSnapshotId?: string | null; refSnapshotId?: string | null; refSnapshotIds?: readonly string[]; parentAttemptId?: string | null; childScope?: string | null }): ProviderAttempt {
+	createProviderAttempt(input: { attemptId?: string; taskId: string; provider: ProviderKind; purpose: ProviderAttemptPurpose; profileRef: string | null; folderIdentity: string; cwd: string; mode: string; prompt: string; conventionSnapshotId?: string | null; refSnapshotId?: string | null; refSnapshotIds?: readonly string[]; approvedInstructions?: readonly WorkspaceTaskInstructionPromotionDTO[]; parentAttemptId?: string | null; childScope?: string | null }): ProviderAttempt {
 		this.assertOpen();
 		const attemptId = input.attemptId ?? randomUUID();
 		const now = new Date().toISOString();
@@ -1128,10 +1160,30 @@ export class WorkspaceDatabase {
 					if (!available) { throw new Error(conventionRun ? 'A convention run reference snapshot must belong to its project.' : 'A run reference snapshot must be linked to its task.'); }
 				}
 			}
+			const approvedInstructions = input.approvedInstructions ?? [];
+			if (!Array.isArray(approvedInstructions) || approvedInstructions.length > 100
+				|| new Set(approvedInstructions.map(item => item.id)).size !== approvedInstructions.length) {
+				throw new Error('A run may use at most 100 distinct approved reference instructions.');
+			}
+			const currentApprovals = input.purpose === 'task'
+				? this.knowledge.listTaskInstructionPromotions(task.id).filter(item => item.active)
+				: [];
+			if (approvedInstructions.length !== currentApprovals.length) {
+				throw new Error('A run must snapshot every active approved reference instruction.');
+			}
+			for (const approval of approvedInstructions) {
+				const current = currentApprovals.find(item => item.id === approval.id);
+				if (!current || JSON.stringify(current) !== JSON.stringify(approval)) {
+					throw new Error('An approved reference instruction changed after run preview. Review the run again.');
+				}
+				if (!input.prompt.includes(approval.id) || !input.prompt.includes(approval.excerpt)) {
+					throw new Error('The provider prompt must include each exact approved reference instruction and its provenance.');
+				}
+			}
 			this.db.prepare(`INSERT INTO provider_attempts
-				(attempt_id, task_id, provider, purpose, profile_ref, folder_identity, cwd, mode, prompt, prompt_hash, convention_snapshot_id, ref_snapshot_id, ref_snapshot_ids_json, state, created_at, updated_at, launch_gate_version, parent_attempt_id, child_scope_json)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 1, ?, ?)`)
-				.run(attemptId, input.taskId, input.provider, input.purpose, input.profileRef, input.folderIdentity, input.cwd, input.mode, input.prompt, promptHash, input.conventionSnapshotId ?? null, referenceIds[0] ?? input.refSnapshotId ?? null, JSON.stringify(referenceIds), now, now, input.parentAttemptId ?? null, childScope);
+				(attempt_id, task_id, provider, purpose, profile_ref, folder_identity, cwd, mode, prompt, prompt_hash, convention_snapshot_id, ref_snapshot_id, ref_snapshot_ids_json, approved_instructions_json, state, created_at, updated_at, launch_gate_version, parent_attempt_id, child_scope_json)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 1, ?, ?)`)
+				.run(attemptId, input.taskId, input.provider, input.purpose, input.profileRef, input.folderIdentity, input.cwd, input.mode, input.prompt, promptHash, input.conventionSnapshotId ?? null, referenceIds[0] ?? input.refSnapshotId ?? null, JSON.stringify(referenceIds), JSON.stringify(approvedInstructions), now, now, input.parentAttemptId ?? null, childScope);
 			this.db.prepare(`INSERT INTO provider_attempt_state_audit (attempt_id, from_state, to_state, changed_at) VALUES (?, NULL, 'queued', ?)`).run(attemptId, now);
 			return this.getProviderAttempt(attemptId)!;
 		});
@@ -2238,7 +2290,8 @@ export class WorkspaceDatabase {
 			purpose: row.purpose as ProviderAttemptPurpose,
 			profileRef: row.profile_ref as string | null, folderIdentity: String(row.folder_identity), cwd: String(row.cwd), mode: String(row.mode),
 			prompt: String(row.prompt), promptHash: String(row.prompt_hash), conventionSnapshotId: row.convention_snapshot_id as string | null,
-			refSnapshotId: row.ref_snapshot_id as string | null, refSnapshotIds: JSON.parse(String(row.ref_snapshot_ids_json)) as string[], state: row.state as ProviderAttemptState,
+			refSnapshotId: row.ref_snapshot_id as string | null, refSnapshotIds: JSON.parse(String(row.ref_snapshot_ids_json)) as string[],
+			approvedInstructions: JSON.parse(String(row.approved_instructions_json)) as WorkspaceTaskInstructionPromotionDTO[], state: row.state as ProviderAttemptState,
 			providerSessionId: row.provider_session_id as string | null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
 			startedAt: row.started_at as string | null, finishedAt: row.finished_at as string | null, errorSummary: row.error_summary as string | null,
 			cleanupVerified: Number(row.cleanup_verified) === 1, ownedPgid: row.owned_pgid === null ? null : Number(row.owned_pgid), launchGateVersion: row.launch_gate_version === null ? null : 1,

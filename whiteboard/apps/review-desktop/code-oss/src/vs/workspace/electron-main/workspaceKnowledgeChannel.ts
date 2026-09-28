@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { WebContents } from 'electron';
 import { isUUID } from '../../base/common/uuid.js';
 import type { WorkspaceDashboardDTO } from '../common/workspaceDashboardProtocol.js';
-import type { AttachWorkspaceTaskReferenceRequest, CreateWorkspaceConventionDraftRequest, ImportWorkspaceTextReferenceRequest, WorkspaceConventionDTO, WorkspaceKnowledgeDTO, WorkspaceKnowledgeReferenceRequest, WorkspaceKnowledgeTaskRequest, WorkspaceKnowledgeConventionRequest, WorkspaceReferenceContentDTO } from '../common/workspaceKnowledgeProtocol.js';
+import type { AttachWorkspaceTaskReferenceRequest, CreateWorkspaceConventionDraftRequest, ImportWorkspaceTextReferenceRequest, PromoteReferenceExcerptRequest, WithdrawReferenceExcerptRequest, WorkspaceConventionDTO, WorkspaceKnowledgeDTO, WorkspaceKnowledgeReferenceRequest, WorkspaceKnowledgeTaskRequest, WorkspaceKnowledgeConventionRequest, WorkspaceReferenceContentDTO } from '../common/workspaceKnowledgeProtocol.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase, type ConventionVersion } from './workspaceDatabase.js';
 
@@ -53,6 +53,21 @@ export class WorkspaceKnowledgeChannel {
 				const { taskId } = this.taskRequest(arg);
 				this.requireTask(dashboard, taskId);
 				return this.database.knowledge.listTaskReferences(taskId) as T;
+			}
+			case 'listTaskInstructionPromotions': {
+				const { taskId } = this.taskRequest(arg);
+				this.requireTask(dashboard, taskId);
+				return this.database.knowledge.listTaskInstructionPromotions(taskId) as T;
+			}
+			case 'promoteReferenceExcerpt': {
+				const request = this.promoteExcerptRequest(arg);
+				this.requireTask(dashboard, request.taskId);
+				return this.database.knowledge.promoteReferenceExcerpt(request.taskId, request.sourceSnapshotId, request.excerpt) as T;
+			}
+			case 'withdrawReferenceExcerpt': {
+				const request = this.withdrawExcerptRequest(arg);
+				this.requireTask(dashboard, request.taskId);
+				return this.database.knowledge.withdrawReferenceExcerpt(request.taskId, request.promotionId) as T;
 			}
 			case 'listConventions':
 				return this.database.knowledge.listConventions(projectId).map(version => this.conventionDTO(version)) as T;
@@ -137,6 +152,25 @@ export class WorkspaceKnowledgeChannel {
 			throw new Error('A valid reference snapshot ID is required.');
 		}
 		return request as AttachWorkspaceTaskReferenceRequest;
+	}
+
+	private promoteExcerptRequest(value: unknown): PromoteReferenceExcerptRequest {
+		const record = this.record(value);
+		if (typeof record.taskId !== 'string' || !isUUID(record.taskId)
+			|| typeof record.sourceSnapshotId !== 'string' || !isUUID(record.sourceSnapshotId)
+			|| typeof record.excerpt !== 'string') {
+			throw new Error('A task, source snapshot, and approved excerpt are required.');
+		}
+		return record as unknown as PromoteReferenceExcerptRequest;
+	}
+
+	private withdrawExcerptRequest(value: unknown): WithdrawReferenceExcerptRequest {
+		const record = this.record(value);
+		if (typeof record.taskId !== 'string' || !isUUID(record.taskId)
+			|| typeof record.promotionId !== 'string' || !isUUID(record.promotionId)) {
+			throw new Error('A task and approved excerpt ID are required.');
+		}
+		return record as unknown as WithdrawReferenceExcerptRequest;
 	}
 
 	private conventionDraftRequest(value: unknown): CreateWorkspaceConventionDraftRequest {

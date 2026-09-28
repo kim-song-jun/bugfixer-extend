@@ -537,6 +537,7 @@ export class WorkspaceConventionAgentChannel {
 			state: attempt.state, mode: 'read-only', accountLabel: this.providerProfile(attempt.provider).label, cwd: attempt.cwd,
 			createdAt: attempt.createdAt, updatedAt: attempt.updatedAt, startedAt: attempt.startedAt, finishedAt: attempt.finishedAt,
 			sessionId: attempt.providerSessionId, errorSummary: attempt.errorSummary, cleanupVerified: attempt.cleanupVerified,
+			approvedInstructions: attempt.approvedInstructions,
 		};
 	}
 

@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import type { WorkspaceTaskInstructionPromotionDTO } from './workspaceKnowledgeProtocol.js';
+
 export const WORKSPACE_PROVIDER_RUNS_CHANNEL = 'vscode:workspaceProviderRuns';
 
 export type ProviderId = 'codex' | 'claude';
@@ -25,6 +27,7 @@ export interface ProviderRunPreviewDTO {
 	readonly task: { readonly id: string; readonly revision: number; readonly title: string; readonly description: string | null };
 	readonly conventionSnapshot: { readonly id: string; readonly version: number; readonly markdown: string; readonly contentSha256: string } | null;
 	readonly references: readonly { readonly id: string; readonly version: number; readonly title: string; readonly contentType: string; readonly contentSha256: string; readonly content: string }[];
+	readonly approvedInstructions: readonly WorkspaceTaskInstructionPromotionDTO[];
 	readonly permission: {
 		readonly providerId: ProviderId;
 		readonly summary: string;
@@ -101,6 +104,7 @@ export interface ProviderAttemptDTO {
 	readonly resultText?: string | null;
 	readonly resultSha256?: string | null;
 	readonly orchestrationPhase?: 'preflight' | 'waiting' | null;
+	readonly approvedInstructions: readonly WorkspaceTaskInstructionPromotionDTO[];
 }
 
 export interface ProviderAttemptEventDTO {

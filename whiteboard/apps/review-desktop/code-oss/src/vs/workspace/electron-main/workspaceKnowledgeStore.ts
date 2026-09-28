@@ -7,9 +7,12 @@ import { createHash, randomUUID } from 'node:crypto';
 // eslint-disable-next-line local/code-import-patterns
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { ConventionCheck, ConventionVersion, ProviderKind, ReferenceSnapshot } from './workspaceDatabase.js';
+import type { WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKnowledgeProtocol.js';
 
 const maximumReferenceContentBytes = 16 * 1024 * 1024;
 const maximumConventionBytes = 256 * 1024;
+const maximumPromotedExcerptCharacters = 4000;
+const maximumPromotedExcerptBytes = 16 * 1024;
 
 export type ReferenceSnapshotSummary = Omit<ReferenceSnapshot, 'content' | 'derivedText'>;
 
@@ -126,6 +129,59 @@ export class WorkspaceKnowledgeStore {
 			FROM task_reference_links l JOIN reference_snapshots s ON s.id = l.snapshot_id
 			JOIN reference_sources r ON r.id = s.source_id WHERE l.task_id = ? ORDER BY l.attached_at, s.id`).all(taskId)
 			.map(row => this.referenceFromRow(row, false) as ReferenceSnapshotSummary);
+	}
+
+	listTaskInstructionPromotions(taskId: string): WorkspaceTaskInstructionPromotionDTO[] {
+		this.assertOpen();
+		return this.db.prepare(`SELECT p.id, p.task_id, p.snapshot_id, s.version, s.content_sha256, p.excerpt, p.excerpt_sha256,
+			p.approved_at, w.action_id AS withdrawal_action_id, w.withdrawn_at
+			FROM task_reference_instruction_promotions p
+			JOIN reference_snapshots s ON s.id = p.snapshot_id
+			LEFT JOIN task_reference_instruction_withdrawals w ON w.promotion_id = p.id
+			WHERE p.task_id = ? ORDER BY p.approved_at, p.id`).all(taskId).map(row => this.promotionFromRow(row));
+	}
+
+	promoteReferenceExcerpt(taskId: string, snapshotId: string, excerpt: string): WorkspaceTaskInstructionPromotionDTO {
+		this.assertOpen();
+		if (typeof excerpt !== 'string' || !excerpt.trim() || [...excerpt].length > maximumPromotedExcerptCharacters
+			|| Buffer.byteLength(excerpt, 'utf8') > maximumPromotedExcerptBytes || excerpt.includes('\0')) {
+			throw new Error('The approved excerpt must contain readable text of at most 4000 characters.');
+		}
+		return this.transaction(() => {
+			const linked = this.db.prepare(`SELECT 1 FROM task_reference_links l
+				JOIN tasks t ON t.id = l.task_id AND t.archived_at IS NULL AND t.trashed_at IS NULL
+				JOIN reference_snapshots s ON s.id = l.snapshot_id
+				WHERE l.task_id = ? AND l.snapshot_id = ?`).get(taskId, snapshotId);
+			if (!linked) { throw new Error('The source snapshot must be attached to this active task before promoting an excerpt.'); }
+			const reference = this.readReference(snapshotId);
+			if (!reference) { throw new Error('The source snapshot is unavailable.'); }
+			const normalizeNewlines = (text: string) => text.replace(/\r\n?/g, '\n');
+			if (!normalizeNewlines(reference.derivedText).includes(normalizeNewlines(excerpt))) {
+				throw new Error('The approved excerpt must exactly match a contiguous passage in the source snapshot.');
+			}
+			const id = randomUUID();
+			const approvedAt = new Date().toISOString();
+			this.db.prepare(`INSERT INTO task_reference_instruction_promotions
+				(id, task_id, snapshot_id, excerpt, excerpt_sha256, approved_at) VALUES (?, ?, ?, ?, ?, ?)`)
+				.run(id, taskId, snapshotId, excerpt, digest(excerpt), approvedAt);
+			return this.listTaskInstructionPromotions(taskId).find(item => item.id === id)!;
+		});
+	}
+
+	withdrawReferenceExcerpt(taskId: string, promotionId: string): WorkspaceTaskInstructionPromotionDTO {
+		this.assertOpen();
+		return this.transaction(() => {
+			const promotion = this.db.prepare('SELECT id FROM task_reference_instruction_promotions WHERE id = ? AND task_id = ?')
+				.get(promotionId, taskId);
+			if (!promotion) { throw new Error('The approved excerpt is unavailable for this task.'); }
+			if (this.db.prepare('SELECT 1 FROM task_reference_instruction_withdrawals WHERE promotion_id = ?').get(promotionId)) {
+				throw new Error('The approved excerpt has already been withdrawn.');
+			}
+			const actionId = randomUUID();
+			this.db.prepare(`INSERT INTO task_reference_instruction_withdrawals (action_id, promotion_id, withdrawn_at)
+				VALUES (?, ?, ?)`).run(actionId, promotionId, new Date().toISOString());
+			return this.listTaskInstructionPromotions(taskId).find(item => item.id === promotionId)!;
+		});
 	}
 
 	createConventionVersion(input: {
@@ -288,6 +344,16 @@ export class WorkspaceKnowledgeStore {
 		return includeContent ? {
 			...value, content: new Uint8Array(row.content as Uint8Array), derivedText: String(row.derived_text ?? ''),
 		} : value;
+	}
+
+	private promotionFromRow(row: Record<string, SQLOutputValue>): WorkspaceTaskInstructionPromotionDTO {
+		return {
+			id: String(row.id), taskId: String(row.task_id), sourceSnapshotId: String(row.snapshot_id),
+			sourceVersion: Number(row.version), sourceContentSha256: String(row.content_sha256),
+			excerpt: String(row.excerpt), excerptSha256: String(row.excerpt_sha256), approvedBy: 'person',
+			approvedAt: String(row.approved_at), active: row.withdrawal_action_id === null,
+			withdrawalActionId: row.withdrawal_action_id as string | null, withdrawnAt: row.withdrawn_at as string | null,
+		};
 	}
 
 	private conventionFromRow(row: Record<string, SQLOutputValue>): ConventionVersion {

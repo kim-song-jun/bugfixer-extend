@@ -48,6 +48,30 @@ export interface WorkspaceKnowledgeTaskRequest extends WorkspaceKnowledgeProject
 	readonly taskId: string;
 }
 
+export interface WorkspaceTaskInstructionPromotionDTO {
+	readonly id: string;
+	readonly taskId: string;
+	readonly sourceSnapshotId: string;
+	readonly sourceVersion: number;
+	readonly sourceContentSha256: string;
+	readonly excerpt: string;
+	readonly excerptSha256: string;
+	readonly approvedBy: 'person';
+	readonly approvedAt: string;
+	readonly active: boolean;
+	readonly withdrawalActionId: string | null;
+	readonly withdrawnAt: string | null;
+}
+
+export interface PromoteReferenceExcerptRequest extends WorkspaceKnowledgeTaskRequest {
+	readonly sourceSnapshotId: string;
+	readonly excerpt: string;
+}
+
+export interface WithdrawReferenceExcerptRequest extends WorkspaceKnowledgeTaskRequest {
+	readonly promotionId: string;
+}
+
 export interface AttachWorkspaceTaskReferenceRequest extends WorkspaceKnowledgeTaskRequest {
 	readonly snapshotId: string;
 }
@@ -100,6 +124,9 @@ export interface WorkspaceKnowledgeOperations {
 	readonly getReference: { readonly request: WorkspaceKnowledgeReferenceRequest; readonly response: WorkspaceReferenceContentDTO };
 	readonly attachTaskReference: { readonly request: AttachWorkspaceTaskReferenceRequest; readonly response: void };
 	readonly listTaskReferences: { readonly request: WorkspaceKnowledgeTaskRequest; readonly response: readonly WorkspaceReferenceDTO[] };
+	readonly listTaskInstructionPromotions: { readonly request: WorkspaceKnowledgeTaskRequest; readonly response: readonly WorkspaceTaskInstructionPromotionDTO[] };
+	readonly promoteReferenceExcerpt: { readonly request: PromoteReferenceExcerptRequest; readonly response: WorkspaceTaskInstructionPromotionDTO };
+	readonly withdrawReferenceExcerpt: { readonly request: WithdrawReferenceExcerptRequest; readonly response: WorkspaceTaskInstructionPromotionDTO };
 	readonly listConventions: { readonly request: WorkspaceKnowledgeProjectRequest; readonly response: readonly WorkspaceConventionDTO[] };
 	readonly createConventionDraft: { readonly request: CreateWorkspaceConventionDraftRequest; readonly response: WorkspaceConventionDTO };
 	readonly applyConvention: { readonly request: WorkspaceKnowledgeConventionRequest; readonly response: WorkspaceConventionDTO };

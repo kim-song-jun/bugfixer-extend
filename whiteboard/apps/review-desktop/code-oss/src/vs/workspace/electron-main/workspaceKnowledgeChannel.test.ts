@@ -12,7 +12,7 @@ import type { WebContents } from 'electron';
 import { URI } from '../../base/common/uri.js';
 import type { ICodeWindow } from '../../platform/window/electron-main/window.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
-import type { WorkspaceConventionDTO, WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO } from '../common/workspaceKnowledgeProtocol.js';
+import type { WorkspaceConventionDTO, WorkspaceKnowledgeDTO, WorkspaceReferenceContentDTO, WorkspaceReferenceDTO, WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKnowledgeProtocol.js';
 import { WorkspaceDashboardChannel } from './workspaceDashboardChannel.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
 import { WorkspaceKnowledgeChannel } from './workspaceKnowledgeChannel.js';
@@ -42,6 +42,22 @@ test('knowledge IPC imports immutable text, attaches it to its task, and rejects
 		assert.equal('derivedText' in content, false);
 		assert.equal('derivedText' in imported, false);
 		await channel.call(sender, 'attachTaskReference', { projectId: one.project.id, taskId: task.id, snapshotId: imported.id });
+		const approved = await channel.call<WorkspaceTaskInstructionPromotionDTO>(sender, 'promoteReferenceExcerpt', {
+			projectId: one.project.id, taskId: task.id, sourceSnapshotId: imported.id, excerpt: 'Keep the example readable.',
+		});
+		assert.equal(approved.active, true);
+		assert.equal(approved.approvedBy, 'person');
+		assert.deepEqual(await channel.call<readonly WorkspaceTaskInstructionPromotionDTO[]>(sender, 'listTaskInstructionPromotions', {
+			projectId: one.project.id, taskId: task.id,
+		}), [approved]);
+		await assert.rejects(channel.call(sender, 'promoteReferenceExcerpt', {
+			projectId: two.project.id, taskId: task.id, sourceSnapshotId: imported.id, excerpt: 'Keep the example readable.',
+		}), /does not match this window/);
+		const withdrawn = await channel.call<WorkspaceTaskInstructionPromotionDTO>(sender, 'withdrawReferenceExcerpt', {
+			projectId: one.project.id, taskId: task.id, promotionId: approved.id,
+		});
+		assert.equal(withdrawn.active, false);
+		assert.ok(withdrawn.withdrawalActionId);
 		const snapshot = await channel.call<WorkspaceKnowledgeDTO>(sender, 'getProjectKnowledge', one.project.id);
 		assert.equal(snapshot.taskReferences[task.id][0].id, imported.id);
 		assert.equal(snapshot.references[0].contentSha256, content.contentSha256);

@@ -127,6 +127,38 @@ test('task-linked reference prompt data keeps embedded directives inside an esca
 	});
 });
 
+test('provider preview delivers only explicit reference promotions and binds their provenance into the run snapshot', async () => {
+	await withProviderChannel(async ({ channel, database, projectId, taskId, sender }) => {
+		const excerpt = 'Use the compact response format.';
+		const reference = database.knowledge.importReference({
+			projectId, connectorId: 'manual-text', connectorVersion: '1', externalId: 'instruction-source',
+			title: 'Response format', contentType: 'text/plain; charset=utf-8', content: new TextEncoder().encode(`Guidance:\n${excerpt}\nOther notes.`),
+		});
+		database.knowledge.attachReferenceToTask(taskId, reference.id);
+		const unapproved = await channel.call<ProviderRunPreviewDTO>(sender, 'preview', { projectId, taskId, providerId: 'codex' as const });
+		assert.deepEqual(unapproved.approvedInstructions, []);
+		assert.match(unapproved.prompt, /quoted reference data/i);
+		assert.doesNotMatch(unapproved.prompt, /Person-approved task instructions/);
+		const approval = database.knowledge.promoteReferenceExcerpt(taskId, reference.id, excerpt);
+		const approved = await channel.call<ProviderRunPreviewDTO>(sender, 'preview', { projectId, taskId, providerId: 'codex' as const });
+		assert.deepEqual(approved.approvedInstructions, [approval]);
+		assert.match(approved.prompt, /Person-approved task instructions/);
+		assert.ok(approved.prompt.includes(approval.excerpt));
+		assert.ok(approved.prompt.includes(`approval ${approval.id}`));
+		assert.notEqual(approved.digest, unapproved.digest);
+		const attempt = database.createProviderAttempt({
+			taskId, provider: 'codex', purpose: 'task', profileRef: 'profile:local', folderIdentity: '/work/project', cwd: '/work/project',
+			mode: 'mutating', prompt: approved.prompt, refSnapshotIds: approved.references.map(item => item.id), approvedInstructions: approved.approvedInstructions,
+		});
+		assert.deepEqual(database.getProviderAttempt(attempt.attemptId)?.approvedInstructions, [approval]);
+		await database.knowledge.withdrawReferenceExcerpt(taskId, approval.id);
+		const withdrawn = await channel.call<ProviderRunPreviewDTO>(sender, 'preview', { projectId, taskId, providerId: 'codex' as const });
+		assert.deepEqual(withdrawn.approvedInstructions, []);
+		assert.notEqual(withdrawn.digest, approved.digest);
+		assert.deepEqual(database.getProviderAttempt(attempt.attemptId)?.approvedInstructions, [approval]);
+	});
+});
+
 test('provider preview digest changes when the applied convention snapshot changes', async () => {
 	await withProviderChannel(async ({ channel, database, projectId, taskId, sender, dashboardChannel }) => {
 		const first = database.knowledge.createConventionVersion({ projectId, markdown: '# First', sourceSnapshotIds: [], authoredBy: 'person' });

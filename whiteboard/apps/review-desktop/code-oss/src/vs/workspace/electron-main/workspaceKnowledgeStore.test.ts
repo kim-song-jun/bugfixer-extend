@@ -161,6 +161,41 @@ test('reference attachments and convention sources cannot cross project boundari
 	});
 });
 
+test('reference excerpt promotion requires an attached exact passage and preserves append-only approval history', () => {
+	withDatabase(database => {
+		const first = createProjectAndTask(database, 'Approval owner');
+		const other = createProjectAndTask(database, 'Other task');
+		const reference = database.knowledge.importReference({
+			projectId: first.project.id, connectorId: 'manual-text', connectorVersion: '1', externalId: 'approved-source',
+			title: 'Approved source', contentType: 'text/plain; charset=utf-8', content: new TextEncoder().encode('Alpha\r\nExact approved passage.\r\nOmega'),
+		});
+		assert.throws(() => database.knowledge.promoteReferenceExcerpt(first.task.id, reference.id, 'Exact approved passage.'), /attached to this active task/);
+		database.knowledge.attachReferenceToTask(first.task.id, reference.id);
+		assert.throws(() => database.knowledge.promoteReferenceExcerpt(first.task.id, reference.id, 'Exact approved passage.\nOmega.'), /exactly match a contiguous passage/);
+		assert.throws(() => database.knowledge.promoteReferenceExcerpt(other.task.id, reference.id, 'Exact approved passage.'), /attached to this active task/);
+		const approval = database.knowledge.promoteReferenceExcerpt(first.task.id, reference.id, 'Exact approved passage.');
+		assert.equal(approval.approvedBy, 'person');
+		assert.equal(approval.sourceSnapshotId, reference.id);
+		assert.equal(approval.sourceVersion, 1);
+		assert.equal(approval.active, true);
+		const attempt = database.createProviderAttempt({
+			taskId: first.task.id, provider: 'codex', purpose: 'task', profileRef: 'profile:local',
+			folderIdentity: `/work/${first.project.id}`, cwd: `/work/${first.project.id}`, mode: 'mutating',
+			prompt: `Approved instruction ${approval.id}:\n${approval.excerpt}`, approvedInstructions: [approval],
+		});
+		const withdrawn = database.knowledge.withdrawReferenceExcerpt(first.task.id, approval.id);
+		assert.equal(withdrawn.active, false);
+		assert.ok(withdrawn.withdrawalActionId);
+		assert.equal(database.knowledge.listTaskInstructionPromotions(first.task.id)[0].active, false);
+		assert.deepEqual(database.getProviderAttempt(attempt.attemptId)?.approvedInstructions, [approval]);
+		assert.equal(database.getProviderAttempt(attempt.attemptId)?.prompt, `Approved instruction ${approval.id}:\n${approval.excerpt}`);
+		assert.throws(() => database.knowledge.withdrawReferenceExcerpt(first.task.id, approval.id), /already been withdrawn/);
+		const sqlite = Reflect.get(database, 'db') as DatabaseSync;
+		assert.throws(() => sqlite.prepare('UPDATE task_reference_instruction_promotions SET excerpt = ? WHERE id = ?').run('altered', approval.id), /immutable/);
+		assert.throws(() => sqlite.prepare('DELETE FROM task_reference_instruction_withdrawals WHERE promotion_id = ?').run(approval.id), /immutable/);
+	});
+});
+
 test('reference import and task attachment roll back together when the task is archived', () => {
 	withDatabase(database => {
 		const { project, task } = createProjectAndTask(database, 'Atomic reference task');
