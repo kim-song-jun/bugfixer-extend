@@ -6594,18 +6594,18 @@ button.review-stack-row:disabled .review-stack-relation {
   align-self: flex-start;
   align-items: center;
   gap: 8px;
-  padding: 4px 0;
+  padding: 0;
   border: 0;
   background: var(--transparent);
-  color: var(--ink-muted);
-  font: 600 11px var(--font-mono);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  color: var(--ink);
+  font: 600 14px/18px var(--font-sans);
 }
 
 .review-home-dismissed-count {
   font-weight: 500;
-  letter-spacing: 0;
+  color: var(--review-home-meta);
+  font-size: 11px;
+  line-height: 14px;
 }
 
 .review-home-dismissed-rows {

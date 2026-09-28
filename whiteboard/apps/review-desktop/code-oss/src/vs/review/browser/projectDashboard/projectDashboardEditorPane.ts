@@ -85,6 +85,47 @@ function e2eRevisionLabel(evidence: WorkspaceE2eEvidenceDTO): string {
 		: reason ?? '정보 없음';
 }
 
+const subagentItemTypeLabels: Readonly<Record<string, string>> = {
+	agent_message: '응답',
+	reasoning: '작업 판단',
+	command_execution: '명령 실행',
+	file_change: '파일 변경',
+	mcp_tool_call: '외부 도구 호출',
+	web_search: '웹 검색',
+	image_view: '이미지 확인',
+	entered_review_mode: '검토 모드 진입',
+	exited_review_mode: '검토 모드 종료',
+	plan: '계획 정리',
+	todo_list: '작업 목록',
+	error: '오류',
+};
+
+const subagentItemOutcomeLabels: Readonly<Record<string, string>> = {
+	denied: '권한 요청 거부',
+	failed: '실패',
+	unresolved: '결과 확인 필요',
+	resolved: '이후 검증에서 해결',
+};
+
+function subagentEventLabel(event: ProviderAttemptEventDTO): string {
+	const itemType = typeof event.metadata.itemType === 'string' ? subagentItemTypeLabels[event.metadata.itemType] ?? '작업 항목' : '작업 항목';
+	const outcome = typeof event.metadata.itemOutcome === 'string' ? subagentItemOutcomeLabels[event.metadata.itemOutcome] : undefined;
+
+	switch (event.type) {
+		case 'session.started': return '세션 연결';
+		case 'turn.started': return '작업 시작';
+		case 'item.started': return `${itemType} 시작`;
+		case 'item.updated': return `${itemType} 진행`;
+		case 'item.completed': return outcome ? `${itemType} ${outcome}` : `${itemType} 완료`;
+		case 'turn.completed': return event.metadata.itemOutcome === 'failed' ? '검증 실패' : '작업 완료';
+		case 'turn.failed': return '작업 실패';
+		case 'error': return '오류 발생';
+		case 'ordinaryFolderInventoryStarted': return '폴더 변경 확인 시작';
+		case 'ordinaryFolderChanges': return '폴더 변경 확인 완료';
+		default: return '기타 이벤트';
+	}
+}
+
 function e2eFailureLabel(failure: string): string {
 	return /^page\.waitForFunction timed out after \d+ms/.test(failure)
 		? '기대한 텍스트가 정해진 시간 안에 나타나지 않았습니다. 선택자와 기대 텍스트를 확인해 주세요.'
@@ -3378,7 +3419,11 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const eventDetails = row.appendChild(createElement('details', 'project-dashboard__subagent-events'));
 				const eventSummary = eventDetails.appendChild(createElement('summary')); eventSummary.textContent = `최근 이벤트 ${events.length}개`;
 				const eventList = eventDetails.appendChild(createElement('ol'));
-				for (const event of events) { const eventRow = eventList.appendChild(createElement('li')); eventRow.textContent = `${event.type} · ${new Date(event.createdAt).toLocaleTimeString()}`; }
+				for (const event of events) {
+					const eventRow = eventList.appendChild(createElement('li'));
+					eventRow.title = event.type;
+					eventRow.textContent = `${subagentEventLabel(event)} · ${new Date(event.createdAt).toLocaleTimeString()}`;
+				}
 			}
 			if (this.isActive(child.state)) {
 				const cancel = row.appendChild(createElement('button', 'project-dashboard__secondary')); cancel.type = 'button'; cancel.textContent = '하위 에이전트 취소'; cancel.disabled = this.providerBusy;
