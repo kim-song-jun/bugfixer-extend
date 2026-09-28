@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +64,14 @@ async function waitForLaunchedAttempt(database: WorkspaceDatabase, attemptId: st
 	}
 	assert.equal(database.getProviderAttempt(attemptId)?.state, 'running', 'the queued attempt must acquire the writer lock and start');
 	assert.ok(launched.length >= expectedCount, 'the supervisor must receive the queued attempt');
+}
+
+function stopTestOwnedProcessGroup(child: ChildProcess): void {
+	if (!child.pid || child.exitCode !== null || child.signalCode !== null) { return; }
+	try { process.kill(-child.pid, 'SIGKILL'); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ESRCH') { throw error; }
+	}
 }
 
 test('provider preview is bound to the live project window and exact task revision', async () => {
@@ -412,7 +420,7 @@ test('startup replay completes Trash and verifies cleanup when a live recorded g
 		});
 		const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 180)'], { detached: true, stdio: 'ignore' });
 		assert.ok(child.pid);
-		t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* Test-owned process group already exited. */ } });
+		t.after(() => stopTestOwnedProcessGroup(child));
 		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
 		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
 		database.beginTaskDeletion(taskId, task.revision, 'trash-exiting-replay');
@@ -433,7 +441,7 @@ test('startup replay leaves Trash visible with an actionable error for a live re
 		});
 		const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
 		assert.ok(child.pid);
-		t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* Test-owned process group already exited. */ } });
+		t.after(() => stopTestOwnedProcessGroup(child));
 		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
 		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
 		database.beginTaskDeletion(taskId, task.revision, 'trash-live-replay');
@@ -455,7 +463,7 @@ test('shutdown cancels startup replay without completing pending Trash', { skip:
 		});
 		const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
 		assert.ok(child.pid);
-		t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* Test-owned process group already exited. */ } });
+		t.after(() => stopTestOwnedProcessGroup(child));
 		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
 		database.finishProviderAttempt(attempt.attemptId, 'interrupted', null, undefined, 'App restarted while the group was live.');
 		database.beginTaskDeletion(taskId, task.revision, 'trash-cancelled-replay');
@@ -477,7 +485,7 @@ test('a stopped recorded process group can be reconciled before Trash', { skip: 
 		});
 		const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 100)'], { detached: true, stdio: 'ignore' });
 		assert.ok(child.pid);
-		t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* Test-owned group is gone. */ } });
+		t.after(() => stopTestOwnedProcessGroup(child));
 		database.setProviderAttemptRunning(attempt.attemptId, task.revision, child.pid);
 		await new Promise<void>((resolve, reject) => { child.once('close', () => resolve()); child.once('error', reject); });
 		database.finishProviderAttempt(attempt.attemptId, 'interrupted');
