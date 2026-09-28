@@ -6,6 +6,7 @@
 import { localize } from '../../../nls.js';
 import { onUnexpectedError } from '../../../base/common/errors.js';
 import Severity from '../../../base/common/severity.js';
+import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { INotificationService } from '../../../platform/notification/common/notification.js';
 import { Registry } from '../../../platform/registry/common/platform.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../platform/storage/common/storage.js';
@@ -15,6 +16,7 @@ import {
 	type IWorkbenchContributionsRegistry,
 } from '../../../workbench/common/contributions.js';
 import { LifecyclePhase } from '../../../workbench/services/lifecycle/common/lifecycle.js';
+import { REVIEW_TELEMETRY_SETTING } from '../../common/reviewConfigurationDefaults.js';
 import { isFirstRunReloadPending } from '../../common/reviewFirstRunReload.js';
 import { IReviewCanvasEditorTabsService } from '../../services/reviewCanvasEditorTabsService.js';
 
@@ -25,7 +27,11 @@ export class ReviewTelemetryNotice implements IWorkbenchContribution {
 		@IStorageService storageService: IStorageService,
 		@INotificationService notificationService: INotificationService,
 		@IReviewCanvasEditorTabsService tabsService: IReviewCanvasEditorTabsService,
+		@IConfigurationService configurationService: IConfigurationService,
 	) {
+		if (configurationService.getValue<boolean>(REVIEW_TELEMETRY_SETTING) === false) {
+			return;
+		}
 		if (
 			storageService.getBoolean(
 				NOTICE_STORAGE_KEY,

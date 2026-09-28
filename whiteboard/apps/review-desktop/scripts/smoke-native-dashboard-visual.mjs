@@ -385,7 +385,7 @@ try {
       assert.equal(await page.evaluate(() => document.activeElement?.id), 'project-task-state-heading', 'Task state mutation must return focus to its heading');
     } catch (error) {
 
-      await captureFailure(page, path.join(output, `dashboard-${tag}-failure.png`), diagnostics);
+      await captureFailure(session.page, path.join(output, `dashboard-${tag}-failure.png`), diagnostics);
 
       throw error;
     } finally {

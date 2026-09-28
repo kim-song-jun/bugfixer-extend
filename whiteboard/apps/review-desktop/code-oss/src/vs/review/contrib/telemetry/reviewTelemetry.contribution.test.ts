@@ -7,12 +7,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { IPromptChoice, IPromptOptions } from '../../../platform/notification/common/notification.js';
+import { REVIEW_TELEMETRY_SETTING } from '../../common/reviewConfigurationDefaults.js';
 import { setFirstRunReloadPending } from '../../common/reviewFirstRunReload.js';
 import { NOTICE_STORAGE_KEY, ReviewTelemetryNotice } from './reviewTelemetry.contribution.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function setup() {
+function setup(telemetryEnabled = true) {
 	const stored: Array<{ key: string; value: unknown }> = [];
 	const prompts: Array<{ choices: IPromptChoice[]; options?: IPromptOptions }> = [];
 	const settingsOpened: unknown[] = [];
@@ -25,6 +26,7 @@ function setup() {
 			},
 		} as never,
 		{ openSettings: async (preview: unknown) => { settingsOpened.push(preview); } } as never,
+		{ getValue: (key: string) => { assert.equal(key, REVIEW_TELEMETRY_SETTING); return telemetryEnabled; } } as never,
 	);
 	return { stored, prompts, settingsOpened, notice };
 }
@@ -60,4 +62,13 @@ test('skips the telemetry notice when the first-run seeding reload is pending', 
 	await settle();
 	assert.deepEqual(prompts, [], 'a pending reload would take the notice with it');
 	assert.deepEqual(stored, []);
+});
+
+test('does not claim telemetry is sent when the user disabled it', async () => {
+	setFirstRunReloadPending(false);
+	const { stored, prompts, notice } = setup(false);
+	notice();
+	await settle();
+	assert.deepEqual(prompts, []);
+	assert.deepEqual(stored, [], 'the notice remains available if telemetry is enabled later');
 });
