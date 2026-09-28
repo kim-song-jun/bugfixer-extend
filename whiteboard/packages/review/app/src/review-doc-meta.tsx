@@ -433,6 +433,7 @@ function relativeTimeLabel(
         ? "1 hour ago"
         : `${hours} hours ago`;
   }
+
   const days = Math.round(hours / 24);
 
   if (days < 7) {

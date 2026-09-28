@@ -29,6 +29,7 @@ interface ReviewDiffFilesSnapshot {
 const LOADING_REVIEW_DIFF_FILES_STATE: ReviewDiffFilesState = {
   status: "loading",
 };
+
 const EMPTY_REVIEW_DIFF_FILES_STATE: ReviewDiffFilesState = {
   status: "loaded",
   files: [],
@@ -54,6 +55,7 @@ export function ReviewDiffFilesProvider({
 
   const snapshotMatches =
     snapshot.documentKey === documentKey && snapshot.enabled === enabled;
+
   const state = !enabled
     ? EMPTY_REVIEW_DIFF_FILES_STATE
     : snapshotMatches
@@ -67,6 +69,7 @@ export function ReviewDiffFilesProvider({
         enabled,
         state: EMPTY_REVIEW_DIFF_FILES_STATE,
       });
+
       return;
     }
 

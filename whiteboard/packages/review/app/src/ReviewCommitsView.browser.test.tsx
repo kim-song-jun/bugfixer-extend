@@ -104,7 +104,9 @@ it("shows Korean copy for the commits view when the browser locale is Korean", a
           baseCommit: "a".repeat(40),
           headCommit: commit.commit,
         }}
-        onOpenDiff={vi.fn()}
+        onOpenDiff={
+          vi.fn<React.ComponentProps<typeof ReviewCommitsView>["onOpenDiff"]>()
+        }
       />,
       {
         files: () => new Promise<ReviewDiffFileWire[]>(() => {}),

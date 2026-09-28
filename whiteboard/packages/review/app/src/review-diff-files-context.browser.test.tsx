@@ -23,6 +23,7 @@ afterEach(async () => {
 describe("ReviewDiffFilesProvider", () => {
   it("does not request diff files for the scratchpad", async () => {
     const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>();
+
     const session = testReviewSession(
       {},
       {
@@ -34,6 +35,7 @@ describe("ReviewDiffFilesProvider", () => {
         },
       },
     );
+
     session.review = { ...session.review!, kind: "scratchpad", pins: undefined };
 
     const container = document.createElement("div");
@@ -42,6 +44,7 @@ describe("ReviewDiffFilesProvider", () => {
 
     function Probe() {
       const state = useReviewDiffFiles();
+
       return <span>{state.status}</span>;
     }
 
@@ -66,7 +69,9 @@ describe("ReviewDiffFilesProvider", () => {
       additions: 1,
       deletions: 0,
     };
+
     const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>(async () => [file]);
+
     const reviewSession = testReviewSession(
       {},
       {
@@ -78,10 +83,12 @@ describe("ReviewDiffFilesProvider", () => {
         },
       },
     );
+
     const scratchpadSession = {
       ...reviewSession,
       review: { ...reviewSession.review!, kind: "scratchpad" as const, pins: undefined },
     };
+
     const container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -89,13 +96,16 @@ describe("ReviewDiffFilesProvider", () => {
 
     function Probe() {
       const state = useReviewDiffFiles();
+
       const label =
         state.status === "loaded"
           ? `loaded:${state.files.map(({ path }) => path).join(",")}`
           : state.status;
+
       useLayoutEffect(() => {
         committedStates.push(label);
       });
+
       return <span>{label}</span>;
     }
 

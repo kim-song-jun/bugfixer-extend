@@ -318,9 +318,11 @@ describe("WelcomePage", () => {
     await act(async () => clickButton("안내문 복사", 0));
     expect(stepState(1)).toBe("done");
     expect(stepOpen(1)).toBe("true");
+
     const connectHeader = step(1)?.querySelector<HTMLButtonElement>(
       ".review-onboarding-step-header",
     );
+
     expect(connectHeader?.getAttribute("aria-label")).toContain("완료");
     const noteId = connectHeader?.getAttribute("aria-describedby");
     expect(noteId).toBeTruthy();

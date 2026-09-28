@@ -175,6 +175,7 @@ describe("ReviewHome", () => {
       reviewId: uuid(1),
       title: "Scratchpad",
     });
+
     const review = summary({ reviewId: uuid(2), title: "A review" });
     const onOpen = vi.fn<(review: ReviewApiSummary) => void>();
     await act(async () =>
@@ -205,6 +206,7 @@ describe("ReviewHome", () => {
         ".review-home-table .review-home-review-title",
       )].map((title) => title.textContent),
     ).toContain("Scratchpad");
+
     const button = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.includes("메모장"),
     )!;
@@ -219,6 +221,7 @@ describe("ReviewHome", () => {
       title: "Scratchpad",
       repositoryName: "",
     });
+
     const pad: ReviewApiSummary = {
       ...base,
       kind: "scratchpad",
@@ -246,6 +249,7 @@ describe("ReviewHome", () => {
       title: "Scratchpad",
       repositoryName: "",
     });
+
     const pad: ReviewApiSummary = { ...base, kind: "scratchpad" };
     const other = summary({ reviewId: uuid(1), title: "Other review" });
 
@@ -257,10 +261,12 @@ describe("ReviewHome", () => {
     const search = container.querySelector<HTMLInputElement>(
       '[aria-label="리뷰 검색"]',
     )!;
+
     const setValue = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value",
     )?.set;
+
     await act(async () => {
       setValue!.call(search, "메모장");
       search.dispatchEvent(new Event("input", { bubbles: true }));
@@ -313,6 +319,7 @@ describe("ReviewHome", () => {
   it("keeps archive beside the delete menu without opening the review", async () => {
     const review = summary({ title: "Menu review" });
     const onOpen = vi.fn<(review: ReviewApiSummary) => void>();
+
     const onDismiss = vi.fn<(review: ReviewApiSummary) => Promise<void>>(
       async () => undefined,
     );
@@ -331,9 +338,11 @@ describe("ReviewHome", () => {
         />,
       ),
     );
+
     const archive = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Menu review 보관"]',
     );
+
     expect(archive).not.toBeNull();
     expect(archive?.closest('[role="menu"]')).toBeNull();
     await act(async () => archive!.click());
@@ -351,9 +360,11 @@ describe("ReviewHome", () => {
     );
     expect(container.querySelector('[role="menu"]')).not.toBeNull();
     expect(onOpen).not.toHaveBeenCalled();
+
     const trigger = container.querySelector<HTMLButtonElement>(
       '[aria-label="Menu review 작업"]',
     )!;
+
     const actions = trigger.parentElement!;
     await act(async () => {
       actions.dispatchEvent(
@@ -589,14 +600,17 @@ describe("ReviewHome", () => {
 
   it("reports failed archive and restore actions and allows retry", async () => {
     const review = summary({ title: "Retryable review" });
+
     const dismissed = {
       ...review,
       dismissedAt: "2026-09-02T00:00:00Z",
     };
+
     const onDismiss = vi
       .fn<(item: ReviewApiSummary) => Promise<void>>()
       .mockRejectedValueOnce(new Error("Offline"))
       .mockResolvedValue(undefined);
+
     const onRestore = vi
       .fn<(item: ReviewApiSummary) => Promise<void>>()
       .mockRejectedValueOnce(new Error("Offline"))
@@ -615,10 +629,12 @@ describe("ReviewHome", () => {
       );
 
     await render(review);
+
     const archive = () =>
       container.querySelector<HTMLButtonElement>(
         '[aria-label="Retryable review 보관"]',
       )!;
+
     await act(async () => archive().click());
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "보관하지 못했습니다",
@@ -635,9 +651,11 @@ describe("ReviewHome", () => {
         .querySelector<HTMLButtonElement>(".review-home-dismissed-toggle")!
         .click(),
     );
+
     const restore = container.querySelector<HTMLButtonElement>(
       ".review-home-restore",
     )!;
+
     await act(async () => restore.click());
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "복원하지 못했습니다",
@@ -651,15 +669,18 @@ describe("ReviewHome", () => {
 
   it("clears action feedback when catalog state reconciles or the review disappears", async () => {
     const review = summary({ title: "Reconciled review" });
+
     const dismissed = {
       ...review,
       dismissedAt: "2026-09-02T00:00:00Z",
     };
+
     const onDismiss = vi.fn<(item: ReviewApiSummary) => Promise<void>>(
       async () => {
         throw new Error("Offline");
       },
     );
+
     const onRestore = vi.fn<(item: ReviewApiSummary) => Promise<void>>(
       async () => {
         throw new Error("Offline");

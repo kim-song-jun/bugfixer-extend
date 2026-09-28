@@ -37,6 +37,7 @@ export function ReviewCommitsView({
   onOpenDiff: OpenCommitDiff;
 }) {
   const korean = isKoreanReviewUi();
+
   if (range.sourceUnavailable) {
     return (
       <ReviewUnavailable
@@ -257,6 +258,7 @@ function isTestFile(path: string): boolean {
 
 export function groupCommitsByDate(commits: readonly ReviewCommitSummary[]) {
   const korean = isKoreanReviewUi();
+
   const formatter = new Intl.DateTimeFormat(korean ? "ko-KR" : undefined, {
     month: "short",
     day: "numeric",
@@ -294,6 +296,7 @@ export function groupCommitsByDate(commits: readonly ReviewCommitSummary[]) {
 
 function reviewCountLabel(count: number, kind: "commit" | "file"): string {
   if (!isKoreanReviewUi()) return countLabel(count, kind);
+
   return `${kind === "commit" ? "커밋" : "파일"} ${count}개`;
 }
 

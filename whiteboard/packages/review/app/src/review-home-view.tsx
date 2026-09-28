@@ -105,8 +105,10 @@ export function ReviewHome({
   );
 
   const [deleteError, setDeleteError] = useState<string>();
+
   const [attentionError, setAttentionError] =
     useState<ReviewAttentionError>();
+
   const latestReviews = useRef(reviews);
   latestReviews.current = reviews;
 
@@ -974,9 +976,11 @@ function formatHomeRelativeTime(timestamp: string | null | undefined): string {
   const formatter = new Intl.RelativeTimeFormat("ko", { numeric: "auto" });
 
   if (elapsed < 60_000) return formatter.format(0, "second");
+
   if (elapsed < 3_600_000) {
     return formatter.format(-Math.floor(elapsed / 60_000), "minute");
   }
+
   if (elapsed < 86_400_000) {
     return formatter.format(-Math.floor(elapsed / 3_600_000), "hour");
   }

@@ -87,6 +87,7 @@ describe("ReviewTraceView", () => {
 
     function Probe() {
       const list = useTraceList();
+
       return <span>{list.status}</span>;
     }
 
