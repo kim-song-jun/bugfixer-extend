@@ -104,7 +104,6 @@ const subagentItemOutcomeLabels: Readonly<Record<string, string>> = {
 	denied: '권한 요청 거부',
 	failed: '실패',
 	unresolved: '결과 확인 필요',
-	resolved: '이후 검증에서 해결',
 };
 
 function subagentEventLabel(event: ProviderAttemptEventDTO): string {
@@ -3421,7 +3420,6 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const eventList = eventDetails.appendChild(createElement('ol'));
 				for (const event of events) {
 					const eventRow = eventList.appendChild(createElement('li'));
-					eventRow.title = event.type;
 					eventRow.textContent = `${subagentEventLabel(event)} · ${new Date(event.createdAt).toLocaleTimeString()}`;
 				}
 			}

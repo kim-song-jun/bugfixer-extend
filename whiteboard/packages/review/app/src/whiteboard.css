@@ -640,10 +640,6 @@ button.host-authoring-activity[data-locatable]:focus-visible {
   stroke-width: 1.2;
 }
 
-.review-home-dismissed-toggle {
-  color: var(--ink-muted);
-}
-
 /* ---------------------------------------------------------------------------
    Contents rail. Mono, numbered; the active entry gets the marker underline.
    --------------------------------------------------------------------------- */
