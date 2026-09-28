@@ -530,9 +530,7 @@ describe("WelcomePage", () => {
     await act(async () =>
       root.render(<WelcomePage install={content(status)} />),
     );
-    await act(async () =>
-      clickStepHeader(1),
-    );
+    await act(async () => clickStepHeader(1));
     expect(buttons("안내문 복사")).toHaveLength(0);
     expect(stepOpen(0)).toBe("true");
 
@@ -596,9 +594,7 @@ describe("WelcomePage", () => {
       expect(stepOpen(index)).toBe("false");
     }
 
-    await act(async () =>
-      clickStepHeader(2),
-    );
+    await act(async () => clickStepHeader(2));
     await act(async () => clickButton("닫기", -1));
     expect(install.finishUpdate).not.toHaveBeenCalled();
 
@@ -615,9 +611,7 @@ describe("WelcomePage", () => {
       container.querySelectorAll('[aria-label="에이전트 선택"] button'),
     ).toHaveLength(5);
 
-    await act(async () =>
-      clickStepHeader(2),
-    );
+    await act(async () => clickStepHeader(2));
     await act(async () => clickButton("닫기", -1));
     expect(onClose).toHaveBeenCalledOnce();
   });

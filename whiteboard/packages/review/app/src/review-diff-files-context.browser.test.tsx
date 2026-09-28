@@ -36,7 +36,11 @@ describe("ReviewDiffFilesProvider", () => {
       },
     );
 
-    session.review = { ...session.review!, kind: "scratchpad", pins: undefined };
+    session.review = {
+      ...session.review!,
+      kind: "scratchpad",
+      pins: undefined,
+    };
 
     const container = document.createElement("div");
     document.body.append(container);
@@ -70,7 +74,9 @@ describe("ReviewDiffFilesProvider", () => {
       deletions: 0,
     };
 
-    const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>(async () => [file]);
+    const files = vi.fn<() => Promise<ReviewDiffFileWire[]>>(async () => [
+      file,
+    ]);
 
     const reviewSession = testReviewSession(
       {},
@@ -86,7 +92,11 @@ describe("ReviewDiffFilesProvider", () => {
 
     const scratchpadSession = {
       ...reviewSession,
-      review: { ...reviewSession.review!, kind: "scratchpad" as const, pins: undefined },
+      review: {
+        ...reviewSession.review!,
+        kind: "scratchpad" as const,
+        pins: undefined,
+      },
     };
 
     const container = document.createElement("div");

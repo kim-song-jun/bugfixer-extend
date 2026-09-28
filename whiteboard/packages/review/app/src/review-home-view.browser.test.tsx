@@ -202,9 +202,11 @@ describe("ReviewHome", () => {
     expect(container.textContent).toContain("2개 다이어그램");
 
     expect(
-      [...container.querySelectorAll(
-        ".review-home-table .review-home-review-title",
-      )].map((title) => title.textContent),
+      [
+        ...container.querySelectorAll(
+          ".review-home-table .review-home-review-title",
+        ),
+      ].map((title) => title.textContent),
     ).toContain("Scratchpad");
 
     const button = Array.from(container.querySelectorAll("button")).find(
@@ -216,7 +218,11 @@ describe("ReviewHome", () => {
   });
 
   it("shows the scratchpad instead of the Welcome rail when it is the only item", async () => {
-    const { pins: _pins, repositoryPath: _path, ...base } = summary({
+    const {
+      pins: _pins,
+      repositoryPath: _path,
+      ...base
+    } = summary({
       reviewId: "scratchpad",
       title: "Scratchpad",
       repositoryName: "",
@@ -244,7 +250,11 @@ describe("ReviewHome", () => {
   });
 
   it("finds the scratchpad by its Korean display name", async () => {
-    const { pins: _pins, repositoryPath: _path, ...base } = summary({
+    const {
+      pins: _pins,
+      repositoryPath: _path,
+      ...base
+    } = summary({
       reviewId: "scratchpad",
       title: "Scratchpad",
       repositoryName: "",
@@ -353,9 +363,7 @@ describe("ReviewHome", () => {
 
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[aria-label="Menu review 작업"]',
-        )!
+        .querySelector<HTMLButtonElement>('[aria-label="Menu review 작업"]')!
         .click(),
     );
     expect(container.querySelector('[role="menu"]')).not.toBeNull();
@@ -513,9 +521,7 @@ describe("ReviewHome", () => {
     await render([review]);
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[aria-label="Pending review 작업"]',
-        )!
+        .querySelector<HTMLButtonElement>('[aria-label="Pending review 작업"]')!
         .click(),
     );
 
@@ -566,9 +572,7 @@ describe("ReviewHome", () => {
     expect(container.textContent).toContain("#320");
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[aria-label="Native review 보관"]',
-        )!
+        .querySelector<HTMLButtonElement>('[aria-label="Native review 보관"]')!
         .click(),
     );
     expect(onDismiss).toHaveBeenCalledWith(review);

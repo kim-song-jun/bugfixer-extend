@@ -777,7 +777,9 @@ button.host-authoring-activity[data-locatable]:focus-visible {
 }
 
 .review-document .review-document-empty-state button {
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
 }
 
 @media (max-width: 560px) {
@@ -2803,8 +2805,14 @@ button:focus-visible > .review-chevron {
   background: #f4f1e9;
 }
 
-.review-theme-host:not(.review-app--theme-light) .review-home-table tbody tr:hover,
-.review-theme-host:not(.review-app--theme-light) .review-home-table tbody tr:focus-within {
+.review-theme-host:not(.review-app--theme-light)
+  .review-home-table
+  tbody
+  tr:hover,
+.review-theme-host:not(.review-app--theme-light)
+  .review-home-table
+  tbody
+  tr:focus-within {
   background: var(--tray);
 }
 
@@ -2924,7 +2932,10 @@ button:focus-visible > .review-chevron {
   background: var(--well);
 }
 .review-home-table tr:hover .review-home-row-actions .review-home-dismiss,
-.review-home-table tr:focus-within .review-home-row-actions .review-home-dismiss {
+.review-home-table
+  tr:focus-within
+  .review-home-row-actions
+  .review-home-dismiss {
   opacity: 1;
 }
 .review-home-row-menu-trigger {

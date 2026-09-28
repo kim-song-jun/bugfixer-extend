@@ -106,8 +106,7 @@ export function ReviewHome({
 
   const [deleteError, setDeleteError] = useState<string>();
 
-  const [attentionError, setAttentionError] =
-    useState<ReviewAttentionError>();
+  const [attentionError, setAttentionError] = useState<ReviewAttentionError>();
 
   const latestReviews = useRef(reviews);
   latestReviews.current = reviews;
@@ -308,9 +307,7 @@ export function ReviewHome({
             </div>
           </div>
           {deleteError ? <p role="alert">{deleteError}</p> : null}
-          {attentionError ? (
-            <p role="alert">{attentionError.message}</p>
-          ) : null}
+          {attentionError ? <p role="alert">{attentionError.message}</p> : null}
           {/* Keyed off the active list, not the whole result: a query that hits
               only dismissed reviews empties the main area, and the collapsed
               Dismissed count alone does not explain why. */}
@@ -459,7 +456,7 @@ function DismissedSection({
               >
                 <MatchedText text={reviewTitle(review)} />
               </button>
-                <span className="review-home-dismissed-clock">보관됨</span>
+              <span className="review-home-dismissed-clock">보관됨</span>
               <RestoreReviewButton review={review} />
               {onDelete ? (
                 <DeleteReviewButton review={review} onDelete={onDelete} />
@@ -970,7 +967,8 @@ export function formatRelativeTime(
 }
 
 function formatHomeRelativeTime(timestamp: string | null | undefined): string {
-  if (!timestamp || !Number.isFinite(Date.parse(timestamp))) return "알 수 없음";
+  if (!timestamp || !Number.isFinite(Date.parse(timestamp)))
+    return "알 수 없음";
 
   const elapsed = Math.max(0, Date.now() - Date.parse(timestamp));
   const formatter = new Intl.RelativeTimeFormat("ko", { numeric: "auto" });

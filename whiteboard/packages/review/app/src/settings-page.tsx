@@ -169,7 +169,10 @@ export function SettingsPage({
           </Section>
 
           <Section label="편집기">
-            <Row label="테마" description="Whiteboard의 화면 모양을 설정합니다.">
+            <Row
+              label="테마"
+              description="Whiteboard의 화면 모양을 설정합니다."
+            >
               <Choice
                 label="테마"
                 value={theme}

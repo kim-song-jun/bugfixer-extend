@@ -149,8 +149,9 @@ export function WelcomePage({
             `${status?.shim.path ?? "~/.local/bin/whiteboard"}에 설치되어 있습니다.`
           ) : cliBuildMissing ? (
             <>
-              CLI 빌드를 찾을 수 없습니다. 소스에서 실행 중이라면 저장소 루트에서{" "}
-              <code>pnpm --filter @dev.fast/review build</code> 명령을 실행한 뒤 Whiteboard를 다시 시작하세요. 소스 실행이 아니라면
+              CLI 빌드를 찾을 수 없습니다. 소스에서 실행 중이라면 저장소
+              루트에서 <code>pnpm --filter @dev.fast/review build</code> 명령을
+              실행한 뒤 Whiteboard를 다시 시작하세요. 소스 실행이 아니라면
               Whiteboard를 다시 설치하세요.
             </>
           ) : status?.shim.installed ? (
@@ -265,7 +266,9 @@ export function WelcomePage({
             onCopied={markConnectCopied}
           />
         ) : (
-          <p className="review-home-empty">에이전트 설정을 사용할 수 없습니다.</p>
+          <p className="review-home-empty">
+            에이전트 설정을 사용할 수 없습니다.
+          </p>
         ),
     },
   ];
@@ -402,7 +405,11 @@ export function WelcomePage({
                       disabled={step.disabled}
                       aria-expanded={open}
                       aria-label={`${open ? "접기" : "펼치기"} ${step.label ?? step.title}${step.done ? " · 완료" : ""}`}
-                      aria-describedby={step.note ? `review-onboarding-step-note-${index}` : undefined}
+                      aria-describedby={
+                        step.note
+                          ? `review-onboarding-step-note-${index}`
+                          : undefined
+                      }
                       onClick={() => setOpenStep(open ? undefined : step.title)}
                     >
                       <StepBadge done={step.done} label={String(index + 1)} />
@@ -440,8 +447,8 @@ export function WelcomePage({
             >
               Discord
             </a>{" "}
-            또는 이메일{" "}
-            <a href="mailto:founders@dev.fast">founders@dev.fast</a>.
+            또는 이메일 <a href="mailto:founders@dev.fast">founders@dev.fast</a>
+            .
           </p>
         </div>
       </div>
