@@ -263,7 +263,7 @@ try {
 
       const onboardingShot = path.join(output, `onboarding-${tag}.png`);
 
-      await session.page.screenshot({ path: onboardingShot });
+      await capturePage(session.page, onboardingShot);
 
       screenshots.push(onboardingShot);
 
@@ -333,7 +333,7 @@ try {
 
       assert.ok(desktop.width > 760 && desktop.height > 0, `Desktop viewport must be measured and wider than 760px: ${JSON.stringify(desktop)}`);
 
-      await page.screenshot({ path: desktopShot, fullPage: false });
+      await capturePage(page, desktopShot);
 
       screenshots.push(desktopShot);
 
@@ -353,7 +353,7 @@ try {
 
         const narrowShot = path.join(output, 'dashboard-light-narrow-760.png');
 
-        await page.screenshot({ path: narrowShot, fullPage: false });
+        await capturePage(page, narrowShot);
 
         screenshots.push(narrowShot);
 
@@ -453,9 +453,27 @@ async function dismissStartupInvitations(page) {
 async function captureFailure(page, file, diagnostics) {
   try {
 
-    await page.screenshot({ path: file });
+    await capturePage(page, file);
   } catch (error) {
 
     diagnostics.pageErrors.push(`Failure screenshot capture failed: ${error.stack ?? error.message}`);
+  }
+}
+
+async function capturePage(page, file) {
+  const cdp = await page.context().newCDPSession(page);
+
+  try {
+    await page.waitForFunction(() => document.fonts.status === 'loaded', undefined, { timeout: 20_000 });
+
+    const shot = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false,
+      fromSurface: true,
+    });
+
+    await writeFile(file, Buffer.from(shot.data, 'base64'));
+  } finally {
+    await cdp.detach();
   }
 }
