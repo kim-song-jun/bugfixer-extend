@@ -1465,6 +1465,7 @@ export class CodeApplication extends Disposable {
 		// across apps until `requestSingleInstance` APIs are adopted.
 
 		const disposables = this._register(new DisposableStore());
+		let pendingTaskDeletionReplay: Promise<void> | undefined;
 
 		// Review operations are brokered through the main process for code windows.
 		const windowsMainService = accessor.get(IWindowsMainService);
@@ -1522,7 +1523,7 @@ export class CodeApplication extends Disposable {
 				},
 			});
 			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, accessor.get(ILogService));
-			await providerRuns.recoverPendingTaskDeletions();
+			pendingTaskDeletionReplay = providerRuns.recoverPendingTaskDeletions();
 			validatedIpcMain.handle(WORKSPACE_DASHBOARD_CHANNEL, (event, command: string, arg: unknown) => dashboardChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
 			validatedIpcMain.handle(WORKSPACE_PROVIDER_RUNS_CHANNEL, (event, command: string, arg: unknown) => providerRuns.call(event.sender, command, arg));
@@ -1741,6 +1742,7 @@ export class CodeApplication extends Disposable {
 		// Utility Process Worker
 		const utilityProcessWorkerChannel = ProxyChannel.fromService(accessor.get(IUtilityProcessWorkerMainService), disposables);
 		mainProcessElectronServer.registerChannel(ipcUtilityProcessWorkerChannelName, utilityProcessWorkerChannel);
+		await pendingTaskDeletionReplay;
 	}
 
 	private async openFirstWindow(accessor: ServicesAccessor, initialProtocolUrls: IInitialProtocolUrls | undefined): Promise<ICodeWindow[]> {
