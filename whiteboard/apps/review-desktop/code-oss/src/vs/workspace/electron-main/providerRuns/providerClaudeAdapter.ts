@@ -32,6 +32,7 @@ export function createClaudeProviderCommand(request: ProviderRunRequest, executa
 		throw new Error('Claude Code executable cannot be empty.');
 	}
 
+	const parseEvent = createClaudeProviderEventParser();
 	return {
 		executable,
 		args: [
@@ -46,7 +47,7 @@ export function createClaudeProviderCommand(request: ProviderRunRequest, executa
 		],
 		stdin: JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: request.prompt }] } }) + '\n',
 		...(request.profileDirectory === join(userInfo().homedir, '.claude') ? {} : { env: { CLAUDE_CONFIG_DIR: request.profileDirectory } }),
-		parseEvent: parseClaudeProviderEvent
+		parseEvent
 	};
 }
 
@@ -60,6 +61,15 @@ export function parseClaudeProviderEvent(line: string, stream: 'stdout' | 'stder
 	readonly terminalState?: ProviderTerminalState;
 	readonly finalText?: string;
 } {
+	return parseClaudeProviderEventWithState(line, stream, { permissionDenied: false });
+}
+
+function createClaudeProviderEventParser(): (line: string, stream: 'stdout' | 'stderr') => ReturnType<typeof parseClaudeProviderEvent> {
+	const state = { permissionDenied: false };
+	return (line, stream) => parseClaudeProviderEventWithState(line, stream, state);
+}
+
+function parseClaudeProviderEventWithState(line: string, stream: 'stdout' | 'stderr', state: { permissionDenied: boolean }): ReturnType<typeof parseClaudeProviderEvent> {
 	if (stream !== 'stdout' || line.length === 0 || Buffer.byteLength(line, 'utf8') > PROVIDER_MAX_EVENT_LINE_BYTES) {
 		return {};
 	}
@@ -83,13 +93,22 @@ export function parseClaudeProviderEvent(line: string, stream: 'stdout' | 'stder
 			}
 		};
 	}
+	if (message.type === 'system' && message.subtype === 'permission_denied') {
+		state.permissionDenied = true;
+		return { event: { type: 'permission.denied' } };
+	}
 
 	if (message.type !== 'result') {
 		return {};
 	}
 
-	const succeeded = message.subtype === 'success' && message.is_error !== true;
+	const permissionDenials = Array.isArray(message.permission_denials) && message.permission_denials.length > 0;
+	const denied = state.permissionDenied || permissionDenials;
+	const succeeded = message.subtype === 'success' && message.is_error !== true && !denied;
 	const metadata: Record<string, string | number | boolean | null> = {};
+	if (denied) {
+		metadata.itemOutcome = 'denied';
+	}
 	const subtype = typeof message.subtype === 'string' ? message.subtype : undefined;
 	if (subtype && CLAUDE_RESULT_SUBTYPES.has(subtype)) {
 		metadata.subtype = subtype;

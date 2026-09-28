@@ -121,3 +121,47 @@ test('rejects invalid profile paths and omits unknown result subtype metadata', 
 		terminalState: 'failed',
 	});
 });
+
+test('tracks Claude permission denial through the observed tool event sequence without retaining details', () => {
+	const command = createClaudeProviderCommand(request());
+	assert.deepEqual(command.parseEvent(JSON.stringify({
+		type: 'assistant', message: { content: [{ type: 'tool_use', name: 'SecretTool', input: { token: 'private' } }] },
+	}), 'stdout'), {});
+	const denied = command.parseEvent(JSON.stringify({
+		type: 'system', subtype: 'permission_denied', tool_name: 'SecretTool', message: 'private denial reason',
+	}), 'stdout');
+	assert.deepEqual(denied, { event: { type: 'permission.denied' } });
+	assert.equal(JSON.stringify(denied).includes('SecretTool'), false);
+	assert.equal(JSON.stringify(denied).includes('private denial reason'), false);
+	assert.deepEqual(command.parseEvent(JSON.stringify({ type: 'user', tool_result: { is_error: true, content: 'private tool output' } }), 'stdout'), {});
+	const result = command.parseEvent(JSON.stringify({
+		type: 'result', subtype: 'success', is_error: false, result: 'must not escape',
+		permission_denials: [{ tool_name: 'SecretTool', reason: 'private denial reason' }],
+	}), 'stdout');
+	assert.deepEqual(result, { event: { type: 'turn.completed', metadata: { itemOutcome: 'denied', subtype: 'success' } }, terminalState: 'failed' });
+	assert.equal(JSON.stringify(result).includes('private'), false);
+	assert.equal(result.finalText, undefined);
+});
+
+test('fails a result containing structured permission denials in the stateless parser', () => {
+	assert.deepEqual(parseClaudeProviderEvent(JSON.stringify({
+		type: 'result', subtype: 'success', is_error: false, result: 'private answer',
+		permission_denials: [{ tool_name: 'SecretTool' }],
+	}), 'stdout'), {
+		event: { type: 'turn.completed', metadata: { itemOutcome: 'denied', subtype: 'success' } },
+		terminalState: 'failed',
+	});
+});
+
+test('does not make recoverable tool errors sticky and preserves a clean success', () => {
+	const command = createClaudeProviderCommand(request());
+	assert.deepEqual(command.parseEvent(JSON.stringify({
+		type: 'user', tool_result: { is_error: true, content: 'tool failed but may recover' },
+	}), 'stdout'), {});
+	assert.deepEqual(command.parseEvent(JSON.stringify({ type: 'assistant', content: [{ type: 'text', text: 'recovered' }] }), 'stdout'), {});
+	assert.deepEqual(command.parseEvent(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'clean answer' }), 'stdout'), {
+		event: { type: 'turn.completed', metadata: { subtype: 'success' } },
+		terminalState: 'succeeded',
+		finalText: 'clean answer',
+	});
+});
