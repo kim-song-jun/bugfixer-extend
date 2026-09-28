@@ -159,7 +159,7 @@ async function launch(
 	let finalText: string | undefined;
 	let resolveResult!: (result: ProviderRunResult) => void;
 	const result = new Promise<ProviderRunResult>((resolve) => resolveResult = resolve);
-	let guardianStreamDrainTimer: NodeJS.Timeout | undefined;
+	let guardianStreamDrainTimer: ReturnType<typeof setTimeout> | undefined;
 	const guardianIsGone = (): boolean => guardianExited || closeSeen || child.exitCode !== null || child.signalCode !== null;
 	const requestTermination = (): Promise<GroupCleanupResult> => {
 		if (guardianIsGone()) {
@@ -271,7 +271,6 @@ async function launch(
 				if (stream && 'destroy' in stream && typeof stream.destroy === 'function') stream.destroy();
 			}
 		}, GROUP_CLEANUP_TIMEOUT_MS);
-		guardianStreamDrainTimer.unref();
 	});
 	child.once('close', (code, signal) => {
 		if (guardianStreamDrainTimer) clearTimeout(guardianStreamDrainTimer);
