@@ -3693,11 +3693,12 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		if (normalized.includes('review and approve the exact connector package')) return '설치 전에 검토한 패키지의 설치를 승인해 주세요.';
 		if (normalized.includes('connector source and selected resource id are required')) return '자료 출처와 원격 자료 ID를 입력해 주세요.';
 		if (normalized.includes('valid project id is required')) return '프로젝트 정보가 유효하지 않습니다. 프로젝트를 다시 열어 주세요.';
+		if (normalized.includes('blocked by the configured permission policy')) return '에이전트가 허용되지 않은 작업을 요청해 실행이 실패했습니다. 권한 요약과 작업 지시를 확인해 주세요.';
 		if (/permission denied|not authorized|access denied/.test(normalized)) return '접근 권한이 없습니다. 계정과 폴더 권한을 확인해 주세요.';
 		if (/not found|does not exist|no longer exists/.test(normalized)) return '요청한 항목을 찾을 수 없습니다. 목록을 새로고침한 뒤 다시 시도해 주세요.';
 		if (/keychain/.test(normalized)) return 'macOS 키체인 작업을 완료하지 못했습니다. 계정 연결 상태를 확인해 주세요.';
 		if (/network|fetch failed|timed? out|econn/.test(normalized)) return '연결이 원활하지 않습니다. 네트워크를 확인하고 다시 시도해 주세요.';
-		return `${fallback} 자세한 내용은 오류 로그를 확인해 주세요.`;
+		return fallback.includes('자세한 내용은 오류 로그를 확인해 주세요.') ? fallback : `${fallback} 자세한 내용은 오류 로그를 확인해 주세요.`;
 	}
 
 	private renderCreateForm(shell: HTMLElement): void {

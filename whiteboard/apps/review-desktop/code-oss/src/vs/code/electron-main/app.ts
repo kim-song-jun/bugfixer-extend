@@ -895,7 +895,7 @@ export class CodeApplication extends Disposable {
 		this._register(appInstantiationService.createInstance(UserDataProfilesHandler));
 
 		// Init Channels
-		appInstantiationService.invokeFunction(accessor => this.initChannels(accessor, mainProcessElectronServer, sharedProcessClient, openProject));
+		await appInstantiationService.invokeFunction(accessor => this.initChannels(accessor, mainProcessElectronServer, sharedProcessClient, openProject));
 
 		// Setup Protocol URL Handlers
 		const initialProtocolUrls = await appInstantiationService.invokeFunction(accessor => this.setupProtocolUrlHandlers(accessor, mainProcessElectronServer));
@@ -1457,7 +1457,7 @@ export class CodeApplication extends Disposable {
 		return this.mainInstantiationService.createChild(services);
 	}
 
-	private initChannels(accessor: ServicesAccessor, mainProcessElectronServer: ElectronIPCServer, sharedProcessClient: Promise<MessagePortClient>, openProject: (projectId: string) => Promise<void>): void {
+	private async initChannels(accessor: ServicesAccessor, mainProcessElectronServer: ElectronIPCServer, sharedProcessClient: Promise<MessagePortClient>, openProject: (projectId: string) => Promise<void>): Promise<void> {
 
 		// Channels registered to node.js are exposed to second instances
 		// launching because that is the only way the second instance
@@ -1522,7 +1522,7 @@ export class CodeApplication extends Disposable {
 				},
 			});
 			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, accessor.get(ILogService));
-			providerRuns.recoverPendingTaskDeletions();
+			await providerRuns.recoverPendingTaskDeletions();
 			validatedIpcMain.handle(WORKSPACE_DASHBOARD_CHANNEL, (event, command: string, arg: unknown) => dashboardChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
 			validatedIpcMain.handle(WORKSPACE_PROVIDER_RUNS_CHANNEL, (event, command: string, arg: unknown) => providerRuns.call(event.sender, command, arg));

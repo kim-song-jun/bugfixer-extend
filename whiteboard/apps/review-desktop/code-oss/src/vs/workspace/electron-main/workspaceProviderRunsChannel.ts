@@ -346,6 +346,7 @@ export class WorkspaceProviderRunsChannel {
 		let leaseLossSubscription: { dispose(): void } | undefined;
 		let providerSessionId: string | null = null;
 		let runningTaskRevision: number | undefined;
+		let permissionDenied = false;
 		try {
 			lease = await this.writerLock.acquire(context.writerLockRoot, queuedRun.controller.signal);
 			leaseLossSubscription = lease.onLost(() => queuedRun.controller.abort());
@@ -394,6 +395,7 @@ export class WorkspaceProviderRunsChannel {
 			const acquiredLease = lease;
 			const handle = await this.supervisor.run(runRequest, spec, event => {
 				if (event.providerSessionId) { providerSessionId = event.providerSessionId; }
+				if (event.type === 'permission.denied' || (event.type === 'turn.completed' && event.metadata?.itemOutcome === 'denied')) { permissionDenied = true; }
 				this.database.appendProviderAttemptEvent(queued.attemptId, { type: event.type, metadata: event.metadata });
 			}, async pgid => {
 				await acquiredLease.attachOwnedProcessGroup(pgid);
@@ -405,7 +407,7 @@ export class WorkspaceProviderRunsChannel {
 				const reportPersisted = await this.persistOrdinaryFolderChanges(queued.attemptId, context, inventoryBefore, inventoryFailure);
 				const terminalState = result.state === 'succeeded' && !reportPersisted ? 'failed' : queuedRun.controller.signal.aborted ? 'cancelled' : result.state;
 				const terminalError = result.state === 'succeeded' && !reportPersisted ? 'Changes unverified: the durable change report could not be saved.'
-					: queuedRun.controller.signal.aborted ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result) : null);
+					: queuedRun.controller.signal.aborted ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result, permissionDenied) : null);
 				if (terminalState === 'succeeded' && result.finalText !== undefined) { this.database.persistProviderAttemptResult(queued.attemptId, result.finalText); }
 				this.database.finishProviderAttempt(queued.attemptId, terminalState, providerSessionId, undefined, terminalError, result.cleanupVerified);
 				if (!result.cleanupVerified) { this.uncertainLeases.set(queued.attemptId, lease); lease = undefined; }
@@ -415,7 +417,7 @@ export class WorkspaceProviderRunsChannel {
 				const reportPersisted = await this.persistOrdinaryFolderChanges(queued.attemptId, context, inventoryBefore, inventoryFailure);
 				let terminalState = result.state === 'succeeded' && !reportPersisted ? 'failed' as const : queuedRun.controller.signal.aborted ? 'cancelled' as const : result.state;
 				let terminalError = result.state === 'succeeded' && !reportPersisted ? 'Changes unverified: the durable change report could not be saved.'
-					: terminalState === 'cancelled' ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result) : null);
+					: terminalState === 'cancelled' ? null : result.error ?? (result.state === 'failed' ? this.failureSummary(result, permissionDenied) : null);
 				if (terminalState === 'succeeded' && result.finalText !== undefined) {
 					try { this.database.persistProviderAttemptResult(queued.attemptId, result.finalText); }
 					catch (error) {
@@ -733,8 +735,8 @@ export class WorkspaceProviderRunsChannel {
 		};
 	}
 
-	private failureSummary(result: ProviderRunResult): string {
-		return result.error ?? 'Provider run failed. Check the local CLI sign-in and permission settings.';
+	private failureSummary(result: ProviderRunResult, permissionDenied: boolean): string {
+		return result.error ?? (permissionDenied ? 'Provider action was blocked by the configured permission policy.' : 'Provider run failed. Check the local CLI sign-in and permission settings.');
 	}
 
 	private safeError(error: unknown, fallback: string): string {
