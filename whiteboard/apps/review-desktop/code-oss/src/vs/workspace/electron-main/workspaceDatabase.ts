@@ -300,7 +300,7 @@ export class ReviewCompletionConflictError extends Error {
 const schemaVersion = 20;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
-	'turn.completed', 'turn.failed', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
+	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
 ]);
 
 /** Main-process-only durable storage for one app profile's project workspace data. */

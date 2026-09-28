@@ -519,10 +519,12 @@ test('provider attempt transitions are audited, task moves are conditional, and 
 		assert.throws(() => database.finishProviderAttempt(attempt.attemptId, 'failed'), /already terminal/);
 		assert.throws(() => database.appendProviderAttemptEvent(attempt.attemptId, { type: 'turn.completed', metadata: { text: 'sensitive content' } }), /not allowed/);
 		assert.throws(() => database.appendProviderAttemptEvent(attempt.attemptId, { type: 'item.started', metadata: { itemType: 'raw secret content' } }), /not allowed/);
+		assert.doesNotThrow(() => database.appendProviderAttemptEvent(attempt.attemptId, { type: 'permission.denied' }));
 		assert.throws(() => database.appendProviderAttemptEvent(attempt.attemptId, { type: 'assistant.message' }), /Unsupported provider event type/);
-		assert.deepEqual(database.listProviderAttemptEvents(attempt.attemptId), []);
+		assert.deepEqual(database.listProviderAttemptEvents(attempt.attemptId).map(event => ({ type: event.type, metadata: event.metadata })), [{ type: 'permission.denied', metadata: {} }]);
 		const audit = new DatabaseSync(path);
 		try {
+			assert.equal(String(audit.prepare('SELECT metadata_json FROM provider_attempt_events WHERE attempt_id = ?').get(attempt.attemptId)?.metadata_json), '{}');
 			assert.equal(Number(audit.prepare('SELECT COUNT(*) AS count FROM provider_attempt_state_audit WHERE attempt_id = ?').get(attempt.attemptId)?.count), 3);
 			assert.deepEqual(audit.prepare('SELECT from_state, to_state FROM provider_attempt_task_state_audit WHERE attempt_id = ? ORDER BY audit_id').all(attempt.attemptId).map(row => [row.from_state, row.to_state]), [['ready', 'inProgress'], ['inProgress', 'review']]);
 			assert.equal(Number(audit.prepare('SELECT COUNT(*) AS count FROM provider_attempt_task_suggestions').get()?.count), 0);
