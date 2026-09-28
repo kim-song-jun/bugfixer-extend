@@ -682,6 +682,7 @@ test('a restarted channel uses authenticated recovery without current helper run
 				const trashedTask = await restarted.deleteTask(projectId, taskId, database.getTask(taskId)!.revision, 'trash-direct-control-test');
 				assert.ok(trashedTask.trashedAt);
 				assert.equal(database.getProviderAttempt(attempt.attemptId)?.cleanupVerified, true);
+				assert.equal((restarted as unknown as { restartBarrier?: unknown }).restartBarrier, undefined, 'verified cleanup must release the new-run barrier');
 				assert.throws(() => lstatSync(control.socketPath), { code: 'ENOENT' });
 				const binding = database.listFolderBindings(projectId)[0];
 				const trashTask = database.createTask({ projectId, bindingId: binding.id, title: 'Recover pending Trash' });

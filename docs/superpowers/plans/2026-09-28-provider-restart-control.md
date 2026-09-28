@@ -62,28 +62,28 @@ Before binding or accepting cancellation, the helper must prove that the supplie
 
 **Interface:** Add an optional macOS `recoveryControl` request containing packaged Node executable, helper script, socket path, and nonce. Extend the persistence callback to `onOwnedProcessSpawned(pgid: number, controlNonce?: string)`. `run()` starts the current detached shell, persists `(PGID, nonce)` through that callback, writes the nonce to fd5, and only then sends GO on fd3. The shell starts the control helper as the provider parent. Linux tests retain the current direct shell path until a Linux runtime is packaged.
 
-- [ ] Add a test proving a failed durable callback or closed fd3 never starts the provider or helper; add a successful launch test asserting the helper socket exists before provider output.
-- [ ] Add a real test proving a helper failure with a surviving descendant makes the shell leader terminate its own group before exiting.
-- [ ] Run the smallest new test to observe a launch-order failure.
-- [ ] Implement the controlled shell branch and fd5 error handling without changing the ordinary direct branch's safety behavior.
-- [ ] Rerun focused launch-gate, guardian-loss, and cancellation tests. Confirm no test-owned process remains.
-- [ ] Commit only this task's owned files with explicit pathspecs.
+- [x] Add a test proving a failed durable callback or closed fd3 never starts the provider or helper; add a successful launch test asserting the helper socket exists before provider output.
+- [x] Add a real test proving a helper failure with a surviving descendant makes the shell leader terminate its own group before exiting.
+- [x] Run the smallest new test to observe a launch-order failure.
+- [x] Implement the controlled shell branch and fd5 error handling without changing the ordinary direct branch's safety behavior.
+- [x] Rerun focused launch-gate, guardian-loss, and cancellation tests. Confirm no test-owned process remains.
+- [x] Commit only this task's owned files with explicit pathspecs (`1a5cb28`).
 
 ### Task 4: Restart cancellation and user control
 
 **Files:** create `providerRuns/providerGroupControlClient.ts`; modify `workspaceProviderRunsChannel.ts`, its focused test, and `projectDashboardEditorPane.ts`.
 
-**Interface:** `cancelRecoveredProviderGroup(attemptId, nonce)` connects to the derived private socket and sends the bounded command. An ACK means request accepted, not cleanup verified. The channel polls `isOwnedProcessGroupGone(ownedPgid)` with a bounded deadline, confirms cleanup only after ESRCH, and refreshes the writer barrier. An unavailable helper or timeout returns a specific error and retains the barrier. The dashboard shows an interrupted, unverified attempt with a `정리 다시 시도` control and Korean status; the existing active-run `실행 취소` remains distinct.
+**Interface:** `cancelProviderProcessGroup` connects to the derived private socket and sends the bounded command. An ACK means request accepted, not cleanup verified. The channel polls `isOwnedProcessGroupGone(ownedPgid)` with a bounded deadline, confirms cleanup only after ESRCH, and refreshes the writer barrier. An unavailable helper or timeout returns a specific error and retains the barrier. The dashboard shows every terminal, unverified attempt with a `정리 다시 시도` control and Korean status; the existing active-run `실행 취소` remains distinct.
 
 User-selected Trash must use the same recovery path. Both a direct `deleteTask` request and `recoverPendingTaskDeletions` replay should request authenticated cancellation of a prior interrupted live group, wait for verified exit within a bound, then finalize Trash. Failed recovery leaves the durable deletion pending with a specific retryable error; shutdown abort still stops replay promptly.
 
-- [ ] Add a real detached-group channel test: restart changes a running attempt to interrupted; cancel reaches its helper, group exits, cleanup becomes verified, and a subsequent run is no longer blocked.
-- [ ] Add negative tests for wrong nonce and absent socket that assert the group stays alive and the barrier stays reserved.
-- [ ] Add a pending Trash replay test where a surviving controlled group is cancelled after restart and Trash is finalized; cover failed recovery staying pending.
-- [ ] Run the first new channel test and observe its expected failure before implementation.
-- [ ] Add the client/channel behavior; then add the renderer control. The renderer change is verified by a real packaged native flow, since this editor pane has no DOM unit-test harness and an element-existence test would not prove usability.
-- [ ] Rerun focused tests. After the user completes the native installer check, capture packaged before/after screenshots at desktop and 760 px, including the scroll end and console/network observations.
-- [ ] Commit only this task's owned files with explicit pathspecs.
+- [x] Add a real detached-group channel test: restart recovery reaches its helper, group exit is verified, and the new-run barrier is released.
+- [x] Add negative tests for wrong nonce and absent socket that assert the group stays alive and the barrier stays reserved.
+- [x] Add direct and pending Trash tests where a surviving controlled group is cancelled and deletion finishes; cover failed recovery staying pending.
+- [x] Run the first new channel test and observe its expected failure before implementation; prove the unverified cancellation regression red before the fix.
+- [x] Add the client/channel behavior and renderer retry control. The renderer still needs a real packaged native flow because this pane has no DOM test harness and an element-presence test would not prove usability.
+- [ ] After the user completes the native installer check, capture packaged before/after screenshots at desktop and 760 px, including the scroll end and console/network observations.
+- [x] Commit code only by explicit pathspecs (`cd3c6e6` backend, `857d11b` renderer); the final focused barrier assertion accompanies this plan update.
 
 ### Task 5: Package and acceptance proof
 
