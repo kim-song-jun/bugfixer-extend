@@ -79,8 +79,8 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		if (launch.kind !== 'project') return;
 
 		await this.editorGroupsService.whenRestored;
-		const compactInitialWindow = !section && !createTask && !activate && window.innerWidth <= 980;
-		if (compactInitialWindow) {
+		const defaultProjectLaunch = !section && !createTask && !activate;
+		if (defaultProjectLaunch) {
 			this.layoutService.setPartHidden(false, Parts.ACTIVITYBAR_PART);
 			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 		} else {

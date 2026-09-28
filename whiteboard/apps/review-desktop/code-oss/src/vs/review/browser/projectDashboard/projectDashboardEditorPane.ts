@@ -1252,7 +1252,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 				const connectHeading = connect.appendChild($('h5')); connectHeading.textContent = '계정 추가';
 				const label = connect.appendChild(createElement('label')); label.htmlFor = `package-account-label-${installed.packageId}`; label.textContent = '계정 이름';
 				const labelInput = connect.appendChild(document.createElement('input')); labelInput.id = label.htmlFor; labelInput.required = true; labelInput.autocomplete = 'off'; labelInput.value = this.packageConnectionLabel; labelInput.disabled = this.packageBusy;
-				const tokenLabel = connect.appendChild(createElement('label')); tokenLabel.htmlFor = `package-token-${installed.packageId}`; tokenLabel.textContent = 'Bearer token (16자 이상)';
+				const tokenLabel = connect.appendChild(createElement('label')); tokenLabel.htmlFor = `package-token-${installed.packageId}`; tokenLabel.textContent = 'Bearer 인증 토큰 (16자 이상)';
 				const tokenInput = connect.appendChild(document.createElement('input')); tokenInput.id = tokenLabel.htmlFor; tokenInput.type = 'password'; tokenInput.required = true; tokenInput.minLength = 16; tokenInput.pattern = '[!-~]{16,}'; tokenInput.autocomplete = 'new-password'; tokenInput.disabled = this.packageBusy;
 				const tokenHint = connect.appendChild($('p')); tokenHint.id = `package-token-hint-${installed.packageId}`; tokenHint.className = 'project-dashboard__connector-note'; tokenHint.textContent = '공백 없는 ASCII 출력 가능 문자만 사용할 수 있으며, 최소 16자여야 합니다.';
 				tokenInput.setAttribute('aria-describedby', tokenHint.id);
@@ -2776,10 +2776,18 @@ export class ProjectDashboardEditorPane extends EditorPane {
 		const allTasksDone = this.dashboard.tasks.length > 0 && this.dashboard.tasks.every(task => task.state === 'done');
 		const nextTitle = nextCopy.appendChild($('h2')); nextTitle.textContent = nextTask?.title ?? (allTasksDone ? '모든 작업 완료' : '작업이 없습니다');
 		const nextDescription = nextCopy.appendChild($('p'));
-		const nextReason = nextAction && recommended?.id === nextAction.taskId
-			? { attention: '실행 확인 필요', inspectChanges: '변경 내용 확인 필요', review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과와 함께 검토' : '결과 검토 필요', running: '작업 진행 중', ready: '시작 준비 완료' }[nextAction.kind]
-			: nextTask ? columns.find(column => column.state === nextTask.state)?.label : undefined;
-		nextDescription.textContent = nextTask ? `${nextReason} · 상세에서 진행 상태를 확인하세요.` : allTasksDone
+		const nextDescriptionText = nextAction && recommended?.id === nextAction.taskId
+			? {
+				attention: '실행 결과를 확인하고 다음 단계를 정하세요.',
+				inspectChanges: '변경 내용을 살펴보세요.',
+				review: nextAction.hasPassedE2eEvidence ? '브라우저 확인 결과를 포함해 검토하세요.' : '작업 결과를 검토하세요.',
+				running: '진행 중인 작업의 상태를 확인하세요.',
+				ready: '준비된 작업을 시작하세요.',
+			}[nextAction.kind]
+			: nextTask?.state === 'review' ? '작업 결과를 검토하세요.'
+			: nextTask?.state === 'inProgress' ? '진행 중인 작업의 상태를 확인하세요.'
+			: nextTask?.state === 'ready' ? '준비된 작업을 시작하세요.' : undefined;
+		nextDescription.textContent = nextTask ? (nextDescriptionText ?? '작업 상태를 확인하세요.') : allTasksDone
 			? '새 작업을 추가해 계속 진행하세요.'
 			: '작업을 만들면 보드에서 진행 상태를 관리할 수 있습니다.';
 		const nextActions = next.appendChild(createElement('div', 'project-dashboard__next-actions'));
@@ -3453,7 +3461,7 @@ export class ProjectDashboardEditorPane extends EditorPane {
 			if (value && typeof value === 'object' && !Array.isArray(value)) {
 				if (typeof (value as { scope?: unknown }).scope === 'string') return (value as { scope: string }).scope;
 				const files = (value as { files?: unknown }).files;
-				if (Array.isArray(files) && files.every(file => typeof file === 'string')) return files.length ? `Files: ${files.join(', ')}` : '지정된 파일이 없습니다.';
+				if (Array.isArray(files) && files.every(file => typeof file === 'string')) return files.length ? `파일: ${files.join(', ')}` : '지정된 파일이 없습니다.';
 				return JSON.stringify(value);
 			}
 		} catch { return '저장된 작업 내용을 읽을 수 없습니다.'; }
