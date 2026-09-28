@@ -6408,6 +6408,7 @@ button.review-stack-row:disabled .review-stack-relation {
    section, and a fixed right lane so every control lines up. */
 .review-settings-page {
   width: min(820px, 100%);
+  padding-bottom: 140px;
 }
 
 .review-settings-lede {

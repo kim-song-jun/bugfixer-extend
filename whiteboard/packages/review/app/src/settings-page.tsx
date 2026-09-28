@@ -265,13 +265,13 @@ export function SettingsPage({
               </label>
             </Row>
             <Row
-              label="스크래치패드"
-              description="홈 화면에 실험 기능인 스크래치패드를 표시합니다. 에이전트는 Whiteboard MCP 도구로 여기에 그릴 수 있습니다."
+              label="메모장"
+              description="홈 화면에 실험 기능인 메모장을 표시합니다. 에이전트는 Whiteboard MCP 도구로 여기에 그릴 수 있습니다."
             >
               <label className="review-settings-toggle">
                 <input
                   type="checkbox"
-                  aria-label="스크래치패드"
+                  aria-label="메모장"
                   checked={scratchpadEnabled}
                   disabled={busy !== null}
                   onChange={(event) => {

@@ -607,7 +607,7 @@ function ReviewLayoutContent({
                         label={
                           scratchpad
                             ? korean
-                              ? "메모"
+                              ? "메모장"
                               : "Scratchpad"
                             : reviewViewLabel("review")
                         }

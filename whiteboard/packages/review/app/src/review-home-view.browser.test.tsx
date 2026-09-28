@@ -171,17 +171,26 @@ describe("ReviewHome", () => {
       contents: { blocks: 6, diagrams: 2 },
     };
 
-    const review = summary({ reviewId: uuid(1), title: "A review" });
+    const ordinaryScratchpadTitle = summary({
+      reviewId: uuid(1),
+      title: "Scratchpad",
+    });
+    const review = summary({ reviewId: uuid(2), title: "A review" });
     const onOpen = vi.fn<(review: ReviewApiSummary) => void>();
     await act(async () =>
-      root.render(<ReviewHome reviews={[review, pad]} onOpen={onOpen} />),
+      root.render(
+        <ReviewHome
+          reviews={[ordinaryScratchpadTitle, review, pad]}
+          onOpen={onOpen}
+        />,
+      ),
     );
 
     const labels = Array.from(container.querySelectorAll("button")).map(
       (button) => button.textContent ?? "",
     );
 
-    const padIndex = labels.findIndex((text) => text.includes("Scratchpad"));
+    const padIndex = labels.findIndex((text) => text.includes("메모장"));
     expect(padIndex).toBeGreaterThanOrEqual(0);
     expect(padIndex).toBeLessThan(
       labels.findIndex((text) => text.includes("A review")),
@@ -191,8 +200,13 @@ describe("ReviewHome", () => {
     expect(container.textContent).toContain("6개 항목");
     expect(container.textContent).toContain("2개 다이어그램");
 
+    expect(
+      [...container.querySelectorAll(
+        ".review-home-table .review-home-review-title",
+      )].map((title) => title.textContent),
+    ).toContain("Scratchpad");
     const button = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Scratchpad"),
+      (button) => button.textContent?.includes("메모장"),
     )!;
 
     await act(async () => button.click());
@@ -216,8 +230,43 @@ describe("ReviewHome", () => {
     );
 
     expect(container.querySelector(".review-home-scratchpad")).not.toBeNull();
-    expect(container.textContent).toContain("Scratchpad");
+    expect(container.querySelector(".review-home")).not.toBeNull();
+    expect(
+      container
+        .querySelector(".review-home-scratchpad")
+        ?.getAttribute("aria-label"),
+    ).toBe("메모장");
+    expect(container.textContent).toContain("메모장");
     expect(container.textContent).toContain("1개 항목");
+  });
+
+  it("finds the scratchpad by its Korean display name", async () => {
+    const { pins: _pins, repositoryPath: _path, ...base } = summary({
+      reviewId: "scratchpad",
+      title: "Scratchpad",
+      repositoryName: "",
+    });
+    const pad: ReviewApiSummary = { ...base, kind: "scratchpad" };
+    const other = summary({ reviewId: uuid(1), title: "Other review" });
+
+    await act(async () =>
+      root.render(<ReviewHome reviews={[pad, other]} onOpen={() => {}} />),
+    );
+    expect(container.querySelector(".review-home-table")).not.toBeNull();
+
+    const search = container.querySelector<HTMLInputElement>(
+      '[aria-label="리뷰 검색"]',
+    )!;
+    const setValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      setValue!.call(search, "메모장");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.querySelector(".review-home-scratchpad")).not.toBeNull();
+    expect(container.querySelector(".review-home-table")).toBeNull();
   });
 
   it("opens API reviews without a checkout path", async () => {

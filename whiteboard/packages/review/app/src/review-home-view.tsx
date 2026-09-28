@@ -682,7 +682,7 @@ function ScratchpadGroup({
   const contents = review.contents;
 
   return (
-    <section className="review-home-scratchpad" aria-label="메모">
+    <section className="review-home-scratchpad" aria-label="메모장">
       <div className="review-home-scratchpad-rows">
         <button
           type="button"
@@ -692,7 +692,7 @@ function ScratchpadGroup({
           <span className="review-home-scratchpad-main">
             <span className="review-home-review-title">
               <PencilIcon />
-              <MatchedText text={reviewTitle(review)} />
+              <MatchedText text={homeDisplayTitle(review)} />
             </span>
             <span className="review-home-scratchpad-meta">
               {contents ? (
@@ -906,10 +906,15 @@ function reviewTitle(review: ReviewApiSummary): string {
   return review.title.trim() || "제목 없는 리뷰";
 }
 
+function homeDisplayTitle(review: ReviewApiSummary): string {
+  return review.kind === "scratchpad" ? "메모장" : reviewTitle(review);
+}
+
 function matchesQuery(review: ReviewApiSummary, query: string): boolean {
   return fuzzyMatches(
     query,
-    reviewTitle(review),
+    homeDisplayTitle(review),
+    review.kind === "scratchpad" ? reviewTitle(review) : "",
     repositoryLabel(review),
     review.repositoryPath ?? "",
     review.origin?.branch ?? "",
