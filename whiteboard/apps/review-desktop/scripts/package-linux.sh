@@ -41,8 +41,8 @@ node "$APP_DIR/scripts/curated-extensions.mjs" \
 
 # The installed app embeds its own Review server runtime (server, CLI, and
 # docs) so it never reaches back into this checkout.
-pnpm --dir "$MONOREPO_ROOT" --filter @dev.fast/review build
-pnpm --dir "$MONOREPO_ROOT" --filter @dev.fast/review ensure:diffr --required
+(cd "$MONOREPO_ROOT" && pnpm --filter @dev.fast/review build)
+(cd "$MONOREPO_ROOT" && pnpm --filter @dev.fast/review ensure:diffr --required)
 node "$APP_DIR/scripts/stage-review-runtime.mjs" --packaged-root "$PACKAGED_ROOT"
 
 node "$APP_DIR/scripts/stage-review-runtime.mjs" --verify --packaged-root "$PACKAGED_ROOT"

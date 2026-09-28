@@ -47,7 +47,7 @@ rebuild_review_desktop_outputs() {
     "$review_package/tsdown.config.ts" \
     "$review_package/package.json" \
     "$monorepo_root/packages/review-protocol/src"; then
-    pnpm --dir "$monorepo_root" --filter @dev.fast/review build
+    (cd "$monorepo_root" && pnpm --filter @dev.fast/review build)
   fi
   if needs_rebuild \
     "$review_package/app/dist/desktop/.vite/manifest.json" \
@@ -56,7 +56,7 @@ rebuild_review_desktop_outputs() {
     "$review_package/app/package.json" \
     "$review_package/package.json" \
     "$monorepo_root/packages/review-protocol/src"; then
-    pnpm --dir "$monorepo_root" --filter @dev.fast/review-canvas build
+    (cd "$monorepo_root" && pnpm --filter @dev.fast/review-canvas build)
   fi
   local tutorial_output="$review_package/tutorial/pins.json"
   if needs_rebuild \
@@ -67,6 +67,6 @@ rebuild_review_desktop_outputs() {
         \( -path "$review_package/tutorial/.bundle" -o -path "$review_package/tutorial/git-stub" -o -path "$review_package/tutorial/pins.json" \) -prune \
         -o -type f -newer "$tutorial_output" -print -quit
     )" ]]; then
-    pnpm --dir "$monorepo_root" --filter @dev.fast/review build:tutorial-assets
+    (cd "$monorepo_root" && pnpm --filter @dev.fast/review build:tutorial-assets)
   fi
 }

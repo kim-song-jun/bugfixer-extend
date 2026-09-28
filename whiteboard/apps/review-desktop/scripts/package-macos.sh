@@ -130,7 +130,7 @@ node "$APP_DIR/scripts/curated-extensions.mjs" \
 # build.sh produces the server dist in local mode. In precompiled mode, the
 # server dist arrives in the darwin payload.
 # Fetch on Darwin: precompiled payloads were built on Linux.
-pnpm --dir "$MONOREPO_ROOT" --filter @dev.fast/review ensure:diffr --required
+(cd "$MONOREPO_ROOT" && pnpm --filter @dev.fast/review ensure:diffr --required)
 node "$APP_DIR/scripts/stage-review-runtime.mjs" --packaged-root "$PACKAGED_APP"
 BOUND_CHECKOUT_HELPER="$PACKAGED_APP/Contents/Resources/app/review-runtime/bin/bound-checkout"
 if [[ ! -x "$BOUND_CHECKOUT_HELPER" ]]; then
