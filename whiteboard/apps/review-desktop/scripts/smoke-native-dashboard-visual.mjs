@@ -83,6 +83,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
   const exited = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
 
   let browser;
+
   try {
     const target = await waitFor(async () => {
 
@@ -98,9 +99,11 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
       return targets.find(item => item.type === 'page' && item.webSocketDebuggerUrl);
     }, 'a native app CDP page', 90_000);
+
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
 
     const watchedPages = new WeakSet();
+
     const watchPage = page => {
 
       if (watchedPages.has(page)) return;
@@ -110,17 +113,20 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
       page.on('pageerror', error => diagnostics.pageErrors.push(error.stack ?? error.message));
       page.on('requestfailed', request => {
         const failure = request.failure()?.errorText ?? 'unknown';
+
         if (failure !== 'net::ERR_ABORTED') diagnostics.failedRequests.push(`${request.url()} — ${failure}`);
       });
     };
 
     for (const context of browser.contexts()) {
       context.on('page', watchPage);
+
       for (const page of context.pages()) watchPage(page);
     }
 
     const page = await waitFor(() => browser.contexts().flatMap(context => context.pages()).find(candidate => candidate.url() !== 'about:blank'), 'the packaged renderer page');
     watchPage(page);
+
     return { child, exited, browser, page, port, targetId: target.id, stderr, owned };
   } catch (error) {
     try {
@@ -129,6 +135,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
     } finally {
       await stopOwned(child, exited, port);
     }
+
     throw error;
   }
 }
@@ -145,6 +152,7 @@ async function stopOwned(child, exited, port) {
   if (child.pid && (!closed || !(await isPortClosed(port)))) {
     try { process.kill(-child.pid, 'SIGKILL'); }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
+
     closed = await exitedWithin(exited, 5_000);
   }
 
@@ -154,6 +162,7 @@ async function stopOwned(child, exited, port) {
 async function exitedWithin(exited, timeoutMs) {
 
   let timeout;
+
   try {
     return await Promise.race([
       exited.then(() => true),
@@ -229,6 +238,7 @@ try {
 
     // Capture first-run onboarding before populating the isolated workspace DB.
     let session = await startPackaged({ executable, userData, extensions, reviewHome });
+
     try {
 
       await session.page.locator('.review-onboarding-headline').waitFor({ timeout: 90_000 });
@@ -254,6 +264,7 @@ try {
     const database = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
 
     let fixture;
+
     try {
 
       const service = new ProjectWorkspaceService(database, userData);
@@ -271,9 +282,11 @@ try {
     } finally {
       database.close();
     }
+
     assert.equal(fixture.initialState, 'ready', 'The service fixture must start in the ready column');
 
     session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
     try {
 
       const page = session.page;
@@ -371,6 +384,7 @@ try {
     } finally {
       persistedDatabase.close();
     }
+
     assert.equal(fixture.finalState, 'inProgress', 'Keyboard state change must persist in workspace.db after the app exits');
 
     await writeFile(path.join(output, `fixture-${tag}.json`), JSON.stringify(fixture, null, 2));
