@@ -94,6 +94,8 @@ test('explanations append immutable exact-evidence revisions and survive databas
 		assert.equal(database.agentSessionReviews.getLatest(target)?.revision, 3);
 		const rawDatabase = new DatabaseSync(join(directory, 'workspace.db'));
 		try {
+			const storedPayload = JSON.parse(String(rawDatabase.prepare('SELECT payload_json FROM agent_session_explanations WHERE id = ?').get(first.id)?.payload_json));
+			assert.deepEqual(Object.keys(storedPayload).sort(), ['actor', 'authorTurnId', 'checkClaims', 'citations', 'status', 'what', 'why']);
 			assert.throws(() => rawDatabase.prepare('UPDATE agent_session_explanations SET payload_json = ? WHERE id = ?').run('{}', first.id), /immutable/);
 			assert.throws(() => rawDatabase.prepare('DELETE FROM agent_session_explanations WHERE id = ?').run(first.id), /immutable/);
 		} finally {

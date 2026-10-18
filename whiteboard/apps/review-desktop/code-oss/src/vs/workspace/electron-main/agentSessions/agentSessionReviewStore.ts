@@ -71,7 +71,6 @@ interface ExplanationPayload {
 	readonly what: string;
 	readonly why: string;
 	readonly citations: readonly AgentSessionExplanationCitation[];
-	readonly grounding: 'linked' | 'unlinked';
 	readonly checkClaims: readonly AgentSessionReportedCheck[];
 }
 
@@ -305,8 +304,7 @@ export class AgentSessionReviewStore {
 		}
 		return Object.freeze({
 			actor: input.actor, authorTurnId: input.authorTurnId, status: input.status,
-			what, why, citations: Object.freeze(citations), grounding: citations.length ? 'linked' : 'unlinked',
-			checkClaims: Object.freeze(checkClaims),
+			what, why, citations: Object.freeze(citations), checkClaims: Object.freeze(checkClaims),
 		});
 	}
 
@@ -323,7 +321,8 @@ export class AgentSessionReviewStore {
 		}
 		return Object.freeze({
 			id: String(row.id), target: Object.freeze(persistedTarget), revision: Number(row.revision),
-			turnSnapshotSha256: String(row.turn_snapshot_sha256), ...payload, verification: 'unverified',
+			turnSnapshotSha256: String(row.turn_snapshot_sha256), ...payload,
+			grounding: payload.citations.length ? 'linked' : 'unlinked', verification: 'unverified',
 			createdAt: String(row.created_at),
 		});
 	}
