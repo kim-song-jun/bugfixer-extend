@@ -2043,7 +2043,6 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
   const session = database.agentSessions.createSession({
     projectId: fixture.projectId,
     bindingId: binding.id,
-    taskId: null,
     name,
     provider: 'codex',
     model: 'ci-fixture-not-executed',

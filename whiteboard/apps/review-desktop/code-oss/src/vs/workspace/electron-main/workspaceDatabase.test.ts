@@ -181,7 +181,7 @@ test('agent-session content baselines and final bytes remain turn-scoped and dur
 	try {
 		const project = database.createProject('Content evidence');
 		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
-		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Retained bytes', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, name: 'Retained bytes', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
 		const canonicalFolder = realpathSync(folder);
 		const identity = statSync(canonicalFolder, { bigint: true });
 		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
@@ -264,7 +264,7 @@ test('binary content gaps preserve complete metadata conclusions and changed has
 	try {
 		const project = database.createProject('Binary content evidence');
 		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
-		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Binary content', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, name: 'Binary content', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
 		const canonicalFolder = realpathSync(folder);
 		const identity = statSync(canonicalFolder, { bigint: true });
 		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
@@ -313,7 +313,7 @@ test('managed-worktree content evidence requires revisions for observed results 
 	try {
 		const project = database.createProject('Managed content evidence');
 		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
-		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Managed revisions', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'gitWorktree' });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, name: 'Managed revisions', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'gitWorktree' });
 		const canonicalFolder = realpathSync(folder);
 		const identity = statSync(canonicalFolder, { bigint: true });
 		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
@@ -355,7 +355,7 @@ test('startup reconciliation adds one unavailable final from a retained baseline
 	try {
 		const project = database.createProject('Interrupted capture');
 		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
-		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Interrupted capture', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, name: 'Interrupted capture', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
 		const canonicalFolder = realpathSync(folder);
 		const identity = statSync(canonicalFolder, { bigint: true });
 		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
