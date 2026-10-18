@@ -29,6 +29,7 @@ const PROCESS_GROUP_POLL_MS = 25;
 const CONTROL_HELLO_TIMEOUT_MS = 1_500;
 const CONTROL_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_CONTROL_CONNECTIONS = 4;
+const MAX_EXIT_LISTENERS = 8;
 
 // Handles are intentionally object-identity tokens. PID and PGID are never accepted from callers.
 declare const agentPtyHandleBrand: unique symbol;
@@ -74,6 +75,8 @@ export interface AgentPtySnapshot {
 	readonly latestSequence: number;
 	readonly outputSanitizerFailed: boolean;
 	readonly failedOutputListeners: number;
+	readonly failedExitListeners: number;
+	readonly accessRevocationFailed: boolean;
 }
 
 export interface AgentPtyStopResult {
@@ -90,6 +93,8 @@ export interface AgentPtyAttachment extends IDisposable {
 
 export interface AgentPtyHostOptions {
 	readonly createSanitizer: () => AgentPtyOutputSanitizer;
+	/** Synchronously revokes launch-scoped access before any owned process stop or signal. */
+	readonly revokeAccess: () => void;
 	/** Trusted standalone Node executable used only for the guardian process. */
 	readonly guardianNodeExecutable: string;
 	/** Packaged path to agentPtyGuardian.mjs. */
@@ -98,6 +103,22 @@ export interface AgentPtyHostOptions {
 	readonly stopVerifyMs?: number;
 	readonly maxOutputBytes?: number;
 	readonly maxOutputChunks?: number;
+}
+
+/** Startup failure with an exact host-owned recovery capability when cleanup could not be proved. */
+export class AgentPtyStartError extends Error {
+	constructor(
+		message: string,
+		readonly cleanupVerified: boolean,
+		readonly recoveryHandle?: AgentPtyHandle,
+		readonly providerExitCode?: number,
+		readonly providerExitSignal?: string,
+	) {
+		super(message);
+		this.name = 'AgentPtyStartError';
+		if (cleanupVerified && recoveryHandle) { throw new Error('A verified PTY startup cleanup cannot retain a recovery handle.'); }
+		if (!cleanupVerified && !recoveryHandle) { throw new Error('Unverified PTY startup cleanup requires its exact recovery handle.'); }
+	}
 }
 
 interface RetainedChunk {
@@ -112,6 +133,7 @@ interface OwnedPty {
 	readonly sanitizer: AgentPtyOutputSanitizer;
 	readonly output: RetainedChunk[];
 	readonly listeners: Set<(chunk: AgentPtyOutputChunk) => void>;
+	readonly exitListeners: Set<(snapshot: AgentPtySnapshot) => void>;
 	readonly disposables: IDisposable[];
 	readonly capability: string;
 	readonly socketPath: string;
@@ -143,6 +165,9 @@ interface OwnedPty {
 	outputDrainGapAdded: boolean;
 	outputSanitizerFailed: boolean;
 	failedOutputListeners: number;
+	failedExitListeners: number;
+	accessRevoked: boolean;
+	accessRevocationFailed: boolean;
 }
 
 /** Main-process owner for interactive PTYs. This foundation is not wired to app launch. */
@@ -160,11 +185,13 @@ export class AgentPtyHost {
 		this.maxOutputBytes = boundedInteger(options.maxOutputBytes ?? MAX_OUTPUT_BYTES, 1024, 16 * 1024 * 1024, 'output byte limit');
 		this.maxOutputChunks = boundedInteger(options.maxOutputChunks ?? MAX_OUTPUT_CHUNKS, 8, 4096, 'output chunk limit');
 		if (typeof options.createSanitizer !== 'function') { throw new Error('An output sanitizer factory is required.'); }
+		if (typeof options.revokeAccess !== 'function') { throw new Error('A synchronous launch access revoker is required.'); }
 		if (!isAbsolute(options.guardianNodeExecutable) || !isAbsolute(options.guardianScriptPath)) { throw new Error('Trusted guardian paths must be absolute.'); }
 	}
 
-	async start(launch: AgentPtyLaunch): Promise<AgentPtyHandle> {
-		if (this.shuttingDown) { throw new Error('The PTY host is shutting down.'); }
+	async start(launch: AgentPtyLaunch, signal?: AbortSignal): Promise<AgentPtyHandle> {
+		if (signal?.aborted) { throw new AgentPtyStartError('The PTY launch was cancelled before resource creation.', true); }
+		if (this.shuttingDown) { throw new AgentPtyStartError('The PTY host is shutting down.', true); }
 		if (process.platform === 'win32') { throw new Error('Verified PTY process-group cleanup is unavailable on Windows.'); }
 		validateLaunch(launch);
 		const sanitizer = this.options.createSanitizer();
@@ -192,6 +219,7 @@ export class AgentPtyHost {
 			sanitizer,
 			output: [],
 			listeners: new Set(),
+			exitListeners: new Set(),
 			disposables: [],
 			capability,
 			socketPath,
@@ -217,16 +245,26 @@ export class AgentPtyHost {
 			outputDrainGapAdded: false,
 			outputSanitizerFailed: false,
 			failedOutputListeners: 0,
+			failedExitListeners: 0,
+			accessRevoked: false,
+			accessRevocationFailed: false,
 		};
 		server.on('connection', socket => this.acceptControlConnection(record, socket, launch));
 		server.on('error', () => {
 			if (record.state !== 'stopping' && record.state !== 'stopped') {
 				record.controlDisconnected = true;
+				record.state = 'cleanupUnverified';
 				record.rejectStartup(new Error('guardian control server failed'));
+				this.notifyExitListeners(record);
 				void this.stop(handle);
 			}
 		});
 		this.owned.set(handle, record);
+		const abortStartup = () => {
+			record.rejectStartup(new Error('PTY launch was cancelled.'));
+			void this.stop(handle);
+		};
+		signal?.addEventListener('abort', abortStartup, { once: true });
 
 		try {
 			try {
@@ -236,9 +274,9 @@ export class AgentPtyHost {
 				record.controlServerBindFailed = true;
 				throw error;
 			}
-			if (this.shuttingDown) { throw new Error('The PTY host is shutting down.'); }
+			if (this.shuttingDown || signal?.aborted) { throw new Error('The PTY launch was cancelled before guardian creation.'); }
 			await chmod(socketPath, 0o600);
-			if (this.shuttingDown) { throw new Error('The PTY host is shutting down.'); }
+			if (this.shuttingDown || signal?.aborted) { throw new Error('The PTY launch was cancelled before guardian creation.'); }
 			const guardianEnvironment: Record<string, string> = {
 				PATH: process.env.PATH ?? '/usr/bin:/bin',
 				...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
@@ -253,7 +291,7 @@ export class AgentPtyHost {
 				handleFlowControl: true,
 			});
 			record.pty = child;
-			record.disposables.push(child.onData(data => this.acceptPtyData(handle, record, data)));
+			record.disposables.push(child.onData(data => this.acceptPtyData(record, data)));
 			record.disposables.push(child.onExit(() => {
 				record.ptyExited = true;
 				resolvePtyExit();
@@ -262,24 +300,54 @@ export class AgentPtyHost {
 					const gone = processGroupGone(child.pid);
 					record.state = gone === true ? 'stopped' : 'cleanupUnverified';
 				}
+				this.notifyExitListeners(record);
 				void this.stop(handle);
 			}));
 			const timer = setTimeout(() => rejectStartup(new Error('guardian start timeout')), this.startTimeoutMs);
 			try {
 				await startPromise;
-				if (this.shuttingDown) { throw new Error('The PTY host shut down during start.'); }
+				if (this.shuttingDown || signal?.aborted) { throw new Error('The PTY launch was cancelled during startup.'); }
 			}
 			finally { clearTimeout(timer); }
 			return handle;
-		} catch {
+		} catch (error) {
+			const message = error instanceof Error && /cancel/i.test(error.message)
+				? 'The trusted PTY guardian launch was cancelled.'
+				: 'The trusted PTY guardian failed to start.';
 			const result = await this.stop(handle);
-			if (result.cleanupVerified) {
-				this.owned.delete(handle);
-			}
-			throw new Error(result.cleanupVerified
-				? 'The trusted PTY guardian failed to start.'
-				: 'The trusted PTY guardian failed to start and process cleanup is unverified.');
+			if (result.cleanupVerified) { this.owned.delete(handle); }
+			throw new AgentPtyStartError(
+				`${message}${result.error ? ` ${result.error}` : ''}`,
+				result.cleanupVerified,
+				result.cleanupVerified ? undefined : handle,
+				record.providerExitCode,
+				record.providerExitSignal,
+			);
+		} finally {
+			signal?.removeEventListener('abort', abortStartup);
 		}
+	}
+
+	/** Subscribes to provider/guardian lifecycle events and replays an already-observed terminal state. */
+	watchExit(handle: AgentPtyHandle, listener: (snapshot: AgentPtySnapshot) => void): IDisposable {
+		const record = this.requireOwned(handle);
+		if (typeof listener !== 'function') { throw new Error('A PTY exit listener is required.'); }
+		if (record.exitListeners.size >= MAX_EXIT_LISTENERS) { throw new Error('The PTY exit listener limit was reached.'); }
+		record.exitListeners.add(listener);
+		let subscribed = true;
+		const subscription = {
+			dispose: () => {
+				if (!subscribed) { return; }
+				subscribed = false;
+				record.exitListeners.delete(listener);
+			},
+		};
+		if (isTerminalState(record.state)) {
+			queueMicrotask(() => {
+				if (subscribed && record.exitListeners.has(listener)) { this.notifyExitListener(record, listener); }
+			});
+		}
+		return subscription;
 	}
 
 	async write(handle: AgentPtyHandle, text: string): Promise<void> {
@@ -352,7 +420,7 @@ export class AgentPtyHost {
 
 	async release(handle: AgentPtyHandle): Promise<void> {
 		const record = this.requireOwned(handle);
-		if (record.state !== 'stopped' || record.listeners.size > 0) { throw new Error('A PTY handle can be released only after verified stop and detach.'); }
+		if (record.state !== 'stopped' || record.listeners.size > 0 || record.exitListeners.size > 0) { throw new Error('A PTY handle can be released only after verified stop and detach.'); }
 		if (!(await this.cleanupControlResources(record))) { throw new Error('PTY control resources could not be closed safely.'); }
 		record.output.length = 0;
 		record.outputBytes = 0;
@@ -407,6 +475,7 @@ export class AgentPtyHost {
 			record.controlDisconnected = true;
 			record.state = 'cleanupUnverified';
 			record.rejectStartup(new Error('guardian control disconnected'));
+			this.notifyExitListeners(record);
 			void this.stop(record.handle);
 		});
 	}
@@ -439,6 +508,10 @@ export class AgentPtyHost {
 				record.state = 'exited';
 				record.rejectStartup(new Error('provider exited before startup completed'));
 			}
+			if (isTerminalState(record.state)) {
+				this.notifyExitListeners(record);
+				void this.stop(record.handle);
+			}
 			return;
 		}
 		if (value.event === 'guardianSignal' && Object.keys(value).length === 2 && (value.signal === 'SIGTERM' || value.signal === 'SIGINT')) { return; }
@@ -464,21 +537,37 @@ export class AgentPtyHost {
 	}
 
 	private async stopOwned(record: OwnedPty): Promise<AgentPtyStopResult> {
+		let revocationError: string | undefined;
+		if (!record.accessRevoked) {
+			try {
+				this.options.revokeAccess();
+				record.accessRevoked = true;
+				record.accessRevocationFailed = false;
+			} catch {
+				record.accessRevocationFailed = true;
+				revocationError = 'Launch-scoped access revocation failed.';
+			}
+		}
 		if (record.state === 'starting') { record.rejectStartup(new Error('PTY stopped while starting')); }
 		const child = record.pty;
-		if (!child) { return this.finishStop(record, true); }
-		if (record.state === 'stopped') { return this.finishStop(record, true); }
+		if (!child) { return this.withRevocationResult(await this.finishStop(record, true), revocationError); }
+		if (record.state === 'stopped') { return this.withRevocationResult(await this.finishStop(record, true), revocationError); }
 		record.state = 'stopping';
 		const pgid = child.pid;
 		const before = processGroupGone(pgid);
-		if (before === true) { return this.waitForGroupCleanup(record, pgid); }
-		if (before === undefined) { return this.finishStop(record, false, 'The PTY process group cannot be inspected.'); }
+		if (before === true) { return this.withRevocationResult(await this.waitForGroupCleanup(record, pgid), revocationError); }
+		if (before === undefined) { return this.withRevocationResult(await this.finishStop(record, false, 'The PTY process group cannot be inspected.'), revocationError); }
 		if (!record.controlDisconnected && !record.guardianCleanup && record.controlSocket && !record.controlSocket.destroyed) {
 			this.sendControl(record.controlSocket, { command: 'stop' });
 		} else {
 			for (const socket of record.controlSockets) { socket.destroy(); }
 		}
-		return this.waitForGroupCleanup(record, pgid);
+		return this.withRevocationResult(await this.waitForGroupCleanup(record, pgid), revocationError);
+	}
+
+	private withRevocationResult(result: AgentPtyStopResult, revocationError?: string): AgentPtyStopResult {
+		if (!revocationError) { return result; }
+		return { state: 'cleanupUnverified', cleanupVerified: false, error: [result.error, revocationError].filter(Boolean).join(' ') };
 	}
 
 	private async waitForGroupCleanup(record: OwnedPty, pgid: number): Promise<AgentPtyStopResult> {
@@ -509,13 +598,16 @@ export class AgentPtyHost {
 			try {
 				if (!(await this.cleanupControlResources(record))) {
 					record.state = 'cleanupUnverified';
+					this.notifyExitListeners(record);
 					return { state: 'cleanupUnverified', cleanupVerified: false, error: 'PTY control resources did not close within the bounded cleanup window.' };
 				}
 			} catch {
 				record.state = 'cleanupUnverified';
+				this.notifyExitListeners(record);
 				return { state: 'cleanupUnverified', cleanupVerified: false, error: 'PTY control resources could not be removed.' };
 			}
 		}
+		this.notifyExitListeners(record);
 		return { state: record.state, cleanupVerified: verified, ...(error ? { error } : {}) };
 	}
 
@@ -542,11 +634,11 @@ export class AgentPtyHost {
 		return true;
 	}
 
-	private acceptPtyData(handle: AgentPtyHandle, record: OwnedPty, data: string): void {
+	private acceptPtyData(record: OwnedPty, data: string): void {
 		if (record.outputSanitizerFailed) { return; }
 		if (Buffer.byteLength(data, 'utf8') > MAX_OUTPUT_EVENT_BYTES) {
 			this.appendOutput(record, '', true);
-			void this.stop(handle);
+			void this.stop(record.handle);
 			return;
 		}
 		try {
@@ -598,6 +690,18 @@ export class AgentPtyHost {
 		for (const disposable of record.disposables.splice(0)) { disposable.dispose(); }
 	}
 
+	private notifyExitListeners(record: OwnedPty): void {
+		for (const listener of [...record.exitListeners]) { this.notifyExitListener(record, listener); }
+	}
+
+	private notifyExitListener(record: OwnedPty, listener: (snapshot: AgentPtySnapshot) => void): void {
+		try { listener(snapshot(record)); }
+		catch {
+			record.exitListeners.delete(listener);
+			record.failedExitListeners++;
+		}
+	}
+
 	private requireOwned(handle: AgentPtyHandle): OwnedPty {
 		const record = this.owned.get(handle);
 		if (!record) { throw new Error('The PTY handle was not created by this host.'); }
@@ -637,7 +741,13 @@ function snapshot(record: OwnedPty): AgentPtySnapshot {
 		latestSequence: record.sequence,
 		outputSanitizerFailed: record.outputSanitizerFailed,
 		failedOutputListeners: record.failedOutputListeners,
+		failedExitListeners: record.failedExitListeners,
+		accessRevocationFailed: record.accessRevocationFailed,
 	};
+}
+
+function isTerminalState(state: AgentPtyState): boolean {
+	return state === 'exited' || state === 'stopped' || state === 'cleanupUnverified';
 }
 
 function processGroupGone(pgid: number): boolean | undefined {

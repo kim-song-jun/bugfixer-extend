@@ -14,7 +14,6 @@ import type {
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import type {
 	AgentPtyAttachment,
-	AgentPtyHandle,
 	AgentPtyOutputChunk,
 	AgentPtyOutputPage,
 	AgentPtySnapshot,
@@ -26,6 +25,13 @@ const LAUNCH_TICKET_TTL_MS = 30_000;
 const MAX_LAUNCH_TICKETS = 128;
 const MAX_PENDING_STARTS = 8;
 
+declare const agentSessionRuntimeHandleBrand: unique symbol;
+
+/** Factory-owned lifecycle capability. It is distinct from the host's actual PTY handle. */
+export interface AgentSessionRuntimeHandle {
+	readonly [agentSessionRuntimeHandleBrand]: true;
+}
+
 export interface AgentSessionLaunchPreview {
 	readonly ticketId: string;
 	readonly expiresAt: string;
@@ -35,14 +41,14 @@ export interface AgentSessionLaunchPreview {
 /** Trusted adapter around the PTY host and provider-specific command builder. */
 export interface AgentSessionRuntimeFactory {
 	/** Resolves only after the trusted PTY reports that the provider actually started. */
-	start(snapshot: AgentSessionTurnSnapshot, turnId: string, signal: AbortSignal): Promise<AgentPtyHandle>;
-	watchExit(handle: AgentPtyHandle, listener: (snapshot: AgentPtySnapshot) => void): IDisposable;
-	getSnapshot(handle: AgentPtyHandle): AgentPtySnapshot;
-	write(handle: AgentPtyHandle, text: string): Promise<void>;
-	resize(handle: AgentPtyHandle, cols: number, rows: number): Promise<void>;
-	attach(handle: AgentPtyHandle, listener: (chunk: AgentPtyOutputChunk) => void, afterSequence: number): Promise<AgentPtyAttachment>;
-	stop(handle: AgentPtyHandle): Promise<AgentPtyStopResult>;
-	release(handle: AgentPtyHandle): Promise<void>;
+	start(snapshot: AgentSessionTurnSnapshot, turnId: string, signal: AbortSignal): Promise<AgentSessionRuntimeHandle>;
+	watchExit(handle: AgentSessionRuntimeHandle, listener: (snapshot: AgentPtySnapshot) => void): IDisposable;
+	getSnapshot(handle: AgentSessionRuntimeHandle): AgentPtySnapshot;
+	write(handle: AgentSessionRuntimeHandle, text: string): Promise<void>;
+	resize(handle: AgentSessionRuntimeHandle, cols: number, rows: number): Promise<void>;
+	attach(handle: AgentSessionRuntimeHandle, listener: (chunk: AgentPtyOutputChunk) => void, afterSequence: number): Promise<AgentPtyAttachment>;
+	stop(handle: AgentSessionRuntimeHandle): Promise<AgentPtyStopResult>;
+	release(handle: AgentSessionRuntimeHandle): Promise<void>;
 }
 
 export interface AgentSessionAttachResult {
@@ -79,7 +85,7 @@ interface LiveTurn {
 	readonly attachments: Map<string, AgentPtyAttachment>;
 	readonly pendingAttachments: Set<Promise<void>>;
 	turn: AgentSessionTurnDTO;
-	runtime?: AgentPtyHandle;
+	runtime?: AgentSessionRuntimeHandle;
 	exitSubscription?: IDisposable;
 	startPromise: Promise<void>;
 	stopPromise?: Promise<AgentSessionTurnDTO>;
@@ -108,7 +114,7 @@ interface PendingWorkspaceOperation {
 	complete(): void;
 }
 
-/** Main-process owner for launch tickets, turn lifecycle and host-created PTY handles. */
+/** Main-process owner for launch tickets, turn lifecycle and factory-owned runtime handles. */
 export class AgentSessionService {
 	private readonly tickets = new Map<string, LaunchTicket>();
 	private readonly turns = new Map<string, LiveTurn>();
@@ -366,6 +372,7 @@ export class AgentSessionService {
 			}
 		} catch (error) {
 			live.launchFailed = true;
+			if (error instanceof AgentSessionRuntimeStartError && error.recoveryHandle) { live.runtime = error.recoveryHandle; }
 			live.launchFailureCleanupVerified = !live.spawnAttempted
 				|| (!live.runtime && error instanceof AgentSessionRuntimeStartError && error.cleanupVerified);
 			if (error instanceof AgentSessionRuntimeStartError) {
@@ -542,9 +549,17 @@ export class AgentSessionService {
 }
 
 export class AgentSessionRuntimeStartError extends Error {
-	constructor(message: string, readonly cleanupVerified: boolean, readonly exitCode?: number | null, readonly exitSignal?: string | null) {
+	constructor(
+		message: string,
+		readonly cleanupVerified: boolean,
+		readonly exitCode?: number | null,
+		readonly exitSignal?: string | null,
+		readonly recoveryHandle?: AgentSessionRuntimeHandle,
+	) {
 		super(message);
 		this.name = 'AgentSessionRuntimeStartError';
+		if (cleanupVerified && recoveryHandle) { throw new Error('Verified runtime cleanup cannot retain a recovery handle.'); }
+		if (!cleanupVerified && !recoveryHandle) { throw new Error('Unverified runtime cleanup requires its exact factory-owned recovery handle.'); }
 	}
 }
 
