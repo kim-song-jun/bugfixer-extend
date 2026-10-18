@@ -191,6 +191,7 @@ export class AgentSessionService {
 		readonly sessionId: string;
 		readonly permissionPolicy: AgentSessionPermissionPolicy;
 		readonly reservationId: string;
+		readonly signal?: AbortSignal;
 	}): Promise<AgentSessionTurnDTO> {
 		this.assertAcceptingLaunches();
 		if (!input.reservationId) { throw new Error('A workflow launch reservation is required.'); }
@@ -203,16 +204,20 @@ export class AgentSessionService {
 			expectedSessionRevision: snapshot.sessionRevision,
 			snapshot,
 			workflowLaunchAuthorization: { reservationId: input.reservationId },
-		}));
+		}), input.signal);
 	}
 
 	private async startWithWorkspace(
 		input: { readonly projectId: string; readonly sessionId: string },
 		permissionPolicy: AgentSessionPermissionPolicy,
 		createTurn: (snapshot: AgentSessionTurnSnapshot) => AgentSessionTurnDTO,
+		signal?: AbortSignal,
 	): Promise<AgentSessionTurnDTO> {
 		this.pendingStartReservations++;
 		const pending = this.beginWorkspaceOperation();
+		const abortPending = () => pending.controller.abort();
+		if (signal?.aborted) { abortPending(); }
+		else { signal?.addEventListener('abort', abortPending, { once: true }); }
 		let workspace: AcquiredAgentSessionWorkspace | undefined;
 		let turn: AgentSessionTurnDTO | undefined;
 		let live: LiveTurn | undefined;
@@ -224,6 +229,7 @@ export class AgentSessionService {
 				signal: pending.controller.signal,
 			});
 			this.assertAcceptingLaunches();
+			if (pending.controller.signal.aborted) { throw new Error('The session launch was cancelled before a turn was created.'); }
 			const snapshot = workspace.snapshot;
 			turn = createTurn(snapshot);
 			live = {
@@ -259,6 +265,7 @@ export class AgentSessionService {
 			if (!turn && workspace) { this.workspaceResolver.release(workspace); }
 			throw error;
 		} finally {
+			signal?.removeEventListener('abort', abortPending);
 			if (turn === undefined) { this.pendingStartReservations--; }
 			this.finishWorkspaceOperation(pending);
 		}

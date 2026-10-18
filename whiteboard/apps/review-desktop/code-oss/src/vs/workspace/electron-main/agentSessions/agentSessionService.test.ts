@@ -19,7 +19,7 @@ import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSession
 import { AgentSessionWorkspaceResolver, type AcquireAgentSessionWorkspaceInput, type AcquiredAgentSessionWorkspace } from './agentSessionWorkspace.js';
 
 const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
-const WORKFLOW_READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'on-request' };
+const WORKFLOW_READ_ONLY: AgentSessionPermissionPolicy = READ_ONLY;
 const MUTATING: AgentSessionPermissionPolicy = { mode: 'mutating', approval: 'on-request' };
 
 function git(cwd: string, ...args: string[]): string {
@@ -138,6 +138,7 @@ function approveWorkflowLaunch(
 function createDelayedService(fixture: ReturnType<typeof createFixture>) {
 	class DelayedResolver extends AgentSessionWorkspaceResolver {
 		private nextHold?: { readonly entered: () => void; readonly gate: Promise<void> };
+		readonly acquiredWorkspaces: AcquiredAgentSessionWorkspace[] = [];
 
 		holdNextAcquire(): { readonly entered: Promise<void>; release(): void } {
 			let notifyEntered!: () => void;
@@ -155,7 +156,9 @@ function createDelayedService(fixture: ReturnType<typeof createFixture>) {
 				hold.entered();
 				await hold.gate;
 			}
-			return super.acquire(input);
+			const workspace = await super.acquire(input);
+			this.acquiredWorkspaces.push(workspace);
+			return workspace;
 		}
 	}
 	const resolver = new DelayedResolver(fixture.database, fixture.worktrees, fixture.writerLock, () => true);
@@ -266,6 +269,30 @@ test('shutdown cancellation during workflow workspace acquisition cannot create 
 		assert.deepEqual(await shutdown, []);
 		assert.equal(fixture.runtimeFactory.starts(), 0);
 		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id), []);
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('caller abort during workflow workspace acquisition releases the workspace before creating a turn', async () => {
+	const fixture = createFixture();
+	try {
+		const { session, reservation } = approveWorkflowLaunch(fixture);
+		const { service, resolver } = createDelayedService(fixture);
+		const hold = resolver.holdNextAcquire();
+		const controller = new AbortController();
+		const start = service.startWorkflowNode({
+			projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY,
+			reservationId: reservation.reservationId, signal: controller.signal,
+		});
+		await hold.entered;
+		controller.abort();
+		hold.release();
+		await assert.rejects(start, /cancelled/i);
+		assert.equal(fixture.runtimeFactory.starts(), 0);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id), []);
+		assert.equal(resolver.acquiredWorkspaces.length, 1);
+		assert.throws(() => resolver.acquiredWorkspaces[0].snapshot, /lease is unavailable/i);
 	} finally {
 		dispose(fixture);
 	}
