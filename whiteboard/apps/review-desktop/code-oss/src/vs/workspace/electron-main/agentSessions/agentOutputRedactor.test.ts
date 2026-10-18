@@ -123,11 +123,14 @@ test('keeps labelled values, recognized token prefixes, and authorization values
 		['password=abcDEF123\n', 'password=***\n'],
 		['password="quoted-secret-value"\n', 'password=***\n'],
 		["password='single-quoted-secret'\n", 'password=***\n'],
+		['password=unquoted=value:with:delimiters\n', 'password=***\n'],
+		['password="quoted=value:with:delimiters"\n', 'password=***\n'],
 		['password="escaped \\" quote secret"\n', 'password=***\n'],
 		['password=""\n', 'password=***\n'],
 		["password=''\n", 'password=***\n'],
 		['\u001b[32mpassword=\u001b[31m"styled-secret"\u001b[0m\n', '\u001b[32mpassword=\u001b[31m***\u001b[0m\n'],
 		['Authorization: Bearer opaque-secret-value\n', 'Authorization: ***\n'],
+		['Authorization: Bearer opaque:secret=value\n', 'Authorization: ***\n'],
 		['ghp_12345SECRET67890\n', '***\n'],
 		['gho_12345SECRET67890\n', '***\n'],
 		['ghu_12345SECRET67890\n', '***\n'],
@@ -147,6 +150,7 @@ test('keeps labelled values, recognized token prefixes, and authorization values
 		['secret=compactsecret\n', 'secret=***\n'],
 		['credential=compactsecret\n', 'credential=***\n'],
 		['-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----\n', '***\n'],
+		['-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----', '***'],
 	];
 	for (const [input, expected] of cases) {
 		for (let split = 1; split < input.length; split++) {
@@ -165,15 +169,15 @@ test('keeps split OSC and CSI sequences stateful while overflow credentials rema
 		password.push('still-title\u0007more-password\n'),
 		password.flush(),
 	];
-	assert.deepEqual(passwordOutputs, ['***', '', '\n', '']);
-	assert.equal(passwordOutputs.join(''), '***\n');
+	assert.deepEqual(passwordOutputs, ['password=***', '', '\n', '']);
+	assert.equal(passwordOutputs.join(''), 'password=***\n');
 
 	const csi = createAgentPtyOutputSanitizer({ maxPendingCodeUnits: 128 });
 	const csiOutput = csi.push(`password=${'s'.repeat(160)}`)
 		+ csi.push('\u001b[0; 1')
 		+ csi.push('mcontinued-secret\n')
 		+ csi.flush();
-	assert.equal(csiOutput, '***\n');
+	assert.equal(csiOutput, 'password=***\n');
 
 	const pem = createAgentPtyOutputSanitizer({ maxPendingCodeUnits: 128 });
 	const pemOutput = pem.push(`-----BEGIN PRIVATE KEY-----\n${'private-'.repeat(40)}`)

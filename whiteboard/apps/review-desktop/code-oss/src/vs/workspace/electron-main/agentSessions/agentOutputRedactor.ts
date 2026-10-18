@@ -180,23 +180,7 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 		if (!text.length) {
 			return cleaned;
 		}
-		const ranges = findKnownSecretRanges(text, knownSecretTrie);
-		for (const pattern of credentialPatterns) {
-			pattern.lastIndex = 0;
-			let match: RegExpExecArray | null;
-			while ((match = pattern.exec(text)) !== null) {
-				// For labelled values retain the label and redact only the value.
-				const valueOffset = match[0].lastIndexOf('=') >= 0
-					? match[0].lastIndexOf('=') + 1
-					: match[0].lastIndexOf(':') >= 0
-						? match[0].lastIndexOf(':') + 1
-						: 0;
-				let start = match.index + valueOffset;
-				while (start < match.index + match[0].length && /\s/.test(text[start])) { start++; }
-				if (start < match.index + match[0].length) { ranges.push([start, match.index + match[0].length]); }
-				if (!match[0].length) { pattern.lastIndex++; }
-			}
-		}
+		const ranges = findSensitiveRanges(text, knownSecretTrie);
 		if (!ranges.length) { return cleaned; }
 		ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
 		const merged: Array<[number, number]> = [];
@@ -235,7 +219,18 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 				pending = '';
 				const complete = combined.length;
 				const completeText = combined.slice(0, complete);
-				const candidate = findOpenSensitiveTail(completeText, knownSecretTrie);
+				let candidate = findOpenSensitiveTail(completeText, knownSecretTrie);
+				const projection = normalizeTerminalText(completeText);
+				const completeSensitiveRanges = findSensitiveRanges(projection.text, knownSecretTrie);
+				if (candidate && completeSensitiveRanges.some(([start, end]) => {
+					const rawStart = projection.rawOffsets[start];
+					const rawEnd = projection.rawEnds[end - 1];
+					return rawStart < candidate!.start && candidate!.start < rawEnd;
+				})) {
+					// A partial prefix at the end of a complete value must not make us
+					// sanitize only its prefix (notably the final dashes of a PEM footer).
+					candidate = undefined;
+				}
 				if (candidate && complete - candidate.start > maxPending) {
 					const maskStart = candidate.kind === 'field' && candidate.releasePrefix ? candidate.valueStart : candidate.start;
 					output += sanitize(combined.slice(0, maskStart)) + REDACTION;
@@ -257,7 +252,16 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 					if (active.remainder) { input = active.remainder; continue; }
 					return output;
 				}
-				const safeEnd = candidate ? candidate.start : findCandidateHoldStart(completeText, knownSecretTrie);
+				let safeEnd = candidate ? candidate.start : findCandidateHoldStart(completeText, knownSecretTrie);
+				for (const [start, end] of completeSensitiveRanges) {
+					const rawStart = projection.rawOffsets[start];
+					const rawEnd = projection.rawEnds[end - 1];
+					if (rawStart < safeEnd && safeEnd < rawEnd) {
+						// Sanitize the whole recognized value in one pass instead of
+						// buffering an arbitrarily large PEM/token tail.
+						safeEnd = rawEnd;
+					}
+				}
 				const boundary = safeEnd > 0 ? codePointBoundary(combined, Math.min(safeEnd, complete)) : 0;
 				if (!boundary) {
 					// An incomplete or hostile control sequence must never grow without bound.
@@ -295,12 +299,25 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 }
 
 /** Credential-shaped values and labelled account-file material. */
-const credentialPatterns: RegExp[] = [
-	/-----BEGIN ([A-Z0-9 ]+)-----[\s\S]*?-----END \1-----/gi,
-	/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b/gi,
-	/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-	/\b(?:authorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+/gi,
-	/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|secret|credential)\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi,
+interface CredentialPattern {
+	readonly pattern: RegExp;
+	/** Start of the value to redact relative to a match; omitted means redact the complete match. */
+	readonly valueOffset?: (match: RegExpExecArray) => number;
+}
+
+const credentialPatterns: readonly CredentialPattern[] = [
+	{ pattern: /-----BEGIN ([A-Z0-9 ]+)-----[\s\S]*?-----END \1-----/gi },
+	{ pattern: /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b/gi },
+	{ pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
+	{ pattern: /\b(authorization\s*:\s*)(?:bearer|basic)\s+[^\s,;]+/gi, valueOffset: match => match[1].length },
+	{
+		pattern: /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|secret|credential)\s*[=:])\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi,
+		valueOffset: match => {
+			let offset = match[1].length;
+			while (offset < match[0].length && /\s/.test(match[0][offset])) { offset++; }
+			return offset;
+		}
+	},
 ];
 
 /** Remove unsafe controls, retain SGR styling, and map visible indexes to raw offsets. */
@@ -401,6 +418,22 @@ function buildSecretTrie(secrets: readonly string[]): SecretTrieNode {
 		}
 	}
 	return root;
+}
+
+function findSensitiveRanges(text: string, root: SecretTrieNode): Array<[number, number]> {
+	const ranges = findKnownSecretRanges(text, root);
+	for (const { pattern, valueOffset } of credentialPatterns) {
+		pattern.lastIndex = 0;
+		let match: RegExpExecArray | null;
+		while ((match = pattern.exec(text)) !== null) {
+			const start = match.index + (valueOffset?.(match) ?? 0);
+			const end = match.index + match[0].length;
+			if (start < end) { ranges.push([start, end]); }
+			if (!match[0].length) { pattern.lastIndex++; }
+		}
+	}
+	ranges.sort((left, right) => left[0] - right[0] || right[1] - left[1]);
+	return ranges;
 }
 
 function findKnownSecretRanges(text: string, root: SecretTrieNode): Array<[number, number]> {
