@@ -114,7 +114,7 @@ export class AgentSessionTranscriptStore {
 			AND (? IS NULL OR kind = ?) AND (? IS NULL OR severity = ?) AND (? IS NULL OR source = ?)
 			ORDER BY sequence LIMIT ?`).all(projectId, sessionId, turnId, afterSequence,
 			options.kind ?? null, options.kind ?? null, options.severity ?? null, options.severity ?? null,
-			options.source ?? null, options.source ?? null, MAX_PAGE_ENTRIES + 1) as TranscriptEntryRow[];
+			options.source ?? null, options.source ?? null, MAX_PAGE_ENTRIES + 1).map(projectTranscriptEntryRow);
 		const entries: AgentSessionTranscriptEntryDTO[] = [];
 		let outputBytes = 0;
 		let nextSequence = afterSequence;
@@ -263,3 +263,26 @@ export class AgentSessionTranscriptStore {
 }
 
 function digest(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
+
+function projectTranscriptEntryRow(row: Record<string, SQLOutputValue>): TranscriptEntryRow {
+	const required = (column: keyof TranscriptEntryRow): SQLOutputValue => {
+		if (!Object.prototype.hasOwnProperty.call(row, column)) {
+			throw new Error(`Transcript query omitted required column "${column}".`);
+		}
+		return row[column];
+	};
+	return {
+		project_id: required('project_id'),
+		session_id: required('session_id'),
+		turn_id: required('turn_id'),
+		sequence: required('sequence'),
+		kind: required('kind'),
+		text: required('text'),
+		byte_length: required('byte_length'),
+		severity: required('severity'),
+		source: required('source'),
+		references_json: required('references_json'),
+		created_at: required('created_at'),
+		content_sha256: required('content_sha256'),
+	};
+}

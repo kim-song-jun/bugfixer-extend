@@ -74,7 +74,7 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 			const recovery = error instanceof AgentSessionPreparationError ? error.recovery : undefined;
 			this.records.set(handle, {
 				...(recovery ? { revokeAccess: recovery.revokeAccess, releasePrivateConfig: recovery.releasePrivateConfig } : {}),
-				accessRevoked: false, privateConfigReleased: false,
+				accessRevoked: false, privateConfigReleased: false, transcriptPersistenceFailed: false, stopEventRecorded: false,
 			});
 			throw new AgentSessionRuntimeStartError(
 				error instanceof Error ? error.message : 'Trusted session launch preparation failed with unverified cleanup.',

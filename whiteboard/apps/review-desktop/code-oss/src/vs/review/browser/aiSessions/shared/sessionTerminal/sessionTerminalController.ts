@@ -277,10 +277,13 @@ class SessionPty extends BasePty implements ITerminalChildProcess {
 	setUnicodeVersion(): Promise<void> { return Promise.resolve(); }
 	async getInitialCwd(): Promise<string> { return this.turn.snapshot.cwd; }
 	async getCwd(): Promise<string> { return this._properties.cwd || this.turn.snapshot.cwd; }
-	refreshProperty<T extends ProcessPropertyType>(property: T): Promise<IProcessPropertyMap[T]> {
+	override refreshProperty<T extends ProcessPropertyType>(property: T): Promise<IProcessPropertyMap[T]> {
 		return Promise.resolve(this._properties[property] as IProcessPropertyMap[T]);
 	}
-	clearBuffer(): void { this.handleData('\u001b[2J\u001b[H'); }
+	override clearBuffer(): void { this.handleData('\u001b[2J\u001b[H'); }
+	async updateProperty<T extends ProcessPropertyType>(property: T, value: IProcessPropertyMap[T]): Promise<void> {
+		this.handleDidChangeProperty({ type: property, value });
+	}
 	private errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 	override dispose(): void { this.shutdown(true); super.dispose(); }
 }
