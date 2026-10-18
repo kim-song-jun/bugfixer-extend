@@ -71,6 +71,10 @@ const MAX_STARTUP_RESPONSE_BYTES = 8192;
 
 const MAX_STARTUP_PROCESS_ROWS = 256;
 
+const MAX_STARTUP_TARGETS = 256;
+
+const REDACTED_STARTUP_BODY = '[redacted CDP response body]';
+
 const LOG_FILE_NAMES = /^(?:main|renderer(?:\d+)?|sharedprocess|ptyhost|exthost|window)\.log$/;
 
 function appendBoundedRecord(destination, record, dropKey) {
@@ -169,41 +173,125 @@ function sanitizeStartupEndpointBody(endpoint, body, port) {
   let parsed;
 
   try { parsed = JSON.parse(body); }
-  catch { return sanitizeStartupText(body); }
+  catch { return { body: REDACTED_STARTUP_BODY, valid: false, reason: 'invalid-json' }; }
 
-  if (endpoint === '/json/version' && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    const keys = ['Browser', 'Protocol-Version', 'User-Agent', 'V8-Version', 'WebKit-Version'];
-    const result = {};
+  try {
 
-    for (const key of keys) {
-      if (typeof parsed[key] === 'string') result[key] = sanitizeStartupText(parsed[key]).slice(0, 512);
+    if (endpoint === '/json/version') {
+      const version = parseStartupVersion(parsed, port);
+      const result = {};
+
+      for (const [key, value] of Object.entries(version.fields)) {
+        result[key] = sanitizeStartupText(value).slice(0, 512);
+      }
+
+      result.webSocketDebuggerUrl = `ws://127.0.0.1:${port}/devtools/browser/[redacted]`;
+
+      return { body: JSON.stringify(result), valid: true };
     }
 
-    result.webSocketDebuggerUrl = typeof parsed.webSocketDebuggerUrl === 'string'
-      ? `ws://127.0.0.1:${port}/devtools/browser/[redacted]`
-      : null;
+    if (endpoint === '/json/list') {
+      const targets = parseStartupTargets(parsed, port);
 
-    return JSON.stringify(result);
+      return {
+        body: JSON.stringify({
+          targetCount: targets.length,
+          targets: targets.slice(0, 32).map(target => ({
+            type: target.type.slice(0, 64),
+            title: sanitizeStartupText(target.title).slice(0, 256),
+            url: sanitizeStartupTargetUrl(target.url),
+            hasWebSocketDebuggerUrl: true,
+          })),
+          truncated: targets.length > 32,
+        }),
+        valid: true,
+      };
+    }
+  } catch {
+    return { body: REDACTED_STARTUP_BODY, valid: false, reason: 'schema-mismatch' };
   }
 
-  if (endpoint === '/json/list' && Array.isArray(parsed)) {
-    return JSON.stringify({
-      targetCount: parsed.length,
-      targets: parsed.slice(0, 32).map(target => ({
-        type: typeof target?.type === 'string' ? target.type.slice(0, 64) : null,
-        title: typeof target?.title === 'string' ? sanitizeStartupText(target.title).slice(0, 256) : null,
-        url: sanitizeStartupTargetUrl(target?.url),
-        hasWebSocketDebuggerUrl: typeof target?.webSocketDebuggerUrl === 'string',
-      })),
-      truncated: parsed.length > 32,
-    });
+  return { body: REDACTED_STARTUP_BODY, valid: false, reason: 'unsupported-endpoint' };
+}
+
+function parseStartupVersion(value, port) {
+  const record = parseStartupRecord(value);
+  const fields = {};
+
+  for (const key of ['Browser', 'Protocol-Version']) {
+    assert.ok(Object.hasOwn(record, key), `CDP version response is missing ${key}`);
+    fields[key] = parseStartupString(record[key], 512, 1);
   }
 
-  return sanitizeStartupText(body);
+  for (const key of ['User-Agent', 'V8-Version', 'WebKit-Version']) {
+    if (Object.hasOwn(record, key)) fields[key] = parseStartupString(record[key], 512, 0);
+  }
+
+  assert.ok(Object.hasOwn(record, 'webSocketDebuggerUrl'), 'CDP version response is missing its browser WebSocket URL');
+  const webSocketDebuggerUrl = parseStartupString(record.webSocketDebuggerUrl, 2048, 1);
+
+  parseStartupWebSocketUrl(webSocketDebuggerUrl, port, 'browser');
+
+  return { fields };
+}
+
+function parseStartupTargets(value, port) {
+  assert.ok(Array.isArray(value), 'CDP target response must be an array');
+  assert.ok(value.length <= MAX_STARTUP_TARGETS, 'CDP target response exceeds its record limit');
+
+  return value.map(target => {
+    const record = parseStartupRecord(target);
+    const id = parseStartupString(record.id, 256, 1);
+    const type = parseStartupString(record.type, 64, 1);
+    const title = parseStartupString(record.title, 512, 0);
+    const url = parseStartupString(record.url, 4096, 0);
+    const webSocketDebuggerUrl = parseStartupString(record.webSocketDebuggerUrl, 2048, 1);
+
+    parseStartupWebSocketUrl(webSocketDebuggerUrl, port, type, id);
+
+    if (Object.hasOwn(record, 'devtoolsFrontendUrl')) {
+      parseStartupString(record.devtoolsFrontendUrl, 2048, 0);
+    }
+
+    return { id, type, title, url, webSocketDebuggerUrl };
+  });
+}
+
+function parseStartupRecord(value) {
+  assert.ok(value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype, 'CDP response must be an object');
+
+  return value;
+}
+
+function parseStartupString(value, maxLength, minLength) {
+  assert.match(value, /^[\s\S]*$/, 'CDP response fields must be strings');
+  assert.ok(value.length >= minLength && value.length <= maxLength, 'CDP response string is outside its length limit');
+
+  return value;
+}
+
+function parseStartupWebSocketUrl(value, port, targetKind, targetId) {
+  const url = new URL(value);
+
+  assert.equal(url.protocol, 'ws:', 'CDP WebSocket URL must use ws');
+  assert.equal(url.hostname, '127.0.0.1', 'CDP WebSocket URL must use the loopback host');
+  assert.equal(url.port, String(port), 'CDP WebSocket URL must use the inspected port');
+  assert.equal(url.username, '', 'CDP WebSocket URL must not contain credentials');
+  assert.equal(url.password, '', 'CDP WebSocket URL must not contain credentials');
+  assert.equal(url.search, '', 'CDP WebSocket URL must not contain a query');
+  assert.equal(url.hash, '', 'CDP WebSocket URL must not contain a fragment');
+  const pathSegments = url.pathname.split('/');
+
+  assert.equal(pathSegments.length, 4, 'CDP WebSocket URL must have a target path');
+  assert.equal(pathSegments[1], 'devtools', 'CDP WebSocket URL must have a target path');
+  assert.equal(pathSegments[2], targetKind, 'CDP WebSocket URL must match its target type');
+  assert.match(pathSegments[3], /^[^/]{1,256}$/, 'CDP WebSocket URL must include a target ID');
+
+  if (targetId !== undefined) assert.equal(pathSegments[3], targetId, 'CDP WebSocket URL must match its target ID');
 }
 
 function sanitizeStartupTargetUrl(value) {
-  if (typeof value !== 'string') return null;
+
   if (value === 'about:blank') return value;
 
   try {
@@ -211,18 +299,18 @@ function sanitizeStartupTargetUrl(value) {
 
     return `${url.protocol}//${url.host}/[redacted]`;
   } catch {
-    return sanitizeStartupText(value).slice(0, 256);
+    return '[invalid-url]';
   }
 }
 
 async function readBoundedStartupBody(response) {
-  if (!response.body) return { body: '', truncated: false };
+  if (!response.body) return { body: '', bytesRead: 0, truncated: false, cancelFailed: false };
 
   const reader = response.body.getReader();
   const chunks = [];
   let byteLength = 0;
   let truncated = false;
-  let cancelError;
+  let cancelFailed = false;
 
   try {
     while (byteLength < MAX_STARTUP_RESPONSE_BYTES) {
@@ -243,10 +331,10 @@ async function readBoundedStartupBody(response) {
     if (byteLength >= MAX_STARTUP_RESPONSE_BYTES) truncated = true;
   } finally {
     try { await reader.cancel(); }
-    catch (error) { cancelError = sanitizeStartupText(`${error?.name ?? 'Error'}: ${error?.message ?? 'response cancellation failed'}`).slice(0, 256); }
+    catch { cancelFailed = true; }
   }
 
-  return { body: Buffer.concat(chunks).toString('utf8'), truncated, cancelError };
+  return { body: Buffer.concat(chunks).toString('utf8'), bytesRead: byteLength, truncated, cancelFailed };
 }
 
 async function readStartupEndpoint(port, endpoint) {
@@ -257,23 +345,32 @@ async function readStartupEndpoint(port, endpoint) {
     const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: controller.signal });
     const body = await readBoundedStartupBody(response);
 
+    const sanitizedBody = body.truncated
+      ? { body: REDACTED_STARTUP_BODY, valid: false, reason: 'response-truncated' }
+      : sanitizeStartupEndpointBody(endpoint, body.body, port);
+
     return {
       endpoint,
       status: response.status,
       ok: response.ok,
-      body: sanitizeStartupEndpointBody(endpoint, body.body, port),
+      body: sanitizedBody.body,
+      bodyValid: sanitizedBody.valid,
+      bodyBytes: body.bytesRead,
+      bodyInvalidReason: sanitizedBody.reason ?? null,
       bodyTruncated: body.truncated,
-      bodyCancelError: body.cancelError ?? null,
+      bodyCancelFailed: body.cancelFailed,
     };
-  } catch (error) {
+  } catch {
     return {
       endpoint,
       status: null,
       ok: false,
-      body: '',
+      body: REDACTED_STARTUP_BODY,
+      bodyValid: false,
+      bodyBytes: 0,
+      bodyInvalidReason: 'request-failed',
       bodyTruncated: false,
-      bodyCancelError: null,
-      error: sanitizeStartupText(`${error?.name ?? 'Error'}: ${error?.message ?? 'request failed'}`).slice(0, 512),
+      bodyCancelFailed: false,
     };
   } finally {
     clearTimeout(timeout);
@@ -294,13 +391,16 @@ async function readOwnedProcessTree(rootPid) {
 
       return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), command: path.basename(match[4]).slice(0, 96) }] : [];
     });
+
     const included = new Set([rootPid]);
+
     let changed = true;
 
     while (changed && included.size < MAX_STARTUP_PROCESS_ROWS) {
       changed = false;
 
       for (const item of all) {
+
         if (included.has(item.pid) || !included.has(item.ppid)) continue;
 
         included.add(item.pid);
