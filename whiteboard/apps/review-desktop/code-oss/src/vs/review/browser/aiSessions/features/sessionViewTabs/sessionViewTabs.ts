@@ -1,6 +1,6 @@
-export type AgentSessionViewTab = 'terminal' | 'changes' | 'logs' | 'messages';
+export type AgentSessionViewTab = 'terminal' | 'changes' | 'logs' | 'messages' | 'workflow';
 
-const labels: Readonly<Record<AgentSessionViewTab, string>> = { terminal: '터미널', changes: '변경 내역', logs: '로그', messages: '메시지' };
+const labels: Readonly<Record<AgentSessionViewTab, string>> = { terminal: '터미널', changes: '변경 내역', logs: '로그', messages: '메시지', workflow: '위임' };
 
 export function createSessionViewTabs(selected: AgentSessionViewTab, onSelect: (tab: AgentSessionViewTab) => void): HTMLElement {
 	const nav = document.createElement('div');

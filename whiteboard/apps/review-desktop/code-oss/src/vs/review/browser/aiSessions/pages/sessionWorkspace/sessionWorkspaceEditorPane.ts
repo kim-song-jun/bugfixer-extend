@@ -31,6 +31,9 @@ import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase 
 import { ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, SessionNotificationDTO, SessionPageOptions, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
+import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO, CreateAgentWorkflowInput } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
+import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
+import type { WorkspaceKnowledgeDTO } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDashboardDTO, WorkspaceDashboardTaskItemDTO } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
@@ -40,6 +43,7 @@ import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
 import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
 import { createSessionNotifications, type SessionNotificationsActions, type SessionNotificationsController } from '../../widgets/sessionNotifications/index.js';
 import { createSessionMessages, type SessionMessagesActions, type SessionMessagesController } from '../../widgets/sessionMessages/index.js';
+import { createSessionWorkflow, type SessionWorkflowActions, type SessionWorkflowController } from '../../widgets/sessionWorkflow/index.js';
 import type { AgentSessionViewTab } from '../../features/sessionViewTabs/index.js';
 import { SessionTerminalController } from '../../shared/sessionTerminal/index.js';
 import { AgentSessionWorkspaceEditorInput } from './sessionWorkspaceEditorInput.js';
@@ -105,6 +109,9 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private sessionMessagesPanel: HTMLElement | undefined;
 	private sessionMessagesMount: HTMLElement | undefined;
 	private sessionMessages: SessionMessagesController | undefined;
+	private sessionWorkflowPanel: HTMLElement | undefined;
+	private sessionWorkflowMount: HTMLElement | undefined;
+	private sessionWorkflow: SessionWorkflowController | undefined;
 	private notificationsMount: HTMLElement | undefined;
 	private sessionNotifications: SessionNotificationsController | undefined;
 	private pendingNotificationMessage: PendingNotificationMessage | undefined;
@@ -123,6 +130,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this._register(toDisposable(() => this.terminalController?.dispose()));
 		this._register(toDisposable(() => this.sessionLogs?.dispose()));
 		this._register(toDisposable(() => this.sessionMessages?.dispose()));
+		this._register(toDisposable(() => this.sessionWorkflow?.dispose()));
 		this._register(toDisposable(() => this.sessionNotifications?.dispose()));
 	}
 
@@ -137,7 +145,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	protected override setEditorVisible(visible: boolean): void {
 		this.editorVisible = visible;
-		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionNotifications?.setVisible(false); }
+		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionNotifications?.setVisible(false); }
 		else this.render();
 		this.updateLifecyclePolling();
 	}
@@ -153,6 +161,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.terminalController?.dispose();
 			this.sessionLogs?.invalidateContext();
 			this.sessionMessages?.setVisible(false);
+			this.sessionWorkflow?.setVisible(false);
 			this.sessionNotifications?.setVisible(false);
 			this.projectId = input.projectId;
 			this.dashboard = undefined;
@@ -177,7 +186,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private loadTabPreference(): void {
 		const tab = localStorage.getItem(`${SESSION_STORAGE_TAB}.${this.projectId}`);
-		if (tab === 'terminal' || tab === 'changes' || tab === 'logs' || tab === 'messages') this.activeTab = tab;
+		if (tab === 'terminal' || tab === 'changes' || tab === 'logs' || tab === 'messages' || tab === 'workflow') this.activeTab = tab;
 	}
 
 	private async load(): Promise<void> {
@@ -223,6 +232,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.terminalController?.hide();
 		this.sessionLogs?.invalidateContext();
 		this.sessionMessages?.setVisible(false);
+		this.sessionWorkflow?.setVisible(false);
 		this.selectedSessionId = sessionId;
 		persistSessionSelection(this.projectId, sessionId);
 		this.notice = undefined;
@@ -469,6 +479,39 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return panel;
 	}
 
+	private updateWorkflowPanel(session: AgentSessionDTO): HTMLElement {
+		if (!this.sessionWorkflowPanel) {
+			this.sessionWorkflowPanel = document.createElement('div');
+			this.sessionWorkflowPanel.className = 'ai-session__workflow-panel';
+			this.sessionWorkflowMount = document.createElement('div');
+			this.sessionWorkflowMount.className = 'ai-session__workflow-mount';
+			this.sessionWorkflowPanel.appendChild(this.sessionWorkflowMount);
+		}
+		const projectId = this.projectId!;
+		const actions: SessionWorkflowActions = {
+			listWorkflows: (afterId, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listWorkflows', { projectId, afterId, limit }) as Promise<AgentWorkflowPageDTO>,
+			getWorkflow: workflowId => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getWorkflow', { projectId, workflowId }) as Promise<AgentWorkflowStatusDTO>,
+			createWorkflow: (input: CreateAgentWorkflowInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'createWorkflow', input) as Promise<AgentWorkflowStatusDTO>,
+			reviseWorkflow: (workflowId, expectedRevision, plan: AgentWorkflowPlanInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'reviseWorkflow', { projectId, workflowId, expectedRevision, plan }) as Promise<AgentWorkflowStatusDTO>,
+			approveWorkflow: (workflowId, expectedRevision, planVersion, fingerprint, idempotencyKey) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'approveWorkflow', { projectId, workflowId, expectedRevision, planVersion, fingerprint, idempotencyKey }) as Promise<AgentWorkflowApprovalResult>,
+			startWorkflow: (workflowId, expectedRevision, idempotencyKey) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'startWorkflow', { projectId, workflowId, expectedRevision, idempotencyKey }) as Promise<AgentWorkflowStatusDTO>,
+			cancelWorkflow: (workflowId, expectedRevision, idempotencyKey) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'cancelWorkflow', { projectId, workflowId, expectedRevision, idempotencyKey }) as Promise<AgentWorkflowStatusDTO>,
+			loadKnowledge: (requestedProjectId: string) => ipcRenderer.invoke(WORKSPACE_KNOWLEDGE_CHANNEL, 'getProjectKnowledge', requestedProjectId) as Promise<WorkspaceKnowledgeDTO>,
+			loadSessions: async (requestedProjectId: string) => {
+				const sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId: requestedProjectId }) as readonly AgentSessionDTO[];
+				if (this.projectId === requestedProjectId) { this.sessions = sessions; }
+				return sessions;
+			},
+		};
+		if (!this.sessionWorkflow) {
+			this.sessionWorkflow = createSessionWorkflow(this.sessionWorkflowMount!, { projectId, session, sessions: this.sessions }, actions);
+		} else {
+			this.sessionWorkflow.setContext({ projectId, session, sessions: this.sessions }, actions);
+		}
+		this.sessionWorkflow.setVisible(this.editorVisible && this.activeTab === 'workflow');
+		return this.sessionWorkflowPanel;
+	}
+
 	private updateNotificationsMount(): HTMLElement {
 		if (!this.notificationsMount) {
 			this.notificationsMount = document.createElement('div');
@@ -502,6 +545,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.terminalController?.hide();
 		this.sessionLogs?.invalidateContext();
 		this.sessionMessages?.setVisible(false);
+		this.sessionWorkflow?.setVisible(false);
 		if (this.previewSessionId !== recipient.id) { this.preview = undefined; this.previewSessionId = undefined; }
 		this.creating = false;
 		this.selectedSessionId = recipient.id;
@@ -558,13 +602,16 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const activeElement = document.activeElement;
 		const focusedLogsElement = activeElement instanceof HTMLElement && this.logsPanel?.contains(activeElement) ? activeElement : undefined;
 		const focusedMessagesElement = activeElement instanceof HTMLElement && this.sessionMessagesPanel?.contains(activeElement) ? activeElement : undefined;
+		const focusedWorkflowElement = activeElement instanceof HTMLElement && this.sessionWorkflowPanel?.contains(activeElement) ? activeElement : undefined;
 		const focusedNotificationsElement = activeElement instanceof HTMLElement && this.notificationsMount?.contains(activeElement) ? activeElement : undefined;
 		let logsShouldBeVisible = false;
 		let messagesShouldBeVisible = false;
+		let workflowShouldBeVisible = false;
 		this.root.replaceChildren();
 		if (!this.projectId) {
 			this.sessionLogs?.setVisible(false);
 			this.sessionMessages?.setVisible(false);
+			this.sessionWorkflow?.setVisible(false);
 			this.sessionNotifications?.setVisible(false);
 			return;
 		}
@@ -612,12 +659,14 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 					if (session.workspaceMode === 'gitWorktree' && workspace) { this.renderWorkspacePreparation(main, workspace); }
 					logsShouldBeVisible = this.editorVisible && this.activeTab === 'logs' && !!this.turns.get(session.id)?.length;
 					messagesShouldBeVisible = this.editorVisible && this.activeTab === 'messages';
+					workflowShouldBeVisible = this.editorVisible && this.activeTab === 'workflow';
 					const logsPanel = this.updateLogsPanel(session.id);
 					const messagesPanel = this.updateMessagesPanel(session.id);
+					const workflowPanel = this.updateWorkflowPanel(session);
 					const rendered = renderSessionDetail(main, session, turn, this.activeTab, {
 						onStart: () => void this.prepareLaunch(session.id),
 						onStop: () => void this.stopTurn(), onTab: tab => this.setTab(tab),
-					}, taskNames.get(session.taskId ?? ''), logsPanel, messagesPanel);
+					}, taskNames.get(session.taskId ?? ''), logsPanel, messagesPanel, workflowPanel);
 					if (this.activeTab === 'terminal') this.renderTerminal(rendered.terminal, session, turn);
 					if (this.preview && this.previewSessionId === session.id) {
 						this.renderPreview(main, this.preview);
@@ -642,9 +691,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (sessionList) sessionList.scrollTop = this.sessionListScrollTop;
 		if (focusedLogsElement?.isConnected) { focusedLogsElement.focus({ preventScroll: true }); }
 		if (focusedMessagesElement?.isConnected) { focusedMessagesElement.focus({ preventScroll: true }); }
+		if (focusedWorkflowElement?.isConnected) { focusedWorkflowElement.focus({ preventScroll: true }); }
 		if (focusedNotificationsElement?.isConnected) { focusedNotificationsElement.focus({ preventScroll: true }); }
 		if (!logsShouldBeVisible) { this.sessionLogs?.setVisible(false); }
 		if (!messagesShouldBeVisible) { this.sessionMessages?.setVisible(false); }
+		if (!workflowShouldBeVisible) { this.sessionWorkflow?.setVisible(false); }
 		if (this.dashboard) { this.sessionNotifications?.setVisible(this.editorVisible); }
 		this.updateLifecyclePolling();
 	}
