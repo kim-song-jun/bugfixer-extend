@@ -215,12 +215,20 @@ test('an approved workflow reservation launches its exact reserved durable turn 
 		assert.equal(turn.state, 'running');
 		assert.deepEqual(runtime.starts(), [reservation.turnId]);
 		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id).map(value => value.id), [reservation.turnId]);
-		await service.stop(fixture.project.id, session.id, turn.id);
-		const preview = await service.preview({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY });
-		const manualTurn = await service.start({ projectId: fixture.project.id, sessionId: session.id, ticketId: preview.ticketId });
+		const stoppedWorkflowTurn = await service.stop(fixture.project.id, session.id, turn.id);
+		assert.equal(stoppedWorkflowTurn.state, 'interrupted');
+		assert.equal(stoppedWorkflowTurn.cleanupVerified, true);
+		assert.equal(fixture.database.agentSessionTurns.getTurn(fixture.project.id, session.id, turn.id)?.state, stoppedWorkflowTurn.state);
+		const manualSession = fixture.database.agentSessions.createSession({
+			projectId: fixture.project.id, bindingId: fixture.sharedBinding.id, name: 'Manual ticket session',
+			provider: 'claude', model: 'sonnet', workspaceMode: 'sharedFolder',
+		});
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: manualSession.id, permissionPolicy: READ_ONLY });
+		const manualTurn = await service.start({ projectId: fixture.project.id, sessionId: manualSession.id, ticketId: preview.ticketId });
 		assert.notEqual(manualTurn.id, reservation.turnId);
 		assert.deepEqual(runtime.starts(), [reservation.turnId, manualTurn.id]);
-		await service.stop(fixture.project.id, session.id, manualTurn.id);
+		const stoppedManualTurn = await service.stop(fixture.project.id, manualSession.id, manualTurn.id);
+		assert.equal(stoppedManualTurn.cleanupVerified, true);
 	} finally {
 		dispose(fixture);
 	}
