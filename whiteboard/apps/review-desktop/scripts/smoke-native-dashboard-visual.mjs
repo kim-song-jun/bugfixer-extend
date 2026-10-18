@@ -1,7 +1,7 @@
 /** Exercise the packaged native project dashboard with a service-created fixture. */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, open, opendir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1085,7 +1085,7 @@ try {
         description: '패키지 앱의 task 상태 버튼과 포커스를 확인합니다.',
       });
 
-      fixture = { projectId: project.project.id, projectName: project.project.name, descriptorPath: project.descriptorPath, taskId: task.id, taskTitle: task.title, initialState: task.state };
+      fixture = { projectId: project.project.id, bindingId: project.binding.id, projectName: project.project.name, descriptorPath: project.descriptorPath, taskId: task.id, taskTitle: task.title, initialState: task.state };
     } finally {
       database.close();
     }
@@ -1225,6 +1225,60 @@ try {
 
     assert.equal(fixture.finalState, 'inProgress', 'Keyboard state change must persist in workspace.db after the app exits');
 
+    const logFixtureDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const seeded = await seedTranscriptHistory(logFixtureDatabase, fixture, projectFolder, tag);
+
+      fixture.logHistory = seeded.receipt;
+
+      assert.equal(seeded.receipt.turnIds.length, 2, 'The isolated history fixture must contain two real persisted turns');
+
+      for (const turnId of seeded.receipt.turnIds) {
+        const stored = logFixtureDatabase.agentSessionTranscripts.readPage(fixture.projectId, seeded.receipt.sessionId, turnId, { limit: 100 });
+        const next = logFixtureDatabase.agentSessionTranscripts.readPage(fixture.projectId, seeded.receipt.sessionId, turnId, { afterSequence: stored.nextSequence, limit: 100 });
+
+        assert.equal(stored.entries.length, 100, 'The history fixture must fill the first UI page');
+        assert.equal(stored.hasMore, true, 'The history fixture must expose another page');
+        assert.equal(stored.entries.length + next.entries.length, seeded.receipt.entryCountPerTurn, 'The stored history must contain more than one UI page of unique entries');
+
+        assert.ok([...stored.entries, ...next.entries].every(entry => !entry.text.includes(transcriptFixtureSecret(tag))), 'Known fixture secrets must be masked before they reach SQLite');
+      }
+    } finally {
+      logFixtureDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `transcript-logs-${tag}`);
+
+      await verifyAiSessionTranscriptLogs(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `ai-session-logs-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const verifiedHistoryDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const turns = verifiedHistoryDatabase.agentSessionTurns.listTurns(fixture.projectId, fixture.logHistory.sessionId);
+
+      assert.deepEqual(turns.map(turn => turn.id), fixture.logHistory.turnIds, 'Both CI history turns must persist after the packaged-app journey');
+
+      for (const turn of turns) {
+        const stored = verifiedHistoryDatabase.agentSessionTranscripts.readPage(fixture.projectId, fixture.logHistory.sessionId, turn.id, { limit: 100 });
+        const next = verifiedHistoryDatabase.agentSessionTranscripts.readPage(fixture.projectId, fixture.logHistory.sessionId, turn.id, { afterSequence: stored.nextSequence, limit: 100 });
+
+        assert.ok([...stored.entries, ...next.entries].every(entry => !entry.text.includes(transcriptFixtureSecret(tag))), 'The persisted history must not contain the unmasked fixture secret');
+      }
+    } finally {
+      verifiedHistoryDatabase.close();
+    }
+
     await writeFile(path.join(output, `fixture-${tag}.json`), JSON.stringify(fixture, null, 2));
   }
 
@@ -1327,6 +1381,296 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
   assert.equal(await workspace.getByRole('tab', { name: '변경 내역', exact: true }).getAttribute('aria-selected'), 'true');
 
   return { name, model };
+}
+
+function transcriptFixtureSecret(tag) {
+  return `WB_CI_TRANSCRIPT_SECRET_${tag.toUpperCase()}_DO_NOT_PERSIST`;
+}
+
+async function seedTranscriptHistory(database, fixture, projectFolder, tag) {
+  const name = `CI 로그 히스토리 fixture ${tag}`;
+  const model = 'ci-fixture-not-executed';
+
+  const session = database.agentSessions.createSession({
+    projectId: fixture.projectId,
+    bindingId: fixture.bindingId,
+    taskId: fixture.taskId,
+    name,
+    provider: 'codex',
+    model,
+    profileRef: 'ci-transcript-fixture-only',
+    workspaceMode: 'sharedFolder',
+  });
+
+  const directoryStats = await statFolder(projectFolder);
+  const turnIds = [];
+  const entryCountPerTurn = 124;
+  const sequenceHole = 17;
+  const secret = transcriptFixtureSecret(tag);
+
+  for (let ordinal = 1; ordinal <= 2; ordinal++) {
+    const currentSession = database.agentSessions.getSession(fixture.projectId, session.id);
+
+    const snapshot = {
+      schemaVersion: 1,
+      projectId: fixture.projectId,
+      sessionId: session.id,
+      sessionRevision: currentSession.revision,
+      bindingId: fixture.bindingId,
+      taskId: fixture.taskId,
+      provider: 'codex',
+      model,
+      profileRef: session.profileRef,
+      cwd: directoryStats.canonicalPath,
+      folderIdentity: { canonicalPath: directoryStats.canonicalPath, dev: directoryStats.dev, ino: directoryStats.ino },
+      managedWorktreeOwnerId: null,
+      permissionPolicy: { mode: 'read-only', approval: 'never' },
+      convention: null,
+      references: [],
+    };
+
+    const turn = database.agentSessionTurns.createTurn({
+      projectId: fixture.projectId,
+      sessionId: session.id,
+      expectedSessionRevision: currentSession.revision,
+      snapshot,
+    });
+
+    const startingSession = database.agentSessions.getSession(fixture.projectId, session.id);
+    const running = database.agentSessionTurns.transitionTurn(
+      fixture.projectId, session.id, turn.id, turn.revision, startingSession.revision, { state: 'running' },
+    );
+
+    const exited = database.agentSessionTurns.transitionTurn(
+      fixture.projectId, session.id, turn.id, running.turn.revision, running.session.revision,
+      { state: 'exited', exitCode: 0, cleanupVerified: true },
+    );
+
+    assert.equal(exited.turn.state, 'exited');
+
+    turnIds.push(turn.id);
+
+    for (let sequence = 1; sequence <= entryCountPerTurn + 1; sequence++) {
+      if (sequence === sequenceHole) continue;
+
+      if (sequence % 2 === 1) {
+        database.agentSessionTranscripts.appendSanitizedTerminalChunk({
+          projectId: fixture.projectId,
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence,
+          sanitizedTextFromTrustedPtyHost: `CI fixture terminal ${tag} run ${ordinal} entry ${sequence}\n`,
+        });
+      } else {
+        const text = sequence === 2
+          ? `CI fixture structured ${tag} run ${ordinal}: fixture search anchor`
+          : sequence === 4
+            ? `CI fixture provider error ${secret} was masked before persistence`
+            : `CI fixture structured ${tag} run ${ordinal} entry ${sequence}`;
+
+        database.agentSessionTranscripts.appendStructuredLog({
+          projectId: fixture.projectId,
+          sessionId: session.id,
+          turnId: turn.id,
+          sequence,
+          text,
+          severity: sequence === 4 ? 'error' : sequence % 6 === 0 ? 'warning' : 'info',
+          source: sequence === 4 ? 'provider' : sequence % 4 === 0 ? 'host' : 'workspace',
+          trustedKnownSecrets: sequence === 4 ? [secret] : [],
+        });
+      }
+    }
+  }
+
+  return {
+    secret,
+    receipt: {
+      fixtureOnly: true,
+      historyUiFixture: true,
+      providerExecuted: false,
+      ptyExecuted: false,
+      source: 'Isolated CI-profile SQLite transcript-store fixture',
+      proofLimit: 'Persisted synthetic history for UI verification; not evidence of provider execution or a real PTY session.',
+      projectId: fixture.projectId,
+      sessionId: session.id,
+      name,
+      model,
+      turnIds,
+      entryCountPerTurn,
+      pageSize: 100,
+      explicitSequenceHole: { missingSequence: sequenceHole, afterSequence: sequenceHole - 1, beforeSequence: sequenceHole + 1 },
+      secretMaskedBeforeDisk: true,
+      copyExport: 'Not exercised by native smoke; clipboard and save-dialog transfer remain unverified here.',
+    },
+  };
+}
+
+async function statFolder(folderPath) {
+  const [stats, canonicalPath] = await Promise.all([stat(folderPath, { bigint: true }), realpath(folderPath)]);
+
+  assert.ok(stats.isDirectory(), 'The fixture binding must resolve to a directory');
+
+  return {
+    canonicalPath,
+    dev: stats.dev.toString(),
+    ino: stats.ino.toString(),
+  };
+}
+
+async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, viewports) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
+
+  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
+  if (!(await sidebar.isVisible())) {
+    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+  }
+
+  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+
+  const workspace = page.locator('.ai-session-workspace');
+  const fixtureRow = workspace.locator('.ai-session__session-row').filter({ hasText: fixture.logHistory.name });
+
+  await fixtureRow.waitFor({ state: 'visible' });
+  await fixtureRow.click();
+  await workspace.getByRole('heading', { name: fixture.logHistory.name, exact: true }).waitFor();
+  await workspace.getByRole('tab', { name: '로그', exact: true }).click();
+
+  const logPanel = workspace.locator('.ai-session__logs-panel');
+  const turnSelector = logPanel.getByRole('combobox', { name: '로그를 볼 실행 선택', exact: true });
+  const logs = logPanel.locator('.ai-session-logs');
+  const entries = logs.locator('.ai-session-logs__entry');
+
+  await turnSelector.waitFor({ state: 'visible' });
+
+  assert.equal(await turnSelector.locator('option').count(), 2, 'The selector must expose both persisted CI fixture turns');
+  assert.equal(await turnSelector.inputValue(), fixture.logHistory.turnIds[1], 'The latest turn must be selected by default');
+  await logs.getByText(`CI fixture terminal ${tag} run 2 entry 1`, { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry').length === 100);
+  assert.ok((await logs.innerText()).includes('기록 누락: 순번 17–17'), 'The explicit sequence hole must be called out as missing history');
+  assert.equal((await logs.innerText()).includes(transcriptFixtureSecret(tag)), false, 'Rendered history must not expose the known fixture secret');
+
+  const exportButton = logs.getByRole('button', { name: '불러온 기록 내보내기', exact: true });
+  await exportButton.scrollIntoViewIfNeeded();
+
+  const beforePageShot = path.join(output, `ai-session-logs-${tag}-rows-before.png`);
+  const desktopLayout = await workspace.evaluate(element => {
+    const action = element.querySelector('.ai-session-logs__button:last-child');
+    const bounds = action?.getBoundingClientRect();
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(desktopLayout.overflow, false, `AI session log layout must not overflow horizontally at ${tag}/1440`);
+  assert.equal(desktopLayout.actionReachable, true, `The final toolbar action must remain reachable at ${tag}/1440`);
+
+  await capturePage(page, beforePageShot);
+  screenshots.push(beforePageShot);
+  viewports.push({ theme: tag, state: 'ai-session-logs-first-page', width: 1440, height: 900, screenshot: beforePageShot, layout: desktopLayout });
+
+  const firstPageButton = logs.getByRole('button', { name: '처음 기록 다시 읽기', exact: true });
+  await firstPageButton.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry').length === 100);
+
+  const nextPage = logs.getByRole('button', { name: '다음 기록 불러오기', exact: true });
+  await nextPage.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry').length > 100);
+
+  assert.equal(await entries.count(), fixture.logHistory.entryCountPerTurn, 'Incremental pagination must load all retained fixture entries without duplicates');
+  assert.equal((await logs.innerText()).includes(transcriptFixtureSecret(tag)), false, 'Paginated rendered history must remain masked');
+
+  const afterPageShot = path.join(output, `ai-session-logs-${tag}-rows-after.png`);
+  await capturePage(page, afterPageShot);
+  screenshots.push(afterPageShot);
+  viewports.push({ theme: tag, state: 'ai-session-logs-paginated-flat-rows', width: 1440, height: 900, screenshot: afterPageShot });
+
+  const kind = logs.getByRole('combobox', { name: '기록 종류', exact: true });
+  const severity = logs.getByRole('combobox', { name: '심각도', exact: true });
+  const source = logs.getByRole('combobox', { name: '출처', exact: true });
+  const search = logs.getByRole('searchbox', { name: '불러온 기록에서 검색', exact: true });
+
+  await kind.selectOption('log');
+
+  assert.ok(await logs.locator('.ai-session-logs__entry--log').count() > 0, 'Kind filter must show structured log entries');
+  assert.equal(await logs.locator('.ai-session-logs__entry--terminal').count(), 0, 'Kind filter must hide terminal output');
+  await kind.selectOption('terminal');
+
+  assert.ok(await logs.locator('.ai-session-logs__entry--terminal').count() > 0, 'Kind filter must show terminal output');
+  assert.equal(await logs.locator('.ai-session-logs__entry--log').count(), 0, 'Terminal filter must hide structured logs');
+  await kind.selectOption('all');
+  await severity.selectOption('error');
+  await source.selectOption('provider');
+
+  assert.equal(await logs.locator('.ai-session-logs__entry').count(), 1, 'Severity and source filters must isolate the matching structured event');
+  assert.equal(await logs.locator('.ai-session-logs__entry-text').innerText(), 'CI fixture provider error *** was masked before persistence');
+  await severity.selectOption('all');
+  await source.selectOption('all');
+  await search.fill('fixture search anchor');
+
+  assert.equal(await logs.locator('.ai-session-logs__entry').count(), 1, 'Search must find a loaded record');
+  assert.ok((await logs.locator('.ai-session-logs__status').innerText()).includes('불러온'), 'Search status must explain it only covers loaded records');
+  await search.fill('');
+
+  const follow = logs.getByRole('button', { name: '따라가기 켜짐', exact: true });
+  const initialCount = await entries.count();
+  await follow.focus();
+  await page.keyboard.press('Space');
+  const pausedFollow = logs.getByRole('button', { name: '따라가기 일시 정지', exact: true });
+  await pausedFollow.waitFor();
+
+  assert.equal(await pausedFollow.getAttribute('aria-pressed'), 'false', 'Pause state must be keyboard reachable and announced');
+  await page.waitForTimeout(3500);
+
+  assert.equal(await entries.count(), initialCount, 'Paused following must retain the current loaded entry count');
+  await pausedFollow.focus();
+  await page.keyboard.press('Space');
+  await logs.getByRole('button', { name: '따라가기 켜짐', exact: true }).waitFor();
+
+  await turnSelector.selectOption(fixture.logHistory.turnIds[0]);
+  await logs.getByText(`CI fixture terminal ${tag} run 1 entry 1`, { exact: true }).waitFor();
+
+  const originalSessionRow = workspace.locator('.ai-session__session-row').filter({ hasText: fixture.aiSession.name });
+  await originalSessionRow.click();
+  await workspace.getByRole('heading', { name: fixture.aiSession.name, exact: true }).waitFor();
+
+  assert.equal(await workspace.locator('.ai-session__logs-empty').innerText(), '이 세션에는 아직 실행 기록이 없습니다.', 'The UI-created session must continue to show the honest zero-turn state');
+  await fixtureRow.click();
+  await workspace.getByRole('heading', { name: fixture.logHistory.name, exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector('.ai-session__logs-panel select[aria-label="로그를 볼 실행 선택"]')?.value !== undefined);
+
+  assert.equal(await turnSelector.inputValue(), fixture.logHistory.turnIds[0], 'Returning to the fixture session must restore its previously selected earlier turn');
+
+  await turnSelector.selectOption(fixture.logHistory.turnIds[1]);
+  await logs.getByText(`CI fixture terminal ${tag} run 2 entry 1`, { exact: true }).waitFor();
+
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  await logs.getByText(`CI fixture terminal ${tag} run 2 entry 1`, { exact: true }).waitFor();
+  await exportButton.scrollIntoViewIfNeeded();
+  const layout = await workspace.evaluate(element => {
+    const action = element.querySelector('.ai-session-logs__button:last-child');
+    const bounds = action?.getBoundingClientRect();
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(layout.overflow, false, `AI session log layout must not overflow horizontally at ${tag}/760`);
+  assert.equal(layout.actionReachable, true, `The final toolbar action must remain reachable at ${tag}/760`);
+  assert.equal((await logs.innerText()).includes(transcriptFixtureSecret(tag)), false, 'Narrow rendered history must remain masked');
+
+  const narrowShot = path.join(output, `ai-session-logs-${tag}-narrow-760.png`);
+  await capturePage(page, narrowShot);
+  screenshots.push(narrowShot);
+  viewports.push({ theme: tag, state: 'ai-session-logs-narrow-760', width: 760, height: 820, screenshot: narrowShot, layout });
 }
 
 async function dismissStartupInvitations(page) {

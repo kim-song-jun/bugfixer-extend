@@ -36,6 +36,7 @@ const MAX_BYTES = 1024 * 1024;
 const PAGE_ENTRIES = 100;
 const PAGE_BYTES = 512 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 3000;
+const MAX_GAP_MARKERS = 100;
 
 type KindFilter = 'all' | 'terminal' | 'log';
 type SeverityFilter = 'all' | AgentSessionTranscriptSeverity;
@@ -81,13 +82,14 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	searchLabel.appendChild(searchInput);
 	const followButton = makeButton('따라가기 켜짐');
 	followButton.setAttribute('aria-pressed', 'true');
+	const firstButton = makeButton('처음 기록 다시 읽기');
 	const newerButton = makeButton('다음 기록 불러오기');
 	const retryButton = makeButton('다시 시도');
 	const copyButton = makeButton('불러온 기록 복사');
 	const exportButton = makeButton('불러온 기록 내보내기');
 	copyButton.disabled = !actions.copyText;
 	exportButton.disabled = !actions.exportText;
-	toolbar.append(kindSelect.wrapper, severitySelect.wrapper, sourceSelect.wrapper, searchLabel, followButton, newerButton, retryButton, copyButton, exportButton);
+	toolbar.append(kindSelect.wrapper, severitySelect.wrapper, sourceSelect.wrapper, searchLabel, followButton, firstButton, newerButton, retryButton, copyButton, exportButton);
 
 	const status = document.createElement('p');
 	status.className = 'ai-session-logs__status';
@@ -126,6 +128,9 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	let lastError: string | undefined;
 	let entries: AgentSessionTranscriptEntryDTO[] = [];
 	let gaps: GapRange[] = [];
+	let collapsedGapCount = 0;
+	let collapsedGapStart = 0;
+	let collapsedGapEnd = 0;
 	let kindFilter: KindFilter = 'all';
 	let severityFilter: SeverityFilter = 'all';
 	let sourceFilter: SourceFilter = 'all';
@@ -147,6 +152,13 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			marker.setAttribute('role', 'note');
 			marker.textContent = `기록 누락: 순번 ${gap.afterSequence + 1}–${gap.throughSequence} 구간을 보존된 기록에서 찾을 수 없습니다.`;
 			list.insertBefore(marker, list.firstChild);
+		}
+		if (collapsedGapCount > 0) {
+			const collapsed = document.createElement('li');
+			collapsed.className = 'ai-session-logs__gap';
+			collapsed.setAttribute('role', 'note');
+			collapsed.textContent = `순번 ${collapsedGapStart}–${collapsedGapEnd} 사이의 이전 누락 구간 ${collapsedGapCount}개는 화면 한도에 따라 접어 표시합니다. 처음 기록 다시 읽기로 해당 페이지를 확인할 수 있습니다.`;
+			list.insertBefore(collapsed, list.firstChild);
 		}
 		if (droppedEntries > 0) {
 			const trim = document.createElement('li');
@@ -204,11 +216,31 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 				gaps.push(gap);
 			}
 		}
+		while (gaps.length > MAX_GAP_MARKERS) {
+			const removed = gaps.shift()!;
+			if (collapsedGapCount === 0) { collapsedGapStart = removed.afterSequence + 1; }
+			collapsedGapEnd = removed.throughSequence;
+			collapsedGapCount++;
+		}
 		const known = new Set(entries.map(entry => entry.sequence));
 		const added = page.entries.filter(entry => !known.has(entry.sequence));
 		entries = [...entries, ...added].sort((a, b) => a.sequence - b.sequence);
 		cursor = Math.max(cursor, page.nextSequence);
 		trimEntries();
+	};
+	const clearLoadedRecords = (): void => {
+		entries = [];
+		gaps = [];
+		collapsedGapCount = 0;
+		collapsedGapStart = 0;
+		collapsedGapEnd = 0;
+		cursor = 0;
+		highestSequence = 0;
+		retainedStart = null;
+		droppedEntries = 0;
+		droppedBytes = 0;
+		hasMore = true;
+		lastError = undefined;
 	};
 
 	const trimEntries = (): void => {
@@ -226,7 +258,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		const range = entries.length ? `순번 ${entries[0].sequence}–${entries[entries.length - 1].sequence}` : '기록 없음';
 		const highWater = highestSequence ? `저장된 마지막 순번 ${highestSequence}` : '저장된 기록 없음';
 		const retained = retainedStart ? `보존 시작 순번 ${retainedStart}` : '보존된 기록 없음';
-		const state = loading ? '불러오는 중' : !connected ? '연결 끊김 · 마지막으로 불러온 기록을 유지합니다.' : '연결됨';
+		const state = loading ? '불러오는 중' : !connected ? '연결 끊김 · 마지막으로 불러온 기록을 유지합니다.' : !follow ? '일시 정지 · 기록 저장은 계속됩니다.' : '연결됨';
 		const empty = entries.length === 0 ? ' · 아직 불러온 기록이 없습니다.' : '';
 		const localSearch = searchText ? ` · 현재 검색은 불러온 ${entries.length}개 기록에서만 수행합니다.` : '';
 		status.textContent = `${state} · ${range} · ${visibleCount}/${entries.length}개 표시 · ${highWater} · ${retained}${empty}${localSearch}`;
@@ -234,7 +266,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 
 	const schedulePoll = (): void => {
 		if (timer) { clearTimeout(timer); timer = undefined; }
-		if (disposed || !visible || !connected) { return; }
+		if (disposed || !visible || !connected || !follow) { return; }
 		timer = setTimeout(() => {
 			timer = undefined;
 			void fetchPage('refresh').finally(schedulePoll);
@@ -252,21 +284,36 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	severitySelect.select.addEventListener('change', onFilterChange);
 	sourceSelect.select.addEventListener('change', onFilterChange);
 	searchInput.addEventListener('input', onFilterChange);
+	const pauseFollowing = (): void => {
+		follow = false;
+		requestGeneration++;
+		loading = false;
+		if (timer) { clearTimeout(timer); timer = undefined; }
+		followButton.setAttribute('aria-pressed', 'false');
+		followButton.textContent = '따라가기 일시 정지';
+		render();
+	};
 	followButton.addEventListener('click', () => {
-		follow = !follow;
-		followButton.setAttribute('aria-pressed', String(follow));
-		followButton.textContent = follow ? '따라가기 켜짐' : '따라가기 일시 정지';
-		if (follow) { viewport.scrollTop = viewport.scrollHeight; }
+		if (follow) { pauseFollowing(); return; }
+		follow = true;
+		followButton.setAttribute('aria-pressed', 'true');
+		followButton.textContent = '따라가기 켜짐';
+		viewport.scrollTop = viewport.scrollHeight;
+		void fetchPage('refresh').finally(schedulePoll);
 	});
 	newerButton.addEventListener('click', () => { void fetchPage('newer'); });
+	firstButton.addEventListener('click', () => {
+		pauseFollowing();
+		clearLoadedRecords();
+		connected = true;
+		void fetchPage('newer');
+	});
 	retryButton.addEventListener('click', () => { connected = true; void fetchPage('refresh'); });
 	copyButton.addEventListener('click', () => { void transferLoaded('copy'); });
 	exportButton.addEventListener('click', () => { void transferLoaded('export'); });
 	viewport.addEventListener('scroll', () => {
 		if (viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight > 40 && follow) {
-			follow = false;
-			followButton.setAttribute('aria-pressed', 'false');
-			followButton.textContent = '따라가기 일시 정지';
+			pauseFollowing();
 		}
 	});
 
@@ -327,7 +374,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 				if (timer) { clearTimeout(timer); timer = undefined; }
 				requestGeneration++;
 				loading = false;
-			} else {
+			} else if (follow || entries.length === 0) {
 				void fetchPage(entries.length ? 'refresh' : 'newer').finally(schedulePoll);
 			}
 			render();
@@ -347,15 +394,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			connected = true;
 			requestGeneration++;
 			loading = false;
-			entries = [];
-			gaps = [];
-			cursor = 0;
-			highestSequence = 0;
-			retainedStart = null;
-			droppedEntries = 0;
-			droppedBytes = 0;
-			hasMore = true;
-			lastError = undefined;
+			clearLoadedRecords();
 			render();
 			if (visible && connected) { void fetchPage('newer').finally(schedulePoll); }
 		},
