@@ -25,13 +25,23 @@ const guardianScriptPath = path.join(resources, 'out', 'vs', 'workspace', 'elect
 
 const hostModule = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentPtyHost.js');
 
+const sessionModules = path.dirname(hostModule);
+
+const probeGuardianScriptPath = path.join(sessionModules, 'agentCliProbeGuardian.mjs');
+
 await mkdir(evidencePath, { recursive: true });
 
 await access(nodeExecutable, constants.X_OK);
 
 await access(guardianScriptPath, constants.R_OK);
 
+await access(probeGuardianScriptPath, constants.R_OK);
+
 const { AgentPtyHost } = await import(pathToFileURL(hostModule).href);
+
+const { runBoundedAgentCliProcess } = await import(pathToFileURL(path.join(sessionModules, 'agentCliProcess.js')).href);
+
+const { createAgentPtyOutputSanitizer } = await import(pathToFileURL(path.join(sessionModules, 'agentOutputRedactor.js')).href);
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'bfx-pty-probe-'));
 
@@ -86,33 +96,7 @@ process.once('SIGINT', requestAbort);
 
 process.once('SIGTERM', requestAbort);
 
-// The probe's fixture policy buffers complete lines, including tokens split across real PTY chunks.
-// This proves the transport's sanitizer boundary; it is not the product's full redaction policy.
-function lineSanitizer() {
-  let pending = '';
-
-  return {
-    push(text) {
-      pending += text;
-      const end = pending.lastIndexOf('\n');
-
-      if (end < 0) return '';
-
-      const ready = pending.slice(0, end + 1);
-      pending = pending.slice(end + 1);
-
-      return ready.replaceAll(secret, '[마스킹]');
-    },
-    flush() {
-      const final = pending.replaceAll(secret, '[마스킹]');
-      pending = '';
-
-      return final;
-    },
-  };
-}
-
-function createHost(createSanitizer = lineSanitizer) {
+function createHost(createSanitizer = () => createAgentPtyOutputSanitizer({ knownSecrets: [secret] })) {
   const host = new AgentPtyHost({
     guardianNodeExecutable: nodeExecutable,
     guardianScriptPath,
@@ -234,6 +218,18 @@ const deadline = setTimeout(() => {
 deadline.unref();
 
 try {
+  const cliProbe = await runBoundedAgentCliProcess(nodeExecutable, ['-e', 'process.stdout.write("PACKAGED_PROBE_FINAL")'], {
+    env: { PATH: process.env.PATH ?? '' },
+    timeoutMs: 5000,
+    maxOutputBytes: 1024,
+    guardianNodeExecutable: nodeExecutable,
+    guardianScriptPath: probeGuardianScriptPath,
+  });
+
+  assert.equal(cliProbe.stdout, 'PACKAGED_PROBE_FINAL');
+  assert.equal(cliProbe.stderr, '');
+  receipt.checks.push('packaged CLI probe guardian and exact final output');
+
   const host = createHost();
   const a = await launchFixture(host, 'a');
   const b = await launchFixture(host, 'b');
@@ -254,7 +250,7 @@ try {
   await host.resize(a, 101, 33);
   await until(() => retained(host, a).includes('SIZE:101:33'), 'actual PTY dimensions');
   await host.write(a, 'secret\n');
-  await until(() => retained(host, a).includes('[마스킹]'), 'cross-chunk sanitization');
+  await until(() => retained(host, a).includes('***'), 'production cross-chunk sanitization');
   assert.ok(!retained(host, a).includes(secret) && !liveOutput.join('').includes(secret));
   await host.write(a, 'flood\n');
   await until(() => retained(host, a).includes('FLOOD_DONE'), 'bounded flood completes');
