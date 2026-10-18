@@ -117,7 +117,7 @@ test('merge uses the repository user identity from global Git config', async () 
 	}, { globalIdentity: true });
 });
 
-test('a non-conflict merge failure keeps its durable pending state and cause', async () => {
+test('a merge failure before Git mutation reconciles as not applied', async () => {
 	await fixture(async (_root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
@@ -126,14 +126,49 @@ test('a non-conflict merge failure keeps its durable pending state and cause', a
 		git(repository, 'config', '--unset', 'user.name');
 		git(repository, 'config', '--unset', 'user.email');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		await assert.rejects(service.mergeReviewed(preview.previewId), /durable recovery|required|identity/i);
+		await assert.rejects(service.mergeReviewed(preview.previewId), /identity/i);
+		const inspected = await service.inspect(integration.ownerId);
+		assert.equal(inspected.state, 'active');
+		assert.equal(inspected.pendingOperation, undefined);
+		assert.ok(inspected.lastOperation);
+		assert.match(inspected.lastOperation.id, /^[0-9a-f-]{36}$/i);
+		assert.equal(inspected.lastOperation.kind, 'merge');
+		assert.equal(inspected.lastOperation.outcome, 'notApplied');
+		assert.equal(inspected.lastOperation.reconciled, true);
+		assert.equal('version' in inspected, false);
+		assert.equal('signature' in inspected, false);
+		assert.equal(existsSync(join(integration.worktreePath, 'identity-failure.txt')), false);
+		assert.equal(git(integration.worktreePath, 'status', '--porcelain'), '');
+		const reopened = new ManagedWorktreeService(join(_root, 'profile'));
+		assert.deepEqual((await reopened.inspect(integration.ownerId)).lastOperation, inspected.lastOperation);
+	});
+});
+
+test('a non-conflict commit-signing failure after merge preparation remains pending for recovery', async () => {
+	await fixture(async (root, repository, service) => {
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(session.worktreePath, 'signing-failure.txt', 'preserved in prepared merge\n', 'source commit');
+		const gpgMarker = join(root, 'gpg-called');
+		const failingGpg = join(root, 'failing-gpg');
+		writeFileSync(failingGpg, `#!/bin/sh\nprintf 'fixture signing failure\\n' >&2\nprintf called > '${gpgMarker}'\nexit 1\n`);
+		chmodSync(failingGpg, 0o700);
+		git(integration.worktreePath, 'config', 'commit.gpgsign', 'true');
+		git(integration.worktreePath, 'config', 'gpg.program', failingGpg);
+		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		await assert.rejects(service.mergeReviewed(preview.previewId), /fixture signing failure/i);
+		assert.equal(existsSync(gpgMarker), true);
+		assert.equal(readFileSync(join(integration.worktreePath, 'signing-failure.txt'), 'utf8'), 'preserved in prepared merge\n');
+		const mergeHeadValue = git(integration.worktreePath, 'rev-parse', '--git-path', 'MERGE_HEAD');
+		const mergeHeadPath = mergeHeadValue.startsWith('/') ? mergeHeadValue : join(integration.worktreePath, mergeHeadValue);
+		assert.equal(readFileSync(mergeHeadPath, 'utf8').trim(), preview.sourceHead);
+		assert.equal(git(integration.worktreePath, 'ls-files', '--error-unmatch', 'signing-failure.txt'), 'signing-failure.txt');
+		assert.equal(git(integration.worktreePath, 'ls-files', '--unmerged'), '');
 		const inspected = await service.inspect(integration.ownerId);
 		assert.equal(inspected.state, 'recoveryRequired');
 		assert.equal(inspected.pendingOperation?.kind, 'merge');
-		assert.equal('version' in inspected, false);
-		assert.equal('signature' in inspected, false);
-		assert.equal(readFileSync(join(integration.worktreePath, 'identity-failure.txt'), 'utf8'), 'preserved\n');
-		const reopened = new ManagedWorktreeService(join(_root, 'profile'));
+		const reopened = new ManagedWorktreeService(join(root, 'profile'));
 		assert.equal((await reopened.inspect(integration.ownerId)).pendingOperation?.id, inspected.pendingOperation?.id);
 	});
 });
