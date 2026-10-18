@@ -369,14 +369,21 @@ try {
     guardianScriptPath,
     prepareLaunch: async (snapshot, turnId, signal) => {
       const mode = launchModes.get(snapshot.sessionId) ?? 'normal';
+
       if (mode === 'hold-until-abort') {
         blockedPreparationEntered = true;
         notifyBlockedPreparationEntered();
         await new Promise((resolve, reject) => {
-          if (signal.aborted) { reject(new Error('cancelled')); return; }
+          if (signal.aborted) {
+            reject(new Error('cancelled'));
+
+            return;
+          }
+
           signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
         });
       }
+
       const identityFile = path.join(root, `service-${turnId}.json`);
       turnIdentities.set(turnId, identityFile);
       resourceEvents.set(turnId, []);
@@ -386,6 +393,7 @@ try {
       const args = [fixturePath, identityFile, fixtureMode, revocationMarker, terminationEvidence];
       const environment = { CODEX_HOME: profileRoot };
       const launch = { executable: nodeExecutable, args, cwd: snapshot.cwd, env: environment, cols: 80, rows: 24 };
+
       return {
         command: {
           commandSpecVersion: AGENT_CLI_COMMAND_SPEC_VERSION,
@@ -405,13 +413,16 @@ try {
         knownSecrets: [secret],
         revokeAccess: () => {
           if (mode === 'verify-revoke') { writeFileSync(revocationMarker, 'revoked'); }
+
           resourceEvents.get(turnId).push('access-revoked');
         },
         releasePrivateConfig: async () => {
           const events = resourceEvents.get(turnId);
           events.push('private-config-released');
+
           try {
             const identity = JSON.parse(await readFile(identityFile, 'utf8'));
+
             for (const [role, pid] of Object.entries(identity)) {
               assert.equal(alive(pid), false, `The ${role} process must be gone before private configuration release.`);
             }
@@ -422,6 +433,7 @@ try {
       };
     },
   });
+
   const service = new AgentSessionService(serviceDatabase, resolver, runtimeFactory);
 
   ownedAgentSessionService = service;
@@ -442,15 +454,22 @@ try {
 
   async function previewSession(session, mode = 'normal') {
     launchModes.set(session.id, mode);
+
     return service.preview({ projectId: project.id, sessionId: session.id, permissionPolicy: { mode: 'mutating', approval: 'on-request' } });
   }
 
   async function recordOwnedIdentity(turnId, label) {
     const identityFile = turnIdentities.get(turnId);
+
     const identity = await until(async () => {
       try { return JSON.parse(await readFile(identityFile, 'utf8')); }
-      catch (error) { if (error.code === 'ENOENT') { return false; } throw error; }
+      catch (error) {
+        if (error.code === 'ENOENT') { return false; }
+
+        throw error;
+      }
     }, `${label} provider identity`);
+
     for (const [role, pid] of Object.entries(identity)) {
       assert.ok(Number.isSafeInteger(pid) && pid > 0);
       const pgid = Number(execFileSync('/bin/ps', ['-p', String(pid), '-o', 'pgid='], { encoding: 'utf8' }).trim());
@@ -472,10 +491,13 @@ try {
   const finalOutput = [];
   const finalAttachment = await service.attach(project.id, naturalSession.id, naturalTurn.id, chunk => finalOutput.push(chunk.text));
   await service.write(project.id, naturalSession.id, naturalTurn.id, 'quit\n');
+
   const naturalTerminal = await until(() => {
     const current = serviceDatabase.agentSessionTurns.getTurn(project.id, naturalSession.id, naturalTurn.id);
+
     return current?.state === 'exited' && current.cleanupVerified ? current : false;
   }, 'service natural exit and verified cleanup');
+
   assert.ok(finalOutput.join('').endsWith('FINAL_WITHOUT_NEWLINE'), 'Active service attachment must receive the final output without a newline');
   assert.equal(resourceEvents.get(naturalTurn.id).join(','), 'access-revoked,private-config-released');
   assert.equal(naturalTerminal.state, 'exited');
@@ -497,15 +519,18 @@ try {
   const lockProbeSession = await createSession('Workspace release proof');
   const lockProbe = new AbortController();
   const lockProbeTimeout = setTimeout(() => lockProbe.abort(), 5000);
+
   try {
     const reacquired = await resolver.acquire({ projectId: project.id, sessionId: lockProbeSession.id, permissionPolicy: { mode: 'mutating', approval: 'on-request' }, signal: lockProbe.signal });
     resolver.release(reacquired);
   } finally { clearTimeout(lockProbeTimeout); }
+
   receipt.checks.push('explicit stop revokes access, cleans the real PTY, releases private config, then frees the workspace lock');
 
   const constructionCleanupEvents = [];
   let constructionIdentityFile;
   let revokeAttempts = 0;
+
   const constructionFailureFactory = new AgentSessionPtyRuntimeFactory({
     guardianNodeExecutable: 'relative-node-must-fail-host-construction',
     guardianScriptPath: 'relative-guardian-must-fail-host-construction',
@@ -513,6 +538,7 @@ try {
       constructionIdentityFile = path.join(root, `construction-failure-${turnId}.json`);
       const args = [fixturePath, constructionIdentityFile];
       const environment = { CODEX_HOME: profileRoot };
+
       return {
         command: {
           commandSpecVersion: AGENT_CLI_COMMAND_SPEC_VERSION,
@@ -533,20 +559,24 @@ try {
         revokeAccess: () => {
           revokeAttempts++;
           constructionCleanupEvents.push(`revoke-attempt-${revokeAttempts}`);
+
           if (revokeAttempts === 1) { throw new Error('Fixture revocation failure.'); }
         },
         releasePrivateConfig: async () => { constructionCleanupEvents.push('private-config-released'); },
       };
     },
   });
+
   const constructionFailureService = new AgentSessionService(serviceDatabase, resolver, constructionFailureFactory);
   constructionFailureService.recoverStartup();
   const constructionFailureSession = await createSession('Runtime construction cleanup retry');
+
   const constructionFailurePreview = await constructionFailureService.preview({
     projectId: project.id,
     sessionId: constructionFailureSession.id,
     permissionPolicy: { mode: 'mutating', approval: 'on-request' },
   });
+
   await assert.rejects(
     constructionFailureService.start({ projectId: project.id, sessionId: constructionFailureSession.id, ticketId: constructionFailurePreview.ticketId }),
     /failed to start/i,
@@ -564,10 +594,13 @@ try {
   const immediatePreview = await previewSession(immediateSession, 'immediate');
   const immediateTurn = await service.start({ projectId: project.id, sessionId: immediateSession.id, ticketId: immediatePreview.ticketId });
   await recordOwnedIdentity(immediateTurn.id, 'service-immediate-exit');
+
   const immediateTerminal = await until(() => {
     const current = serviceDatabase.agentSessionTurns.getTurn(project.id, immediateSession.id, immediateTurn.id);
+
     return current?.state === 'exited' && current.cleanupVerified ? current : false;
   }, 'service immediate exit replay and cleanup');
+
   assert.equal(immediateTerminal.state, 'exited');
   assert.equal(resourceEvents.get(immediateTurn.id).join(','), 'access-revoked,private-config-released');
   receipt.checks.push('service immediate-exit replay without renderer polling or TTY inference');

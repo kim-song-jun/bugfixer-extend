@@ -795,6 +795,7 @@ async function stopOwned(child, exited, port, owned) {
 function startBrowserClose(browser, owned) {
   if (!browser) {
     owned.browserCloseStatus = 'not-started';
+
     return undefined;
   }
 
@@ -810,6 +811,7 @@ async function collectBrowserClose(browserClose, owned, failures) {
 
   if (outcome.status === 'settled' && outcome.value.status === 'closed') {
     owned.browserCloseStatus = 'closed';
+
     return;
   }
 
@@ -932,6 +934,7 @@ async function closeApp(session) {
         }
       }
     }
+
     await captureIsolatedAppLogs(session.owned.userData, session.child.pid);
   } catch (error) {
     cleanupFailures.push(error);
