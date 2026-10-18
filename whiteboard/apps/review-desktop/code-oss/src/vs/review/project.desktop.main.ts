@@ -10,15 +10,8 @@
 import './browser/projectDashboard/projectSidebar.contribution.js';
 import './browser/aiSessions/index.js';
 import './navigator.desktop.main.js';
-// The project session workspace creates native terminals for agent turns.
-// Register the real browser service set and Electron PTY backend in this
-// renderer entry; the separate Review shell's curated entry does not import
-// them by default.
-import '../workbench/services/terminal/common/embedderTerminalService.js';
-import '../workbench/contrib/terminal/common/environmentVariable.contribution.js';
-import '../workbench/contrib/terminal/common/terminalExtensionPoints.contribution.js';
-import '../workbench/contrib/terminal/browser/terminal.contribution.js';
-import '../workbench/contrib/terminal/electron-browser/terminal.contribution.js';
+// Register only the real terminal services needed by the session-owned custom PTY.
+import './browser/aiSessions/app/index.js';
 import './browser/parts/canvas/reviewCanvasEditorRegistration.js';
 import './browser/projectDashboard/index.js';
 import './contrib/extensions/reviewCuratedExtensions.contribution.js';

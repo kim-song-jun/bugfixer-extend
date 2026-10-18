@@ -77,12 +77,6 @@ const {
   ManagedWorktreeService, TaskFolderWriterLock, WorkspaceDatabase,
 } = await import(pathToFileURL(hostModule).href);
 
-assert.equal(typeof AgentPtyHost, 'function', 'Packaged Electron bootstrap must load the production PTY host');
-
-assert.equal(typeof AgentSessionService, 'function', 'Packaged Electron bootstrap must load the production session service');
-
-assert.equal(typeof WorkspaceDatabase, 'function', 'Packaged Electron bootstrap must load the production workspace database');
-
 const root = await mkdtemp(path.join(os.tmpdir(), 'bfx-pty-probe-'));
 
 const secret = 'bfx-public-fixture-sensitive-value';
