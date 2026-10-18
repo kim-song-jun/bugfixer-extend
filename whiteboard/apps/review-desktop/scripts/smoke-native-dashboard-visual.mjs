@@ -22,7 +22,7 @@ await mkdir(output, { recursive: true });
 
 const root = await mkdtemp('/tmp/wb-native-ui-');
 
-const diagnostics = { apps: [], console: [], pageErrors: [], failedRequests: [] };
+const diagnostics = { apps: [], console: [], canceledThemeLoads: [], pageErrors: [], failedRequests: [], themes: [] };
 
 class FatalWaitError extends Error {}
 
@@ -109,7 +109,14 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
       if (watchedPages.has(page)) return;
 
       watchedPages.add(page);
-      page.on('console', message => { if (message.type() === 'error') diagnostics.console.push(message.text()); });
+      page.on('console', message => {
+        if (message.type() !== 'error') return;
+
+        const entry = `PID ${child.pid}: ${message.text()}`;
+
+        if (/review-(?:light|dark)\.json/.test(entry) && /\(Canceled: Canceled\)/.test(entry)) diagnostics.canceledThemeLoads.push(entry);
+        else diagnostics.console.push(entry);
+      });
       page.on('pageerror', error => diagnostics.pageErrors.push(error.stack ?? error.message));
       page.on('requestfailed', request => {
         const failure = request.failure()?.errorText ?? 'unknown';
@@ -259,6 +266,8 @@ try {
 
       assert.equal(await projectHomeHeading.innerText(), '어떤 프로젝트를 열까요?', 'Fresh profile must show the Korean project picker');
 
+      await verifyTheme(session.page, tag === 'dark', `onboarding-${tag}`);
+
       assert.ok((await session.page.locator('main').innerText()).trim().length > 0, 'Onboarding must render visible content');
 
       const onboardingShot = path.join(output, `onboarding-${tag}.png`);
@@ -307,6 +316,10 @@ try {
 
       const page = session.page;
 
+      await page.setViewportSize({ width: 1440, height: 900 });
+
+      await page.waitForFunction(() => window.innerWidth === 1440);
+
       const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
 
       await sidebar.waitFor({ timeout: 90_000 });
@@ -318,6 +331,8 @@ try {
       assert.equal(await sidebar.locator('.project-sidebar__item[aria-current="page"]').innerText(), '대시보드');
 
       await page.locator('.project-dashboard').waitFor();
+
+      await verifyTheme(page, tag === 'dark', `dashboard-${tag}`);
 
       await page.getByRole('heading', { name: fixture.projectName, exact: true }).waitFor();
 
@@ -331,7 +346,7 @@ try {
 
       const desktop = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
 
-      assert.ok(desktop.width > 760 && desktop.height > 0, `Desktop viewport must be measured and wider than 760px: ${JSON.stringify(desktop)}`);
+      assert.deepEqual(desktop, { width: 1440, height: 900 }, 'Desktop capture must use the requested 1440 × 900 viewport');
 
       await capturePage(page, desktopShot);
 
@@ -427,7 +442,7 @@ assert.deepEqual(diagnostics.console, [], 'Unexpected renderer console errors');
 
 assert.deepEqual(diagnostics.failedRequests, [], 'Unexpected failed network requests');
 
-console.log(`Native dashboard smoke captured ${diagnostics.pageErrors.length} runtime errors, ${diagnostics.console.length} console errors and ${diagnostics.failedRequests.length} failed requests.`);
+console.log(`Native dashboard smoke captured ${diagnostics.pageErrors.length} runtime errors, ${diagnostics.console.length} console errors, ${diagnostics.canceledThemeLoads.length} recovered theme cancellations, and ${diagnostics.failedRequests.length} failed requests.`);
 
 async function dismissStartupInvitations(page) {
 
@@ -476,4 +491,33 @@ async function capturePage(page, file) {
   } finally {
     await cdp.detach();
   }
+}
+
+async function verifyTheme(page, expectedDark, phase) {
+  const expectedColors = expectedDark
+    ? { editor: '#17171c', activityBar: '#202426' }
+    : { editor: '#ffffff', activityBar: '#f5f5f2' };
+
+  await page.waitForFunction(({ dark, colors }) => {
+    const workbench = document.querySelector('.monaco-workbench');
+
+    if (!workbench || workbench.classList.contains('vs-dark') !== dark) return false;
+
+    const style = getComputedStyle(workbench);
+
+    return style.getPropertyValue('--vscode-editor-background').trim().toLowerCase() === colors.editor
+      && style.getPropertyValue('--vscode-activityBar-background').trim().toLowerCase() === colors.activityBar;
+  }, { dark: expectedDark, colors: expectedColors }, { timeout: 30_000 });
+
+  const state = await page.locator('.monaco-workbench').evaluate(workbench => {
+    const style = getComputedStyle(workbench);
+
+    return {
+      classes: workbench.className,
+      editorBackground: style.getPropertyValue('--vscode-editor-background').trim(),
+      activityBarBackground: style.getPropertyValue('--vscode-activityBar-background').trim(),
+    };
+  });
+
+  diagnostics.themes.push({ phase, expectedDark, ...state });
 }
