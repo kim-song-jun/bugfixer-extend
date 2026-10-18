@@ -198,7 +198,9 @@ test('optional unread queue limit is atomic, preserves retries at capacity, and 
 		const next = database.agentSessions.sendMessage(project.id, sender.id, {
 			recipientSessionId: recipient.id, idempotencyKey: 'queue-after-ack', body: 'Capacity freed',
 		}, policy);
-		assert.equal(database.agentSessions.listInbox(project.id, recipient.id, { limit: 100 }).filter(message => message.readAt === null).length, 100);
+		const databaseHandle = Reflect.get(database, 'db') as { prepare(sql: string): { get(...args: string[]): { unread: number } } };
+		assert.equal(Number(databaseHandle.prepare(`SELECT COUNT(*) AS unread FROM agent_session_messages
+			WHERE project_id = ? AND recipient_session_id = ? AND read_at IS NULL`).get(project.id, recipient.id).unread), 100);
 		assert.equal(database.agentSessions.listInbox(project.id, recipient.id, { afterSequence: 100, limit: 1 })[0].id, next.id);
 		assert.throws(() => database.agentSessions.sendMessage(project.id, sender.id, {
 			recipientSessionId: recipient.id, idempotencyKey: 'invalid-cap', body: 'No',

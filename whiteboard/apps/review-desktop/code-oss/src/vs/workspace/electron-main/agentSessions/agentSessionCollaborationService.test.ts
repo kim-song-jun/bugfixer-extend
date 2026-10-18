@@ -144,7 +144,7 @@ test('mailbox survives database restart while launch capabilities remain process
 		collaboration.revoke(grant);
 		const sqlite = Reflect.get(fixture.database, 'db') as { prepare(sql: string): { all(): Array<Record<string, unknown>> } };
 		const persistedRows = sqlite.prepare('SELECT body, idempotency_key FROM agent_session_messages').all();
-		assert.deepEqual(persistedRows, [{ body: 'persist this mailbox item', idempotency_key: 'restart-key' }]);
+		assert.deepEqual(persistedRows.map(row => ({ body: row.body, idempotency_key: row.idempotency_key })), [{ body: 'persist this mailbox item', idempotency_key: 'restart-key' }]);
 		fixture.database.close();
 		fixture = { ...fixture, database: WorkspaceDatabase.open(databasePath) };
 		assert.equal(fixture.database.agentSessions.listInbox(fixture.project.id, receiver.id, { limit: 10 })[0].id, sent.id);

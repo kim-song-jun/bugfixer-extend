@@ -58,17 +58,64 @@ async function openMcpClient(access: Awaited<ReturnType<AgentSessionMcpBridge['i
 	};
 	const transport = new StdioClientTransport({ command: process.execPath, args: [GATEWAY_PATH, ...access.gatewayArguments], env, stderr: 'pipe' });
 	const client = new Client({ name: 'bugfixer-session-collaboration-test', version: '1.0.0' });
-	await client.connect(transport);
-	return { client, close: async () => { try { await client.close(); } catch { /* The bridge revocation test intentionally closes the private socket first. */ } } };
+	try { await client.connect(transport); }
+	catch (error) {
+		try { await transport.close(); }
+		catch (cleanupError) { throw new AggregateError([error, cleanupError], 'MCP client setup and transport cleanup failed.'); }
+		throw error;
+	}
+	return { client, close: () => client.close() };
+}
+
+async function closeOwnedMcpResources(
+	clients: readonly Awaited<ReturnType<typeof openMcpClient>>[],
+	accesses: readonly Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>>[],
+): Promise<void> {
+	for (const access of accesses) { access.revokeAccess(); }
+	const clientsClosed = await Promise.allSettled(clients.map(client => client.close()));
+	const configsReleased = await Promise.allSettled(accesses.map(access => access.releasePrivateConfig()));
+	const failures = [...clientsClosed, ...configsReleased].filter(result => result.status === 'rejected').map(result => (result as PromiseRejectedResult).reason);
+	if (failures.length) { throw new AggregateError(failures, 'Owned MCP fixture resources did not close cleanly.'); }
 }
 
 function assertSocketDenied(socketPath: string, token: string): Promise<void> {
 	const socket = connect(socketPath);
 	return new Promise((resolve, reject) => {
-		socket.once('connect', () => socket.write(`${JSON.stringify({ type: 'auth', token })}\n`));
-		socket.once('close', () => resolve());
-		socket.once('error', reject);
+		let settled = false;
+		const finish = (error?: Error) => {
+			if (settled) { return; }
+			settled = true;
+			socket.destroy();
+			if (error) { reject(error); } else { resolve(); }
+		};
+		socket.once('connect', () => socket.write(`${JSON.stringify({ type: 'auth', token })}\n`, error => {
+			if (error) {
+				if ((error as NodeJS.ErrnoException).code === 'EPIPE') { finish(); }
+				else { finish(error); }
+			}
+		}));
+		socket.once('close', () => finish());
+		socket.once('error', error => {
+			if (['EPIPE', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) { finish(); }
+			else { finish(error); }
+		});
 	});
+}
+
+function readSuccessfulToolPayload(result: unknown, operation: string): Record<string, unknown> {
+	const envelope = result as { isError?: boolean; structuredContent?: unknown; content?: unknown };
+	assert.notEqual(envelope.isError, true, `${operation} returned an MCP tool error: ${JSON.stringify(envelope)}`);
+	assert.ok(Array.isArray(envelope.content), `${operation} returned no MCP content blocks: ${JSON.stringify(envelope)}`);
+	const textBlock = (envelope.content as Array<{ type?: unknown; text?: unknown }>).find(block => block.type === 'text' && typeof block.text === 'string');
+	assert.ok(textBlock, `${operation} returned no text content block: ${JSON.stringify(envelope)}`);
+	let textPayload: unknown;
+	try { textPayload = JSON.parse(textBlock.text as string) as unknown; }
+	catch (error) { assert.fail(`${operation} returned invalid JSON text content: ${String(error)}; payload=${String(textBlock.text)}`); }
+	let payload = envelope.structuredContent;
+	if (payload === undefined) { payload = textPayload; }
+	else { assert.deepEqual(payload, textPayload, `${operation} structuredContent differs from its text payload`); }
+	assert.ok(payload !== null && typeof payload === 'object' && !Array.isArray(payload), `${operation} returned an unexpected tool payload: ${JSON.stringify(payload)}`);
+	return payload as Record<string, unknown>;
 }
 
 test('real MCP SDK client uses scoped sockets for all provider pairings and durable receipts', async () => {
@@ -102,30 +149,29 @@ test('real MCP SDK client uses scoped sockets for all provider pairings and dura
 				};
 				const first = await senderClient.client.callTool(request);
 				const duplicate = await senderClient.client.callTool(request);
-				const firstPayload = first.structuredContent as { message: { id: string; receiverAvailability: string } };
-				const duplicatePayload = duplicate.structuredContent as { message: { id: string } };
+				const firstPayload = readSuccessfulToolPayload(first, 'messages_send') as unknown as { message: { id: string; receiverAvailability: string } };
+				const duplicatePayload = readSuccessfulToolPayload(duplicate, 'idempotent messages_send') as unknown as { message: { id: string } };
+				assert.ok(firstPayload.message && typeof firstPayload.message.id === 'string', `messages_send returned an unexpected payload: ${JSON.stringify(firstPayload)}`);
 				assert.equal(firstPayload.message.id, duplicatePayload.message.id);
 				assert.equal(firstPayload.message.receiverAvailability, 'active');
 				const page = await receiverClient.client.callTool({ name: 'messages_list', arguments: { afterSequence: 0, limit: 1 } });
-				const pagePayload = page.structuredContent as { messages: Array<{ id: string; senderSessionId: string; body: string }>; nextCursor: number };
+				const pagePayload = readSuccessfulToolPayload(page, 'messages_list') as unknown as { messages: Array<{ id: string; senderSessionId: string; body: string }>; nextCursor: number };
 				assert.equal(pagePayload.messages.length, 1);
 				assert.equal(pagePayload.messages[0].senderSessionId, sender.id);
 				assert.equal(pagePayload.messages[0].body, 'Inspect this collaboration request.');
 				assert.ok(pagePayload.nextCursor > 0);
 				await receiverClient.client.callTool({ name: 'messages_ack', arguments: { messageId: pagePayload.messages[0].id } });
 				const acknowledged = await receiverClient.client.callTool({ name: 'messages_list', arguments: { afterSequence: 0, limit: 1 } });
-				assert.ok((acknowledged.structuredContent as { messages: Array<{ readAt: string | null }> }).messages[0].readAt);
+				assert.ok((readSuccessfulToolPayload(acknowledged, 'acknowledged messages_list') as unknown as { messages: Array<{ readAt: string | null }> }).messages[0].readAt);
 				if (senderProvider === 'codex' && receiverProvider === 'codex') {
 					const offline = createSession(fixture, 'claude');
 					const queued = await senderClient.client.callTool({ name: 'messages_send', arguments: {
 						recipientSessionId: offline.id, idempotencyKey: 'offline-recipient', body: 'This remains queued for an offline session.',
 					} });
-					assert.equal((queued.structuredContent as { message: { receiverAvailability: string } }).message.receiverAvailability, 'offline');
+					assert.equal((readSuccessfulToolPayload(queued, 'offline messages_send') as unknown as { message: { receiverAvailability: string } }).message.receiverAvailability, 'offline');
 				}
 			} finally {
-				for (const access of pairAccesses) { access.revokeAccess(); }
-				for (const client of pairClients) { await client.close(); }
-				for (const access of pairAccesses) { await access.releasePrivateConfig(); }
+				await closeOwnedMcpResources(pairClients, pairAccesses);
 			}
 		}
 	} finally {
@@ -165,20 +211,20 @@ test('large escaped mailbox messages are byte-paged with exact cursors and unrep
 			recipientSessionId: receiver.id, idempotencyKey: 'unrepresentable-surrogate-text', body: '\ud800'.repeat(10_000),
 		} });
 		assert.equal(oversized.isError, true);
+		assert.match(JSON.stringify(oversized.content), /cannot be represented/i);
 		const sqlite = Reflect.get(fixture.database, 'db') as { prepare(sql: string): { all(...args: string[]): Array<Record<string, unknown>> } };
 		assert.equal(sqlite.prepare('SELECT id FROM agent_session_messages WHERE idempotency_key = ?').all('unrepresentable-surrogate-text').length, 0);
 
 		const received: Array<{ id: string; body: string; sequence: number }> = [];
 		const waited = await receiverClient.client.callTool({ name: 'messages_wait', arguments: { afterSequence: 0, timeoutMs: 0, limit: 100 } });
-		const waitPage = waited.structuredContent as { messages: Array<{ id: string; body: string; sequence: number }>; nextCursor: number };
+		const waitPage = readSuccessfulToolPayload(waited, 'messages_wait') as unknown as { messages: Array<{ id: string; body: string; sequence: number }>; nextCursor: number };
 		assert.ok(waitPage.messages.length > 0 && waitPage.messages.length < 7, 'wait results must be byte-paged within the response frame');
 		assert.equal(waitPage.nextCursor, waitPage.messages.at(-1)!.sequence);
 		received.push(...waitPage.messages);
 		let cursor = waitPage.nextCursor;
 		while (true) {
 			const response = await receiverClient.client.callTool({ name: 'messages_list', arguments: { afterSequence: cursor, limit: 100 } });
-			assert.equal(response.isError, undefined);
-			const page = response.structuredContent as { messages: Array<{ id: string; body: string; sequence: number }>; nextCursor: number };
+			const page = readSuccessfulToolPayload(response, 'messages_list pagination') as unknown as { messages: Array<{ id: string; body: string; sequence: number }>; nextCursor: number };
 			if (!page.messages.length) { break; }
 			assert.ok(page.messages.length < 7, 'large bodies must be byte-paged before reaching the frame limit');
 			assert.equal(page.nextCursor, page.messages.at(-1)!.sequence);
@@ -189,11 +235,11 @@ test('large escaped mailbox messages are byte-paged with exact cursors and unrep
 		assert.deepEqual(received.map(message => message.body), expectedBodies);
 		assert.equal(new Set(received.map(message => message.id)).size, 7);
 	} finally {
-		for (const access of accesses) { access.revokeAccess(); }
-		for (const client of clients) { await client.close(); }
-		for (const access of accesses) { await access.releasePrivateConfig(); }
-		fixture.database.close();
-		rmSync(directory, { recursive: true, force: true });
+		try { await closeOwnedMcpResources(clients, accesses); }
+		finally {
+			fixture.database.close();
+			rmSync(directory, { recursive: true, force: true });
+		}
 	}
 });
 
@@ -320,15 +366,11 @@ test('MCP token is secret-redacted and revocation promptly cancels a waiting too
 		assert.equal(existsSync(receiverSocketPath), false);
 		assert.equal(existsSync(receiverDirectory), false);
 	} finally {
-		if (receiverAccess) { receiverAccess.revokeAccess(); }
-		await receiverClient?.close();
-		if (receiverAccess) { await receiverAccess.releasePrivateConfig(); }
-		if (access) {
-			access.revokeAccess();
-			await mcp?.close();
-			await access.releasePrivateConfig();
+		try {
+			await closeOwnedMcpResources([receiverClient, mcp].filter(client => client !== undefined), [receiverAccess, access].filter(item => item !== undefined));
+		} finally {
+			fixture.database.close();
+			rmSync(directory, { recursive: true, force: true });
 		}
-		fixture.database.close();
-		rmSync(directory, { recursive: true, force: true });
 	}
 });
