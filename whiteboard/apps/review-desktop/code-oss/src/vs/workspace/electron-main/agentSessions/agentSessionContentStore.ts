@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See the LICENSE file in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 // eslint-disable-next-line local/code-import-patterns
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';

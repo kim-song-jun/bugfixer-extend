@@ -20,8 +20,8 @@ import { SyncDescriptor } from '../../../../../platform/instantiation/common/des
 import { INativeWorkbenchEnvironmentService } from '../../../../../workbench/services/environment/electron-browser/environmentService.js';
 import type { IEditorGroup } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
 import { EditorsOrder } from '../../../../../workbench/common/editor.js';
-import type { IEditorOpenContext } from '../../../../../workbench/common/editor.js';
-import type { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
+import type { EditorInput } from '../../../../../workbench/common/editor/editorInput.js';
+import type { IEditorOpenContext, ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
 import { EditorExtensions, type IEditorFactoryRegistry } from '../../../../../workbench/common/editor.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
@@ -51,7 +51,7 @@ import { createSessionNotifications, type SessionNotificationsActions, type Sess
 import { createSessionMessages, type SessionMessagesActions, type SessionMessagesController } from '../../widgets/sessionMessages/index.js';
 import { createSessionWorkflow, type SessionWorkflowActions, type SessionWorkflowController } from '../../widgets/sessionWorkflow/index.js';
 import { createSessionChanges, type SessionChangesActions, type SessionChangesContext, type SessionChangesController } from '../../widgets/sessionChanges/index.js';
-import { agentSessionStateLabel } from '../../entities/agentSession/index.js';
+import { agentSessionTurnStateLabel } from '../../entities/agentSession/index.js';
 import type { AgentSessionViewTab } from '../../features/sessionViewTabs/index.js';
 import { SessionTerminalController } from '../../shared/sessionTerminal/index.js';
 import { AgentSessionWorkspaceEditorInput } from './sessionWorkspaceEditorInput.js';
@@ -81,7 +81,7 @@ interface PendingNotificationMessage {
 }
 
 interface OwnedSessionChangeDiff {
-	readonly input: import('../../../../../workbench/common/editor.js').EditorInput;
+	readonly input: EditorInput;
 	readonly original: import('../../../../../editor/common/model.js').ITextModel;
 	readonly modified: import('../../../../../editor/common/model.js').ITextModel;
 	dispose(): void;
@@ -593,7 +593,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.sessionChangesWidgetMount!.hidden = false;
 		const selectorLabel = document.createElement('label'); selectorLabel.className = 'ai-session-changes__turn-label'; selectorLabel.textContent = '실행 기록';
 		const selector = document.createElement('select'); selector.setAttribute('aria-label', '변경을 확인할 실행 기록');
-		for (const turn of turns) { const option = document.createElement('option'); option.value = turn.id; option.textContent = `실행 ${turn.ordinal} · ${agentSessionStateLabel[turn.state]} · ${new Date(turn.createdAt).toLocaleString('ko-KR')}`; selector.appendChild(option); }
+		for (const turn of turns) { const option = document.createElement('option'); option.value = turn.id; option.textContent = `실행 ${turn.ordinal} · ${agentSessionTurnStateLabel[turn.state]} · ${new Date(turn.createdAt).toLocaleString('ko-KR')}`; selector.appendChild(option); }
 		selector.value = turnId;
 		selector.addEventListener('change', () => { this.selectedChangeTurns.set(sessionId, selector.value); this.render(); });
 		selectorLabel.appendChild(selector); selectMount.appendChild(selectorLabel);
@@ -626,7 +626,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			if (owned) {
 				const identifier = editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).find(item => item.editor === owned.input);
 				if (identifier) { await editorService.closeEditor(identifier); }
-				if (sessionChangeDiffOwners.get(editorService) === owned) { owned.dispose(); }
+				if (sessionChangeDiffOwners.get(editorService) === owned) { throw new Error('이전 파일 비교 편집기가 아직 열려 있습니다. 해당 비교를 닫은 뒤 다시 시도해 주세요.'); }
 			}
 			if (!isCurrent()) { return; }
 			const token = `${encodeURIComponent(context.projectId)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(context.turnId)}/${generateUuid()}`;
@@ -634,42 +634,45 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			const modifiedUri = URI.from({ scheme: Schemas.inMemory, path: `/agent-session-change/${token}/after/${encodeURIComponent(path)}` });
 			let original: import('../../../../../editor/common/model.js').ITextModel | undefined;
 			let modified: import('../../../../../editor/common/model.js').ITextModel | undefined;
-			let openedInput: import('../../../../../workbench/common/editor.js').EditorInput | undefined;
+			let openedInput: EditorInput | undefined;
+			let pair: OwnedSessionChangeDiff | undefined;
 			try {
-				original = this.modelService.createModel(before, null, originalUri);
-				modified = this.modelService.createModel(after, null, modifiedUri);
+				const originalModel = this.modelService.createModel(before, null, originalUri);
+				original = originalModel;
+				const modifiedModel = this.modelService.createModel(after, null, modifiedUri);
+				modified = modifiedModel;
 				const label = `v${evidence.version} · ${path} · 실행 ${evidence.turnId.slice(0, 8)}`;
 				const pane = await editorService.openEditor({ original: { resource: originalUri }, modified: { resource: modifiedUri }, label, description: evidence.fingerprint.slice(0, 12) }) as ITextDiffEditorPane | undefined;
 				openedInput = pane?.input;
 				if (!pane || !openedInput) { throw new Error('코드 비교 편집기를 열지 못했습니다.'); }
+				let disposed = false;
+				let disposeListener: { dispose(): void } | undefined;
+				const ownedPair: OwnedSessionChangeDiff = {
+					input: openedInput, original: originalModel, modified: modifiedModel,
+					dispose: () => {
+						if (disposed) { return; }
+						disposed = true; disposeListener?.dispose(); originalModel.dispose(); modifiedModel.dispose();
+						if (sessionChangeDiffOwners.get(editorService) === ownedPair) { sessionChangeDiffOwners.delete(editorService); }
+					},
+				};
+				pair = ownedPair;
+				sessionChangeDiffOwners.set(editorService, ownedPair);
+				disposeListener = openedInput.onWillDispose(() => ownedPair.dispose());
 				if (!isCurrent()) {
 					const identifier = editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).find(item => item.editor === openedInput);
 					if (identifier) { await editorService.closeEditor(identifier); }
-					original.dispose(); modified.dispose();
 					return;
 				}
 				const control = pane.getControl();
 				control?.updateOptions({ readOnly: true });
 				control?.getOriginalEditor().updateOptions({ readOnly: true });
 				control?.getModifiedEditor().updateOptions({ readOnly: true });
-				let closed = false;
-				let closeListener: { dispose(): void } | undefined;
-				const pair: OwnedSessionChangeDiff = {
-					input: openedInput, original, modified,
-					dispose: () => {
-						if (closed) { return; }
-						closed = true; closeListener?.dispose(); original!.dispose(); modified!.dispose();
-						if (sessionChangeDiffOwners.get(editorService) === pair) { sessionChangeDiffOwners.delete(editorService); }
-					},
-				};
-				sessionChangeDiffOwners.set(editorService, pair);
-				closeListener = editorService.onDidCloseEditor(event => { if (event.editor === openedInput) { pair.dispose(); } });
 			} catch (error) {
 				if (openedInput) {
 					const identifier = editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).find(item => item.editor === openedInput);
 					if (identifier) { await editorService.closeEditor(identifier); }
 				}
-				original?.dispose(); modified?.dispose();
+				if (!pair || sessionChangeDiffOwners.get(editorService) !== pair) { original?.dispose(); modified?.dispose(); }
 				throw error;
 			}
 		});

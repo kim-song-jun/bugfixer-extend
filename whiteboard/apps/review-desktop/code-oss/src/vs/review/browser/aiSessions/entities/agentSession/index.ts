@@ -1,1 +1,1 @@
-export { agentSessionStateLabel, agentSessionSummary } from './agentSessionViewModel.js';
+export { agentSessionStateLabel, agentSessionSummary, agentSessionTurnStateLabel } from './agentSessionViewModel.js';
