@@ -146,12 +146,16 @@ test('worktree resolution rejects unowned, integration, repository-mismatched, a
 		const validProfile = join(fixture.root, 'valid-profile');
 		mkdirSync(validProfile);
 		const validWorktrees = new ManagedWorktreeService(validProfile);
-		const validLease = await validWorktrees.create({ repositoryPath: fixture.repository, ownerId: fixture.gitSession.id, kind: 'session', baseRef: 'HEAD' });
+		const replacedSession = fixture.database.agentSessions.createSession({
+			projectId: fixture.project.id, bindingId: fixture.gitBinding.id, name: 'Replaced worktree',
+			provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'gitWorktree',
+		});
+		const validLease = await validWorktrees.create({ repositoryPath: fixture.repository, ownerId: replacedSession.id, kind: 'session', baseRef: 'HEAD' });
 		const movedPath = `${validLease.worktreePath}-moved`;
 		const fs = await import('node:fs/promises');
 		await fs.rename(validLease.worktreePath, movedPath);
 		const replacedResolver = new AgentSessionWorkspaceResolver(fixture.database, validWorktrees, fixture.writerLock, () => true);
-		await assert.rejects(replacedResolver.acquire({ projectId: fixture.project.id, sessionId: fixture.gitSession.id, permissionPolicy: READ_ONLY }), /worktree|identity|path|missing/i);
+		await assert.rejects(replacedResolver.acquire({ projectId: fixture.project.id, sessionId: replacedSession.id, permissionPolicy: READ_ONLY }), /worktree|identity|path|missing/i);
 	} finally {
 		dispose(fixture);
 	}
