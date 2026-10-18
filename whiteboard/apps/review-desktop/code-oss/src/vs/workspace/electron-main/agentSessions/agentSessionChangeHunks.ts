@@ -63,10 +63,12 @@ export function computeAgentSessionChangeHunks(input: AgentSessionContentFileDTO
 	if (!isRecord(options) || !exactKeys(options, Object.hasOwn(options, 'computationBudgetMs') ? ['computationBudgetMs'] : [])) {
 		throw new Error('Hunk computation options contain missing or unknown fields.');
 	}
-	const budget = options.computationBudgetMs ?? AGENT_SESSION_CHANGE_HUNKS_DEFAULT_COMPUTATION_BUDGET_MS;
-	if (!Number.isFinite(budget) || !Number.isInteger(budget) || budget < 1 || budget > AGENT_SESSION_CHANGE_HUNKS_MAX_COMPUTATION_BUDGET_MS) {
+	const rawBudget: unknown = options.computationBudgetMs;
+	if (rawBudget !== undefined && (typeof rawBudget !== 'number' || !Number.isFinite(rawBudget) || !Number.isInteger(rawBudget)
+		|| rawBudget < 1 || rawBudget > AGENT_SESSION_CHANGE_HUNKS_MAX_COMPUTATION_BUDGET_MS)) {
 		throw new Error(`Hunk computation budget must be an integer from 1 to ${AGENT_SESSION_CHANGE_HUNKS_MAX_COMPUTATION_BUDGET_MS} milliseconds.`);
 	}
+	const budget = typeof rawBudget === 'number' ? rawBudget : AGENT_SESSION_CHANGE_HUNKS_DEFAULT_COMPUTATION_BUDGET_MS;
 	const before = validateState(input.before, input.path);
 	const after = validateState(input.after, input.path);
 	const base = {

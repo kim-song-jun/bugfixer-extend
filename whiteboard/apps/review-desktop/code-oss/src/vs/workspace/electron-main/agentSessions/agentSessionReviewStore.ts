@@ -277,14 +277,20 @@ export class AgentSessionReviewStore {
 		];
 		const citations = input.citations.map(candidate => {
 			this.assertKeys(candidate, ['kind', 'id', 'version', 'sha256'], [], 'review citation');
-			if ((candidate.kind !== 'reference' && candidate.kind !== 'convention') || !UUID_PATTERN.test(candidate.id)
-				|| !Number.isSafeInteger(candidate.version) || candidate.version < 1 || !SHA256_PATTERN.test(candidate.sha256)) {
+			const kind = candidate.kind;
+			const id = candidate.id;
+			const version = candidate.version;
+			const sha256 = candidate.sha256;
+			if ((kind !== 'reference' && kind !== 'convention') || typeof id !== 'string' || !UUID_PATTERN.test(id)
+				|| typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1
+				|| typeof sha256 !== 'string' || !SHA256_PATTERN.test(sha256)) {
 				throw new Error('Review citation must identify an exact selected reference or convention version.');
 			}
-			if (!allowedCitations.some(item => item.kind === candidate.kind && item.id === candidate.id && item.version === candidate.version && item.sha256 === candidate.sha256)) {
+			if (!allowedCitations.some(item => item.kind === kind && item.id === id && item.version === version && item.sha256 === sha256)) {
 				throw new Error('Review citation is not present in the target turn knowledge snapshot.');
 			}
-			return Object.freeze({ kind: candidate.kind, id: candidate.id, version: candidate.version, sha256: candidate.sha256 });
+			const citation: AgentSessionExplanationCitation = Object.freeze({ kind, id, version, sha256 });
+			return citation;
 		}).sort((left, right) => compareCodeUnits(`${left.kind}\0${left.id}\0${left.version}\0${left.sha256}`, `${right.kind}\0${right.id}\0${right.version}\0${right.sha256}`));
 		if (new Set(citations.map(item => `${item.kind}\0${item.id}\0${item.version}\0${item.sha256}`)).size !== citations.length) { throw new Error('Review citations cannot contain duplicates.'); }
 		if (!Array.isArray(input.checkClaims) || input.checkClaims.length > MAX_CHECK_CLAIMS) { throw new Error('A review may contain at most 10 reported check claims.'); }
@@ -292,8 +298,9 @@ export class AgentSessionReviewStore {
 			this.assertKeys(candidate, ['label', 'outcome'], ['detail'], 'reported check claim');
 			const label = this.requiredText(candidate.label, 'Check label', 256);
 			const detail = candidate.detail === undefined ? '' : this.optionalText(candidate.detail, 'Check detail', 1024);
-			if (!['reportedPass', 'reportedFail', 'notRun'].includes(candidate.outcome)) { throw new Error('Reported check outcome is invalid.'); }
-			return Object.freeze({ label, outcome: candidate.outcome, detail });
+			const outcome = candidate.outcome;
+			if (outcome !== 'reportedPass' && outcome !== 'reportedFail' && outcome !== 'notRun') { throw new Error('Reported check outcome is invalid.'); }
+			return Object.freeze({ label, outcome, detail });
 		});
 		if (input.actor !== 'agent' && input.actor !== 'human') { throw new Error('Review actor must be assigned by the trusted recording method.'); }
 		if (input.actor === 'agent' && (typeof input.authorTurnId !== 'string' || !UUID_PATTERN.test(input.authorTurnId) || input.status !== 'draft')) {

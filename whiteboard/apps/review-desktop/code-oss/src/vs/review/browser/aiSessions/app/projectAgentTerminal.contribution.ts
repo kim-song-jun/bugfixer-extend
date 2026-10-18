@@ -12,7 +12,7 @@ import { registerTerminalPlatformConfiguration } from '../../../../platform/term
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { LifecyclePhase } from '../../../../workbench/services/lifecycle/common/lifecycle.js';
 import { WorkbenchPhase, IWorkbenchContributionsRegistry, Extensions as WorkbenchExtensions, registerWorkbenchContribution2 } from '../../../../workbench/common/contributions.js';
-import { ITerminalConfigurationService, ITerminalEditingService, ITerminalEditorService, ITerminalGroupService, ITerminalService, ITerminalProfileService } from '../../../../workbench/contrib/terminal/browser/terminal.js';
+import { ITerminalConfigurationService, ITerminalEditingService, ITerminalEditorService, ITerminalGroupService, ITerminalService } from '../../../../workbench/contrib/terminal/browser/terminal.js';
 import { TerminalConfigurationService } from '../../../../workbench/contrib/terminal/browser/terminalConfigurationService.js';
 import { TerminalEditingService } from '../../../../workbench/contrib/terminal/browser/terminalEditingService.js';
 import { TerminalEditorService } from '../../../../workbench/contrib/terminal/browser/terminalEditorService.js';
@@ -23,8 +23,9 @@ import { TerminalService } from '../../../../workbench/contrib/terminal/browser/
 import { registerColors } from '../../../../workbench/contrib/terminal/common/terminalColorRegistry.js';
 import { registerTerminalConfiguration } from '../../../../workbench/contrib/terminal/common/terminalConfiguration.js';
 import { ITerminalContributionService, TerminalContributionService } from '../../../../workbench/contrib/terminal/common/terminalExtensionPoints.js';
-import { ITerminalProfileResolverService } from '../../../../workbench/contrib/terminal/common/terminal.js';
-import { IEnvironmentVariableService, EnvironmentVariableService } from '../../../../workbench/contrib/terminal/common/environmentVariable.js';
+import { ITerminalProfileService, ITerminalProfileResolverService } from '../../../../workbench/contrib/terminal/common/terminal.js';
+import { IEnvironmentVariableService } from '../../../../workbench/contrib/terminal/common/environmentVariable.js';
+import { EnvironmentVariableService } from '../../../../workbench/contrib/terminal/common/environmentVariableService.js';
 import { TerminalNativeContribution } from '../../../../workbench/contrib/terminal/electron-browser/terminalNativeContribution.js';
 import { ElectronTerminalProfileResolverService } from '../../../../workbench/contrib/terminal/electron-browser/terminalProfileResolverService.js';
 import { LocalTerminalBackendContribution } from '../../../../workbench/contrib/terminal/electron-browser/localTerminalBackend.js';
