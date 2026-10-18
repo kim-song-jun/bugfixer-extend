@@ -813,7 +813,7 @@ function canTransitionWorkflowState(current: AgentWorkflowState, next: AgentWork
 	const transitions: Readonly<Record<AgentWorkflowState, readonly AgentWorkflowState[]>> = {
 		waiting: ['ready', 'cancelled', 'blocked'],
 		ready: ['running', 'cancelRequested', 'cancelled', 'blocked', 'recoveryRequired'],
-		running: ['ready', 'cancelRequested', 'succeeded', 'failed', 'blocked', 'recoveryRequired'],
+		running: ['ready', 'cancelRequested', 'cancelled', 'succeeded', 'failed', 'blocked', 'recoveryRequired'],
 		cancelRequested: ['cancelled', 'failed', 'recoveryRequired'],
 		interrupted: ['recoveryRequired', 'cancelRequested'],
 		recoveryRequired: ['cancelRequested', 'cancelled', 'failed'],

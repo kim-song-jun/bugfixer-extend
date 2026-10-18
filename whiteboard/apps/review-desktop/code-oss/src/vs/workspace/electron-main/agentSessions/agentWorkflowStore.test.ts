@@ -214,7 +214,11 @@ test('only a consumed trusted reservation links the exact approved turn; ordinar
 		const exit = database.agentSessionTurns.transitionTurn(project.id, session.id, priorOrdinaryTurn.turn.id, priorOrdinaryTurn.turn.revision, priorOrdinaryTurn.session.revision, { state: 'exited', exitCode: 0 });
 		database.agentSessionTurns.confirmTurnCleanup(project.id, session.id, exit.turn.id, exit.turn.revision);
 		const run = approveAndStart(database, project.id, workflow.id);
-		assert.throws(() => database.agentWorkflows.transitionNode(project.id, workflow.id, run.id, 'implement', 1, 'running', priorOrdinaryTurn.turn.id), /launch reservation/i);
+		assert.throws(() => database.agentWorkflows.transitionNode(project.id, workflow.id, run.id, 'implement', 1, 'running', priorOrdinaryTurn.turn.id), /state transition is invalid/i);
+		const untouched = database.agentWorkflows.getRun(project.id, workflow.id, run.id)!;
+		assert.equal(untouched.nodes[0].state, 'ready');
+		assert.equal(untouched.nodes[0].revision, 1);
+		assert.equal(untouched.nodes[0].sessionTurnId, null);
 		const currentSession = database.agentSessions.getSession(project.id, session.id)!;
 		const reservation = database.agentWorkflows.reserveNodeTurnLaunch(project.id, workflow.id, run.id, 'implement', 1, currentSession.revision);
 		assert.notEqual(reservation.turnId, priorOrdinaryTurn.turn.id);
@@ -290,10 +294,43 @@ test('reservation is single-use, exact-turn-bound, and revoked on cancellation o
 	withDatabase((database, fixtureRoot) => {
 		const { project, binding, task } = projectFixture(database, 'Workflow cancelled reservation', fixtureRoot);
 		const session = createSession(database, project.id, binding.id, task.id, 'codex', 'sharedFolder');
+		const basePlan = plan(project.id, session.id, binding.id, task.id, { maxConcurrentNodes: 1, maxTotalTurns: 2 });
+		const waitingSession = createSession(database, project.id, binding.id, task.id, 'claude', 'sharedFolder');
+		const waitingNode = { ...basePlan.nodes[0], nodeId: 'review', sessionId: waitingSession.id, role: 'reviewer' as const, provider: 'claude' as const, model: 'sonnet' };
+		const workflow = create(database, project.id, { ...basePlan, nodes: [basePlan.nodes[0], waitingNode] });
+		const run = approveAndStart(database, project.id, workflow.id);
+		const reservation = database.agentWorkflows.reserveNodeTurnLaunch(project.id, workflow.id, run.id, 'implement', 1, session.revision);
+		assert.throws(() => database.agentWorkflows.reserveNodeTurnLaunch(project.id, workflow.id, run.id, 'review', 1, waitingSession.revision), /maximum concurrency/i);
+		const turn = createRunningSessionTurn(database, project.id, binding.id, task.id, session.id, fixtureRoot, { reservationId: reservation.reservationId });
+		const cancelRequested = database.agentWorkflows.requestWorkflowCancellation(project.id, workflow.id, 3, 'cancel-reserved');
+		const cancelledRun = database.agentWorkflows.getRun(project.id, workflow.id, run.id)!;
+		assert.equal(cancelRequested.state, 'cancelRequested');
+		assert.equal(cancelledRun.state, 'cancelRequested');
+		assert.equal(cancelledRun.nodes[0].state, 'cancelRequested');
+		assert.equal(cancelledRun.nodes[0].sessionTurnId, turn.turn.id);
+		assert.equal(database.agentSessionTurns.getTurn(project.id, session.id, turn.turn.id)?.cleanupVerified, false);
+		const sqlite = Reflect.get(database, 'db') as DatabaseSync;
+		const occupiedSlots = Number(sqlite.prepare(`SELECT COUNT(*) AS count FROM agent_workflow_run_nodes
+			WHERE run_id = ? AND state IN ('running', 'cancelRequested')`).get(run.id)?.count);
+		assert.equal(occupiedSlots, 1, 'A linked turn awaiting verified host cleanup must keep its concurrency slot.');
+		assert.throws(() => database.agentWorkflows.transitionNode(project.id, workflow.id, run.id, 'implement', cancelledRun.nodes[0].revision, 'cancelled'), /host cleanup is verified/i);
+		const stopped = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.turn.id, turn.turn.revision, turn.session.revision, {
+			state: 'exited', exitCode: 0, cleanupVerified: true,
+		});
+		const settled = database.agentWorkflows.transitionNode(project.id, workflow.id, run.id, 'implement', cancelledRun.nodes[0].revision, 'cancelled');
+		assert.equal(settled.state, 'cancelled');
+		assert.equal(settled.nodes[0].sessionTurnId, stopped.turn.id);
+		assert.throws(() => createRunningSessionTurn(database, project.id, binding.id, task.id, session.id, fixtureRoot, { reservationId: reservation.reservationId }), /authorization/i);
+	});
+	withDatabase((database, fixtureRoot) => {
+		const { project, binding, task } = projectFixture(database, 'Workflow unconsumed reservation cancellation', fixtureRoot);
+		const session = createSession(database, project.id, binding.id, task.id, 'codex', 'sharedFolder');
 		const workflow = create(database, project.id, plan(project.id, session.id, binding.id, task.id));
 		const run = approveAndStart(database, project.id, workflow.id);
 		const reservation = database.agentWorkflows.reserveNodeTurnLaunch(project.id, workflow.id, run.id, 'implement', 1, session.revision);
-		database.agentWorkflows.requestWorkflowCancellation(project.id, workflow.id, 3, 'cancel-reserved');
+		const cancelled = database.agentWorkflows.requestWorkflowCancellation(project.id, workflow.id, 3, 'cancel-unconsumed-reservation');
+		assert.equal(cancelled.state, 'cancelled');
+		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.nodes[0].state, 'cancelled');
 		assert.throws(() => createRunningSessionTurn(database, project.id, binding.id, task.id, session.id, fixtureRoot, { reservationId: reservation.reservationId }), /authorization/i);
 	});
 	withDatabase((database, fixtureRoot) => {
