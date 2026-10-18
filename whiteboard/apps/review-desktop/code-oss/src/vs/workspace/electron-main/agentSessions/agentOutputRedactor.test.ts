@@ -30,6 +30,11 @@ test('redacts credentials whose characters are interrupted by cursor and erase c
 	assert.equal(drain(sanitizer, ['sec\u001b[2Kret-value\n']), '***\n');
 });
 
+test('preserves carriage return and backspace while excluding them from secret matching', () => {
+	const sanitizer = createAgentPtyOutputSanitizer({ knownSecrets: ['secret-value'] });
+	assert.equal(drain(sanitizer, ['progress 1\rprogress 2\b3\n', 'sec\rret-\bvalue\n']), 'progress 1\rprogress 2\b3\n***\n');
+});
+
 test('preserves interactive CSI navigation and hides secrets split across CSI controls', () => {
 	const sanitizer = createAgentPtyOutputSanitizer({ knownSecrets: ['secret-value'] });
 	const output = drain(sanitizer, [
@@ -53,6 +58,46 @@ test('does not redact ordinary labels and still masks short labelled values', ()
 	assert.equal(drain(sanitizer, ['monkey=banana\npassword=ok\napi_key=x\n']), 'monkey=banana\npassword=***\napi_key=***\n');
 });
 
+test('shows recognized credential prompts immediately, then masks later echoed values', () => {
+	const password = createAgentPtyOutputSanitizer();
+	assert.equal(password.push('Password: '), 'Password: ');
+	assert.equal(password.push('typed-password'), '***');
+	assert.equal(password.push('\n'), '\n');
+	assert.equal(password.flush(), '');
+
+	const key = createAgentPtyOutputSanitizer();
+	assert.equal(key.push('api_key='), 'api_key=');
+	assert.equal(key.push('compact'), '***');
+	assert.equal(key.push('secret\n'), '\n');
+	assert.equal(key.flush(), '');
+});
+
+test('preserves leading field whitespace while masking values across every split', () => {
+	const cases = [
+		['password=  secret-value\n', 'password=  ***\n'],
+		['Password: secret-value\n', 'Password: ***\n'],
+		['Password:  secret-value\n', 'Password:  ***\n'],
+		['api_key=\t\t"quoted value"\n', 'api_key=\t\t***\n'],
+		['api_key=  \t"quoted-value"\n', 'api_key=  \t***\n'],
+	];
+	for (const [input, expected] of cases) {
+		assert.equal(drain(createAgentPtyOutputSanitizer(), [input]), expected, `unexpected output without splitting: ${input}`);
+		for (let split = 1; split < input.length; split++) {
+			const sanitizer = createAgentPtyOutputSanitizer();
+			const output = sanitizer.push(input.slice(0, split)) + sanitizer.push(input.slice(split)) + sanitizer.flush();
+			assert.equal(output, expected, `unexpected output at split ${split}: ${input}`);
+		}
+	}
+
+	for (const [chunks, expected] of [
+		[['password=', ' secret-value\n'], 'password= ***\n'],
+		[['Password: ', ' secret-value\n'], 'Password:  ***\n'],
+		[['api_key=', '  \t', '"quoted-value"\n'], 'api_key=  \t***\n'],
+	] as const) {
+		assert.equal(drain(createAgentPtyOutputSanitizer(), chunks), expected);
+	}
+});
+
 test('bounds retained stream state during large output and flushes a final partial secret safely', () => {
 	const sanitizer = createAgentPtyOutputSanitizer({ knownSecrets: ['final-secret'], maxPendingCodeUnits: 256 });
 	const first = sanitizer.push(`${'x'.repeat(10000)}final-sec`);
@@ -66,14 +111,22 @@ test('raises the overlap for long trusted values so they cannot leak across chun
 	const secret = 's'.repeat(500);
 	const sanitizer = createAgentPtyOutputSanitizer({ knownSecrets: [secret], maxPendingCodeUnits: 128 });
 	assert.equal(sanitizer.push(`prefix ${secret.slice(0, 300)}`), 'prefix ');
-	assert.equal(sanitizer.push(`${secret.slice(300)} suffix`), '*** suffix');
-	assert.equal(sanitizer.flush(), '');
+	const completed = sanitizer.push(`${secret.slice(300)} suffix`);
+	assert.equal(completed, '*** suffi');
+	assert.equal(completed.includes(secret), false);
+	assert.equal(sanitizer.flush(), 'x');
 	assert.throws(() => createAgentPtyOutputSanitizer({ knownSecrets: ['x'.repeat(65536)] }), /exceeds/);
 });
 
 test('keeps labelled values, recognized token prefixes, and authorization values masked across every split', () => {
 	const cases = [
 		['password=abcDEF123\n', 'password=***\n'],
+		['password="quoted-secret-value"\n', 'password=***\n'],
+		["password='single-quoted-secret'\n", 'password=***\n'],
+		['password="escaped \\" quote secret"\n', 'password=***\n'],
+		['password=""\n', 'password=***\n'],
+		["password=''\n", 'password=***\n'],
+		['\u001b[32mpassword=\u001b[31m"styled-secret"\u001b[0m\n', '\u001b[32mpassword=\u001b[31m***\u001b[0m\n'],
 		['Authorization: Bearer opaque-secret-value\n', 'Authorization: ***\n'],
 		['ghp_12345SECRET67890\n', '***\n'],
 		['gho_12345SECRET67890\n', '***\n'],
@@ -166,6 +219,12 @@ test('masks PEM bodies larger than the pending limit through a footer split over
 	assert.equal(output.includes(body), false);
 	assert.equal(output.includes(footer), false);
 	assert.ok(output.includes('***'));
+});
+
+test('masks an unterminated PEM through flush without releasing its partial footer', () => {
+	const sanitizer = createAgentPtyOutputSanitizer();
+	assert.equal(sanitizer.push('-----BEGIN RSA PRIVATE KEY-----\nprivate-material\n-----END RSA PRIVATE KEY--'), '');
+	assert.equal(sanitizer.flush(), '***');
 });
 
 test('rejects non-finite and fractional pending limits before clamping', () => {

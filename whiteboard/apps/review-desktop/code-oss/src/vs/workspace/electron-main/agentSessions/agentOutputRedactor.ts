@@ -21,7 +21,7 @@ export interface AgentOutputRedactorOptions {
 	maxPendingCodeUnits?: number;
 }
 
-type ActiveMask = { kind: 'token' | 'field'; quote: string | undefined; escaped: boolean } | { kind: 'pem'; tail: string; footer: string | undefined };
+type ActiveMask = { kind: 'token' | 'field'; quote: string | undefined; quoteOpened: boolean; valueStarted: boolean; escaped: boolean; markerEmitted: boolean } | { kind: 'pem'; tail: string; footer: string | undefined };
 
 const DEFAULT_MAX_PENDING = 4096;
 const MAX_PENDING_LIMIT = 65536;
@@ -83,7 +83,7 @@ class StreamingTerminalControlParser {
 				continue;
 			}
 			const value = String.fromCodePoint(input.codePointAt(index)!);
-			if ((code >= 0x20 || code === 0x0a || code === 0x09) && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)) { output += value; }
+			if ((code >= 0x20 || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0d) && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)) { output += value; }
 			index += value.length;
 		}
 		return { text: output, overflowed };
@@ -188,7 +188,7 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 				// For labelled values retain the label and redact only the value.
 				const valueOffset = match[0].lastIndexOf('=') >= 0
 					? match[0].lastIndexOf('=') + 1
-					: match[0].lastIndexOf(':') >= 0 && /authorization/i.test(match[0])
+					: match[0].lastIndexOf(':') >= 0
 						? match[0].lastIndexOf(':') + 1
 						: 0;
 				let start = match.index + valueOffset;
@@ -237,15 +237,25 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 				const completeText = combined.slice(0, complete);
 				const candidate = findOpenSensitiveTail(completeText, knownSecretTrie);
 				if (candidate && complete - candidate.start > maxPending) {
-					output += sanitize(combined.slice(0, candidate.start)) + REDACTION;
+					const maskStart = candidate.kind === 'field' && candidate.releasePrefix ? candidate.valueStart : candidate.start;
+					output += sanitize(combined.slice(0, maskStart)) + REDACTION;
 					activeMask = candidate.kind === 'pem'
 						? { kind: 'pem', tail: '', footer: candidate.pemFooter }
-						: { kind: candidate.kind, quote: candidate.quote, escaped: false };
+						: { kind: candidate.kind, quote: candidate.quote, quoteOpened: false, valueStarted: true, escaped: false, markerEmitted: true };
 					const body = combined.slice(candidate.valueStart, complete);
 					const consumed = consumeMasked(activeMask, body);
 					activeMask = consumed.mode;
 					input = consumed.remainder + combined.slice(complete);
 					continue;
+				}
+				if (candidate?.kind === 'field' && candidate.releasePrefix) {
+					output += sanitize(combined.slice(0, candidate.valueStart));
+					activeMask = { kind: 'field', quote: candidate.quote, quoteOpened: false, valueStarted: false, escaped: false, markerEmitted: false };
+					const active = consumeMasked(activeMask, combined.slice(candidate.valueStart, complete));
+					activeMask = active.mode;
+					output += active.output;
+					if (active.remainder) { input = active.remainder; continue; }
+					return output;
 				}
 				const safeEnd = candidate ? candidate.start : findCandidateHoldStart(completeText, knownSecretTrie);
 				const boundary = safeEnd > 0 ? codePointBoundary(combined, Math.min(safeEnd, complete)) : 0;
@@ -275,6 +285,10 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 			const remainder = pending;
 			pending = '';
 			if (activeMask) { activeMask = undefined; return controlGap ? REDACTION : ''; }
+			const candidate = findOpenSensitiveTail(remainder, knownSecretTrie);
+			if (candidate) {
+				return (controlGap ? REDACTION : '') + sanitize(remainder.slice(0, candidate.start)) + REDACTION;
+			}
 			return (controlGap ? REDACTION : '') + sanitize(remainder);
 		}
 	};
@@ -282,7 +296,7 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 
 /** Credential-shaped values and labelled account-file material. */
 const credentialPatterns: RegExp[] = [
-	/-----BEGIN ([A-Z0-9 ]+)-----[\s\S]*?(?:-----END \1-----|$)/gi,
+	/-----BEGIN ([A-Z0-9 ]+)-----[\s\S]*?-----END \1-----/gi,
 	/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9-]+|AKIA[0-9A-Z]{16})\b/gi,
 	/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
 	/\b(?:authorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+/gi,
@@ -411,7 +425,7 @@ function stepSecretTrie(root: SecretTrieNode, text: string): SecretTrieNode {
 	return node;
 }
 
-type OpenSensitiveTail = { start: number; valueStart: number; kind: 'field' | 'token' | 'pem'; quote?: string; pemFooter?: string };
+type OpenSensitiveTail = { start: number; valueStart: number; kind: 'field' | 'token' | 'pem'; quote?: string; pemFooter?: string; releasePrefix?: boolean };
 
 function findOpenSensitiveTail(raw: string, knownSecretTrie: SecretTrieNode): OpenSensitiveTail | undefined {
 	const { text, rawOffsets } = normalizeTerminalText(raw);
@@ -426,7 +440,8 @@ function findOpenSensitiveTail(raw: string, knownSecretTrie: SecretTrieNode): Op
 		const quote = match[2] === '"' || match[2] === "'" ? match[2] : undefined;
 		const tail = text.slice(valueIndex);
 		if (valueIndex === text.length || (tail.length && (quote ? findUnescapedQuote(tail, quote) < 0 : !/[\s,;]/.test(tail)))) {
-			consider({ start: match.index, valueStart: valueIndex, kind: 'field', quote });
+			const contentStart = quote ? match.index + match[1].length : valueIndex;
+			consider({ start: match.index, valueStart: contentStart, kind: 'field', quote, releasePrefix: !/^authorization/i.test(match[1]) });
 		}
 		if (!match[0].length) { label.lastIndex++; }
 	}
@@ -478,17 +493,43 @@ function consumeMasked(mode: ActiveMask, raw: string): { mode: ActiveMask | unde
 		const keep = Math.min(128, combined.length);
 		return { mode: { ...mode, tail: combined.slice(-keep) }, remainder: '', output: '' };
 	}
+	let quote = mode.quote;
 	let escaped = mode.escaped;
+	let markerEmitted = mode.markerEmitted;
+	let quoteOpened = mode.quoteOpened;
+	let valueStarted = mode.valueStarted;
+	let output = '';
 	for (let index = 0; index < text.length; index++) {
-		if (mode.quote) {
+		if (!quote && mode.kind === 'field' && !markerEmitted && !quoteOpened && (text[index] === '"' || text[index] === "'")) {
+			quote = text[index];
+			quoteOpened = true;
+			continue;
+		}
+		if (quote) {
+			if (!quoteOpened) {
+				quoteOpened = true;
+				if (text[index] === quote) { continue; }
+			}
 			if (escaped) { escaped = false; continue; }
 			if (text[index] === '\\') { escaped = true; continue; }
-			if (text[index] === mode.quote) { return { mode: undefined, remainder: raw.slice(rawEnds[index] ?? raw.length), output: '' }; }
+			if (text[index] === quote) {
+				if (!valueStarted && !markerEmitted) { output += REDACTION; markerEmitted = true; }
+				return { mode: undefined, remainder: raw.slice(rawEnds[index] ?? raw.length), output };
+			}
+		} else if (!valueStarted && (text[index] === ' ' || text[index] === '\t')) {
+			// Whitespace before the first value character is safe to display and
+			// must be preserved so output does not depend on chunk boundaries.
+			output += text[index];
+			continue;
+		} else if (!valueStarted && (text[index] === '\n' || text[index] === '\r')) {
+			return { mode: undefined, remainder: raw.slice(rawEnds[index] - 1), output };
 		} else if (/[\s,;]/.test(text[index])) {
-			return { mode: undefined, remainder: raw.slice(rawEnds[index] - 1), output: '' };
+			return { mode: undefined, remainder: raw.slice(rawEnds[index] - 1), output };
 		}
+		valueStarted = true;
+		if (!markerEmitted) { output += REDACTION; markerEmitted = true; }
 	}
-	return { mode: { ...mode, escaped }, remainder: '', output: '' };
+	return { mode: { ...mode, quote, quoteOpened, valueStarted, escaped, markerEmitted }, remainder: '', output };
 }
 
 function c1CsiEnd(text: string, start: number): number {
