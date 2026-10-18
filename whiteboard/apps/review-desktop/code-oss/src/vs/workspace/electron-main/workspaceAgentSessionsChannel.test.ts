@@ -17,13 +17,14 @@ import type { IWindowsMainService } from '../../platform/windows/electron-main/w
 import type { IDisposable } from '../../base/common/lifecycle.js';
 import type { AgentSessionTranscriptPageDTO, AgentSessionTurnSnapshot, SessionNotificationDTO } from '../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
+import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO } from '../common/workspaceAgentWorkflowProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './agentSessions/managedWorktrees.js';
 import { TaskFolderWriterLock } from './providerRuns/taskFolderWriterLock.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
-import { WorkspaceAgentSessionsChannel } from './workspaceAgentSessionsChannel.js';
+import { WorkspaceAgentSessionsChannel, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
 
 function deferred() {
 	let resolve!: () => void;
@@ -236,6 +237,139 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		assert.equal(await channel.call(sender, 'getMessage', { ...targetRequest, messageId: randomUUID() }), null);
 		await assert.rejects(channel.call(forgedSender, 'getMessage', targetRequest), /open project window/u);
 		await assert.rejects(channel.call(sender, 'getMessage', { ...targetRequest, projectId: otherProject.project.id }), /does not match this window/u);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('workflow IPC scopes plans, requires native confirmation, and rejects stale dialog approval', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-workflow-channel-'));
+	const database = WorkspaceDatabase.open(':memory:');
+	try {
+		const descriptorUri = URI.file(join(directory, 'workflow.code-workspace')).toString();
+		const otherUri = URI.file(join(directory, 'other.code-workspace')).toString();
+		const project = database.createProjectWorkspace('Workflow project', directory, descriptorUri);
+		const other = database.createProjectWorkspace('Foreign project', directory, otherUri);
+		const windowData = {
+			config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } },
+			openedWorkspace: { id: 'workflow-workspace', configPath: URI.parse(descriptorUri) },
+		};
+		const codeWindow = windowData as unknown as ICodeWindow;
+		const sender = Object.assign(new EventEmitter(), { id: 41, isDestroyed: () => false }) as unknown as WebContents;
+		const forgedSender = { id: 42, isDestroyed: () => false } as WebContents;
+		const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
+		let accept = false;
+		let dialogCalls = 0;
+		let gate: ReturnType<typeof deferred> | undefined;
+		let startGate: ReturnType<typeof deferred> | undefined;
+		const host: WorkspaceAgentWorkflowHost = {
+			start: async (projectId, workflowId, revision, key) => {
+				const run = database.agentWorkflows.startWorkflow(projectId, workflowId, revision, key);
+				if (startGate) { const current = startGate; startGate = undefined; current.entered(); await current.promise; }
+				return run;
+			},
+			cancel: (projectId, workflowId, revision, key) => database.agentWorkflows.requestWorkflowCancellation(projectId, workflowId, revision, key),
+			getHostError: () => null,
+			confirmPlan: async (dialogSender, plan) => {
+				assert.equal(dialogSender, sender);
+				assert.equal(plan.projectId, project.project.id);
+				dialogCalls++;
+				if (gate) { const current = gate; gate = undefined; current.entered(); await current.promise; }
+				return accept;
+			},
+		};
+		const channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, host);
+		const session = database.agentSessions.createSession({ projectId: project.project.id, bindingId: project.binding.id, name: 'Implementation', provider: 'codex', model: 'fixture-model', workspaceMode: 'sharedFolder' });
+		const input: AgentWorkflowPlanInput = {
+			projectId: project.project.id, bindingId: project.binding.id, taskId: null, maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
+			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: session.provider, model: session.model, bindingId: session.bindingId, taskId: null, referenceIds: [], dependsOn: [], permissionPolicy: { mode: 'read-only', approval: 'never' } }],
+		};
+		const created = await channel.call<AgentWorkflowStatusDTO>(sender, 'createWorkflow', { ...input, idempotencyKey: 'create-first', approved: true });
+		const identity = { projectId: project.project.id, workflowId: created.workflow.id };
+		const approval = { ...identity, expectedRevision: created.workflow.revision, planVersion: created.plan.version, fingerprint: created.plan.fingerprint, idempotencyKey: 'approve-first' };
+		await assert.rejects(channel.call(sender, 'startWorkflow', { ...identity, expectedRevision: created.workflow.revision, idempotencyKey: 'unapproved-start', approved: true }), /must be approved/i);
+		const denied = await channel.call<AgentWorkflowApprovalResult>(sender, 'approveWorkflow', approval);
+		assert.equal(denied.approved, false);
+		assert.equal(denied.status.workflow.state, 'waiting');
+		accept = true;
+		const approved = await channel.call<AgentWorkflowApprovalResult>(sender, 'approveWorkflow', approval);
+		assert.equal(approved.approved, true);
+		assert.equal(approved.status.workflow.state, 'ready');
+		assert.equal(dialogCalls, 2);
+		const started = await channel.call<AgentWorkflowStatusDTO>(sender, 'startWorkflow', { ...identity, expectedRevision: approved.status.workflow.revision, idempotencyKey: 'start-first' });
+		assert.equal(started.run?.state, 'ready');
+		const cancelled = await channel.call<AgentWorkflowStatusDTO>(sender, 'cancelWorkflow', { ...identity, expectedRevision: started.workflow.revision, idempotencyKey: 'cancel-first' });
+		assert.equal(cancelled.run?.state, 'cancelled');
+		assert.equal(database.agentSessionTurns.listTurns(project.project.id, session.id).length, 0);
+
+		const second = await channel.call<AgentWorkflowStatusDTO>(sender, 'createWorkflow', { ...input, idempotencyKey: 'create-second' });
+		const page = await channel.call<AgentWorkflowPageDTO>(sender, 'listWorkflows', { projectId: project.project.id, limit: 1 });
+		assert.equal(page.workflows.length, 1);
+		assert.equal(page.hasMore, true);
+		const next = await channel.call<AgentWorkflowPageDTO>(sender, 'listWorkflows', { projectId: project.project.id, afterId: page.nextCursor, limit: 1 });
+		assert.equal(next.hasMore, false);
+		assert.deepEqual(new Set([...page.workflows, ...next.workflows].map(workflow => workflow.id)), new Set([created.workflow.id, second.workflow.id]));
+		await assert.rejects(channel.call(forgedSender, 'getWorkflow', identity), /open project window/i);
+		await assert.rejects(channel.call(sender, 'getWorkflow', { ...identity, projectId: other.project.id }), /does not match this window/i);
+		await assert.rejects(channel.call(sender, 'createWorkflow', { ...input, idempotencyKey: 'unsupported-policy', nodes: [{ ...input.nodes[0], permissionPolicy: { mode: 'read-only', approval: 'always' } }] }), /launch policy/i);
+
+		const staleGate = gate = deferred();
+		const pendingApproval = channel.call(sender, 'approveWorkflow', { projectId: project.project.id, workflowId: second.workflow.id, expectedRevision: second.workflow.revision, planVersion: second.plan.version, fingerprint: second.plan.fingerprint, idempotencyKey: 'stale-approval' });
+		await staleGate.reached;
+		const revised = await channel.call<AgentWorkflowStatusDTO>(sender, 'reviseWorkflow', { projectId: project.project.id, workflowId: second.workflow.id, expectedRevision: second.workflow.revision, plan: { ...input, maxDurationMs: 120_000 } });
+		staleGate.resolve();
+		await assert.rejects(pendingApproval, /changed while its approval dialog/i);
+		assert.equal(revised.workflow.state, 'waiting');
+		assert.equal((await channel.call<AgentWorkflowStatusDTO>(sender, 'getWorkflow', { projectId: project.project.id, workflowId: second.workflow.id })).run, null);
+		await assert.rejects(channel.call(sender, 'startWorkflow', { projectId: project.project.id, workflowId: second.workflow.id, expectedRevision: revised.workflow.revision, idempotencyKey: 'changed-plan-start' }), /must be approved/i);
+
+		const navigationGate = gate = deferred();
+		const navigationApproval = channel.call(sender, 'approveWorkflow', { projectId: project.project.id, workflowId: second.workflow.id, expectedRevision: revised.workflow.revision, planVersion: revised.plan.version, fingerprint: revised.plan.fingerprint, idempotencyKey: 'navigation-approval' });
+		await navigationGate.reached;
+		windowData.config.reviewWindowLaunch.projectId = other.project.id;
+		windowData.openedWorkspace.configPath = URI.parse(otherUri);
+		navigationGate.resolve();
+		await assert.rejects(navigationApproval, /changed|project|scope/i);
+		assert.equal(database.agentWorkflows.getWorkflow(project.project.id, second.workflow.id)?.state, 'waiting');
+
+		windowData.config.reviewWindowLaunch.projectId = project.project.id;
+		windowData.openedWorkspace.configPath = URI.parse(descriptorUri);
+		const secondIdentity = { projectId: project.project.id, workflowId: second.workflow.id };
+		const approveCurrent = await channel.call<AgentWorkflowApprovalResult>(sender, 'approveWorkflow', { ...secondIdentity, expectedRevision: revised.workflow.revision, planVersion: revised.plan.version, fingerprint: revised.plan.fingerprint, idempotencyKey: 'approve-current' });
+		const ownStartGate = startGate = deferred();
+		const ownStart = channel.call(sender, 'startWorkflow', { ...secondIdentity, expectedRevision: approveCurrent.status.workflow.revision, idempotencyKey: 'start-with-navigation' });
+		await ownStartGate.reached;
+		const ownRun = database.agentWorkflows.getLatestRun(project.project.id, second.workflow.id)!;
+		windowData.config.reviewWindowLaunch.projectId = other.project.id;
+		windowData.openedWorkspace.configPath = URI.parse(otherUri);
+		ownStartGate.resolve();
+		await assert.rejects(ownStart, /changed|project|scope/i);
+		assert.equal(database.agentWorkflows.getRun(project.project.id, second.workflow.id, ownRun.id)?.state, 'cancelled', 'Navigation compensates the exact run started by this request.');
+
+		windowData.config.reviewWindowLaunch.projectId = project.project.id;
+		windowData.openedWorkspace.configPath = URI.parse(descriptorUri);
+		const oldWorkflow = database.agentWorkflows.getWorkflow(project.project.id, second.workflow.id)!;
+		const nextPlan = database.agentWorkflows.reviseWorkflowPlan(project.project.id, second.workflow.id, oldWorkflow.revision, { ...input, maxDurationMs: 180_000 });
+		const nextStatus = await channel.call<AgentWorkflowStatusDTO>(sender, 'getWorkflow', secondIdentity);
+		assert.equal(nextStatus.run, null, 'An older plan run cannot appear as the revised plan execution.');
+		const nextApproval = await channel.call<AgentWorkflowApprovalResult>(sender, 'approveWorkflow', { ...secondIdentity, expectedRevision: nextPlan.revision, planVersion: nextStatus.plan.version, fingerprint: nextStatus.plan.fingerprint, idempotencyKey: 'approve-next' });
+		const interleavingGate = startGate = deferred();
+		const delayedStart = channel.call(sender, 'startWorkflow', { ...secondIdentity, expectedRevision: nextApproval.status.workflow.revision, idempotencyKey: 'old-delayed-start' });
+		await interleavingGate.reached;
+		const inFlight = database.agentWorkflows.getWorkflow(project.project.id, second.workflow.id)!;
+		const stoppedOld = database.agentWorkflows.requestWorkflowCancellation(project.project.id, second.workflow.id, inFlight.revision, 'controlled-old-cancel');
+		const newer = database.agentWorkflows.reviseWorkflowPlan(project.project.id, second.workflow.id, stoppedOld.revision, { ...input, maxDurationMs: 240_000 });
+		const newerPlan = database.agentWorkflows.getPlan(project.project.id, second.workflow.id)!;
+		database.agentWorkflows.recordTrustedUiApproval(project.project.id, second.workflow.id, newerPlan.version, newerPlan.fingerprint, 'controlled-newer-approval');
+		const newerReady = database.agentWorkflows.getWorkflow(project.project.id, second.workflow.id)!;
+		const newerRun = database.agentWorkflows.startWorkflow(project.project.id, second.workflow.id, newerReady.revision, 'controlled-newer-start');
+		assert.equal(newer.planVersion, newerPlan.version);
+		windowData.config.reviewWindowLaunch.projectId = other.project.id;
+		windowData.openedWorkspace.configPath = URI.parse(otherUri);
+		interleavingGate.resolve();
+		await assert.rejects(delayedStart, /changed|project|scope/i);
+		assert.equal(database.agentWorkflows.getRun(project.project.id, second.workflow.id, newerRun.id)?.state, 'ready', 'Stale start compensation cannot cancel a later plan/run.');
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

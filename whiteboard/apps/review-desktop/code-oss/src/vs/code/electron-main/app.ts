@@ -1544,6 +1544,44 @@ export class CodeApplication extends Disposable {
 				(provider, profileRef) => agentSessions.normalizeProfileRef(provider, profileRef),
 				(projectId, sessionId) => agentSessions.workspacePreparation(projectId, sessionId),
 				(projectId, sessionId) => agentSessions.prepareWorkspace(projectId, sessionId),
+				{
+					start: (projectId, workflowId, revision, key) => agentSessions.workflowScheduler.start(projectId, workflowId, revision, key),
+					cancel: (projectId, workflowId, revision, key) => agentSessions.workflowScheduler.cancel(projectId, workflowId, revision, key),
+					getHostError: (projectId, workflowId, runId) => agentSessions.workflowScheduler.getHostError(projectId, workflowId, runId),
+					confirmPlan: async (sender, plan) => {
+						const window = BrowserWindow.fromWebContents(sender);
+						if (!window || window.isDestroyed()) { throw new Error('The project window closed before workflow approval.'); }
+						const display = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ');
+						const roles = { coordinator: '조율', implementer: '구현', reviewer: '검토', researcher: '조사', tester: '검증' };
+						const rows: string[] = [];
+						for (const node of plan.nodes) {
+							const preparation = await agentSessions.workspacePreparation(plan.projectId, node.sessionId);
+							if (preparation.state !== 'ready' || !preparation.worktreePath) { throw new Error('Prepare every workflow session workspace before approving its plan.'); }
+							rows.push([
+								`${display(node.nodeId)} · ${roles[node.role]} · ${node.provider} / ${display(node.model)}`,
+								`세션: ${node.sessionId}`,
+								`작업 폴더: ${display(preparation.worktreePath)}`,
+								`브랜치: ${preparation.branch ? display(preparation.branch) : '일반 폴더 · 단일 수정자'}`,
+								`권한: ${node.permissionPolicy.mode === 'mutating' ? '파일 수정 · 필요한 권한은 직접 승인' : '읽기 전용'}`,
+								`선행 단계: ${node.dependsOn.length ? node.dependsOn.join(', ') : '없음'}`,
+								`참고자료와 규칙: ${node.referenceIds.length ? node.referenceIds.map(reference => `${reference.kind === 'knowledgeSnapshot' ? '참고자료' : '규칙'}: ${reference.id}`).join(', ') : '선택 없음'}`,
+							].join('\n'));
+						}
+						if (window.isDestroyed() || sender.isDestroyed()) { throw new Error('The project window closed before workflow approval.'); }
+						const result = await dialog.showMessageBox(window, {
+							type: 'question', title: 'AI 세션 실행 계획 승인',
+							message: `실행 계획 ${plan.version} · ${plan.nodes.length}개 세션`,
+							detail: [
+								`최대 동시 실행 ${plan.maxConcurrentNodes}개 / 총 실행 ${plan.maxTotalTurns}회 / 제한 시간 ${Math.ceil(plan.maxDurationMs / 60_000)}분`,
+								'선행 실행이 성공하면 다음 세션의 터미널을 시작합니다. 작업 카드의 완료는 직접 확인합니다.',
+								...rows,
+								`계획 SHA-256: ${plan.fingerprint}`,
+							].join('\n\n'),
+							buttons: ['취소', '이 계획 승인'], cancelId: 0, defaultId: 0, noLink: true,
+						});
+						return result.response === 1;
+					},
+				},
 			);
 			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {
 				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Agent session IPC is only available to the application main frame.'); }

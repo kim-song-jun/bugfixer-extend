@@ -98,7 +98,26 @@ export interface AgentWorkflowRunDTO {
 }
 
 export interface CreateAgentWorkflowInput extends AgentWorkflowPlanInput {
-	/** Host-generated retry key. A retry with changed content is rejected. */
+	/** Request retry key. A retry with changed content is rejected. */
 	readonly idempotencyKey: string;
+}
+
+/** Execution success never marks the separate project task Done. */
+export interface AgentWorkflowStatusDTO {
+	readonly workflow: AgentWorkflowDTO;
+	readonly plan: AgentWorkflowPlan;
+	readonly run: AgentWorkflowRunDTO | null;
+	readonly hostError: string | null;
+}
+
+export interface AgentWorkflowPageDTO {
+	readonly workflows: readonly AgentWorkflowDTO[];
+	readonly nextCursor: string | null;
+	readonly hasMore: boolean;
+}
+
+export interface AgentWorkflowApprovalResult {
+	readonly approved: boolean;
+	readonly status: AgentWorkflowStatusDTO;
 }
 

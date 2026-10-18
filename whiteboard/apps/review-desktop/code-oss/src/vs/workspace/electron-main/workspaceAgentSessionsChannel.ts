@@ -18,6 +18,9 @@ import type {
 } from '../common/workspaceAgentSessionProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT } from '../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage } from '../common/workspaceAgentCommunicationProtocol.js';
+import type {
+	AgentWorkflowDTO, AgentWorkflowNodePlan, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowRunDTO, AgentWorkflowStatusDTO,
+} from '../common/workspaceAgentWorkflowProtocol.js';
 import type { AgentSessionAttachResult, AgentSessionService } from './agentSessions/agentSessionService.js';
 import type { WorkspaceDatabase } from './workspaceDatabase.js';
 
@@ -63,6 +66,14 @@ interface ScopeToken {
 	readonly descriptorUri: string;
 }
 
+/** Approval always uses a main-process native dialog; IPC cannot supply an approval receipt. */
+export interface WorkspaceAgentWorkflowHost {
+	start(projectId: string, workflowId: string, expectedRevision: number, idempotencyKey: string): AgentWorkflowRunDTO | Promise<AgentWorkflowRunDTO>;
+	cancel(projectId: string, workflowId: string, expectedRevision: number, idempotencyKey: string): AgentWorkflowDTO | Promise<AgentWorkflowDTO>;
+	getHostError(projectId: string, workflowId: string, runId?: string): string | null;
+	confirmPlan(sender: WebContents, plan: AgentWorkflowPlan): Promise<boolean>;
+}
+
 /** Project-scoped IPC for durable sessions and host-owned PTY capabilities. */
 export class WorkspaceAgentSessionsChannel {
 	private readonly attachments = new Map<string, ScopedAttachment>();
@@ -77,6 +88,7 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly normalizeProfileRef?: (provider: AgentSessionProvider, profileRef: string | undefined) => string,
 		private readonly workspacePreparation?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
 		private readonly prepareWorkspace?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
+		private readonly workflowHost?: WorkspaceAgentWorkflowHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -85,6 +97,75 @@ export class WorkspaceAgentSessionsChannel {
 			case 'listSessions': {
 				this.assertProjectRequest(arg, projectId);
 				return this.database.agentSessions.listSessions(projectId) as T;
+			}
+			case 'listWorkflows': {
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				return this.database.agentWorkflows.listWorkflows(projectId, {
+					...(request.afterId !== undefined ? { afterId: this.uuid(request.afterId, 'workflow cursor') } : {}),
+					limit: request.limit === undefined ? 50 : this.integer(request.limit, 1, 100, 'workflow page limit'),
+				}) as T;
+			}
+			case 'getWorkflow': {
+				const request = this.parseWorkflowRequest(arg, projectId);
+				return this.workflowStatus(projectId, request.workflowId) as T;
+			}
+			case 'createWorkflow': {
+				const request = this.record(arg);
+				const plan = this.parseWorkflowPlan(request, projectId);
+				const workflow = this.database.agentWorkflows.createWorkflow(projectId, { ...plan, idempotencyKey: this.string(request.idempotencyKey, 'workflow retry key', 128) });
+				return this.workflowStatus(projectId, workflow.id) as T;
+			}
+			case 'reviseWorkflow': {
+				const request = this.parseWorkflowMutation(arg, projectId);
+				const plan = this.parseWorkflowPlan(this.record(arg).plan, projectId);
+				this.database.agentWorkflows.reviseWorkflowPlan(projectId, request.workflowId, request.expectedRevision, plan);
+				return this.workflowStatus(projectId, request.workflowId) as T;
+			}
+			case 'approveWorkflow': {
+				const request = this.parseWorkflowMutation(arg, projectId);
+				const raw = this.record(arg);
+				const planVersion = this.integer(raw.planVersion, 1, Number.MAX_SAFE_INTEGER, 'workflow plan version');
+				const fingerprint = this.string(raw.fingerprint, 'workflow plan fingerprint', 64);
+				const key = this.string(raw.idempotencyKey, 'workflow approval retry key', 128);
+				const before = this.workflowStatus(projectId, request.workflowId);
+				if (before.workflow.revision !== request.expectedRevision || before.plan.version !== planVersion || before.plan.fingerprint !== fingerprint) { throw new Error('The workflow plan changed; review its current version before approval.'); }
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const approved = await this.requireWorkflowHost().confirmPlan(sender, before.plan);
+					this.assertScopeCurrent(scope);
+					const current = this.workflowStatus(projectId, request.workflowId);
+					if (current.workflow.revision !== request.expectedRevision || current.plan.version !== planVersion || current.plan.fingerprint !== fingerprint) { throw new Error('The workflow plan changed while its approval dialog was open.'); }
+					if (approved) { this.database.agentWorkflows.recordTrustedUiApproval(projectId, request.workflowId, planVersion, fingerprint, key); }
+					return { approved, status: this.workflowStatus(projectId, request.workflowId) } as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'startWorkflow': {
+				const request = this.parseWorkflowMutation(arg, projectId);
+				const key = this.string(this.record(arg).idempotencyKey, 'workflow start retry key', 128);
+				const host = this.requireWorkflowHost();
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const startedRun = await host.start(projectId, request.workflowId, request.expectedRevision, key);
+					try { this.assertScopeCurrent(scope); }
+					catch (scopeError) {
+						const current = this.workflowStatus(projectId, request.workflowId);
+						if (current.run?.id === startedRun.id && current.run.planVersion === startedRun.planVersion && current.run.fingerprint === startedRun.fingerprint) {
+							await host.cancel(projectId, request.workflowId, current.workflow.revision, randomUUID());
+						}
+						throw scopeError;
+					}
+					return this.workflowStatus(projectId, request.workflowId) as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'cancelWorkflow': {
+				const request = this.parseWorkflowMutation(arg, projectId);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					await this.requireWorkflowHost().cancel(projectId, request.workflowId, request.expectedRevision, this.string(this.record(arg).idempotencyKey, 'workflow cancellation retry key', 128));
+					this.assertScopeCurrent(scope);
+					return this.workflowStatus(projectId, request.workflowId) as T;
+				} finally { this.finishScopedOperation(scope); }
 			}
 			case 'createSession': {
 				const parsed = this.parseCreate(arg, projectId);
@@ -498,6 +579,66 @@ export class WorkspaceAgentSessionsChannel {
 			...(raw.kind !== undefined ? { kind: raw.kind as AgentSessionTranscriptPageOptions['kind'] } : {}),
 			...(raw.severity !== undefined ? { severity: raw.severity as AgentSessionTranscriptPageOptions['severity'] } : {}),
 			...(raw.source !== undefined ? { source: raw.source as AgentSessionTranscriptPageOptions['source'] } : {}),
+		};
+	}
+
+	private workflowStatus(projectId: string, workflowId: string): AgentWorkflowStatusDTO {
+		const workflow = this.database.agentWorkflows.getWorkflow(projectId, workflowId);
+		const plan = this.database.agentWorkflows.getPlan(projectId, workflowId);
+		if (!workflow || !plan) { throw new Error('The workflow does not belong to this project.'); }
+		const run = this.database.agentWorkflows.getLatestRun(projectId, workflowId) ?? null;
+		return { workflow, plan, run, hostError: this.workflowHost?.getHostError(projectId, workflowId, run?.id) ?? null };
+	}
+
+	private requireWorkflowHost(): WorkspaceAgentWorkflowHost {
+		if (!this.workflowHost) { throw new Error('The workflow execution host is unavailable.'); }
+		return this.workflowHost;
+	}
+
+	private parseWorkflowRequest(value: unknown, projectId: string) {
+		const request = this.record(value);
+		this.assertProjectId(request.projectId, projectId);
+		return { projectId, workflowId: this.uuid(request.workflowId, 'workflow ID') };
+	}
+
+	private parseWorkflowMutation(value: unknown, projectId: string) {
+		const request = this.parseWorkflowRequest(value, projectId);
+		return { ...request, expectedRevision: this.integer(this.record(value).expectedRevision, 1, Number.MAX_SAFE_INTEGER, 'workflow revision') };
+	}
+
+	private parseWorkflowPlan(value: unknown, projectId: string): AgentWorkflowPlanInput {
+		const plan = this.record(value);
+		this.assertProjectId(plan.projectId, projectId);
+		if (!Array.isArray(plan.nodes) || plan.nodes.length < 1 || plan.nodes.length > 64) { throw new Error('A workflow needs 1 to 64 nodes.'); }
+		const bindingId = this.uuid(plan.bindingId, 'workflow folder binding');
+		const taskId = plan.taskId === null ? null : this.uuid(plan.taskId, 'workflow task');
+		return {
+			projectId, bindingId, taskId,
+			maxConcurrentNodes: this.integer(plan.maxConcurrentNodes, 1, 8, 'workflow concurrency'),
+			maxTotalTurns: this.integer(plan.maxTotalTurns, 1, 64, 'workflow turn limit'),
+			maxDurationMs: this.integer(plan.maxDurationMs, 1000, 7_200_000, 'workflow duration'),
+			nodes: plan.nodes.map((value): AgentWorkflowNodePlan => {
+				const node = this.record(value);
+				if (!Array.isArray(node.dependsOn) || node.dependsOn.length > 64 || !Array.isArray(node.referenceIds) || node.referenceIds.length > 64) { throw new Error('Workflow dependencies and references must be bounded lists.'); }
+				if (node.provider !== 'codex' && node.provider !== 'claude') { throw new Error('The workflow provider is invalid.'); }
+				const role = node.role;
+				if (role !== 'coordinator' && role !== 'implementer' && role !== 'reviewer' && role !== 'researcher' && role !== 'tester') { throw new Error('The workflow role is invalid.'); }
+				const permissionPolicy = this.parsePolicy(node.permissionPolicy);
+				if (!((permissionPolicy.mode === 'read-only' && permissionPolicy.approval === 'never') || (permissionPolicy.mode === 'mutating' && permissionPolicy.approval === 'on-request'))) { throw new Error('The workflow launch policy must be read-only/never or mutating/on-request.'); }
+				return {
+					nodeId: this.string(node.nodeId, 'workflow node ID', 80), sessionId: this.uuid(node.sessionId, 'workflow session ID'),
+					role, provider: node.provider,
+					model: this.string(node.model, 'workflow model', 800),
+					bindingId: this.uuid(node.bindingId, 'node folder binding'), taskId: node.taskId === null ? null : this.uuid(node.taskId, 'node task'),
+					permissionPolicy,
+					dependsOn: node.dependsOn.map(id => this.string(id, 'dependency ID', 80)),
+					referenceIds: node.referenceIds.map(value => {
+						const reference = this.record(value);
+						if (reference.kind !== 'knowledgeSnapshot' && reference.kind !== 'conventionVersion') { throw new Error('The workflow reference kind is invalid.'); }
+						return { kind: reference.kind, id: this.uuid(reference.id, 'workflow reference ID') };
+					}),
+				};
+			}),
 		};
 	}
 

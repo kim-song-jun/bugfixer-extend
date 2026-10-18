@@ -16,6 +16,7 @@ import { AgentSessionPreparationError } from './agentSessionPreparationError.js'
 import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
+import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './managedWorktrees.js';
 import { OwnerOperationCoordinator } from './ownerOperationCoordinator.js';
@@ -36,6 +37,7 @@ export class AgentSessionApplication {
 	readonly mcpBridge: AgentSessionMcpBridge;
 	readonly workspaceResolver: AgentSessionWorkspaceResolver;
 	readonly service: AgentSessionService;
+	readonly workflowScheduler: AgentWorkflowScheduler;
 	private recoveryReady = false;
 	private readonly worktrees: ManagedWorktreeService;
 	private readonly workspacePreparationLocks = new OwnerOperationCoordinator();
@@ -57,6 +59,7 @@ export class AgentSessionApplication {
 			createJournal: (snapshot, turnId, knownSecrets) => new AgentSessionJournal(database.agentSessionTranscripts, snapshot, turnId, knownSecrets),
 		}));
 		this.service.recoverStartup();
+		this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}
 
@@ -101,7 +104,10 @@ export class AgentSessionApplication {
 	}
 
 	async shutdown(): Promise<void> {
+		this.workflowScheduler.stopScheduling();
+		this.workflowScheduler.requestShutdownCancellation();
 		const receipts = await this.service.shutdown();
+		this.workflowScheduler.reconcileAfterShutdown();
 		const unverified = receipts.filter(receipt => !receipt.cleanupVerified);
 		if (unverified.length) { throw new Error(`Session shutdown left ${unverified.length} owned turn cleanup(s) unverified.`); }
 	}

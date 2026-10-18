@@ -8,7 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
 import type {
-	AgentWorkflowApprovalReceipt, AgentWorkflowDTO, AgentWorkflowNodeExecutionDTO, AgentWorkflowNodePlan,
+	AgentWorkflowApprovalReceipt, AgentWorkflowDTO, AgentWorkflowNodeExecutionDTO, AgentWorkflowNodePlan, AgentWorkflowPageDTO,
 	AgentWorkflowNodeState, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowReference, AgentWorkflowRole,
 	AgentWorkflowRunDTO, AgentWorkflowState, CreateAgentWorkflowInput,
 } from '../../common/workspaceAgentWorkflowProtocol.js';
@@ -66,6 +66,29 @@ export class AgentWorkflowStore {
 		this.validateUuid(projectId, 'project ID');
 		this.validateUuid(workflowId, 'workflow ID');
 		return this.getWorkflowInternal(projectId, workflowId);
+	}
+
+	listWorkflows(projectId: string, options: { readonly afterId?: string; readonly limit?: number } = {}): AgentWorkflowPageDTO {
+		this.assertOpen();
+		this.validateUuid(projectId, 'project ID');
+		if (options.afterId !== undefined) { this.validateUuid(options.afterId, 'workflow cursor'); }
+		const limit = options.limit ?? 50;
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) { throw new Error('The workflow page limit must be between 1 and 100.'); }
+		const rows = this.db.prepare(`SELECT * FROM agent_workflows WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?`)
+			.all(projectId, options.afterId ?? '', limit + 1) as WorkflowRow[];
+		const workflows = rows.slice(0, limit).map(row => this.workflowFromRow(row));
+		return { workflows, nextCursor: workflows.at(-1)?.id ?? null, hasMore: rows.length > limit };
+	}
+
+	/** Earlier plan runs remain in history, but never stand in for the current plan's execution. */
+	getLatestRun(projectId: string, workflowId: string): AgentWorkflowRunDTO | undefined {
+		this.assertOpen();
+		this.validateUuid(projectId, 'project ID');
+		this.validateUuid(workflowId, 'workflow ID');
+		const row = this.db.prepare(`SELECT run.id FROM agent_workflow_runs run JOIN agent_workflows workflow
+			ON workflow.id = run.workflow_id AND workflow.project_id = run.project_id AND workflow.plan_version = run.plan_version
+			WHERE run.project_id = ? AND run.workflow_id = ? ORDER BY run.created_at DESC, run.id DESC LIMIT 1`).get(projectId, workflowId);
+		return row ? this.getRunInternal(projectId, workflowId, String(row.id)) : undefined;
 	}
 
 	getPlan(projectId: string, workflowId: string, version?: number): AgentWorkflowPlan | undefined {
@@ -355,7 +378,7 @@ export class AgentWorkflowStore {
 				}
 			}
 			const deadlinePassed = Date.parse(String(node.deadline_at)) <= Date.now();
-			if (deadlinePassed && nextState !== 'cancelRequested' && nextState !== 'cancelled' && nextState !== 'failed' && nextState !== 'interrupted') {
+			if (deadlinePassed && nextState !== 'cancelRequested' && nextState !== 'cancelled' && nextState !== 'failed' && nextState !== 'interrupted' && nextState !== 'recoveryRequired') {
 				throw new Error('The workflow run deadline has passed; only cancellation and observed terminal outcomes may be recorded.');
 			}
 			if (nextState === 'ready' || nextState === 'running') { this.assertDependenciesSucceeded(workflowId, runId, Number(node.plan_version), nodeId); }
