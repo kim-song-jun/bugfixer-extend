@@ -45,9 +45,11 @@ const { createAgentPtyOutputSanitizer } = await import(pathToFileURL(path.join(s
 
 const { AgentSessionPtyRuntimeFactory } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionPtyRuntime.js')).href);
 
+const { AgentSessionPreparationError } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionPreparationError.js')).href);
+
 const { AGENT_CLI_COMMAND_SPEC_VERSION } = await import(pathToFileURL(path.join(sessionModules, 'agentCliCapabilities.js')).href);
 
-const { AgentSessionService } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionService.js')).href);
+const { AgentSessionService, AgentSessionRuntimeStartError } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionService.js')).href);
 
 const { AgentSessionWorkspaceResolver } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionWorkspace.js')).href);
 
@@ -377,6 +379,7 @@ try {
   const resolver = new AgentSessionWorkspaceResolver(serviceDatabase, worktrees, serviceWriterLock, () => recoveryReady);
   let recoveryReady = false;
   const launchModes = new Map();
+  const verifiedPreparationFailureSessions = new Set();
   const turnIdentities = new Map();
   const resourceEvents = new Map();
   let blockedPreparationEntered;
@@ -388,6 +391,11 @@ try {
     guardianScriptPath,
     prepareLaunch: async (snapshot, turnId, signal) => {
       const mode = launchModes.get(snapshot.sessionId) ?? 'normal';
+
+      if (mode === 'verified-preparation-failure' && !verifiedPreparationFailureSessions.has(snapshot.sessionId)) {
+        verifiedPreparationFailureSessions.add(snapshot.sessionId);
+        throw new AgentSessionPreparationError('Fixture provider CLI is unavailable.', true);
+      }
 
       if (mode === 'hold-until-abort') {
         blockedPreparationEntered = true;
@@ -496,6 +504,41 @@ try {
       identities.push({ label, role, pid, pgid });
     }
   }
+
+  const verifiedPreparationSession = await createSession('Verified provider preflight failure retry');
+  const verifiedPreparationPreview = await previewSession(verifiedPreparationSession, 'verified-preparation-failure');
+  await assert.rejects(
+    service.start({ projectId: project.id, sessionId: verifiedPreparationSession.id, ticketId: verifiedPreparationPreview.ticketId }),
+    /provider failed to start/i,
+  );
+  const verifiedPreparationFailedTurn = serviceDatabase.agentSessionTurns.listTurns(project.id, verifiedPreparationSession.id)[0];
+  assert.equal(verifiedPreparationFailedTurn.state, 'failed');
+  assert.equal(verifiedPreparationFailedTurn.cleanupVerified, true, 'A trusted pre-PTY rejection with no resources must release the workspace.');
+  assert.equal(turnIdentities.has(verifiedPreparationFailedTurn.id), false, 'A verified preflight rejection must not create a PTY identity.');
+  const verifiedPreparationRetryPreview = await previewSession(verifiedPreparationSession, 'normal');
+  const verifiedPreparationRetryTurn = await service.start({ projectId: project.id, sessionId: verifiedPreparationSession.id, ticketId: verifiedPreparationRetryPreview.ticketId });
+  const verifiedPreparationRetryStopped = await service.stop(project.id, verifiedPreparationSession.id, verifiedPreparationRetryTurn.id);
+  assert.equal(verifiedPreparationRetryStopped.cleanupVerified, true, 'A verified pre-PTY failure must allow a later turn in the same workspace.');
+  receipt.checks.push('verified pre-PTY provider failure records cleanly and allows a later turn in the same workspace');
+
+  const unknownPreparationFactory = new AgentSessionPtyRuntimeFactory({
+    guardianNodeExecutable: nodeExecutable,
+    guardianScriptPath,
+    prepareLaunch: async () => { throw new Error('Fixture unknown preparer failure.'); },
+  });
+  const unknownSnapshot = { provider: 'codex', sessionId: 'unknown-preparation-fixture' };
+  let unknownPreparationHandle;
+  await assert.rejects(
+    unknownPreparationFactory.start(unknownSnapshot, 'unknown-preparation-turn', new AbortController().signal),
+    error => {
+      assert.ok(error instanceof AgentSessionRuntimeStartError);
+      assert.equal(error.cleanupVerified, false, 'An unclassified preparer rejection must remain unverified.');
+      unknownPreparationHandle = error.recoveryHandle;
+      return Boolean(unknownPreparationHandle);
+    },
+  );
+  assert.equal((await unknownPreparationFactory.stop(unknownPreparationHandle)).cleanupVerified, false, 'Unknown preparation failures must retain a blocking recovery handle.');
+  receipt.checks.push('unknown preparation failure remains cleanup-unverified and retains its runtime handle');
 
   const naturalSession = await createSession('Service natural exit');
   const naturalPreview = await previewSession(naturalSession);

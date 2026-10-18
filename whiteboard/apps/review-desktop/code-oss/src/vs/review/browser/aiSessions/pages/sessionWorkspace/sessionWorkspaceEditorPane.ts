@@ -5,6 +5,7 @@ import { ipcRenderer } from '../../../../../base/parts/sandbox/electron-browser/
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
+import type { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../../../workbench/browser/parts/editor/editorPane.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../../../workbench/browser/editor.js';
 import { Registry } from '../../../../../platform/registry/common/platform.js';
@@ -23,7 +24,7 @@ import { Emitter } from '../../../../../base/common/event.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../../workbench/common/contributions.js';
 import { ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
-import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTurnDTO, CreateAgentSessionInput } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTurnDTO, CreateAgentSessionInput, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDashboardDTO, WorkspaceDashboardTaskItemDTO } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
@@ -59,6 +60,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private dashboard: WorkspaceDashboardDTO | undefined;
 	private sessions: readonly AgentSessionDTO[] = [];
 	private turns = new Map<string, readonly AgentSessionTurnDTO[]>();
+	private readonly workspacePreparations = new Map<string, WorkspaceAgentSessionWorkspacePreparationDTO>();
 	private selectedSessionId: string | undefined;
 	private activeTab: AgentSessionViewTab = 'terminal';
 	private loading = false;
@@ -105,7 +107,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.updateLifecyclePolling();
 	}
 
-	override async setInput(input: AgentSessionWorkspaceEditorInput, options: unknown, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+	override async setInput(input: AgentSessionWorkspaceEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		if (this.environment.reviewWindowLaunch.kind !== 'project' || this.environment.reviewWindowLaunch.projectId !== input.projectId) {
 			this.error = '현재 프로젝트 창과 세션 편집기의 프로젝트가 일치하지 않습니다.';
@@ -126,6 +128,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.terminalController = new SessionTerminalController(input.projectId, this.terminalService, message => this.showError(message));
 			this.selectedSessionId = undefined;
 			this.turns.clear();
+			this.workspacePreparations.clear();
 			this.loadTabPreference();
 		}
 		await this.load();
@@ -152,7 +155,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			}
 			if (this.selectedSessionId) {
 				persistSessionSelection(this.projectId, this.selectedSessionId);
-				await this.loadTurns(this.selectedSessionId);
+				await Promise.all([this.loadTurns(this.selectedSessionId), this.loadWorkspacePreparation(this.selectedSessionId)]);
 			}
 			this.notice = undefined;
 		} catch (error) {
@@ -163,6 +166,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private async loadTurns(sessionId: string): Promise<void> {
 		if (!this.projectId) return;
 		this.turns.set(sessionId, await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listTurns', { projectId: this.projectId, sessionId }) as readonly AgentSessionTurnDTO[]);
+	}
+
+	private async loadWorkspacePreparation(sessionId: string): Promise<void> {
+		if (!this.projectId) return;
+		const status = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'workspacePreparation', { projectId: this.projectId, sessionId }) as WorkspaceAgentSessionWorkspacePreparationDTO;
+		if (status.projectId !== this.projectId || status.sessionId !== sessionId) { throw new Error('작업공간 상태가 현재 프로젝트 세션과 일치하지 않습니다.'); }
+		this.workspacePreparations.set(sessionId, status);
 	}
 
 	private selectSession(sessionId: string): void {
@@ -180,7 +190,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 				: this.root?.querySelector<HTMLElement>('.ai-session__narrow-selector select');
 			selected?.focus({ preventScroll: true });
 		});
-		void this.loadTurns(sessionId).then(() => this.render()).catch(error => this.showError(this.errorMessage(error, '세션 실행 기록을 불러오지 못했습니다.')));
+		void Promise.all([this.loadTurns(sessionId), this.loadWorkspacePreparation(sessionId)]).then(() => this.render()).catch(error => this.showError(this.errorMessage(error, '세션 정보를 불러오지 못했습니다.')));
 	}
 
 	private async createSession(draft: CreateDraft): Promise<void> {
@@ -204,13 +214,24 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.creating = false;
 		} catch (error) { this.error = this.errorMessage(error, '세션을 만들지 못했습니다.'); }
 		finally { this.operation = false; this.render(); }
-		if (createdSessionId) await this.prepareLaunch(createdSessionId);
+		if (createdSessionId) {
+			try { await this.loadWorkspacePreparation(createdSessionId); }
+			catch (error) { this.error = this.errorMessage(error, '작업공간 상태를 확인하지 못했습니다.'); this.render(); return; }
+			if (this.workspacePreparations.get(createdSessionId)?.state === 'ready') { await this.prepareLaunch(createdSessionId); }
+			else { this.notice = '세션은 저장했습니다. 작업공간 상태를 확인한 뒤 같은 세션에서 다시 준비할 수 있습니다.'; this.render(); }
+		}
 	}
 
 	private async prepareLaunch(sessionId = this.selectedSessionId): Promise<void> {
 		if (!this.projectId || !sessionId || this.operation) return;
 		this.operation = true; this.error = undefined; this.preview = undefined; this.previewSessionId = undefined; this.render();
 		try {
+			await this.loadWorkspacePreparation(sessionId);
+			const workspace = this.workspacePreparations.get(sessionId);
+			if (workspace?.state !== 'ready') {
+				this.error = workspace?.reason ?? '작업공간 준비가 완료되지 않았습니다. 상태를 확인하고 다시 준비해 주세요.';
+				return;
+			}
 			const permissionMode = this.sessionPermissionModes.get(sessionId) ?? 'read-only';
 			const permissionPolicy: AgentSessionPermissionPolicy = permissionMode === 'read-only'
 				? { mode: 'read-only', approval: 'never' }
@@ -220,6 +241,19 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.notice = '실행 전에 작업 폴더와 권한 범위를 확인해 주세요.';
 			requestAnimationFrame(() => this.root?.querySelector<HTMLButtonElement>('#ai-session-preview-start')?.focus({ preventScroll: true }));
 		} catch (error) { this.error = this.errorMessage(error, '실행 미리보기를 만들지 못했습니다.'); }
+		finally { this.operation = false; this.render(); }
+	}
+
+	private async retryWorkspacePreparation(sessionId: string): Promise<void> {
+		if (!this.projectId || sessionId !== this.selectedSessionId || this.operation) return;
+		this.operation = true; this.error = undefined; this.notice = undefined; this.render();
+		try {
+			const status = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'prepareWorkspace', { projectId: this.projectId, sessionId }) as WorkspaceAgentSessionWorkspacePreparationDTO;
+			if (status.projectId !== this.projectId || status.sessionId !== sessionId) { throw new Error('작업공간 준비 결과가 현재 프로젝트 세션과 일치하지 않습니다.'); }
+			this.workspacePreparations.set(sessionId, status);
+			if (status.state === 'ready') { this.notice = '기존 세션의 작업공간을 확인했습니다. 실행 범위를 검토해 주세요.'; }
+			else { this.error = status.reason ?? (status.state === 'recoveryRequired' ? '보존된 작업공간에 복구가 필요합니다.' : '작업공간을 아직 준비하지 못했습니다.'); }
+		} catch (error) { this.error = this.errorMessage(error, '작업공간을 준비하지 못했습니다.'); }
 		finally { this.operation = false; this.render(); }
 	}
 
@@ -310,6 +344,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 				const session = this.sessions.find(item => item.id === this.selectedSessionId);
 				if (session) {
 					const turn = this.latestTurn(session.id);
+					const workspace = this.workspacePreparations.get(session.id);
+					if (session.workspaceMode === 'gitWorktree' && workspace) { this.renderWorkspacePreparation(main, workspace); }
 					const rendered = renderSessionDetail(main, session, turn, this.activeTab, {
 						onStart: () => void this.prepareLaunch(session.id),
 						onStop: () => void this.stopTurn(), onTab: tab => this.setTab(tab),
@@ -387,6 +423,38 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (terminalController) void terminalController.show(container, session.id, turn).catch(error => this.showError(this.errorMessage(error, '세션 터미널에 연결하지 못했습니다.')));
 	}
 
+	private renderWorkspacePreparation(parent: HTMLElement, status: WorkspaceAgentSessionWorkspacePreparationDTO): void {
+		const section = document.createElement('section');
+		section.className = 'ai-session__state';
+		section.setAttribute('aria-labelledby', 'ai-session-workspace-preparation-title');
+		const title = document.createElement('h2');
+		title.id = 'ai-session-workspace-preparation-title';
+		title.textContent = status.state === 'ready' ? '작업공간 준비 완료' : status.state === 'needsPreparation' ? '작업공간 준비가 필요합니다' : '작업공간 복구가 필요합니다';
+		section.appendChild(title);
+		if (status.state === 'ready') {
+			const detail = document.createElement('p');
+			detail.textContent = `경로 · ${status.worktreePath ?? '경로 확인 불가'}${status.branch ? ` · 브랜치 ${status.branch}` : ''}`;
+			section.appendChild(detail);
+		} else {
+			const reason = document.createElement('p');
+			reason.textContent = status.reason ?? (status.state === 'recoveryRequired' ? '보존된 경로와 브랜치를 확인하고 복구해야 합니다.' : '같은 세션에서 작업공간을 다시 준비할 수 있습니다.');
+			section.appendChild(reason);
+			if (status.worktreePath || status.branch) {
+				const retained = document.createElement('p');
+				retained.textContent = `보존된 위치 · ${status.worktreePath ?? '확인할 수 없음'}${status.branch ? ` · 브랜치 ${status.branch}` : ''}`;
+				section.appendChild(retained);
+			}
+			if (status.state === 'needsPreparation') {
+				const actions = document.createElement('div'); actions.className = 'ai-session__form-actions';
+				const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'ai-session__secondary';
+				retry.disabled = this.operation; retry.textContent = '같은 세션에서 작업공간 다시 준비';
+				retry.addEventListener('click', () => void this.retryWorkspacePreparation(status.sessionId));
+				actions.appendChild(retry); section.appendChild(actions);
+			}
+		}
+		parent.prepend(section);
+	}
+
 	private renderCreateForm(parent: HTMLElement, tasks: readonly WorkspaceDashboardTaskItemDTO[]): void {
 		const section = document.createElement('section'); section.className = 'ai-session__create';
 		const title = document.createElement('h1'); title.textContent = this.sessions.length ? '새 AI 세션' : '프로젝트 첫 AI 세션';
@@ -438,17 +506,21 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const list = document.createElement('dl'); list.className = 'ai-session__preview-list';
 		for (const [label, value] of [
 			['공급자와 모델', `${snapshot.provider === 'codex' ? 'Codex' : 'Claude'} · ${snapshot.model}`],
-			['작업 폴더', snapshot.cwd], ['권한', snapshot.permissionPolicy.mode === 'read-only' ? '읽기 전용' : '파일 수정 · 요청 시 승인'],
+			['작업 폴더', snapshot.cwd], ['권한', snapshot.permissionPolicy.mode === 'read-only' ? '파일 도구 읽기 전용' : '파일 수정 · 요청 시 승인'],
 			['규칙 스냅샷', snapshot.convention ? `연결됨 · ${snapshot.convention.sha256.slice(0, 12)}` : '연결 없음'],
 			['참고 자료', snapshot.references.length ? `${snapshot.references.length}개 연결됨` : '연결 없음'],
 			['계정 프로필', snapshot.profileRef ?? '기본 로컬 프로필'],
 		] as const) { const dt = document.createElement('dt'); dt.textContent = label; const dd = document.createElement('dd'); dd.textContent = value; list.append(dt, dd); }
 		const expiry = new Date(preview.expiresAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 		const note = document.createElement('p'); note.className = 'ai-session__field-help'; note.textContent = `실행 후 비용이 발생할 수 있습니다. 위 스냅샷은 ${expiry}까지 유효합니다.`;
+		const mcpScope = document.createElement('p'); mcpScope.className = 'ai-session__field-help';
+		mcpScope.textContent = snapshot.provider === 'codex'
+			? '앱의 MCP 권한은 이 프로젝트와 세션에 적용됩니다. Codex의 기존 MCP 도구는 프로필 설정을 따르며, 파일 및 외부 서비스 접근 범위는 별도로 적용됩니다.'
+			: '앱의 MCP 권한은 이 프로젝트와 세션에 적용됩니다. 파일 도구의 읽기 전용 설정은 기존 프로필 도구와 외부 서비스 접근 범위를 제한하지 않습니다.';
 		const actions = document.createElement('div'); actions.className = 'ai-session__form-actions';
 		const start = document.createElement('button'); start.id = 'ai-session-preview-start'; start.type = 'button'; start.className = 'ai-session__primary'; start.disabled = this.operation; start.textContent = '확인하고 실행'; start.addEventListener('click', () => void this.startPreviewedTurn());
 		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.preview = undefined; this.previewSessionId = undefined; this.render(); });
-		actions.append(start, cancel); section.append(title, list, note, actions); parent.appendChild(section);
+		actions.append(start, cancel); section.append(title, list, note, mcpScope, actions); parent.appendChild(section);
 	}
 
 	private renderEmpty(parent: HTMLElement, canCreate: boolean): void {
@@ -478,7 +550,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	override clearInput(): void {
 		this.terminalController?.dispose(); this.terminalController = undefined;
 		if (this.lifecycleTimer) clearInterval(this.lifecycleTimer);
-		this.lifecycleTimer = undefined; this.projectId = undefined; this.dashboard = undefined; this.sessions = []; this.turns.clear(); this.selectedSessionId = undefined; this.preview = undefined; this.previewSessionId = undefined; this.creating = false; this.sessionPermissionModes.clear(); this.createPermissionMode = 'read-only'; this.error = undefined; this.notice = undefined;
+		this.lifecycleTimer = undefined; this.projectId = undefined; this.dashboard = undefined; this.sessions = []; this.turns.clear(); this.workspacePreparations.clear(); this.selectedSessionId = undefined; this.preview = undefined; this.previewSessionId = undefined; this.creating = false; this.sessionPermissionModes.clear(); this.createPermissionMode = 'read-only'; this.error = undefined; this.notice = undefined;
 		if (this.root) this.root.replaceChildren();
 		super.clearInput();
 	}

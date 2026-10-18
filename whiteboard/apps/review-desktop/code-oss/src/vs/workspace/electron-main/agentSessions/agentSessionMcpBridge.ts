@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
 import { AgentSessionCollaborationService, type AgentSessionCollaborationGrant } from './agentSessionCollaborationService.js';
+import { AgentSessionPreparationError, type AgentSessionPreparationRecovery } from './agentSessionPreparationError.js';
 
 export const AGENT_SESSION_MCP_GATEWAY_MODULE = 'agentSessionMcpGateway.mjs';
 export const AGENT_SESSION_MCP_TOKEN_ENV = 'BUGFIXER_SESSION_MCP_TOKEN';
@@ -41,13 +42,21 @@ export interface AgentSessionMcpAccess {
 	releasePrivateConfig(): Promise<void>;
 }
 
+export interface AgentSessionMcpBridgeOptions {
+	/** Trusted app temp root; injectable to isolate setup and cleanup in focused tests. */
+	readonly temporaryDirectory?: string;
+	readonly chmod?: typeof chmodSync;
+	readonly unlink?: typeof unlink;
+	readonly rmdir?: typeof rmdir;
+}
+
 interface ActiveRequest {
 	readonly controller: AbortController;
 }
 
 /** Main-process capability broker. It owns a private Unix socket and no process handles. */
 export class AgentSessionMcpBridge {
-	constructor(private readonly collaboration: AgentSessionCollaborationService) { }
+	constructor(private readonly collaboration: AgentSessionCollaborationService, private readonly options: AgentSessionMcpBridgeOptions = {}) { }
 
 	async issueAccess(input: AgentSessionMcpAccessInput): Promise<AgentSessionMcpAccess> {
 		assertUuid(input.projectId, 'project ID');
@@ -66,61 +75,87 @@ export class AgentSessionMcpBridge {
 		});
 		const tokenDigest = createHash('sha256').update(token, 'utf8').digest();
 		let active = true;
-		let released = false;
+		let grantRevoked = false;
+		let serverClosed = false;
+		let socketRemoved = false;
+		let directoryRemoved = false;
 		let closePromise: Promise<void> | undefined;
 		const sockets = new Set<Socket>();
 		let privateDirectory: string | undefined;
 		let socketPath: string | undefined;
 		let server: Server | undefined;
+		let asynchronousServerFailure: unknown;
+		const revokeAccess = () => {
+			active = false;
+			const failures: unknown[] = [];
+			if (!grantRevoked) {
+				try { this.collaboration.revoke(grant); grantRevoked = true; } catch (error) { failures.push(error); }
+			}
+			for (const socket of sockets) {
+				try { socket.destroy(); } catch (error) { failures.push(error); }
+			}
+			sockets.clear();
+			if (asynchronousServerFailure !== undefined) {
+				failures.push(asynchronousServerFailure);
+				asynchronousServerFailure = undefined;
+			}
+			if (failures.length) { throw new AggregateError(failures, 'Session MCP access revocation could not be verified.'); }
+		};
+		const cleanupOwnedResources = async () => {
+			const failures: unknown[] = [];
+			if (server && !serverClosed) {
+				closePromise ??= closeServer(server);
+				try { await closePromise; serverClosed = true; }
+				catch (error) { closePromise = undefined; failures.push(error); }
+			}
+			if (socketPath && !socketRemoved) {
+				try { await (this.options.unlink ?? unlink)(socketPath); socketRemoved = true; }
+				catch (error) { if (isMissingFile(error)) { socketRemoved = true; } else { failures.push(error); } }
+			}
+			if (privateDirectory && !directoryRemoved) {
+				try { await (this.options.rmdir ?? rmdir)(privateDirectory); directoryRemoved = true; }
+				catch (error) { if (isMissingFile(error)) { directoryRemoved = true; } else { failures.push(error); } }
+			}
+			if (failures.length) { throw new AggregateError(failures, 'Session MCP private resources could not be released.'); }
+		};
+		const releasePrivateConfig = async () => {
+			if (!grantRevoked) { throw new Error('Session MCP access must be revoked before private configuration is released.'); }
+			await cleanupOwnedResources();
+		};
 		try {
-			privateDirectory = mkdtempSync(join(tmpdir(), 'bugfixer-session-mcp-'));
+			privateDirectory = mkdtempSync(join(this.options.temporaryDirectory ?? tmpdir(), 'bugfixer-session-mcp-'));
 			socketPath = join(privateDirectory, 'bridge.sock');
 			server = createServer(socket => acceptSocket(socket, grant, tokenDigest, this.collaboration, sockets, () => active));
 			server.maxConnections = MAX_CONNECTIONS;
-			server.on('error', () => {
+			server.on('error', error => {
 				if (!active) { return; }
-				active = false;
-				this.collaboration.revoke(grant);
-				for (const socket of sockets) { socket.destroy(); }
-				sockets.clear();
+				try { revokeAccess(); } catch (revokeError) { asynchronousServerFailure = new AggregateError([error, revokeError], 'Session MCP server failed and access revocation needs retry.'); }
 			});
 			await listen(server, socketPath);
-			chmodSync(privateDirectory, 0o700);
-			chmodSync(socketPath, 0o600);
+			(this.options.chmod ?? chmodSync)(privateDirectory, 0o700);
+			(this.options.chmod ?? chmodSync)(socketPath, 0o600);
 		} catch (error) {
-			active = false;
-			this.collaboration.revoke(grant);
 			const cleanupErrors: unknown[] = [];
-			if (server) { try { await closeServer(server); } catch (cleanupError) { cleanupErrors.push(cleanupError); } }
-			if (socketPath) { try { await unlink(socketPath); } catch (cleanupError) { if (!isMissingFile(cleanupError)) { cleanupErrors.push(cleanupError); } } }
-			if (privateDirectory) { try { await rmdir(privateDirectory); } catch (cleanupError) { if (!isMissingFile(cleanupError)) { cleanupErrors.push(cleanupError); } } }
-			if (cleanupErrors.length) { throw new AggregateError([error, ...cleanupErrors], 'Session MCP launch setup failed and its private resources could not be fully released.'); }
-			throw error;
+			try { revokeAccess(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+			try { await cleanupOwnedResources(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+			if (cleanupErrors.length) {
+				const recovery: AgentSessionPreparationRecovery = { revokeAccess, releasePrivateConfig };
+				throw new AgentSessionPreparationError(
+					new AggregateError([error, ...cleanupErrors], 'Session MCP launch setup failed and its private resources could not be fully released.').message,
+					false,
+					recovery,
+				);
+			}
+			throw new AgentSessionPreparationError(error instanceof Error ? error.message : String(error), true);
 		}
 		const knownSecrets = Object.freeze([...new Set([...(input.knownSecrets ?? []), token].filter(Boolean))]);
-		const ownedServer = server!;
-		const ownedDirectory = privateDirectory!;
 		const ownedSocketPath = socketPath!;
 		return Object.freeze({
 			gatewayArguments: Object.freeze([ownedSocketPath]),
 			gatewayEnvironment: Object.freeze({ [AGENT_SESSION_MCP_TOKEN_ENV]: token }),
 			knownSecrets,
-			revokeAccess: () => {
-				if (!active) { return; }
-				active = false;
-				this.collaboration.revoke(grant);
-				for (const socket of sockets) { socket.destroy(); }
-				sockets.clear();
-			},
-			releasePrivateConfig: async () => {
-				if (released) { return; }
-				if (active) { throw new Error('Session MCP access must be revoked before private configuration is released.'); }
-				closePromise ??= closeServer(ownedServer);
-				await closePromise;
-				try { await unlink(ownedSocketPath); } catch (error) { if (!isMissingFile(error)) { throw error; } }
-				await rmdir(ownedDirectory);
-				released = true;
-			},
+			revokeAccess,
+			releasePrivateConfig,
 		});
 	}
 }

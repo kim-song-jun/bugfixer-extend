@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import test from 'node:test';
@@ -15,7 +15,7 @@ import { URI } from '../../base/common/uri.js';
 import type { ICodeWindow } from '../../platform/window/electron-main/window.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
 import type { IDisposable } from '../../base/common/lifecycle.js';
-import type { AgentSessionTurnSnapshot } from '../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionTranscriptPageDTO, AgentSessionTurnSnapshot, SessionNotificationDTO } from '../common/workspaceAgentSessionProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
@@ -139,7 +139,7 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		assert.equal(created.bindingId, project.binding.id);
 		assert.deepEqual(await channel.call(sender, 'listSessions', { projectId: project.project.id }), [created]);
 
-		database.agentSessions.createSession({
+		const otherSession = database.agentSessions.createSession({
 			projectId: otherProject.project.id, bindingId: otherProject.binding.id, name: 'Private', provider: 'claude',
 			model: 'sonnet', workspaceMode: 'sharedFolder',
 		});
@@ -153,6 +153,50 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		await assert.rejects(channel.call(sender, 'preview', {
 			projectId: project.project.id, sessionId: created.id, permissionPolicy: { mode: 'read-only', approval: 'never' },
 		}), /no trusted PTY backend/u);
+
+		const session = database.agentSessions.getSession(project.project.id, created.id)!;
+		const cwd = realpathSync(directory);
+		const identity = statSync(cwd, { bigint: true });
+		const snapshot: AgentSessionTurnSnapshot = {
+			schemaVersion: 1, projectId: project.project.id, sessionId: session.id, sessionRevision: session.revision,
+			bindingId: session.bindingId, taskId: session.taskId, provider: session.provider, model: session.model, profileRef: session.profileRef,
+			cwd, folderIdentity: { canonicalPath: cwd, dev: identity.dev.toString(), ino: identity.ino.toString() },
+			managedWorktreeOwnerId: session.id, permissionPolicy: { mode: 'read-only', approval: 'never' }, convention: null, references: [],
+		};
+		const turn = database.agentSessionTurns.createTurn({ projectId: project.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
+		database.agentSessionTranscripts.appendSanitizedTerminalChunk({ projectId: project.project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'sanitized terminal history\n' });
+		database.agentSessionTranscripts.appendStructuredLog({ projectId: project.project.id, sessionId: session.id, turnId: turn.id, sequence: 2, text: 'token=private-fixture-value', severity: 'info', source: 'host' });
+		const transcriptRequest = { projectId: project.project.id, sessionId: session.id, turnId: turn.id };
+		const page = await channel.call<AgentSessionTranscriptPageDTO>(sender, 'readTranscript', { ...transcriptRequest, options: { limit: 1 } });
+		assert.equal(page.entries[0].text, 'sanitized terminal history\n');
+		assert.equal(page.nextSequence, 1);
+		assert.equal(page.hasMore, true);
+		const logs = await channel.call<AgentSessionTranscriptPageDTO>(sender, 'readTranscript', { ...transcriptRequest, options: { kind: 'log', afterSequence: page.nextSequence } });
+		assert.equal(logs.entries.length, 1);
+		assert.equal(logs.entries[0].text, 'token=***');
+		await assert.rejects(channel.call(forgedSender, 'readTranscript', transcriptRequest), /open project window/u);
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, projectId: otherProject.project.id }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, sessionId: otherSession.id }), /does not belong/u);
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, options: { kind: 'raw' } }), /kind is invalid/u);
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, options: { maxOutputBytes: 8 * 1024 * 1024 } }), /byte budget/u);
+
+		const recipient = database.agentSessions.createSession({ projectId: project.project.id, bindingId: project.binding.id, name: 'Review', provider: 'claude', model: 'sonnet', workspaceMode: 'sharedFolder' });
+		const recipientTurn = database.agentSessionTurns.createTurn({
+			projectId: project.project.id, sessionId: recipient.id, expectedSessionRevision: recipient.revision,
+			snapshot: { ...snapshot, sessionId: recipient.id, sessionRevision: recipient.revision, provider: recipient.provider, model: recipient.model, profileRef: recipient.profileRef, managedWorktreeOwnerId: null },
+		});
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, turnId: recipientTurn.id }), /does not belong/u);
+		database.agentSessions.sendMessage(project.project.id, session.id, { recipientSessionId: recipient.id, idempotencyKey: 'channel-alert', body: 'Review ready.' });
+		const notifications = await channel.call<SessionNotificationDTO[]>(sender, 'listNotifications', { projectId: project.project.id });
+		assert.equal(notifications.length, 1);
+		assert.equal(notifications[0].sessionId, recipient.id);
+		assert.equal(notifications[0].readAt, null);
+		await channel.call(sender, 'markNotificationRead', { projectId: project.project.id, notificationId: notifications[0].id });
+		await channel.call(sender, 'markNotificationRead', { projectId: project.project.id, notificationId: notifications[0].id });
+		assert.ok((await channel.call<SessionNotificationDTO[]>(sender, 'listNotifications', { projectId: project.project.id }))[0].readAt);
+		await assert.rejects(channel.call(forgedSender, 'markNotificationRead', { projectId: project.project.id, notificationId: notifications[0].id }), /open project window/u);
+		await assert.rejects(channel.call(sender, 'listNotifications', { projectId: otherProject.project.id }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'markNotificationRead', { projectId: project.project.id, notificationId: randomUUID() }), /does not belong/u);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

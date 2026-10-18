@@ -123,6 +123,35 @@ export class ManagedWorktreeService {
 		return lease.pendingOperation ? this.reconcilePendingOperation(lease) : lease;
 	}
 
+	/** Inspects an existing session lease without reconciling or repairing it. */
+	async inspectOptional(ownerId: string, repositoryPath: string): Promise<ManagedWorktreeLease | undefined> {
+		this.validateOwnerId(ownerId);
+		if (existsSync(this.manifestPath(ownerId))) {
+			const lease = await this.readAndValidate(ownerId);
+			return lease.pendingOperation ? { ...lease, state: 'recoveryRequired' } : lease;
+		}
+		const canonicalRepository = realpathSync(repositoryPath);
+		if (realpathSync(await this.git(canonicalRepository, ['rev-parse', '--show-toplevel'])) !== canonicalRepository) {
+			throw new Error('The bound repository path is not its Git checkout root.');
+		}
+		const expectedPath = join(this.root, 'session', ownerId);
+		const expectedBranch = `bugfixer/session/${ownerId}`;
+		if (existsSync(expectedPath)) { throw new Error(`An unmanifested session worktree is retained at ${expectedPath}; explicit recovery is required.`); }
+		if (await this.git(canonicalRepository, ['branch', '--list', expectedBranch])) {
+			throw new Error(`The session branch ${expectedBranch} exists without its signed worktree manifest; explicit recovery is required.`);
+		}
+		const registrations = await this.git(canonicalRepository, ['worktree', 'list', '--porcelain']);
+		if (registrations.includes(`worktree ${expectedPath}\n`)) {
+			throw new Error(`Git still registers ${expectedPath} without its signed worktree manifest; explicit recovery is required.`);
+		}
+		return undefined;
+	}
+
+	expectedLocation(ownerId: string, kind: 'session' | 'integration'): { readonly worktreePath: string; readonly branch: string } {
+		this.validateOwnerId(ownerId);
+		return Object.freeze({ worktreePath: join(this.root, kind, ownerId), branch: `bugfixer/${kind}/${ownerId}` });
+	}
+
 	async previewMerge(input: { integrationOwnerId: string; sessionOwnerId: string }): Promise<MergePreview> {
 		const integration = await this.readAndValidate(input.integrationOwnerId);
 		const session = await this.readAndValidate(input.sessionOwnerId);

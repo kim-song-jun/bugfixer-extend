@@ -14,6 +14,7 @@ import type { WorkspaceE2eStep } from '../common/workspaceE2eProtocol.js';
 import type { WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKnowledgeProtocol.js';
 import { AgentSessionStore } from './agentSessions/agentSessionStore.js';
 import { AgentSessionTurnStore } from './agentSessions/agentSessionTurnStore.js';
+import { AgentSessionTranscriptStore } from './agentSessions/agentSessionTranscriptStore.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -301,7 +302,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 23;
+const schemaVersion = 24;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -313,11 +314,13 @@ export class WorkspaceDatabase {
 	readonly knowledge: WorkspaceKnowledgeStore;
 	readonly agentSessions: AgentSessionStore;
 	readonly agentSessionTurns: AgentSessionTurnStore;
+	readonly agentSessionTranscripts: AgentSessionTranscriptStore;
 
 	private constructor(private readonly db: DatabaseSync) {
 		this.knowledge = new WorkspaceKnowledgeStore(db, () => this.assertOpen());
 		this.agentSessions = new AgentSessionStore(db, () => this.assertOpen());
 		this.agentSessionTurns = new AgentSessionTurnStore(db, () => this.assertOpen(), this.agentSessions);
+		this.agentSessionTranscripts = new AgentSessionTranscriptStore(db, () => this.assertOpen());
 	}
 
 	static open(path: string): WorkspaceDatabase {
@@ -367,6 +370,7 @@ export class WorkspaceDatabase {
 				if (version < 21) { WorkspaceDatabase.migrateV21(db); }
 				if (version < 22) { WorkspaceDatabase.migrateV22(db); }
 				if (version < 23) { WorkspaceDatabase.migrateV23(db); }
+				if (version < 24) { WorkspaceDatabase.migrateV24(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -922,6 +926,42 @@ export class WorkspaceDatabase {
 			CREATE TRIGGER agent_session_turn_immutable_delete BEFORE DELETE ON agent_session_turns
 			BEGIN SELECT RAISE(ABORT, 'agent session turn history is immutable'); END;
 			PRAGMA user_version = 23;
+		`);
+	}
+
+	private static migrateV24(db: DatabaseSync): void {
+		db.exec(`
+			CREATE TABLE agent_session_transcript_cursors (
+				turn_id TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				highest_sequence INTEGER NOT NULL DEFAULT 0 CHECK (highest_sequence >= 0),
+				first_retained_sequence INTEGER CHECK (first_retained_sequence IS NULL OR first_retained_sequence > 0),
+				evicted_through_sequence INTEGER NOT NULL DEFAULT 0 CHECK (evicted_through_sequence >= 0),
+				retained_bytes INTEGER NOT NULL DEFAULT 0 CHECK (retained_bytes >= 0),
+				retained_count INTEGER NOT NULL DEFAULT 0 CHECK (retained_count >= 0),
+				UNIQUE (turn_id, project_id, session_id),
+				FOREIGN KEY (turn_id, project_id, session_id) REFERENCES agent_session_turns(id, project_id, session_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE TABLE agent_session_transcript_entries (
+				turn_id TEXT NOT NULL,
+				project_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				sequence INTEGER NOT NULL CHECK (sequence > 0),
+				kind TEXT NOT NULL CHECK (kind IN ('terminal', 'log')),
+				text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 262144),
+				content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'),
+				byte_length INTEGER NOT NULL CHECK (byte_length BETWEEN 0 AND 262144),
+				severity TEXT CHECK (severity IN ('debug', 'info', 'warning', 'error') OR severity IS NULL),
+				source TEXT CHECK (source IN ('pty', 'provider', 'host', 'workspace') OR source IS NULL),
+				references_json TEXT NOT NULL CHECK (json_valid(references_json) AND length(CAST(references_json AS BLOB)) <= 4096),
+				created_at TEXT NOT NULL,
+				PRIMARY KEY (turn_id, sequence),
+				CHECK ((kind = 'terminal' AND severity IS NULL AND source IS NULL) OR (kind = 'log' AND severity IS NOT NULL AND source IS NOT NULL)),
+				FOREIGN KEY (turn_id, project_id, session_id) REFERENCES agent_session_transcript_cursors(turn_id, project_id, session_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE INDEX agent_session_transcript_page ON agent_session_transcript_entries(project_id, session_id, turn_id, sequence);
+			PRAGMA user_version = 24;
 		`);
 	}
 

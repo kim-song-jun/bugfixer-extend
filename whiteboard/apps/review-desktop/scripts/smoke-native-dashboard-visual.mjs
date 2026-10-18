@@ -1196,6 +1196,8 @@ try {
       assert.equal(await page.locator('[data-focus-key="task-state:inProgress"]').getAttribute('aria-pressed'), 'true', 'Keyboard action must persist the selected task state');
 
       assert.equal(await page.evaluate(() => document.activeElement?.id), 'project-task-state-heading', 'Task state mutation must return focus to its heading');
+
+      fixture.aiSession = await verifyAiSessionWorkspace(page, tag, screenshots, viewports);
     } catch (error) {
 
       await captureFailure(session.page, path.join(output, `dashboard-${tag}-failure.png`), diagnostics);
@@ -1210,6 +1212,13 @@ try {
     try {
 
       fixture.finalState = persistedDatabase.getTask(fixture.taskId)?.state;
+
+      const aiSession = persistedDatabase.agentSessions.listSessions(fixture.projectId).find(item => item.name === fixture.aiSession.name);
+
+      assert.ok(aiSession, 'The UI-created AI session must persist in workspace.db');
+      assert.equal(aiSession.model, fixture.aiSession.model);
+      assert.equal(aiSession.state, 'created', 'Preparing a session must not launch a provider');
+      assert.equal(persistedDatabase.agentSessionTurns.listTurns(fixture.projectId, aiSession.id).length, 0, 'Visual QA must not create a paid provider turn');
     } finally {
       persistedDatabase.close();
     }
@@ -1241,6 +1250,84 @@ assert.deepEqual(diagnostics.console, [], 'Unexpected renderer console errors');
 assert.deepEqual(diagnostics.failedRequests, [], 'Unexpected failed network requests');
 
 console.log(`Native dashboard smoke captured ${diagnostics.pageErrors.length} runtime errors, ${diagnostics.console.length} console errors, ${diagnostics.canceledThemeLoads.length} recovered theme cancellations, and ${diagnostics.failedRequests.length} failed requests.`);
+
+async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
+  if (!(await sidebar.isVisible())) {
+    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+  }
+
+  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+
+  const workspace = page.locator('.ai-session-workspace');
+
+  await workspace.getByRole('heading', { name: '프로젝트 첫 AI 세션', exact: true }).waitFor();
+
+  const emptyScreenshot = path.join(output, `ai-sessions-${tag}-empty-desktop.png`);
+
+  await capturePage(page, emptyScreenshot);
+  screenshots.push(emptyScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-empty', width: 1440, height: 900, screenshot: emptyScreenshot });
+
+  const name = `검수용 ${tag} Codex 세션`;
+  const model = 'ci-fixture-not-executed';
+
+  await workspace.getByRole('textbox', { name: '세션 이름', exact: true }).fill(name);
+  await workspace.getByRole('textbox', { name: '모델 ID', exact: true }).fill(model);
+  await workspace.getByRole('button', { name: '세션 만들고 실행 미리보기', exact: true }).click();
+  await workspace.locator('.ai-session__preview').waitFor();
+  await workspace.getByRole('heading', { name, exact: true }).waitFor();
+
+  assert.ok((await workspace.locator('.ai-session__preview').innerText()).includes(model), 'The preview must show the exact selected model ID');
+
+  const selectedScreenshot = path.join(output, `ai-sessions-${tag}-selected-desktop.png`);
+
+  await capturePage(page, selectedScreenshot);
+  screenshots.push(selectedScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-preview', width: 1440, height: 900, screenshot: selectedScreenshot });
+  await page.setViewportSize({ width: 760, height: 820 });
+
+  const compact = workspace.locator('.ai-session__narrow-toolbar');
+
+  await compact.waitFor({ state: 'visible' });
+
+  const create = compact.getByRole('button', { name: '새 AI 세션 만들기', exact: true });
+
+  await create.focus();
+  await page.keyboard.press('Enter');
+  await workspace.getByRole('heading', { name: '새 AI 세션', exact: true }).waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute('name') === 'name');
+
+  const scrollBounds = await workspace.evaluate(element => {
+    element.scrollTop = element.scrollHeight;
+
+    const action = element.querySelector('.ai-session__create-form button[type="submit"]');
+    const bounds = action?.getBoundingClientRect();
+    const viewport = element.getBoundingClientRect();
+
+    return { actionBottom: bounds?.bottom, viewportBottom: viewport.bottom, overflow: element.scrollWidth > element.clientWidth + 1 };
+  });
+
+  assert.equal(scrollBounds.overflow, false, 'The narrow AI session workspace must not overflow horizontally');
+  assert.ok(Number.isFinite(scrollBounds.actionBottom) && scrollBounds.actionBottom <= scrollBounds.viewportBottom + 1, 'The final create action must remain reachable at scroll end');
+
+  const narrowScreenshot = path.join(output, `ai-sessions-${tag}-create-narrow-760.png`);
+
+  await capturePage(page, narrowScreenshot);
+  screenshots.push(narrowScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-create-narrow', width: 760, height: 820, screenshot: narrowScreenshot, scrollBounds });
+  await workspace.locator('.ai-session__create-form').getByRole('button', { name: '취소', exact: true }).click();
+  await workspace.getByRole('tab', { name: '터미널', exact: true }).focus();
+  await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(() => document.activeElement?.id === 'ai-session-tab-changes');
+
+  assert.equal(await workspace.getByRole('tab', { name: '변경 내역', exact: true }).getAttribute('aria-selected'), 'true');
+
+  return { name, model };
+}
 
 async function dismissStartupInvitations(page) {
 

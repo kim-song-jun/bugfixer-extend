@@ -1,11 +1,11 @@
-import { Disposable, DisposableStore, toDisposable } from '../../../../../../base/common/lifecycle.js';
-import { URI } from '../../../../../../base/common/uri.js';
-import { ipcRenderer } from '../../../../../../base/parts/sandbox/electron-browser/globals.js';
-import { ProcessPropertyType, type IProcessPropertyMap, type IProcessReadyEvent, type ITerminalChildProcess } from '../../../../../../platform/terminal/common/terminal.js';
-import type { AgentSessionTurnDTO } from '../../../../../../workspace/common/workspaceAgentSessionProtocol.js';
-import { WORKSPACE_AGENT_SESSIONS_CHANNEL, WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT, type WorkspaceAgentSessionOutputEvent } from '../../../../../../workspace/common/workspaceAgentSessionProtocol.js';
-import { ITerminalService, type ITerminalInstance } from '../../../../../../workbench/contrib/terminal/browser/terminal.js';
-import { BasePty } from '../../../../../../workbench/contrib/terminal/common/basePty.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../../../base/common/lifecycle.js';
+import { URI } from '../../../../../base/common/uri.js';
+import { ipcRenderer } from '../../../../../base/parts/sandbox/electron-browser/globals.js';
+import { ProcessPropertyType, type IProcessPropertyMap, type IProcessReadyEvent, type ITerminalChildProcess } from '../../../../../platform/terminal/common/terminal.js';
+import type { AgentSessionTurnDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import { WORKSPACE_AGENT_SESSIONS_CHANNEL, WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT, type WorkspaceAgentSessionOutputEvent } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import { ITerminalService, type ITerminalInstance } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
+import { BasePty } from '../../../../../workbench/contrib/terminal/common/basePty.js';
 
 interface AttachmentResult {
 	readonly attachmentId: string;
@@ -25,6 +25,7 @@ export class SessionTerminalController extends Disposable {
 	private desiredKey: string | undefined;
 	private viewGeneration = 0;
 	private readonly maximumTerminals = 3;
+	private disposed = false;
 
 	constructor(private readonly projectId: string, private readonly terminalService: ITerminalService, private readonly onError: (message: string) => void) { super(); }
 
@@ -46,11 +47,11 @@ export class SessionTerminalController extends Disposable {
 			try {
 				record = await work.promise;
 			} catch (error) {
-				if (generation !== this.viewGeneration || this.desiredKey !== key || this.isDisposed) return;
+				if (generation !== this.viewGeneration || this.desiredKey !== key || this.disposed) return;
 				throw error;
 			}
 		}
-		if (generation !== this.viewGeneration || this.desiredKey !== key || this.isDisposed) return;
+		if (generation !== this.viewGeneration || this.desiredKey !== key || this.disposed) return;
 		record.lastUsed = Date.now();
 		this.attachedKey = key;
 		record.instance.attachToElement(container);
@@ -96,7 +97,7 @@ export class SessionTerminalController extends Disposable {
 			const record: TerminalRecord = { key, instance, lastUsed: Date.now() };
 			this.records.set(key, record);
 			this.trim(key);
-			if (this.desiredKey !== key || this.isDisposed) {
+			if (this.desiredKey !== key || this.disposed) {
 				if (this.records.get(key) === record) this.records.delete(key);
 				instance.dispose();
 				throw new Error('세션 터미널 요청이 취소되었습니다.');
@@ -147,6 +148,8 @@ export class SessionTerminalController extends Disposable {
 	}
 
 	override dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
 		this.hide();
 		for (const record of this.records.values()) record.instance.dispose();
 		this.records.clear();

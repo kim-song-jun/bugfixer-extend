@@ -1,4 +1,4 @@
-import type { AgentSessionDTO, AgentSessionState } from '../../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionDTO, AgentSessionState } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 
 export const agentSessionStateLabel: Readonly<Record<AgentSessionState, string>> = {
 	created: '준비', starting: '시작 중', running: '실행 중', waitingForInput: '입력 대기',

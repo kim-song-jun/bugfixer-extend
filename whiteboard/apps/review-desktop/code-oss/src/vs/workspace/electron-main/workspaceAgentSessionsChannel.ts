@@ -9,7 +9,10 @@ import { isUUID } from '../../base/common/uuid.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
 import type {
 	AgentSessionPermissionPolicy,
+	AgentSessionProvider,
+	AgentSessionTranscriptPageOptions,
 	CreateAgentSessionInput,
+	WorkspaceAgentSessionWorkspacePreparationDTO,
 	WorkspaceAgentSessionOutputEvent,
 } from '../common/workspaceAgentSessionProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT } from '../common/workspaceAgentSessionProtocol.js';
@@ -67,6 +70,10 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly database: WorkspaceDatabase,
 		private readonly windowsMainService: IWindowsMainService,
 		private readonly service?: AgentSessionService,
+		private readonly prepareCreatedSession?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
+		private readonly normalizeProfileRef?: (provider: AgentSessionProvider, profileRef: string | undefined) => string,
+		private readonly workspacePreparation?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
+		private readonly prepareWorkspace?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -77,13 +84,60 @@ export class WorkspaceAgentSessionsChannel {
 				return this.database.agentSessions.listSessions(projectId) as T;
 			}
 			case 'createSession': {
-				const request = this.parseCreate(arg, projectId);
-				return this.database.agentSessions.createSession(request) as T;
+				const parsed = this.parseCreate(arg, projectId);
+				const request = this.normalizeProfileRef ? { ...parsed, profileRef: this.normalizeProfileRef(parsed.provider, parsed.profileRef) } : parsed;
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const session = this.database.agentSessions.createSession(request);
+					if (this.prepareCreatedSession) { await this.prepareCreatedSession(projectId, session.id); }
+					this.assertScopeCurrent(scope);
+					return session as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'workspacePreparation': {
+				const request = this.parseSessionRequest(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const status = await this.requireWorkspacePreparationHook(this.workspacePreparation)(projectId, request.sessionId);
+					this.assertScopeCurrent(scope);
+					return status as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'prepareWorkspace': {
+				const request = this.parseSessionRequest(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const status = await this.requireWorkspacePreparationHook(this.prepareWorkspace)(projectId, request.sessionId);
+					this.assertScopeCurrent(scope);
+					return status as T;
+				} finally { this.finishScopedOperation(scope); }
 			}
 			case 'listTurns': {
 				const request = this.parseSessionRequest(arg, projectId);
 				this.requireSession(projectId, request.sessionId);
 				return this.database.agentSessionTurns.listTurns(projectId, request.sessionId) as T;
+			}
+			case 'readTranscript': {
+				const request = this.parseTurnRequest(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const options = this.parseTranscriptOptions(this.record(arg).options);
+				return this.database.agentSessionTranscripts.readPage(projectId, request.sessionId, request.turnId, options) as T;
+			}
+			case 'listNotifications': {
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				return this.database.agentSessions.listNotifications(projectId, {
+					afterSequence: request.afterSequence === undefined ? 0 : this.sequence(request.afterSequence, 'notification cursor'),
+					limit: request.limit === undefined ? 50 : this.integer(request.limit, 1, 100, 'notification page limit'),
+				}) as T;
+			}
+			case 'markNotificationRead': {
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				this.database.agentSessions.markNotificationRead(projectId, this.uuid(request.notificationId, 'notification ID'));
+				return undefined as T;
 			}
 			case 'preview': {
 				const request = this.parsePreview(arg, projectId);
@@ -280,6 +334,11 @@ export class WorkspaceAgentSessionsChannel {
 		return this.service;
 	}
 
+	private requireWorkspacePreparationHook(hook: ((projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>) | undefined): (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO> {
+		if (!hook) { throw new Error('Session workspace preparation is unavailable because no trusted worktree service is registered.'); }
+		return hook;
+	}
+
 	private requireSession(projectId: string, sessionId: string): void {
 		if (!this.database.agentSessions.getSession(projectId, sessionId)) { throw new Error('The session does not belong to this project.'); }
 	}
@@ -384,6 +443,21 @@ export class WorkspaceAgentSessionsChannel {
 		const raw = this.record(value);
 		const policy = this.parsePolicy(raw.permissionPolicy);
 		return { ...request, permissionPolicy: policy };
+	}
+
+	private parseTranscriptOptions(value: unknown): AgentSessionTranscriptPageOptions {
+		const raw = value === undefined ? {} : this.record(value);
+		if (raw.kind !== undefined && raw.kind !== 'terminal' && raw.kind !== 'log') { throw new Error('The transcript kind is invalid.'); }
+		if (raw.severity !== undefined && (typeof raw.severity !== 'string' || !['debug', 'info', 'warning', 'error'].includes(raw.severity))) { throw new Error('The transcript severity is invalid.'); }
+		if (raw.source !== undefined && (typeof raw.source !== 'string' || !['pty', 'provider', 'host', 'workspace'].includes(raw.source))) { throw new Error('The transcript source is invalid.'); }
+		return {
+			afterSequence: raw.afterSequence === undefined ? 0 : this.sequence(raw.afterSequence, 'transcript cursor'),
+			limit: raw.limit === undefined ? 50 : this.integer(raw.limit, 1, 100, 'transcript page limit'),
+			maxOutputBytes: raw.maxOutputBytes === undefined ? 512 * 1024 : this.integer(raw.maxOutputBytes, 256 * 1024, 2 * 1024 * 1024, 'transcript byte budget'),
+			...(raw.kind !== undefined ? { kind: raw.kind as AgentSessionTranscriptPageOptions['kind'] } : {}),
+			...(raw.severity !== undefined ? { severity: raw.severity as AgentSessionTranscriptPageOptions['severity'] } : {}),
+			...(raw.source !== undefined ? { source: raw.source as AgentSessionTranscriptPageOptions['source'] } : {}),
+		};
 	}
 
 	private parsePolicy(value: unknown): AgentSessionPermissionPolicy {

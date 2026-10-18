@@ -153,6 +153,10 @@ import { WorkspaceDashboardChannel } from '../../workspace/electron-main/workspa
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../workspace/common/workspaceDashboardProtocol.js';
 import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/workspaceProviderRunsChannel.js';
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspaceProviderRunProtocol.js';
+import { TaskFolderWriterLock } from '../../workspace/electron-main/providerRuns/taskFolderWriterLock.js';
+import { AgentSessionApplication } from '../../workspace/electron-main/agentSessions/agentSessionApplication.js';
+import { WorkspaceAgentSessionsChannel } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
+import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../workspace/common/workspaceAgentSessionProtocol.js';
 import { WorkspaceKnowledgeChannel } from '../../workspace/electron-main/workspaceKnowledgeChannel.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WorkspaceWebsiteChannel } from '../../workspace/electron-main/workspaceWebsiteChannel.js';
@@ -193,6 +197,7 @@ export class CodeApplication extends Disposable {
 	private startupProjectWindowOpener!: (projectId: string, initialStartup: boolean) => Promise<ICodeWindow[]>;
 	private reportProjectWindowRestoreFailure!: (projectId: string, error: unknown) => void;
 	private workspaceProviderRuns: WorkspaceProviderRunsChannel | undefined;
+	private agentSessionApplication: AgentSessionApplication | undefined;
 	private workspaceConventionAgent: WorkspaceConventionAgentChannel | undefined;
 	private workspaceEgoCapture: WorkspaceEgoCaptureChannel | undefined;
 	private workspaceE2e: WorkspaceE2eChannel | undefined;
@@ -223,6 +228,7 @@ export class CodeApplication extends Disposable {
 			try {
 				const results = await Promise.allSettled([
 					this.workspaceProviderRuns?.shutdown(),
+					this.agentSessionApplication?.shutdown(),
 					this.workspaceConventionAgent?.shutdown(),
 					this.workspaceEgoCapture?.shutdown(),
 					this.workspaceE2e?.shutdown(),
@@ -1522,12 +1528,28 @@ export class CodeApplication extends Disposable {
 					return providerRuns.reconcileTaskCleanup(taskId);
 				},
 			});
-			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, accessor.get(ILogService));
+			const taskFolderWriterLock = new TaskFolderWriterLock();
+			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, accessor.get(ILogService), taskFolderWriterLock);
+			const agentSessions = this.agentSessionApplication = new AgentSessionApplication(
+				this.workspaceDatabase, join(this.environmentMainService.userDataPath, 'agent-sessions'), taskFolderWriterLock, process.resourcesPath,
+			);
 			pendingTaskDeletionReplay = providerRuns.recoverPendingTaskDeletions();
 			validatedIpcMain.handle(WORKSPACE_DASHBOARD_CHANNEL, (event, command: string, arg: unknown) => dashboardChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
 			validatedIpcMain.handle(WORKSPACE_PROVIDER_RUNS_CHANNEL, (event, command: string, arg: unknown) => providerRuns.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_PROVIDER_RUNS_CHANNEL)));
+			const agentSessionsChannel = new WorkspaceAgentSessionsChannel(
+				this.workspaceDatabase, windowsMainService, agentSessions.service,
+				(projectId, sessionId) => agentSessions.prepareCreatedSession(projectId, sessionId),
+				(provider, profileRef) => agentSessions.normalizeProfileRef(provider, profileRef),
+				(projectId, sessionId) => agentSessions.workspacePreparation(projectId, sessionId),
+				(projectId, sessionId) => agentSessions.prepareWorkspace(projectId, sessionId),
+			);
+			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {
+				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Agent session IPC is only available to the application main frame.'); }
+				return agentSessionsChannel.call(event.sender, command, arg);
+			});
+			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_AGENT_SESSIONS_CHANNEL)));
 			const knowledgeChannel = new WorkspaceKnowledgeChannel(this.workspaceDatabase, dashboardChannel);
 			validatedIpcMain.handle(WORKSPACE_KNOWLEDGE_CHANNEL, (event, command: string, arg: unknown) => knowledgeChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_KNOWLEDGE_CHANNEL)));

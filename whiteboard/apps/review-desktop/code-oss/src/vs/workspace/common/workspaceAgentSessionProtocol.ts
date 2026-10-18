@@ -46,6 +46,16 @@ export interface AgentSessionDTO {
 	readonly updatedAt: string;
 }
 
+export interface WorkspaceAgentSessionWorkspacePreparationDTO {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly workspaceMode: AgentSessionWorkspaceMode;
+	readonly state: 'ready' | 'needsPreparation' | 'recoveryRequired';
+	readonly worktreePath: string | null;
+	readonly branch: string | null;
+	readonly reason: string | null;
+}
+
 export interface SendSessionMessageInput {
 	readonly recipientSessionId: string;
 	readonly idempotencyKey: string;
@@ -158,10 +168,68 @@ export interface AgentSessionTurnLifecycleResult {
 	readonly session: AgentSessionDTO;
 }
 
+export type AgentSessionTranscriptSeverity = 'debug' | 'info' | 'warning' | 'error';
+export type AgentSessionTranscriptSource = 'pty' | 'provider' | 'host' | 'workspace';
+export type AgentSessionTranscriptReferenceKind = 'task' | 'turn' | 'knowledge' | 'diff';
+export interface AgentSessionTranscriptReference {
+	readonly kind: AgentSessionTranscriptReferenceKind;
+	readonly id: string;
+}
+/** Text for terminal chunks must already be emitted by the stream's trusted full-output sanitizer. */
+export interface AppendAgentSessionTranscriptChunkInput {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly turnId: string;
+	readonly sequence: number;
+	readonly sanitizedTextFromTrustedPtyHost: string;
+}
+/** Structured event text is sanitized in full by the store using the host's trusted secret set. */
+export interface AppendAgentSessionTranscriptLogInput {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly turnId: string;
+	readonly sequence: number;
+	readonly text: string;
+	readonly severity: AgentSessionTranscriptSeverity;
+	readonly source: AgentSessionTranscriptSource;
+	readonly references?: readonly AgentSessionTranscriptReference[];
+	readonly trustedKnownSecrets?: readonly string[];
+}
+export interface AgentSessionTranscriptEntryDTO {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly turnId: string;
+	readonly sequence: number;
+	readonly kind: 'terminal' | 'log';
+	readonly text: string;
+	readonly byteLength: number;
+	readonly retained: boolean;
+	readonly severity: AgentSessionTranscriptSeverity | null;
+	readonly source: AgentSessionTranscriptSource | null;
+	readonly references: readonly AgentSessionTranscriptReference[];
+	readonly createdAt: string;
+}
+export interface AgentSessionTranscriptPageOptions {
+	readonly afterSequence?: number;
+	readonly limit?: number;
+	readonly maxOutputBytes?: number;
+	readonly kind?: 'terminal' | 'log';
+	readonly severity?: AgentSessionTranscriptSeverity;
+	readonly source?: AgentSessionTranscriptSource;
+}
+export interface AgentSessionTranscriptPageDTO {
+	readonly entries: readonly AgentSessionTranscriptEntryDTO[];
+	readonly nextSequence: number;
+	readonly highestSequence: number;
+	readonly firstRetainedSequence: number | null;
+	readonly gaps: readonly { readonly afterSequence: number; readonly throughSequence: number }[];
+	readonly hasMore: boolean;
+}
+
 /** Project-window IPC contract. Runtime authority is always derived from the sender's live window. */
 export type WorkspaceAgentSessionsCommand =
-	| 'listSessions' | 'createSession' | 'listTurns' | 'preview' | 'start' | 'stop'
-	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect';
+	| 'listSessions' | 'createSession' | 'workspacePreparation' | 'prepareWorkspace' | 'listTurns' | 'preview' | 'start' | 'stop'
+	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect' | 'readTranscript' | 'listNotifications' | 'markNotificationRead';
 
 export interface WorkspaceAgentSessionProjectRequest { readonly projectId: string; }
 export type WorkspaceAgentSessionCreateRequest = CreateAgentSessionInput;
@@ -169,6 +237,9 @@ export interface WorkspaceAgentSessionItemRequest extends WorkspaceAgentSessionP
 export interface WorkspaceAgentSessionPreviewRequest extends WorkspaceAgentSessionItemRequest { readonly permissionPolicy: AgentSessionPermissionPolicy; }
 export interface WorkspaceAgentSessionStartRequest extends WorkspaceAgentSessionItemRequest { readonly ticketId: string; }
 export interface WorkspaceAgentSessionTurnRequest extends WorkspaceAgentSessionItemRequest { readonly turnId: string; }
+export interface WorkspaceAgentSessionTranscriptRequest extends WorkspaceAgentSessionTurnRequest { readonly options?: AgentSessionTranscriptPageOptions; }
+export interface WorkspaceAgentSessionNotificationsRequest extends WorkspaceAgentSessionProjectRequest { readonly afterSequence?: number; readonly limit?: number; }
+export interface WorkspaceAgentSessionNotificationReadRequest extends WorkspaceAgentSessionProjectRequest { readonly notificationId: string; }
 export interface WorkspaceAgentSessionAttachRequest extends WorkspaceAgentSessionTurnRequest { readonly afterSequence?: number; }
 export interface WorkspaceAgentSessionReadRequest extends WorkspaceAgentSessionTurnRequest {
 	readonly attachmentId: string;

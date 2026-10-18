@@ -259,10 +259,13 @@ test('gateway rejects a duplicate in-flight JSON-RPC ID before dispatching its s
 			env: { PATH: process.env.PATH ?? '', [AGENT_SESSION_MCP_TOKEN_ENV]: access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV] },
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
+		const input = child.stdin;
+		const output = child.stdout;
+		assert.ok(input && output, 'Gateway fixture requires piped stdin and stdout.');
 		let buffered = '';
 		const lines: string[] = [];
 		const readers: Array<(line: string) => void> = [];
-		child.stdout.on('data', chunk => {
+		output.on('data', chunk => {
 			buffered += chunk.toString('utf8');
 			let newline: number;
 			while ((newline = buffered.indexOf('\n')) >= 0) {
@@ -279,11 +282,11 @@ test('gateway rejects a duplicate in-flight JSON-RPC ID before dispatching its s
 				readers.push(line => { clearTimeout(timeout); resolve(line); });
 			});
 		};
-		child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'same-id', method: 'tools/call', params: { name: 'messages_wait', arguments: { timeoutMs: 30_000 } } })}\n`);
+		input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'same-id', method: 'tools/call', params: { name: 'messages_wait', arguments: { timeoutMs: 30_000 } } })}\n`);
 		const deadline = Date.now() + 2_000;
 		while (Reflect.get(collaboration, 'activeWaiters') !== 1 && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 10)); }
 		assert.equal(Reflect.get(collaboration, 'activeWaiters'), 1, 'first request must be pending before duplicate arrives');
-		child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'same-id', method: 'tools/call', params: { name: 'messages_send', arguments: {
+		input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'same-id', method: 'tools/call', params: { name: 'messages_send', arguments: {
 			recipientSessionId: receiver.id, idempotencyKey: 'must-not-send', body: 'Duplicate request must have no side effect.',
 		} } })}\n`);
 		const duplicate = JSON.parse(await readLine()) as { id: string; error?: { code: number; message: string } };
@@ -291,7 +294,7 @@ test('gateway rejects a duplicate in-flight JSON-RPC ID before dispatching its s
 		assert.equal(duplicate.error?.code, -32600);
 		assert.match(duplicate.error?.message ?? '', /already in flight/i);
 		const escapedLongId = '\\'.repeat(130);
-		child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: escapedLongId, method: 'tools/call', params: { name: 'messages_send', arguments: {
+		input.write(`${JSON.stringify({ jsonrpc: '2.0', id: escapedLongId, method: 'tools/call', params: { name: 'messages_send', arguments: {
 			recipientSessionId: receiver.id, idempotencyKey: 'escaped-id-must-not-send', body: 'Escaped ID rejected before dispatch.',
 		} } })}\n`);
 		const invalidId = JSON.parse(await readLine()) as { id: string | null; error?: { code: number; message: string } };

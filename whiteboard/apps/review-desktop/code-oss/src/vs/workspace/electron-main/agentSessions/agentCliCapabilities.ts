@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBoundedAgentCliProcess } from './agentCliProcess.js';
+import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
 
 export const AGENT_CLI_COMMAND_SPEC_VERSION = 1 as const;
 export const AGENT_CLI_PROBE_TIMEOUT_MS = 5_000;
@@ -53,12 +54,14 @@ export async function discoverAgentCliCapabilities(options: AgentCliProbeOptions
 		throw new Error('The selected CLI executable path is invalid.');
 	}
 	const probeHome = mkdtempSync(join(tmpdir(), 'agent-cli-capabilities-'));
+	let allProbesCompleted = false;
 	try {
 		const env = minimalProbeEnvironment(options.env ?? process.env, options.provider, probeHome);
 		const timeoutMs = options.timeoutMs ?? AGENT_CLI_PROBE_TIMEOUT_MS;
 		const versionOutput = await probe(options.executable, ['--version'], env, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath);
 		const helpOutput = await probe(options.executable, ['--help'], env, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath);
 		const resumeHelpOutput = options.provider === 'codex' ? await probe(options.executable, ['resume', '--help'], env, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath) : { stdout: '', stderr: '' };
+		allProbesCompleted = true;
 		const version = extractVersion(options.provider, `${versionOutput.stdout}\n${versionOutput.stderr}`);
 		const help = `${helpOutput.stdout}\n${helpOutput.stderr}\n${resumeHelpOutput.stdout}\n${resumeHelpOutput.stderr}`;
 		const has = (flag: string) => new RegExp(`(?:^|\\s)${escapeRegExp(flag)}(?:[\\s,=]|$)`, 'm').test(help);
@@ -79,6 +82,11 @@ export async function discoverAgentCliCapabilities(options: AgentCliProbeOptions
 			requiredPermissionModes: options.provider === 'codex' ? ['--approve-for-me', '--sandbox read-only'] : ['--restricted --tools Read,Glob,Grep', '--permission-mode acceptEdits'],
 		} satisfies Omit<AgentCliCapabilities, 'version'> & { version: string };
 		return Object.freeze({ ...common, version });
+	} catch (error) {
+		if (allProbesCompleted || (error instanceof Error && error.name === 'AgentCliProcessError' && 'cleanupVerified' in error && error.cleanupVerified === true)) {
+			throw new AgentSessionPreparationError(error instanceof Error ? error.message : String(error), true);
+		}
+		throw error;
 	} finally {
 		rmSync(probeHome, { recursive: true, force: true });
 	}

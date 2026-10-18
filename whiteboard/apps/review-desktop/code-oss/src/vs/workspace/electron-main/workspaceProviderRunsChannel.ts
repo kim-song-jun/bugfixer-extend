@@ -76,7 +76,7 @@ interface QueuedRun extends PendingStart {
 	/** A project-window-only IPC boundary for local task runs. */
 export class WorkspaceProviderRunsChannel {
 	private readonly supervisor = new ProviderProcessSupervisor();
-	private readonly writerLock = new TaskFolderWriterLock();
+	private readonly writerLock: TaskFolderWriterLock;
 	private readonly active = new Map<string, ActiveRun>();
 	private readonly pendingStarts = new Map<Promise<{ attempt: ProviderAttemptDTO }>, PendingStart>();
 	private readonly queuedRuns = new Map<string, QueuedRun>();
@@ -89,7 +89,9 @@ export class WorkspaceProviderRunsChannel {
 		private readonly database: WorkspaceDatabase,
 		private readonly dashboardChannel: WorkspaceDashboardChannel,
 		private readonly logService: ILogService,
+		writerLock: TaskFolderWriterLock = new TaskFolderWriterLock(),
 	) {
+		this.writerLock = writerLock;
 		this.database.interruptLiveProviderAttempts();
 		this.markInterruptedInventoriesUnverified();
 		this.refreshRestartBarrier();

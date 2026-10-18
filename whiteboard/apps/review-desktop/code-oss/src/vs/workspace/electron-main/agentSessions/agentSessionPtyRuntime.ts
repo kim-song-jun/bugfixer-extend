@@ -11,6 +11,7 @@ import { createAgentPtyOutputSanitizer } from './agentOutputRedactor.js';
 import { AGENT_CLI_COMMAND_SPEC_VERSION } from './agentCliCapabilities.js';
 import type { AgentSessionCommandSpec } from './agentSessionCommands.js';
 import { AgentSessionRuntimeStartError, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessionService.js';
+import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
 
 export interface PreparedAgentSessionPtyLaunch {
 	readonly command: AgentSessionCommandSpec;
@@ -39,7 +40,9 @@ export interface AgentSessionPtyRuntimeOptions extends Omit<AgentPtyHostOptions,
 
 interface RuntimeRecord {
 	host?: AgentPtyHost;
-	readonly prepared: PreparedAgentSessionPtyLaunch;
+	prepared?: PreparedAgentSessionPtyLaunch;
+	revokeAccess?: () => void;
+	releasePrivateConfig?: () => Promise<void>;
 	hostHandle?: AgentPtyHandle;
 	accessRevoked: boolean;
 	privateConfigReleased: boolean;
@@ -56,14 +59,28 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 	async start(snapshot: AgentSessionTurnSnapshot, turnId: string, signal: AbortSignal): Promise<AgentSessionRuntimeHandle> {
 		if (signal.aborted) { throw new AgentSessionRuntimeStartError('The session launch was cancelled before preparation.', true); }
 		let prepared: PreparedAgentSessionPtyLaunch;
-		try {
-			prepared = await this.options.prepareLaunch(snapshot, turnId, signal);
-		} catch {
-			throw new Error('Trusted session launch preparation failed; the preparer must clean partial resources before rejecting.');
+		try { prepared = await this.options.prepareLaunch(snapshot, turnId, signal); }
+		catch (error) {
+			if (error instanceof AgentSessionPreparationError && error.cleanupVerified) {
+				throw new AgentSessionRuntimeStartError(error.message, true);
+			}
+			const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
+			const recovery = error instanceof AgentSessionPreparationError ? error.recovery : undefined;
+			this.records.set(handle, {
+				...(recovery ? { revokeAccess: recovery.revokeAccess, releasePrivateConfig: recovery.releasePrivateConfig } : {}),
+				accessRevoked: false, privateConfigReleased: false,
+			});
+			throw new AgentSessionRuntimeStartError(
+				error instanceof Error ? error.message : 'Trusted session launch preparation failed with unverified cleanup.',
+				false,
+				undefined,
+				undefined,
+				handle,
+			);
 		}
 
 		const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
-		const record: RuntimeRecord = { prepared, accessRevoked: false, privateConfigReleased: false };
+		const record: RuntimeRecord = { prepared, revokeAccess: prepared.revokeAccess, releasePrivateConfig: prepared.releasePrivateConfig, accessRevoked: false, privateConfigReleased: false };
 		this.records.set(handle, record);
 
 		try {
@@ -153,7 +170,8 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 		if (!hostResult.cleanupVerified) { return hostResult; }
 		if (!record.privateConfigReleased) {
 			try {
-				await record.prepared.releasePrivateConfig();
+				if (!record.releasePrivateConfig) { return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Private launch resource cleanup is unavailable.' }; }
+				await record.releasePrivateConfig();
 				record.privateConfigReleased = true;
 			} catch {
 				return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Private launch configuration could not be released.' };
@@ -184,7 +202,8 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 	private tryRevokePreparedAccess(record: RuntimeRecord): boolean {
 		if (record.accessRevoked) { return true; }
 		try {
-			record.prepared.revokeAccess();
+			if (!record.revokeAccess) { return false; }
+			record.revokeAccess();
 			record.accessRevoked = true;
 			return true;
 		} catch {
@@ -211,8 +230,14 @@ function validatePreparedLaunch(snapshot: AgentSessionTurnSnapshot, prepared: Pr
 		throw new Error('The PTY launch command does not match the trusted versioned command specification.');
 	}
 	const profileSelector = snapshot.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
+	const forwarded = new Set(command.forwardedMcpEnvironmentVariableNames);
+	const allowedNames = new Set([profileSelector, 'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', ...forwarded]);
 	if (Object.keys(command.env).length !== 1 || command.env[profileSelector] !== prepared.profileDirectory
-		|| Object.keys(launch.env).length !== Object.keys(command.env).length || launch.env[profileSelector] !== command.env[profileSelector]) {
-		throw new Error('The PTY launch environment must select only the persisted provider profile.');
+		|| forwarded.size !== command.forwardedMcpEnvironmentVariableNames.length
+		|| Object.keys(launch.env).some(name => !allowedNames.has(name))
+		|| launch.env[profileSelector] !== command.env[profileSelector]
+		|| ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME'].some(name => typeof launch.env[name] !== 'string' || !launch.env[name])
+		|| [...forwarded].some(name => typeof launch.env[name] !== 'string' || !prepared.knownSecrets.includes(launch.env[name]))) {
+		throw new Error('The PTY launch environment must contain trusted process essentials, the selected provider profile, and only explicitly forwarded, known-secret MCP values.');
 	}
 }

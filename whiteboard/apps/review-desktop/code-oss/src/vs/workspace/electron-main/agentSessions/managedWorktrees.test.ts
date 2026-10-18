@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 
 import { ManagedWorktreeService, type ManagedWorktreeLease } from './managedWorktrees.js';
+import { OwnerOperationCoordinator } from './ownerOperationCoordinator.js';
 
 function git(cwd: string, ...args: string[]): string {
 	return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -88,6 +89,24 @@ test('session worktrees use separate owned branches and leave the user checkout 
 		assert.equal(git(repository, 'branch', '--show-current'), 'user-work');
 		assert.equal(git(repository, 'rev-parse', 'HEAD'), originalHead);
 		assert.equal((await service.inspect(session.ownerId)).repositoryPath, repository);
+	});
+});
+
+test('concurrent preparation for one session owner creates one signed worktree lease', async () => {
+	await fixture(async (_root, repository, service) => {
+		const ownerId = randomUUID();
+		const coordinator = new OwnerOperationCoordinator();
+		const prepare = () => coordinator.run(ownerId, async () => {
+			const existing = await service.inspectOptional(ownerId, repository);
+			if (!existing) { await service.create({ repositoryPath: repository, ownerId, kind: 'session', baseRef: 'HEAD' }); }
+			return service.inspect(ownerId);
+		});
+		const [first, second] = await Promise.all([prepare(), prepare()]);
+		assert.equal(first.state, 'active');
+		assert.equal(second.state, 'active');
+		assert.equal(first.worktreePath, second.worktreePath);
+		assert.equal(first.branch, second.branch);
+		assert.equal(git(repository, 'worktree', 'list', '--porcelain').split(`worktree ${first.worktreePath}`).length - 1, 1);
 	});
 });
 
@@ -417,6 +436,36 @@ test('mismatched repositories and forged or retargeted manifests cannot authoriz
 		manifest.worktreePath = other;
 		writeFileSync(manifestPath, JSON.stringify(manifest));
 		await assert.rejects(service.inspect(session.ownerId), /manifest|identity|signature|owned/i);
+	});
+});
+
+test('an unprepared session owner can retry after a precreation Git failure using the same ID', async () => {
+	await fixture(async (_root, repository, service) => {
+		const ownerId = randomUUID();
+		await assert.rejects(service.create({ repositoryPath: repository, ownerId, kind: 'session', baseRef: 'missing-session-base' }));
+		assert.equal(await service.inspectOptional(ownerId, repository), undefined);
+		const recovered = await service.create({ repositoryPath: repository, ownerId, kind: 'session', baseRef: 'HEAD' });
+		assert.equal(recovered.ownerId, ownerId);
+		assert.equal((await service.inspectOptional(ownerId, repository))?.state, 'active');
+	});
+});
+
+test('optional inspection fails closed for invalid manifests and unmanifested worktree artifacts', async () => {
+	await fixture(async (root, repository, service) => {
+		const invalidManifestOwner = randomUUID();
+		const invalidManifestPath = join(root, 'profile', 'managed-worktrees', `${invalidManifestOwner}.json`);
+		writeFileSync(invalidManifestPath, JSON.stringify({ version: 1, ownerId: invalidManifestOwner }));
+		await assert.rejects(service.inspectOptional(invalidManifestOwner, repository), /manifest|invalid|malformed|signature/i);
+
+		const partialOwner = randomUUID();
+		const partialPath = join(root, 'profile', 'managed-worktrees', 'session', partialOwner);
+		mkdirSync(partialPath, { recursive: true });
+		await assert.rejects(service.inspectOptional(partialOwner, repository), /unmanifested|recovery/i);
+		assert.equal(existsSync(partialPath), true);
+
+		const branchOwner = randomUUID();
+		git(repository, 'branch', `bugfixer/session/${branchOwner}`);
+		await assert.rejects(service.inspectOptional(branchOwner, repository), /branch .*without its signed worktree manifest/i);
 	});
 });
 
