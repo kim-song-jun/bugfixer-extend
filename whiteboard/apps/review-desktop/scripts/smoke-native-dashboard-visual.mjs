@@ -2181,6 +2181,7 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
     fileBytes += bytes.byteLength;
     contentReadCount++;
     const sha256 = createHash('sha256').update(bytes).digest('hex');
+
     if (bytes.includes(0)) {
       entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, contentUnavailableReason: 'binary' });
       hasUnavailableContent = true;
@@ -2566,6 +2567,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.waitForFunction(() => window.innerWidth === 1440);
   const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
   if (!(await sidebar.isVisible())) { await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click(); }
 
   await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
@@ -2584,6 +2586,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   const changes = changesPanel.locator('.ai-session-changes');
   await changes.getByText(`v${evidenceFixture.evidenceVersion} · ${evidenceFixture.fingerprint}`, { exact: true }).waitFor();
   assert.ok((await changes.innerText()).includes('작성자 알 수 없음'), 'The UI must state that before/after evidence does not establish authorship');
+
   for (const filePath of evidenceFixture.changedPaths) {
     await changes.locator('.ai-session-changes__file').filter({ hasText: filePath }).waitFor();
   }
@@ -2614,6 +2617,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
     overflow: document.documentElement.scrollWidth > window.innerWidth,
     actionReachable: [...element.querySelectorAll('button')].filter(button => button.offsetParent !== null).every(button => {
       const rect = button.getBoundingClientRect();
+
       return rect.left >= 0 && rect.right <= window.innerWidth + 1;
     }),
   }));
@@ -2639,6 +2643,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   await modifiedEditor.locator('.view-lines').click();
   assert.equal(await modifiedEditor.evaluate(editor => {
     const focused = document.activeElement;
+
     return focused !== null && editor.contains(focused) && focused.matches('textarea.inputarea, .native-edit-context');
   }), true, 'The retained modified editor must own its actual keyboard input before the edit attempt');
   await page.keyboard.type(`CI_READONLY_EDIT_ATTEMPT_${tag}`);
