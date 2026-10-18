@@ -205,7 +205,8 @@ test('large escaped mailbox messages are byte-paged with exact cursors and unrep
 			const sent = await senderClient.client.callTool({ name: 'messages_send', arguments: {
 				recipientSessionId: receiver.id, idempotencyKey: `large-page-${index}`, body: expectedBodies[index],
 			} });
-			assert.equal(sent.isError, undefined);
+			const sentPayload = readSuccessfulToolPayload(sent, `messages_send large-page-${index}`);
+			assert.equal((sentPayload.message as { body: string }).body, expectedBodies[index]);
 		}
 		const oversized = await senderClient.client.callTool({ name: 'messages_send', arguments: {
 			recipientSessionId: receiver.id, idempotencyKey: 'unrepresentable-surrogate-text', body: '\ud800'.repeat(10_000),

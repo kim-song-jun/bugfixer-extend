@@ -165,7 +165,7 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		};
 		const turn = database.agentSessionTurns.createTurn({ projectId: project.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
 		database.agentSessionTranscripts.appendSanitizedTerminalChunk({ projectId: project.project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'sanitized terminal history\n' });
-		database.agentSessionTranscripts.appendStructuredLog({ projectId: project.project.id, sessionId: session.id, turnId: turn.id, sequence: 2, text: 'token=private-fixture-value', severity: 'info', source: 'host' });
+		database.agentSessionTranscripts.appendStructuredLog({ projectId: project.project.id, sessionId: session.id, turnId: turn.id, sequence: 2, text: 'token=private-fixture-value', severity: 'info', source: 'host', trustedKnownSecrets: ['private-fixture-value'] });
 		const transcriptRequest = { projectId: project.project.id, sessionId: session.id, turnId: turn.id };
 		const page = await channel.call<AgentSessionTranscriptPageDTO>(sender, 'readTranscript', { ...transcriptRequest, options: { limit: 1 } });
 		assert.equal(page.entries[0].text, 'sanitized terminal history\n');

@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -37,6 +37,7 @@ test('MCP setup failure retains exact cleanup hooks and retries a real socket re
 		};
 		const turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
 		let failSocketUnlink = true;
+		let failDirectoryRemoval = true;
 		const bridge = new AgentSessionMcpBridge(new AgentSessionCollaborationService(database), {
 			temporaryDirectory,
 			chmod: () => { throw new Error('Injected chmod failure after real socket listen.'); },
@@ -46,6 +47,13 @@ test('MCP setup failure retains exact cleanup hooks and retries a real socket re
 					throw Object.assign(new Error('Injected one-time socket unlink failure.'), { code: 'EACCES' });
 				}
 				await unlink(path);
+			},
+			rmdir: async path => {
+				if (failDirectoryRemoval) {
+					failDirectoryRemoval = false;
+					throw Object.assign(new Error('Injected one-time private directory removal failure.'), { code: 'EACCES' });
+				}
+				await rmdir(path);
 			},
 		});
 		let recovery: AgentSessionPreparationError['recovery'];

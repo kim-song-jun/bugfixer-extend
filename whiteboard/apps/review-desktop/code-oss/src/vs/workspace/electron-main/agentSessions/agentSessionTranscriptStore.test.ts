@@ -92,7 +92,7 @@ test('retention eviction preserves the highest cursor and reports prefix loss; p
 		assert.equal(page.firstRetainedSequence, 2);
 		assert.deepEqual(page.gaps, [{ afterSequence: 0, throughSequence: 1 }]);
 		assert.deepEqual(page.entries.map(entry => entry.sequence), [2, 3]);
-		assert.throws(() => store.appendSanitizedTerminalChunk({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'one' }), /pruned.*cannot be verified/i);
+		assert.throws(() => store.appendSanitizedTerminalChunk({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'one' }), /pruned.*no longer be verified/i);
 	});
 });
 
