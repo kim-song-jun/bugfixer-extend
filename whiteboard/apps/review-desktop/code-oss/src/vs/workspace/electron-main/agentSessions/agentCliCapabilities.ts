@@ -24,7 +24,10 @@ export interface AgentCliCapabilities {
 	readonly workingDirectory: boolean;
 	readonly readOnlyPolicy: boolean;
 	readonly mutatingPolicy: boolean;
-	readonly scopedMcpConfig: boolean;
+	/** The CLI accepts an invocation-only MCP config/override flag; this does not imply an exclusive server roster. */
+	readonly invocationMcpConfig: boolean;
+	/** The CLI can restrict MCP servers to the invocation config. Codex has no equivalent; Claude managed policy may reject strict config. */
+	readonly exclusiveMcpRoster: boolean;
 	/** Current profile selector env key. This is configuration metadata, not proof of account isolation. */
 	readonly profileSelector: 'CODEX_HOME' | 'CLAUDE_CONFIG_DIR';
 	readonly requiredPermissionModes: readonly string[];
@@ -70,7 +73,8 @@ export async function discoverAgentCliCapabilities(options: AgentCliProbeOptions
 			workingDirectory: options.provider === 'codex' ? has('--cd') || has('-C') : true,
 			readOnlyPolicy: options.provider === 'codex' ? has('--sandbox') && has('--ask-for-approval') : has('--restricted') && has('--tools') && has('--permission-mode'),
 			mutatingPolicy: options.provider === 'codex' ? has('--approve-for-me') : has('--permission-mode'),
-			scopedMcpConfig: options.provider === 'codex' ? has('-c') || has('--config') : has('--mcp-config') && has('--strict-mcp-config'),
+			invocationMcpConfig: options.provider === 'codex' ? has('-c') || has('--config') : has('--mcp-config') && has('--strict-mcp-config'),
+			exclusiveMcpRoster: options.provider === 'claude' && has('--mcp-config') && has('--strict-mcp-config'),
 			profileSelector: options.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR',
 			requiredPermissionModes: options.provider === 'codex' ? ['--approve-for-me', '--sandbox read-only'] : ['--restricted --tools Read,Glob,Grep', '--permission-mode acceptEdits'],
 		} satisfies Omit<AgentCliCapabilities, 'version'> & { version: string };

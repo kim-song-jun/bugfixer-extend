@@ -13,7 +13,7 @@ const conversationId = '123e4567-e89b-42d3-a456-426614174000';
 const capabilities: AgentCliCapabilities = {
 	provider: 'codex', commandSpecVersion: 1, version: '0.163.0', interactive: true, model: true,
 	resumeById: true, newSessionId: true, workingDirectory: true, readOnlyPolicy: true, mutatingPolicy: true,
-	scopedMcpConfig: true, profileSelector: 'CODEX_HOME', requiredPermissionModes: ['--no-daemon'],
+	invocationMcpConfig: true, exclusiveMcpRoster: false, profileSelector: 'CODEX_HOME', requiredPermissionModes: ['--no-daemon'],
 };
 
 function input(overrides: Partial<AgentSessionCommandInput> = {}): AgentSessionCommandInput {
@@ -27,7 +27,7 @@ function input(overrides: Partial<AgentSessionCommandInput> = {}): AgentSessionC
 }
 
 describe('interactive agent CLI command builders', () => {
-	it('builds interactive Codex argv with no daemon, explicit model, cwd, approval mode, and scoped bridge', () => {
+	it('builds interactive Codex argv with no daemon, explicit model, cwd, approval mode, and an invocation bridge override', () => {
 		const spec = createAgentSessionCommand(input());
 		assert.deepEqual(spec.args.slice(0, 6), ['--no-daemon', '--model', 'gpt-6.1-sol', '--cd', '/work/repo', '--approve-for-me']);
 		assert.equal(spec.args.includes('--last'), false);
@@ -68,7 +68,7 @@ describe('interactive agent CLI command builders', () => {
 	it('builds interactive Claude with a strict app MCP config and read-only built-in tool allowlist', () => {
 		const spec = createAgentSessionCommand(input({
 			provider: 'claude',
-			capabilities: { ...capabilities, provider: 'claude', profileSelector: 'CLAUDE_CONFIG_DIR' },
+			capabilities: { ...capabilities, provider: 'claude', exclusiveMcpRoster: true, profileSelector: 'CLAUDE_CONFIG_DIR' },
 			profileEnvironment: { CLAUDE_CONFIG_DIR: '/private/profile' },
 			claudeMcpConfigPath: '/private/session-mcp.json',
 			permissionPolicy: { mode: 'read-only', approval: 'never' },
@@ -77,6 +77,10 @@ describe('interactive agent CLI command builders', () => {
 			'--restricted', '--tools', 'Read,Glob,Grep', '--permission-mode', 'plan']);
 		assert.equal(spec.args.includes('--print'), false);
 		assert.equal(spec.args.includes('--permission-prompts'), false);
+	});
+
+	it('requires invocation MCP configuration support without claiming Codex roster exclusivity', () => {
+		assert.throws(() => createAgentSessionCommand(input({ capabilities: { ...capabilities, invocationMcpConfig: false } })), /does not prove/);
 	});
 
 	it('rejects unsupported policies, capability gaps, bad IDs, injected control characters, and profile mismatch', () => {

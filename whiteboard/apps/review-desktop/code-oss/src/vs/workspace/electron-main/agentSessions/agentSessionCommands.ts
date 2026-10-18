@@ -76,7 +76,7 @@ function validateInput(input: AgentSessionCommandInput): void {
 		throw new Error('The CLI command specification version is unsupported.');
 	}
 	if (input.capabilities.provider !== input.provider || !input.capabilities.interactive || !input.capabilities.model || !input.capabilities.resumeById || !input.capabilities.newSessionId
-		|| !input.capabilities.workingDirectory || !input.capabilities.scopedMcpConfig
+		|| !input.capabilities.workingDirectory || !input.capabilities.invocationMcpConfig
 		|| (input.permissionPolicy.mode === 'read-only' && !input.capabilities.readOnlyPolicy)
 		|| (input.permissionPolicy.mode === 'mutating' && !input.capabilities.mutatingPolicy)) {
 		throw new Error('The selected CLI does not prove all required interactive session capabilities.');

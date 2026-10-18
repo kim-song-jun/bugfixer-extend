@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -17,6 +17,16 @@ describe('bounded CLI probe process ownership', () => {
 	it('returns bounded output after a successful probe', async () => {
 		const result = await runBoundedAgentCliProcess(process.execPath, ['-e', "process.stdout.write('version 1.2.3')"], { env, timeoutMs: 1_000, maxOutputBytes: 1024 });
 		assert.equal(result.stdout, 'version 1.2.3');
+	});
+
+	it('runs the provider in its trusted probe directory', async () => {
+		const directory = mkdtempSync(join(tmpdir(), 'agent-cli-cwd-'));
+		try {
+			const result = await runBoundedAgentCliProcess(process.execPath, ['-e', 'process.stdout.write(process.cwd())'], { env, cwd: directory, timeoutMs: 1_000, maxOutputBytes: 4096 });
+			assert.equal(result.stdout, realpathSync(directory));
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it('preserves exact late output bytes and verifies the flushed output receipt', async () => {

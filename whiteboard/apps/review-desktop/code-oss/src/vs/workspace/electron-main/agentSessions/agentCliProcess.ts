@@ -16,6 +16,8 @@ const GUARDIAN_PATH = fileURLToPath(new URL('./agentCliProbeGuardian.mjs', impor
 
 export interface BoundedAgentCliProcessOptions {
 	readonly env: NodeJS.ProcessEnv;
+	/** Trusted absolute probe directory; inherited by the guardian and its provider child. */
+	readonly cwd?: string;
 	readonly timeoutMs: number;
 	readonly maxOutputBytes: number;
 	/** Trusted standalone Node executable. Electron hosts must provide this explicitly. */
@@ -53,6 +55,9 @@ export function runBoundedAgentCliProcess(
 	if (process.platform === 'win32') {
 		return Promise.reject(new AgentCliProcessError('CLI capability probes require verified POSIX process-group cleanup.', true));
 	}
+	if (options.cwd !== undefined && (!isAbsolute(options.cwd) || options.cwd.length > 4096 || /[\u0000-\u001f\u007f]/.test(options.cwd))) {
+		return Promise.reject(new AgentCliProcessError('The CLI probe working directory is invalid.', true));
+	}
 	const nodeExecutable = options.guardianNodeExecutable ?? (process.versions.electron ? undefined : process.execPath);
 	if (!nodeExecutable || !isAbsolute(nodeExecutable) || !existsSync(nodeExecutable)) {
 		return Promise.reject(new AgentCliProcessError('A trusted standalone Node executable is required for CLI probes.', true));
@@ -84,6 +89,7 @@ async function runWithGuardian(
 	try {
 		guardian = fork(guardianScriptPath, [], {
 			execPath: nodeExecutable,
+			...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
 			execArgv: [],
 			detached: true,
 			shell: false,
