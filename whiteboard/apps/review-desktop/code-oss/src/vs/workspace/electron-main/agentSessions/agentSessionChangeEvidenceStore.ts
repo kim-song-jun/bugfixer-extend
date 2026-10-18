@@ -89,7 +89,7 @@ export interface AgentSessionChangeEvidencePage {
 	readonly hasMore: boolean;
 }
 
-interface EvidenceRow {
+interface EvidenceRow extends Readonly<Record<string, SQLOutputValue>> {
 	readonly id: SQLOutputValue;
 	readonly project_id: SQLOutputValue;
 	readonly session_id: SQLOutputValue;
@@ -195,8 +195,9 @@ export class AgentSessionChangeEvidenceStore {
 	private fromRow(row: EvidenceRow): AgentSessionChangeEvidenceDTO {
 		const evidence = JSON.parse(String(row.evidence_json)) as NormalizedEvidence;
 		return {
+			...evidence,
 			id: String(row.id), projectId: String(row.project_id), sessionId: String(row.session_id), turnId: String(row.turn_id),
-			version: Number(row.version), fingerprint: String(row.fingerprint), ...evidence,
+			version: Number(row.version), fingerprint: String(row.fingerprint),
 			noChangesConfirmed: evidence.status === 'observed' && evidence.coverage === 'complete' && evidence.files.length === 0,
 			createdAt: String(row.created_at),
 		};
