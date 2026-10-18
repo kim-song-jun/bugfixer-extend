@@ -4,11 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { createServer, type Server, type Socket } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { clearTimeout, setTimeout } from 'node:timers';
-import * as pty from 'node-pty';
+import type * as NodePty from 'node-pty';
 import type { IDisposable } from '../../../base/common/lifecycle.js';
+
+const nodeRequire = createRequire(import.meta.url);
 
 const MAX_ARGUMENTS = 256;
 const MAX_ARGUMENT_BYTES = 64 * 1024;
@@ -146,7 +149,7 @@ interface OwnedPty {
 	readonly controlSockets: Set<Socket>;
 	readonly controlSocketTimers: Map<Socket, ReturnType<typeof setTimeout>>;
 	readonly ptyExitPromise: Promise<void>;
-	pty?: pty.IPty;
+	pty?: NodePty.IPty;
 	controlSocket?: Socket;
 	controlServerClosePromise?: Promise<void>;
 	controlServerWasListening: boolean;
@@ -197,6 +200,7 @@ export class AgentPtyHost {
 		if (this.shuttingDown) { throw new AgentPtyStartError('The PTY host is shutting down.', true); }
 		if (process.platform === 'win32') { throw new Error('Verified PTY process-group cleanup is unavailable on Windows.'); }
 		validateLaunch(launch);
+		const pty = nodeRequire('node-pty') as typeof import('node-pty');
 		const sanitizer = this.options.createSanitizer();
 		if (!sanitizer || typeof sanitizer.push !== 'function' || typeof sanitizer.flush !== 'function') { throw new Error('The PTY output sanitizer is invalid.'); }
 

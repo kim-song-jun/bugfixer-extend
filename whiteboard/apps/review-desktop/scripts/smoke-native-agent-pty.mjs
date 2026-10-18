@@ -42,6 +42,10 @@ await access(probeGuardianScriptPath, constants.R_OK);
 
 await access(identityHookScriptPath, constants.R_OK);
 
+const bootstrapNodePath = path.join(resources, 'out', 'bootstrap-node.js');
+
+await import(pathToFileURL(bootstrapNodePath).href);
+
 const {
   AgentPtyHost, runBoundedAgentCliProcess, createAgentPtyOutputSanitizer, AgentSessionPtyRuntimeFactory,
   AgentSessionJournal, AgentSessionPreparationError, AGENT_CLI_COMMAND_SPEC_VERSION,
