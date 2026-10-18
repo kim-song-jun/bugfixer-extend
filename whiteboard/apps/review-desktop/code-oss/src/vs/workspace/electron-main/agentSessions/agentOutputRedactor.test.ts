@@ -159,11 +159,14 @@ test('keeps labelled values, recognized token prefixes, and authorization values
 
 test('keeps split OSC and CSI sequences stateful while overflow credentials remain masked', () => {
 	const password = createAgentPtyOutputSanitizer({ maxPendingCodeUnits: 128 });
-	const passwordOutput = password.push(`password=${'s'.repeat(160)}`)
-		+ password.push('\u001b]0; password=not-a-delimiter ')
-		+ password.push('still-title\u0007more-password\n')
-		+ password.flush();
-	assert.equal(passwordOutput, '***\n');
+	const passwordOutputs = [
+		password.push(`password=${'s'.repeat(160)}`),
+		password.push('\u001b]0; password=not-a-delimiter '),
+		password.push('still-title\u0007more-password\n'),
+		password.flush(),
+	];
+	assert.deepEqual(passwordOutputs, ['***', '', '\n', '']);
+	assert.equal(passwordOutputs.join(''), '***\n');
 
 	const csi = createAgentPtyOutputSanitizer({ maxPendingCodeUnits: 128 });
 	const csiOutput = csi.push(`password=${'s'.repeat(160)}`)

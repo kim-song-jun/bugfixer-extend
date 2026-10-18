@@ -479,7 +479,7 @@ function findOpenSensitiveTail(raw: string, knownSecretTrie: SecretTrieNode): Op
 }
 
 function consumeMasked(mode: ActiveMask, raw: string): { mode: ActiveMask | undefined; remainder: string; output: string } {
-	const { text, rawEnds } = normalizeTerminalText(raw);
+	const { text, rawOffsets, rawEnds } = normalizeTerminalText(raw);
 	if (mode.kind === 'pem') {
 		const combined = mode.tail + text;
 		const footerIndex = mode.footer ? combined.toLowerCase().indexOf(mode.footer.toLowerCase()) : -1;
@@ -499,14 +499,20 @@ function consumeMasked(mode: ActiveMask, raw: string): { mode: ActiveMask | unde
 	let quoteOpened = mode.quoteOpened;
 	let valueStarted = mode.valueStarted;
 	let output = '';
+	let rawCursor = 0;
 	for (let index = 0; index < text.length; index++) {
+		const rawGap = raw.slice(rawCursor, rawOffsets[index] ?? rawCursor);
 		if (!quote && mode.kind === 'field' && !markerEmitted && !quoteOpened && (text[index] === '"' || text[index] === "'")) {
+			output += rawGap;
+			rawCursor = rawEnds[index] ?? raw.length;
 			quote = text[index];
 			quoteOpened = true;
 			continue;
 		}
 		if (quote) {
 			if (!quoteOpened) {
+				output += rawGap;
+				rawCursor = rawEnds[index] ?? raw.length;
 				quoteOpened = true;
 				if (text[index] === quote) { continue; }
 			}
@@ -519,14 +525,16 @@ function consumeMasked(mode: ActiveMask, raw: string): { mode: ActiveMask | unde
 		} else if (!valueStarted && (text[index] === ' ' || text[index] === '\t')) {
 			// Whitespace before the first value character is safe to display and
 			// must be preserved so output does not depend on chunk boundaries.
-			output += text[index];
+			output += rawGap + raw.slice(rawOffsets[index] ?? rawCursor, rawEnds[index] ?? raw.length);
+			rawCursor = rawEnds[index] ?? raw.length;
 			continue;
 		} else if (!valueStarted && (text[index] === '\n' || text[index] === '\r')) {
-			return { mode: undefined, remainder: raw.slice(rawEnds[index] - 1), output };
+			return { mode: undefined, remainder: raw.slice((rawOffsets[index] ?? rawCursor)), output: output + rawGap };
 		} else if (/[\s,;]/.test(text[index])) {
-			return { mode: undefined, remainder: raw.slice(rawEnds[index] - 1), output };
+			return { mode: undefined, remainder: raw.slice((rawOffsets[index] ?? rawCursor)), output };
 		}
 		valueStarted = true;
+		if (!markerEmitted && !quote) { output += rawGap; }
 		if (!markerEmitted) { output += REDACTION; markerEmitted = true; }
 	}
 	return { mode: { ...mode, quote, quoteOpened, valueStarted, escaped, markerEmitted }, remainder: '', output };
