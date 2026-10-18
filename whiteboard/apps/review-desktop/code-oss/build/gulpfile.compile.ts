@@ -13,7 +13,8 @@ function makeCompileBuildTask(disableMangle: boolean) {
 		util.rimraf('out-build'),
 		date.writeISODate('out-build'),
 		compilation.compileApiProposalNamesTask,
-		compilation.compileTask('src', 'out-build', true, { disableMangle })
+		compilation.compileTask('src', 'out-build', true, { disableMangle }),
+		compilation.copyAgentSessionGuardianResourcesTask('out-build'),
 	);
 }
 

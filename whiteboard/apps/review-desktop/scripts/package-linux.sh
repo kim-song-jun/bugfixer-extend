@@ -5,6 +5,8 @@ MONOREPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 APP_DIR="$MONOREPO_ROOT/apps/review-desktop"
 CHECKOUT="$APP_DIR/code-oss"
 PACKAGED_ROOT="$APP_DIR/VSCode-linux-x64"
+# shellcheck source=agent-session-guardians.sh
+source "$APP_DIR/scripts/agent-session-guardians.sh"
 
 if (( $# > 0 )); then
   echo "usage: $0" >&2
@@ -34,6 +36,7 @@ if [[ ! -x "$PACKAGED_ROOT/$APPLICATION_NAME" ]]; then
   echo "Review Desktop packaging did not create $PACKAGED_ROOT/$APPLICATION_NAME" >&2
   exit 1
 fi
+require_agent_session_guardians "$PACKAGED_ROOT/resources/app/out" "Packaged Linux app"
 node "$APP_DIR/scripts/copy-canvas.mjs" --packaged-root "$PACKAGED_ROOT"
 node "$APP_DIR/scripts/curated-extensions.mjs" \
   --target=linux-x64 \

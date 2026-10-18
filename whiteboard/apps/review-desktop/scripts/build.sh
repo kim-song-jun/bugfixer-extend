@@ -16,6 +16,8 @@ EVENT_STREAM_OUTPUT="$CHECKOUT/out/vs/review/common/reviewEventStream.js"
 source "$APP_DIR/scripts/code-oss-dependencies.sh"
 # shellcheck source=freshness.sh
 source "$APP_DIR/scripts/freshness.sh"
+# shellcheck source=agent-session-guardians.sh
+source "$APP_DIR/scripts/agent-session-guardians.sh"
 
 DEV_FAST_ACTIVE=0
 if [[ "${REVIEW_DESKTOP_CI_FAST:-0}" != "1" && "${REVIEW_DESKTOP_DEV_FAST:-0}" == "1" ]]; then
@@ -137,3 +139,4 @@ fi
 if [[ -n "$TYPECHECK_PID" ]]; then
   wait "$TYPECHECK_PID"
 fi
+require_agent_session_guardians "$CHECKOUT/out" "Code OSS build"

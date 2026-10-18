@@ -103,6 +103,9 @@ const vscodeEntryPoints = [
 ].flat();
 
 const vscodeResourceIncludes = [
+	// App-owned Node guardians loaded by the agent session runtime.
+	'out-build/vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
+	'out-build/vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
 
 	// NLS
 	'out-build/nls.messages.json',

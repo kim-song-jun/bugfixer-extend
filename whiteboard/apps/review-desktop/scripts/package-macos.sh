@@ -59,6 +59,8 @@ PACKAGED_BINARY="$PACKAGED_APP/Contents/MacOS/$PRODUCT_NAME"
 
 # shellcheck source=darwin-payload-manifest.sh
 source "$APP_DIR/scripts/darwin-payload-manifest.sh"
+# shellcheck source=agent-session-guardians.sh
+source "$APP_DIR/scripts/agent-session-guardians.sh"
 CURATED_EXTENSIONS_PAYLOAD="$MONOREPO_ROOT/$DARWIN_PAYLOAD_CURATED_EXTENSIONS_PATH"
 
 # shellcheck source=code-oss-dependencies.sh
@@ -90,6 +92,7 @@ if [[ "$PRECOMPILED" == "1" ]]; then
       exit 1
     fi
   done
+  require_agent_session_guardians "$CHECKOUT/out-vscode-min" "Precompiled Darwin payload"
   CURATED_EXTENSIONS_SOURCE="$CURATED_EXTENSIONS_PAYLOAD"
 else
   bash "$APP_DIR/scripts/build.sh"
@@ -117,6 +120,7 @@ if [[ ! -x "$PACKAGED_BINARY" ]]; then
   echo "Review Desktop packaging did not create $PACKAGED_BINARY" >&2
   exit 1
 fi
+require_agent_session_guardians "$PACKAGED_APP/Contents/Resources/app/out" "Packaged macOS app"
 node "$APP_DIR/scripts/copy-canvas.mjs" --packaged-root "$PACKAGED_APP"
 node "$APP_DIR/scripts/curated-extensions.mjs" \
   --target=darwin-arm64 \

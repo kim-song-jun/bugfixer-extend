@@ -12,6 +12,8 @@ PAYLOAD="$APP_DIR/dist/darwin-payload.tar.zst"
 
 # shellcheck source=darwin-payload-manifest.sh
 source "$APP_DIR/scripts/darwin-payload-manifest.sh"
+# shellcheck source=agent-session-guardians.sh
+source "$APP_DIR/scripts/agent-session-guardians.sh"
 CURATED_EXTENSIONS_PAYLOAD="$MONOREPO_ROOT/$DARWIN_PAYLOAD_CURATED_EXTENSIONS_PATH"
 
 if (( $# > 0 )); then
@@ -32,6 +34,7 @@ else
 fi
 export BUILD_SOURCEVERSION
 npm --prefix "$CHECKOUT" run gulp -- vscode-darwin-arm64-min-prepare
+require_agent_session_guardians "$CHECKOUT/out-vscode-min" "Darwin payload build"
 
 # Tags the bundles, so it must run before they are archived.
 if [[ -n "${REVIEW_POSTHOG_KEY:-}" ]]; then

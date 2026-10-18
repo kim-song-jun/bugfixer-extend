@@ -29,11 +29,22 @@ task.task(task.define('transpile-client-esbuild', task.series(
 )));
 
 // Transpile only
-const transpileClientTask = task.define('transpile-client', task.series(util.rimraf('out'), compilation.transpileTask('src', 'out')));
+const transpileClientTask = task.define('transpile-client', task.series(
+	util.rimraf('out'),
+	compilation.transpileTask('src', 'out'),
+	compilation.copyAgentSessionGuardianResourcesTask('out'),
+));
 task.task(transpileClientTask);
 
 // Fast compile for development time
-const compileClientTask = task.define('compile-client', task.series(util.rimraf('out'), compilation.copyCodiconsTask, compilation.compileApiProposalNamesTask, compilation.compileExtensionPointNamesTask, compilation.compileTask('src', 'out', false)));
+const compileClientTask = task.define('compile-client', task.series(
+	util.rimraf('out'),
+	compilation.copyCodiconsTask,
+	compilation.compileApiProposalNamesTask,
+	compilation.compileExtensionPointNamesTask,
+	compilation.compileTask('src', 'out', false),
+	compilation.copyAgentSessionGuardianResourcesTask('out'),
+));
 task.task(compileClientTask);
 
 const watchClientTask = task.define('watch-client', task.parallel(compilation.watchTypeCheckTask('src'), compilation.watchApiProposalNamesTask, compilation.watchExtensionPointNamesTask, compilation.watchCodiconsTask));

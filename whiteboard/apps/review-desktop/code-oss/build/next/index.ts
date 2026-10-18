@@ -149,6 +149,9 @@ const commonResourcePatterns = [
 // Resources for desktop target
 const desktopResourcePatterns = [
 	...commonResourcePatterns,
+	// App-owned Node guardians are runtime files and must survive production bundling.
+	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
+	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
 
 	// HTML
 	'vs/code/electron-browser/workbench/workbench.html',
@@ -381,7 +384,23 @@ async function copyResources(outDir: string): Promise<void> {
 		}
 	}
 
+	await assertAgentSessionGuardianResources(outDir);
 	console.log(`[resources] Copied ${copied} files`);
+}
+
+const agentSessionGuardianResources = [
+	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
+	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
+] as const;
+
+async function assertAgentSessionGuardianResources(outDir: string): Promise<void> {
+	for (const relativePath of agentSessionGuardianResources) {
+		const outputPath = path.join(REPO_ROOT, outDir, relativePath);
+		const stat = await fs.promises.stat(outputPath).catch(() => undefined);
+		if (!stat?.isFile() || stat.size === 0) {
+			throw new Error(`[resources] Required agent session guardian was not staged: ${path.join(outDir, relativePath)}`);
+		}
+	}
 }
 
 // ============================================================================
@@ -896,6 +915,7 @@ async function watch(): Promise<void> {
 	try {
 		await transpile(outDir, false);
 		await copyAllNonTsFiles(outDir, false);
+		await assertAgentSessionGuardianResources(outDir);
 		console.log(`Finished transpilation with 0 errors after ${Date.now() - t1} ms`);
 	} catch (err) {
 		console.error('[watch] Initial build failed:', err);
@@ -935,6 +955,7 @@ async function watch(): Promise<void> {
 					console.log(`[watch] Copied ${relativePath}`);
 				}));
 			}
+			await assertAgentSessionGuardianResources(outDir);
 
 			if (tsFiles.length > 0 || filesToCopy.length > 0) {
 				console.log(`Finished transpilation with 0 errors after ${Date.now() - t1} ms`);
@@ -1030,6 +1051,7 @@ async function main(): Promise<void> {
 					const t1 = Date.now();
 					await transpile(outDir, options.excludeTests);
 					await copyAllNonTsFiles(outDir, options.excludeTests);
+					await assertAgentSessionGuardianResources(outDir);
 					console.log(`[transpile] Done in ${Date.now() - t1}ms`);
 				}
 				break;

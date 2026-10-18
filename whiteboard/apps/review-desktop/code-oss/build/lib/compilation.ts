@@ -119,6 +119,31 @@ export function transpileTask(src: string, out: string, esbuild?: boolean): task
 	return task;
 }
 
+const agentSessionGuardianResources = [
+	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
+	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
+] as const;
+
+/** Copies the two app-owned Node guardians as explicit runtime resources. */
+export function copyAgentSessionGuardianResourcesTask(out: string): task.Task {
+	const copy: task.Task = async () => {
+		const sourceRoot = path.join(import.meta.dirname, '../../src');
+		const outputRoot = path.resolve(out);
+		for (const relativePath of agentSessionGuardianResources) {
+			const sourcePath = path.join(sourceRoot, relativePath);
+			const outputPath = path.join(outputRoot, relativePath);
+			await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+			await fs.promises.copyFile(sourcePath, outputPath);
+			const stat = await fs.promises.stat(outputPath);
+			if (!stat.isFile() || stat.size === 0) {
+				throw new Error(`Required agent session runtime resource was not staged: ${relativePath}`);
+			}
+		}
+	};
+	copy.taskName = `copy-agent-session-guardians-${path.basename(out)}`;
+	return copy;
+}
+
 export function compileTask(src: string, out: string, build: boolean, options: { disableMangle?: boolean; preserveEnglish?: boolean } = {}): task.Task {
 
 	const task = async () => {
