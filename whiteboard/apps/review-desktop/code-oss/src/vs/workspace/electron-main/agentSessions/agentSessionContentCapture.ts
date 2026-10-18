@@ -466,6 +466,11 @@ function metadataOnly(file: AgentSessionContentFile | undefined): Omit<AgentSess
 }
 
 function compareCodeUnits(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
+function isCanonicalTimestamp(value: string): boolean {
+	if (value.length !== 24) { return false; }
+	const date = new Date(value);
+	return Number.isFinite(date.getTime()) && date.toISOString() === value;
+}
 function sha256(bytes: Buffer): string { return createHash('sha256').update(bytes).digest('hex'); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean { return Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)); }

@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -42,6 +43,26 @@ async function createFixture(): Promise<{ directory: string; root: string; helpe
 		identity: { canonicalPath, dev: identityStat.dev.toString(), ino: identityStat.ino.toString() },
 	};
 }
+
+test('serialized snapshots require canonical timestamps and retain an immutable validated copy of text', () => {
+	const content = 'before';
+	const input = {
+		schemaVersion: 1, folderIdentity: { canonicalPath: '/bound/project', dev: '1', ino: '2' },
+		capturedAt: '2026-10-19T00:00:00.000Z', inventoryCoverage: 'complete', contentCoverage: 'complete',
+		entryCount: 1, fileBytes: 6, retainedTextBytes: 6, contentReadCount: 1,
+		entries: [{ path: 'note.txt', kind: 'file', size: 6, sha256: createHash('sha256').update(content).digest('hex'), content }],
+	};
+	const snapshot = validateAgentSessionContentSnapshot(input);
+	assert.equal(Object.isFrozen(snapshot.entries[0]), true);
+	assert.equal(Object.isFrozen(snapshot.folderIdentity), true);
+	assert.throws(() => validateAgentSessionContentSnapshot({ ...input, capturedAt: '2026-10-19' }), /invalid shape/i);
+	assert.throws(() => validateAgentSessionContentSnapshot({ ...input, capturedAt: '2026-02-30T00:00:00.000Z' }), /invalid shape/i);
+	input.entries[0].content = 'later';
+	input.folderIdentity.ino = '3';
+	assert.equal(snapshot.entries[0].content, 'before');
+	assert.equal(snapshot.folderIdentity.ino, '2');
+	assert.throws(() => validateAgentSessionContentSnapshot(input), /text content is invalid/i);
+});
 
 test('native before and after snapshots retain bytes and report filesystem changes without following symlinks', { skip: !nativeTest }, async () => {
 	const fixture = await createFixture();
