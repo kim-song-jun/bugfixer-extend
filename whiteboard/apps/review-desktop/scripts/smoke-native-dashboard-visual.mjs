@@ -1437,6 +1437,7 @@ async function seedTranscriptHistory(database, fixture, projectFolder, tag) {
     });
 
     const startingSession = database.agentSessions.getSession(fixture.projectId, session.id);
+
     const running = database.agentSessionTurns.transitionTurn(
       fixture.projectId, session.id, turn.id, turn.revision, startingSession.revision, { state: 'running' },
     );
@@ -1555,9 +1556,11 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   await exportButton.scrollIntoViewIfNeeded();
 
   const beforePageShot = path.join(output, `ai-session-logs-${tag}-rows-before.png`);
+
   const desktopLayout = await workspace.evaluate(element => {
     const action = element.querySelector('.ai-session-logs__button:last-child');
     const bounds = action?.getBoundingClientRect();
+
     return {
       overflow: element.scrollWidth > element.clientWidth + 1,
       actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
@@ -1653,9 +1656,11 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   await page.waitForFunction(() => window.innerWidth === 760);
   await logs.getByText(`CI fixture terminal ${tag} run 2 entry 1`, { exact: true }).waitFor();
   await exportButton.scrollIntoViewIfNeeded();
+
   const layout = await workspace.evaluate(element => {
     const action = element.querySelector('.ai-session-logs__button:last-child');
     const bounds = action?.getBoundingClientRect();
+
     return {
       overflow: element.scrollWidth > element.clientWidth + 1,
       actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1

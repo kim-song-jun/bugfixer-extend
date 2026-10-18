@@ -591,12 +591,14 @@ try {
   });
   const unknownSnapshot = { provider: 'codex', sessionId: 'unknown-preparation-fixture' };
   let unknownPreparationHandle;
+
   await assert.rejects(
     unknownPreparationFactory.start(unknownSnapshot, 'unknown-preparation-turn', new AbortController().signal),
     error => {
       assert.ok(error instanceof AgentSessionRuntimeStartError);
       assert.equal(error.cleanupVerified, false, 'An unclassified preparer rejection must remain unverified.');
       unknownPreparationHandle = error.recoveryHandle;
+
       return Boolean(unknownPreparationHandle);
     },
   );
@@ -687,6 +689,7 @@ try {
 
       return current?.state === 'failed' && current.cleanupVerified ? current : false;
     }, 'SQLite transcript failure summary with verified process cleanup');
+
     assert.match(persistenceFailedTurn.errorSummary, /transcript could not be written/i);
     assert.equal(failedOutput.length, 0, 'The next terminal write is withheld regardless of output chunk boundaries.');
     assert.equal(serviceDatabase.agentSessionTranscripts.readPage(project.id, persistenceFailureSession.id, persistenceFailureTurn.id).entries
