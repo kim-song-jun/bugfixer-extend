@@ -6,7 +6,7 @@
 import type {
 	AgentWorkflowApprovalResult, AgentWorkflowDTO, AgentWorkflowNodePlan, AgentWorkflowPageDTO,
 	AgentWorkflowNodeState, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowReference,
-	AgentWorkflowRole, AgentWorkflowRunDTO, AgentWorkflowState, AgentWorkflowStatusDTO,
+	AgentWorkflowRole, AgentWorkflowState, AgentWorkflowStatusDTO,
 	CreateAgentWorkflowInput,
 } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
 import type { AgentSessionDTO, AgentSessionPermissionPolicy } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';

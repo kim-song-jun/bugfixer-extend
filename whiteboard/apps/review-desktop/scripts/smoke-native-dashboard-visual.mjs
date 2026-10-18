@@ -1287,6 +1287,15 @@ try {
       const seededMailbox = await seedMailboxNotificationHistory(mailboxFixtureDatabase, fixture, projectFolder, tag, AgentSessionCollaborationService);
 
       fixture.mailbox = seededMailbox.receipt;
+
+      assert.equal(mailboxFixtureDatabase.agentWorkflows.listWorkflows(fixture.projectId).workflows.length, 0, 'The workflow journey must begin without a preseeded workflow');
+
+      const visualSession = mailboxFixtureDatabase.agentSessions.listSessions(fixture.projectId).find(item => item.name === fixture.aiSession.name);
+
+      assert.ok(visualSession, 'The UI-created session must remain available beside the mailbox fixture sessions');
+
+      fixture.workflowTurnCountsBefore = Object.fromEntries([visualSession.id, seededMailbox.receipt.senderSessionId, seededMailbox.receipt.recipientSessionId]
+        .map(sessionId => [sessionId, mailboxFixtureDatabase.agentSessionTurns.listTurns(fixture.projectId, sessionId).length]));
     } finally {
       mailboxFixtureDatabase.close();
     }
@@ -1297,6 +1306,8 @@ try {
       await waitForExtensionReadiness(session, `mailbox-notifications-${tag}`);
 
       await verifyAiSessionMailbox(session.page, fixture, tag, screenshots, viewports);
+
+      fixture.workflow = await verifyAiSessionWorkflow(session.page, fixture, tag, screenshots, viewports);
     } catch (error) {
       await captureFailure(session.page, path.join(output, `ai-session-mailbox-${tag}-failure.png`), diagnostics);
 
@@ -1326,6 +1337,14 @@ try {
 
       assert.ok(senderSession && recipientSession, 'Both CI mailbox sessions must persist through the packaged-app journey');
 
+      assert.equal(senderSession.bindingId, fixture.bindingId, 'The sender fixture must remain bound to the dashboard task scope');
+
+      assert.equal(senderSession.taskId, fixture.taskId, 'The sender fixture must remain connected to the dashboard task');
+
+      assert.equal(recipientSession.bindingId, fixture.bindingId, 'The recipient fixture must remain bound to the dashboard task scope');
+
+      assert.equal(recipientSession.taskId, fixture.taskId, 'The recipient fixture must remain connected to the dashboard task');
+
       assert.ok(messages.every(message => !message.body.includes(mailboxFixtureSecret(tag))), 'The production sanitization boundary must mask the known mailbox secret before persistence');
 
       assert.ok(messages.every(message => message.readAt === null), 'Human UI navigation must not acknowledge any mailbox message for the AI');
@@ -1341,6 +1360,46 @@ try {
       assert.equal(notificationStatus.unreadCount, fixture.mailbox.messageCount - 1, 'Only the opened notification must leave the project unread count');
 
       assert.equal(notificationStatus.latestSequence, fixture.mailbox.messageCount, 'The project notification high-water mark must remain persisted');
+
+      const savedWorkflow = verifiedMailboxDatabase.agentWorkflows.getWorkflow(fixture.projectId, fixture.workflow.workflowId);
+
+      assert.ok(savedWorkflow, 'The packaged UI must create a persisted workflow through the application IPC');
+
+      assert.equal(savedWorkflow.state, 'waiting', 'Saving a plan must leave it waiting for native approval');
+
+      assert.equal(savedWorkflow.planVersion, fixture.workflow.savedVersion, 'The workflow store must retain the saved edited plan version');
+
+      const savedPlan = verifiedMailboxDatabase.agentWorkflows.getPlan(fixture.projectId, fixture.workflow.workflowId);
+
+      assert.equal(savedPlan?.fingerprint, fixture.workflow.savedFingerprint, 'The persisted workflow fingerprint must match the rendered saved plan');
+
+      assert.equal(savedPlan?.maxConcurrentNodes, fixture.workflow.expectedPlan.maxConcurrentNodes, 'The UI must persist the explicit finite concurrency limit');
+
+      assert.equal(savedPlan?.maxTotalTurns, fixture.workflow.expectedPlan.maxTotalTurns, 'The UI must persist the explicit finite turn limit');
+
+      assert.equal(savedPlan?.maxDurationMs, fixture.workflow.expectedPlan.maxDurationMs, 'The UI must persist the explicit finite duration limit');
+
+      const persistedNodes = savedPlan?.nodes.map(node => ({
+        sessionId: node.sessionId,
+        role: node.role,
+        permissionPolicy: node.permissionPolicy,
+        dependsOn: node.dependsOn.map(dependency => {
+          const dependencyNode = savedPlan.nodes.find(candidate => candidate.nodeId === dependency);
+
+          assert.ok(dependencyNode, 'Every persisted workflow dependency must resolve to a selected session');
+
+          return dependencyNode.sessionId;
+        }).sort(),
+      })).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+
+      assert.deepEqual(persistedNodes, fixture.workflow.expectedPlan.nodes
+        .map(node => ({ ...node })).sort((left, right) => left.sessionId.localeCompare(right.sessionId)), 'The persisted plan must retain its real session identities, supported policies, roles, and dependency');
+
+      assert.equal(verifiedMailboxDatabase.agentWorkflows.getLatestRun(fixture.projectId, fixture.workflow.workflowId), undefined, 'Saving a workflow must not approve it or create a run');
+
+      for (const [sessionId, count] of Object.entries(fixture.workflowTurnCountsBefore)) {
+        assert.equal(verifiedMailboxDatabase.agentSessionTurns.listTurns(fixture.projectId, sessionId).length, count, 'Saving a workflow must not create provider turns for its sessions');
+      }
     } finally {
       verifiedMailboxDatabase.close();
     }
@@ -1731,8 +1790,10 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
       projectId: fixture.projectId,
       senderSessionId: sender.id,
       senderName,
+      senderProvider: sender.provider,
       recipientSessionId: recipient.id,
       recipientName,
+      recipientProvider: recipient.provider,
       model,
       messageCount: messageIds.length,
       messageIds,
@@ -2073,6 +2134,189 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
   await capturePage(page, narrowShot);
   screenshots.push(narrowShot);
   viewports.push({ theme: tag, state: 'ai-session-mailbox-narrow-760', width: 760, height: 820, screenshot: narrowShot, layout: narrowLayout });
+}
+
+async function verifyAiSessionWorkflow(page, fixture, tag, screenshots, viewports) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await page.waitForFunction(() => window.innerWidth === 1440);
+
+  const workspace = page.locator('.ai-session-workspace');
+
+  const workflowTab = workspace.getByRole('tab', { name: '위임', exact: true });
+
+  await workflowTab.focus();
+
+  await page.keyboard.press('Enter');
+
+  await page.waitForFunction(() => document.querySelector('#ai-session-tab-workflow')?.getAttribute('aria-selected') === 'true');
+
+  const panel = workspace.locator('.ai-session__workflow-panel');
+
+  const rows = panel.locator('.ai-session-workflows__node-row');
+
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-workflows__node-row').length >= 2);
+
+  const senderRow = rows.filter({ hasText: fixture.mailbox.senderName });
+
+  const recipientRow = rows.filter({ hasText: fixture.mailbox.recipientName });
+
+  await senderRow.getByRole('checkbox', { name: `${fixture.mailbox.senderName} 세션 포함`, exact: true }).check();
+
+  await recipientRow.getByRole('checkbox', { name: `${fixture.mailbox.recipientName} 세션 포함`, exact: true }).check();
+
+  assert.ok((await senderRow.locator('.ai-session-workflows__identity').innerText()).includes(`${fixture.mailbox.senderProvider} · ${fixture.mailbox.model}`), 'The sender row must show its persisted provider and model ID');
+
+  assert.ok((await recipientRow.locator('.ai-session-workflows__identity').innerText()).includes(`${fixture.mailbox.recipientProvider} · ${fixture.mailbox.model}`), 'The recipient row must show its persisted provider and model ID');
+
+  const policyOptions = await panel.locator('select[data-field="policy"]').evaluateAll(elements => elements.map(element => Array.from(element.options, option => option.value)));
+
+  assert.deepEqual(policyOptions, [['read-only', 'mutating'], ['read-only', 'mutating']], 'The plan editor must expose only the two runtime-supported permission policies');
+
+  await senderRow.locator('select[data-field="role"]').selectOption('researcher');
+
+  await recipientRow.locator('select[data-field="role"]').selectOption('implementer');
+
+  await senderRow.locator('select[data-field="policy"]').selectOption('read-only');
+
+  await recipientRow.locator('select[data-field="policy"]').selectOption('mutating');
+
+  await recipientRow.locator('.ai-session-workflows__dependencies').getByRole('checkbox', { name: fixture.mailbox.senderName, exact: true }).check();
+
+  assert.equal(await recipientRow.locator('.ai-session-workflows__dependencies').getByRole('checkbox', { name: fixture.mailbox.senderName, exact: true }).isChecked(), true, 'The selected recipient plan node must explicitly depend on the sender');
+
+  const limits = panel.locator('.ai-session-workflows__limit-field input');
+
+  await limits.nth(0).fill('2');
+
+  await limits.nth(1).fill('4');
+
+  await limits.nth(2).fill('30');
+
+  const save = panel.getByRole('button', { name: '계획 저장', exact: true });
+
+  await save.focus();
+
+  await page.keyboard.press('Enter');
+
+  await page.waitForFunction(() => document.querySelector('.ai-session-workflows__state')?.textContent?.includes('승인 대기'));
+
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), '계획 저장', 'Saving a workflow by keyboard must keep focus on the stable save control');
+
+  const workflowId = await panel.locator('.ai-session-workflows__select').first().getAttribute('data-workflow-id');
+
+  assert.ok(workflowId, 'The saved workflow must appear in the project history list');
+
+  const initialIdentity = panel.locator('.ai-session-workflows__editor p').filter({ hasText: '저장된 계획 · v1 · 지문' });
+
+  const initialIdentityText = await initialIdentity.innerText();
+
+  const initialFingerprint = initialIdentityText.match(/[0-9a-f]{64}/)?.[0];
+
+  assert.ok(initialFingerprint, 'The saved plan version and fingerprint must be visible in its context');
+
+  assert.ok((await panel.locator('.ai-session-workflows__status').innerText()).includes('실행 기록 없음'), 'A saved waiting plan must not imply a workflow run exists');
+
+  await limits.nth(1).fill('5');
+
+  const draftWarning = panel.locator('.ai-session-workflows__editor p[role="status"]').filter({ hasText: '저장하지 않은 변경이 있습니다.' });
+
+  await draftWarning.waitFor({ state: 'visible' });
+
+  const approve = panel.getByRole('button', { name: '승인 요청', exact: true });
+
+  const start = panel.getByRole('button', { name: '실행 시작', exact: true });
+
+  assert.equal(await approve.isDisabled(), true, 'Approval must be disabled while the visible plan draft is unsaved');
+
+  assert.equal(await start.isDisabled(), true, 'Start must be disabled while the visible plan draft is unsaved');
+
+  await save.focus();
+
+  await page.keyboard.press('Enter');
+
+  await page.waitForFunction(() => document.querySelector('.ai-session-workflows__state')?.textContent?.includes('승인 대기 · 계획 v2'));
+
+  assert.equal(await draftWarning.isVisible(), false, 'Saving the edited plan must clear the unsaved warning');
+
+  assert.equal(await approve.isDisabled(), false, 'The saved waiting plan may present its separate native-approval action');
+
+  const savedIdentity = panel.locator('.ai-session-workflows__editor p').filter({ hasText: '저장된 계획 · v2 · 지문' });
+
+  const savedIdentityText = await savedIdentity.innerText();
+
+  const savedFingerprint = savedIdentityText.match(/[0-9a-f]{64}/)?.[0];
+
+  assert.ok(savedFingerprint && savedFingerprint !== initialFingerprint, 'Editing and saving must produce a visible new version and fingerprint');
+
+  assert.ok((await panel.locator('.ai-session-workflows__status').innerText()).includes('실행 기록 없음'), 'Editing a plan must not create a run');
+
+  const screenshotLayout = async (width, state) => {
+    const height = width === 760 ? 820 : 900;
+
+    await page.setViewportSize({ width, height });
+
+    await page.waitForFunction(expectedWidth => window.innerWidth === expectedWidth, width);
+
+    const lastAction = panel.getByRole('button', { name: '상태·참조 다시 읽기', exact: true });
+
+    await lastAction.scrollIntoViewIfNeeded();
+
+    const layout = await panel.evaluate(element => {
+      const action = element.querySelector('.ai-session-workflows__actions button:last-child');
+
+      const bounds = action?.getBoundingClientRect();
+
+      return {
+        overflow: element.scrollWidth > element.clientWidth + 1,
+        actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+          && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+      };
+    });
+
+    assert.equal(layout.overflow, false, `Workflow content must not overflow horizontally at ${tag}/${width}`);
+
+    assert.equal(layout.actionReachable, true, `The last workflow action must remain reachable at ${tag}/${width}`);
+
+    await verifyTheme(page, tag === 'dark', `workflow-${tag}-${width}`);
+
+    const screenshot = path.join(output, `ai-session-workflow-${tag}-${width}-${state}.png`);
+
+    await capturePage(page, screenshot);
+
+    screenshots.push(screenshot);
+
+    viewports.push({ theme: tag, state: `ai-session-workflow-${state}`, width, height, screenshot, layout });
+  };
+
+  await screenshotLayout(1440, 'desktop-saved');
+
+  await screenshotLayout(760, 'narrow-saved');
+
+  return {
+    fixtureOnly: true,
+    workflowUiFixture: true,
+    providerExecuted: false,
+    ptyExecuted: false,
+    workflowId,
+    sessionIds: [fixture.mailbox.senderSessionId, fixture.mailbox.recipientSessionId],
+    savedVersion: 2,
+    savedFingerprint,
+    initialFingerprint,
+    expectedPlan: {
+      maxConcurrentNodes: 2,
+      maxTotalTurns: 5,
+      maxDurationMs: 30 * 60_000,
+      nodes: [
+        { sessionId: fixture.mailbox.senderSessionId, role: 'researcher', permissionPolicy: { mode: 'read-only', approval: 'never' }, dependsOn: [] },
+        { sessionId: fixture.mailbox.recipientSessionId, role: 'implementer', permissionPolicy: { mode: 'mutating', approval: 'on-request' }, dependsOn: [fixture.mailbox.senderSessionId] },
+      ],
+    },
+    expectedState: 'waiting-for-native-approval',
+    actualProviderStart: false,
+    actualTaskCompletion: false,
+    proofLimit: 'The packaged UI created and revised a persisted workflow plan only. Native approval, provider launch, and agent task execution were not performed.',
+  };
 }
 
 async function dismissStartupInvitations(page) {

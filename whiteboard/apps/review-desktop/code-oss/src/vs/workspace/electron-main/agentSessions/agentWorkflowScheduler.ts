@@ -4,8 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomUUID } from 'node:crypto';
+import { clearTimeout as clearTimer, setTimeout as setTimer } from 'node:timers';
 import type { AgentWorkflowDTO, AgentWorkflowNodeExecutionDTO, AgentWorkflowPlan, AgentWorkflowRunDTO } from '../../common/workspaceAgentWorkflowProtocol.js';
-import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import type { AgentSessionService } from './agentSessionService.js';
 
@@ -48,7 +49,7 @@ export class AgentWorkflowScheduler {
 	private readonly stops = new Map<string, StopOperation>();
 	private readonly stopFailures = new Set<string>();
 	private readonly hostErrors = new Map<string, AgentWorkflowHostErrorCode>();
-	private timer: ReturnType<typeof setTimeout> | undefined;
+	private timer: ReturnType<typeof setTimer> | undefined;
 	private pumping = false;
 	private stopped = false;
 
@@ -95,7 +96,7 @@ export class AgentWorkflowScheduler {
 	/** Stops scheduler work synchronously; the session service owns aborting pending acquisitions and PTYs. */
 	stopScheduling(): void {
 		this.stopped = true;
-		if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+		if (this.timer) { clearTimer(this.timer); this.timer = undefined; }
 	}
 
 	/** Called before AgentSessionService.shutdown so tracked workflows become non-resumable. */
@@ -137,11 +138,12 @@ export class AgentWorkflowScheduler {
 
 	private schedulePump(): void {
 		if (this.stopped || this.timer || this.pumping || this.activeRuns.size === 0) { return; }
-		this.timer = setTimeout(() => {
+		const timer = setTimer(() => {
 			this.timer = undefined;
 			void this.pump();
 		}, this.intervalMs);
-		this.timer.unref?.();
+		timer.unref();
+		this.timer = timer;
 	}
 
 	private async pump(): Promise<void> {
@@ -228,7 +230,7 @@ export class AgentWorkflowScheduler {
 			return;
 		}
 		if (!turn.cleanupVerified) {
-			const requested = node.state === 'cancelRequested' ? node : this.transitionNode(active, run, node, 'cancelRequested').nodes.find(value => value.nodeId === node.nodeId)!;
+			const requested = this.transitionNode(active, run, node, 'cancelRequested').nodes.find(value => value.nodeId === node.nodeId)!;
 			this.stopExactTurn(active, requested, turn.id);
 			return;
 		}
