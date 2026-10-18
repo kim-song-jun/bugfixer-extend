@@ -42,8 +42,31 @@ jobs:
           cache-dependency-path: whiteboard/pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Record runner resources before session contracts
+        run: |
+          uptime
+          getconf _NPROCESSORS_ONLN
+          free -m
+          ps -eo comm= | awk '/node/ {node++} /chrome|chromium|firefox/ {browser++} END {print "node=" node+0, "browser=" browser+0}'
       - name: Test persistence, mailboxes and managed Git worktrees
         run: pnpm --filter @dev.fast/review-desktop test:agent-sessions
+      - name: Install pinned public CLIs for help-only discovery
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-cli-help-tools" "$RUNNER_TEMP/agent-cli-help-home/codex" "$RUNNER_TEMP/agent-cli-help-home/claude"
+          npm install --prefix "$RUNNER_TEMP/agent-cli-help-tools" --no-save --package-lock=false @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.302
+      - name: Check pinned CLI help and versions without authentication
+        timeout-minutes: 3
+        run: |
+          HOME="$RUNNER_TEMP/agent-cli-help-home" \
+          CODEX_HOME="$RUNNER_TEMP/agent-cli-help-home/codex" \
+          CLAUDE_CONFIG_DIR="$RUNNER_TEMP/agent-cli-help-home/claude" \
+          BUGFIXER_CODEX_CLI="$RUNNER_TEMP/agent-cli-help-tools/node_modules/.bin/codex" \
+          BUGFIXER_CLAUDE_CLI="$RUNNER_TEMP/agent-cli-help-tools/node_modules/.bin/claude" \
+          pnpm --filter @dev.fast/review-desktop test:agent-cli-help
+      - name: Remove disposable CLI help profiles and tools
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/agent-cli-help-tools" "$RUNNER_TEMP/agent-cli-help-home"
 
   review-desktop:
     name: Review Desktop
@@ -268,6 +291,20 @@ jobs:
           REVIEW_DESKTOP_PACKAGE_ROOT: ${{ runner.temp }}/review-desktop-package
           SKIP_NOTARIZE: "1"
         run: pnpm --filter @dev.fast/review-desktop app:package:macos
+
+      - name: Record macOS resources before native contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        run: |
+          uptime
+          sysctl -n hw.ncpu
+          vm_stat
+          sysctl vm.swapusage
+          ps -axo comm= | awk '/node/ {node++} /Chrome|Chromium|Firefox|Whiteboard/ {browser++} END {print "node=" node+0, "browser=" browser+0}'
+
+      - name: Native shared-folder and worktree launch contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @dev.fast/review-desktop test:agent-session-workspaces
 
       - name: Native project dashboard smoke
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
