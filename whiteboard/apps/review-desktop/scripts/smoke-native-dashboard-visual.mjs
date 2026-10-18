@@ -215,12 +215,16 @@ async function closeApp(session) {
 
 async function waitForExtensionReadiness(session, phase) {
   const requiredMarks = ['code/didLoadExtensions', 'code/didInitializeLocalExtensionHost'];
+
   const marks = await waitFor(
     () => session.page.evaluate(names => {
       const entries = performance.getEntriesByType('mark');
+
       if (!names.every(name => entries.some(entry => entry.name === name))) return undefined;
+
       return names.map(name => {
         const entry = entries.find(candidate => candidate.name === name);
+
         return { name: entry.name, startTime: entry.startTime };
       });
     }, requiredMarks),
