@@ -589,6 +589,7 @@ try {
     guardianScriptPath,
     prepareLaunch: async () => { throw new Error('Fixture unknown preparer failure.'); },
   });
+
   const unknownSnapshot = { provider: 'codex', sessionId: 'unknown-preparation-fixture' };
   let unknownPreparationHandle;
 
