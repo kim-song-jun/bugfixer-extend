@@ -42,10 +42,10 @@
 
 `CreateAgentSessionInput` has `projectId`, `bindingId`, optional `taskId`/`parentSessionId`, `name`, `provider: 'codex'|'claude'`, `model`, optional `profileRef`, and `workspaceMode: 'gitWorktree'|'sharedFolder'`. `AgentSessionDTO` adds generated `id`, null-normalized optional fields, `state`, `revision`, `createdAt`, `updatedAt`. States are `created | starting | running | waitingForInput | waitingForApproval | idle | stopping | stopped | interrupted | failed`; invalid state transitions and stale revisions reject. Optional folder/branch assignment is a later service operation, not an unverified caller-supplied launch path. `SessionMessageDTO` contains `id, projectId, senderSessionId, recipientSessionId, sequence, idempotencyKey, body, createdAt, readAt`. `SessionNotificationDTO` contains `id, projectId, sessionId, sequence, kind:'message', messageId, createdAt, readAt`. Message max is 16,384 Unicode code units and 64 KiB UTF-8; idempotency key max is 128; page limit is 1–100 with default 50. Boundary errors never echo message bodies.
 
-- [ ] Add tests against actual SQLite for reopen, v21 migration without losing tasks, all three provider pairings, idempotent retry, changed-key-content rejection, wrong-project/wrong-recipient ack, cursor order and durable notification read state.
-- [ ] Implement v22 in the same migration transaction and shared SQLite connection; store methods assert database open and enforce project/task/binding/parent ownership.
-- [ ] Add focused serial CI entrypoint in Task 2's main-owned workflow patch; no local tests.
-- [ ] Independent source review, CI proof, exact-path commit.
+- [x] Add tests against actual SQLite for reopen, v21 migration without losing tasks, all three provider pairings, idempotent retry, changed-key-content rejection, wrong-project/wrong-recipient ack, cursor order and durable notification read state.
+- [x] Implement v22 in the same migration transaction and shared SQLite connection; store methods assert database open and enforce project/task/binding/parent ownership.
+- [x] Add focused serial CI entrypoint in Task 2's main-owned workflow patch; no local tests.
+- [x] Independent source review, CI proof, exact-path commit. Store contracts passed in runs 39140476843 and 39143937041; this is persistence evidence, not authenticated CLI/MCP communication.
 
 ### Task 2: App-owned worktrees and reviewed local merge core
 
@@ -53,12 +53,12 @@
 
 **Interfaces:** `ManagedWorktreeService(profileDirectory)`. `create({repositoryPath, ownerId, kind:'session'|'integration', baseRef})` returns an owned lease with canonical common-dir/repository identity, generated branch, worktree path, base commit and state. `inspect(ownerId)` validates manifest/worktree/ref identity. `previewMerge({integrationOwnerId, sessionOwnerId})` returns an opaque preview ID with exact source/target HEAD, diff/hash and expiry. `mergeReviewed(previewId)` is called only by the later trusted human-approval channel, rechecks the exact snapshot, and returns merged commit or explicit conflict/recovery state. No MCP approval method. `remove(ownerId, {retainedIntegrationOwnerId?})` rejects dirty/untracked/unmerged data and never uses force. A lease manifest, not arbitrary caller path/branch, controls every mutation.
 
-- [ ] Write actual disposable-Git fixtures for independent session branches, unchanged user checkout/branch, clean local integration merge, source/target advance after preview, conflict state, mismatched repositories, forged/retargeted ownership, dirty/untracked cleanup rejection, and safe merged cleanup.
-- [ ] All I/O methods return `Promise` (`create/inspect → Promise<ManagedWorktreeLease>`, `previewMerge → Promise<MergePreview>`, `mergeReviewed → Promise<ReviewedMergeResult>`, `remove → Promise<void>`). Git and process-identity subprocesses must be asynchronous and bounded so an operation cannot freeze Electron's main process.
-- [ ] Use subprocess argument arrays, no shell interpolation; pin commands to verified app-owned worktree/common-dir identity, disable automatic repo hooks explicitly, bound git processes and preserve partial failures for recovery.
-- [ ] Gate same integration mutations with a lease; never abort/reset conflict state automatically or delete unique commits. Preserve recovery metadata after partial filesystem/Git failure.
-- [ ] Add workflow step running only `agentSessions/*.test.ts` serially via existing tsx/preload; CI is the first runtime execution.
-- [ ] Independent review, CI proof, exact-path commit.
+- [x] Write actual disposable-Git fixtures for independent session branches, unchanged user checkout/branch, clean local integration merge, source/target advance after preview, conflict state, mismatched repositories, forged/retargeted ownership, dirty/untracked cleanup rejection, and safe merged cleanup.
+- [x] All I/O methods return `Promise` (`create/inspect → Promise<ManagedWorktreeLease>`, `previewMerge → Promise<MergePreview>`, `mergeReviewed → Promise<ReviewedMergeResult>`, `remove → Promise<void>`). Git and process-identity subprocesses must be asynchronous and bounded so an operation cannot freeze Electron's main process.
+- [x] Use subprocess argument arrays, no shell interpolation; pin commands to verified app-owned worktree/common-dir identity, disable automatic repo hooks explicitly, bound git processes and preserve partial failures for recovery.
+- [x] Gate same integration mutations with a lease; never abort/reset conflict state automatically or delete unique commits. Preserve recovery metadata after partial filesystem/Git failure.
+- [x] Add workflow step running only `agentSessions/*.test.ts` serially via existing tsx/preload; CI is the first runtime execution.
+- [x] Independent review, CI proof, exact-path commit. Actual Git fixtures passed in runs 39140476843 and 39143937041. Trusted UI approval and PR publication remain Tasks 3/7.
 
 ### Task 3: Session host service, project IPC and real PTY lifecycle
 
