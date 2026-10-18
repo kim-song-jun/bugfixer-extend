@@ -261,6 +261,7 @@ jobs:
           node-version-file: whiteboard/apps/review-desktop/code-oss/.nvmrc
 
       - name: Assemble and verify unsigned macOS app
+        id: native_package
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REVIEW_DESKTOP_PRECOMPILED: "1"
@@ -269,7 +270,22 @@ jobs:
         run: pnpm --filter @dev.fast/review-desktop app:package:macos
 
       - name: Native project dashboard smoke
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         run: node apps/review-desktop/scripts/smoke-native-dashboard-visual.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-ui-smoke"
+
+      - name: Native AI session PTY contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 5
+        run: ELECTRON_RUN_AS_NODE=1 "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app/Contents/MacOS/Whiteboard" apps/review-desktop/scripts/smoke-native-agent-pty.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-pty-smoke"
+
+      - name: Upload native PTY evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-desktop-native-pty-smoke
+          path: ${{ runner.temp }}/review-desktop-native-pty-smoke
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload native UI smoke evidence
         if: always()

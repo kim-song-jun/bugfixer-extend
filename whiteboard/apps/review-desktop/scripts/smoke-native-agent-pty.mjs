@@ -1,0 +1,339 @@
+/** Run real PTY contracts inside the packaged Electron runtime on the macOS CI runner. */
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+assert.equal(process.env.GITHUB_ACTIONS, 'true', 'This resource-intensive probe runs only in GitHub CI');
+assert.equal(process.platform, 'darwin');
+assert.ok(process.versions.electron, 'Use the packaged Electron executable with ELECTRON_RUN_AS_NODE=1');
+
+const [appPath, evidencePath] = process.argv.slice(2);
+
+assert.ok(appPath && evidencePath, 'Pass the packaged app and evidence directory');
+
+const resources = path.join(appPath, 'Contents', 'Resources', 'app');
+const nodeExecutable = path.join(resources, 'review-runtime', 'bin', 'node');
+const guardianScriptPath = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'pty', 'agentPtyGuardian.mjs');
+const hostModule = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentPtyHost.js');
+
+await mkdir(evidencePath, { recursive: true });
+await access(nodeExecutable, constants.X_OK);
+await access(guardianScriptPath, constants.R_OK);
+
+const { AgentPtyHost } = await import(pathToFileURL(hostModule).href);
+const root = await mkdtemp(path.join(os.tmpdir(), 'bfx-pty-probe-'));
+const secret = 'bfx-public-fixture-sensitive-value';
+const hosts = [];
+const identities = [];
+
+function hostState() {
+  const commands = execFileSync('/bin/ps', ['-axo', 'comm='], { encoding: 'utf8', timeout: 2000 }).split('\n');
+  let docker;
+
+  try {
+    const version = execFileSync('docker', ['info', '--format', '{{.ServerVersion}}'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+    docker = { available: true, version };
+  } catch (error) {
+    docker = { available: false, reason: error.code ?? error.status ?? 'unavailable' };
+  }
+
+  return {
+    load: os.loadavg(),
+    cores: os.cpus().length,
+    freeMemory: os.freemem(),
+    totalMemory: os.totalmem(),
+    swap: execFileSync('/usr/sbin/sysctl', ['-n', 'vm.swapusage'], { encoding: 'utf8', timeout: 2000 }).trim(),
+    nodeProcesses: commands.filter(command => /(^|\/)node$/.test(command.trim())).length,
+    appProcesses: commands.filter(command => /Whiteboard|Electron/.test(command)).length,
+    target: 'packaged PTY host with disposable Node fixtures',
+    docker,
+  };
+}
+
+const receipt = {
+  commit: process.env.GITHUB_SHA,
+  runtime: { node: process.versions.node, electron: process.versions.electron, modules: process.versions.modules },
+  baseline: hostState(),
+  checks: [],
+  cleanup: [],
+  ownedProcesses: identities,
+};
+const abortController = new AbortController();
+
+function requestAbort() {
+  receipt.interrupted = true;
+  abortController.abort();
+}
+
+process.once('SIGINT', requestAbort);
+process.once('SIGTERM', requestAbort);
+
+// The probe's fixture policy buffers complete lines, including tokens split across real PTY chunks.
+// This proves the transport's sanitizer boundary; it is not the product's full redaction policy.
+function lineSanitizer() {
+  let pending = '';
+
+  return {
+    push(text) {
+      pending += text;
+      const end = pending.lastIndexOf('\n');
+
+      if (end < 0) return '';
+
+      const ready = pending.slice(0, end + 1);
+      pending = pending.slice(end + 1);
+
+      return ready.replaceAll(secret, '[마스킹]');
+    },
+    flush() {
+      const final = pending.replaceAll(secret, '[마스킹]');
+      pending = '';
+
+      return final;
+    },
+  };
+}
+
+function createHost(createSanitizer = lineSanitizer) {
+  const host = new AgentPtyHost({
+    guardianNodeExecutable: nodeExecutable,
+    guardianScriptPath,
+    createSanitizer,
+    maxOutputBytes: 4096,
+    maxOutputChunks: 16,
+  });
+
+  hosts.push(host);
+
+  return host;
+}
+
+async function until(check, label, timeout = 15_000, ignoreAbort = false) {
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    if (!ignoreAbort && abortController.signal.aborted) throw new Error('The PTY probe was interrupted');
+
+    const result = await check();
+
+    if (result) return result;
+
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`Timed out: ${label}`);
+}
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+
+    throw error;
+  }
+}
+
+function retained(host, handle) {
+  return host.read(handle, 0, 500).chunks.map(chunk => chunk.text).join('');
+}
+
+const fixturePath = path.join(root, 'interactive-fixture.mjs');
+const fixtureSource = `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+if (!process.stdin.isTTY || !process.stdout.isTTY) process.exit(31);
+process.stdin.setRawMode(true);
+process.stdin.setEncoding('utf8');
+process.stdin.resume();
+process.on('SIGTERM', () => {});
+const descendant = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});process.send({ready:true});setInterval(()=>{},1000)'], { stdio:['ignore','ignore','ignore','ipc'], detached:false, env:{PATH:process.env.PATH} });
+descendant.once('message',()=>{
+  writeFileSync(process.argv[2], JSON.stringify({provider:process.pid,guardian:process.ppid,descendant:descendant.pid}));
+  process.stdout.write('READY\\n');
+});
+process.on('SIGWINCH', () => process.stdout.write('SIZE:'+process.stdout.columns+':'+process.stdout.rows+'\\n'));
+let pending='';
+process.stdin.on('data', chunk => {
+  pending += chunk;
+  while (pending.includes('\\n')) {
+    const end=pending.indexOf('\\n');
+    const line=pending.slice(0,end).replace(/\\r$/, '');
+    pending=pending.slice(end+1);
+    if (line.startsWith('echo:')) process.stdout.write('ECHO:'+line.slice(5)+'\\n');
+    if (line==='secret') {
+      process.stdout.write(${JSON.stringify(secret.slice(0, 12))});
+      setTimeout(()=>process.stdout.write(${JSON.stringify(secret.slice(12))}+'\\n'),25);
+    }
+    if (line==='flood') {
+      for (let i=0;i<2000;i++) process.stdout.write('FLOOD:'+i+':'+'.'.repeat(64)+'\\n');
+      process.stdout.write('FLOOD_DONE\\n');
+    }
+    if (line==='quit') process.stdout.write('FINAL_WITHOUT_NEWLINE',()=>process.exit(0));
+  }
+});
+`;
+
+await writeFile(fixturePath, fixtureSource, { mode: 0o600 });
+
+async function launchFixture(host, label) {
+  const identityFile = path.join(root, `${label}.json`);
+  const handle = await host.start({
+    executable: nodeExecutable,
+    args: [fixturePath, identityFile],
+    cwd: root,
+    env: { PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8' },
+    cols: 80,
+    rows: 24,
+  });
+
+  await until(() => retained(host, handle).includes('READY'), `${label} real TTY ready`);
+
+  const identity = JSON.parse(await readFile(identityFile, 'utf8'));
+
+  for (const [role, pid] of Object.entries(identity)) {
+    assert.ok(Number.isSafeInteger(pid) && pid > 0);
+
+    const pgid = Number(execFileSync('/bin/ps', ['-p', String(pid), '-o', 'pgid='], { encoding: 'utf8' }).trim());
+
+    assert.equal(pgid, identity.guardian, 'Provider and descendant must share the real guardian-owned process group');
+    identities.push({ label, role, pid, pgid });
+  }
+
+  return handle;
+}
+
+const deadline = setTimeout(() => {
+  receipt.timeout = true;
+  process.exitCode = 1;
+  abortController.abort();
+}, 90_000);
+
+deadline.unref();
+
+try {
+  const host = createHost();
+  const a = await launchFixture(host, 'a');
+  const b = await launchFixture(host, 'b');
+  const liveOutput = [];
+  const attachment = await host.attach(a, chunk => liveOutput.push(chunk.text));
+
+  assert.throws(() => host.getSnapshot(Object.freeze({})), /not created by this host/);
+  await host.write(a, 'echo:한글-A\n');
+  await host.write(b, 'echo:B\n');
+  await until(() => retained(host, a).includes('ECHO:한글-A') && retained(host, b).includes('ECHO:B'), 'independent duplex terminals');
+  assert.ok(!retained(host, a).includes('ECHO:B'));
+  attachment.dispose();
+  await host.write(a, 'echo:detached\n');
+  await until(() => retained(host, a).includes('ECHO:detached'), 'detached terminal remains alive');
+
+  const reattached = await host.attach(a, chunk => liveOutput.push(chunk.text));
+
+  await host.resize(a, 101, 33);
+  await until(() => retained(host, a).includes('SIZE:101:33'), 'actual PTY dimensions');
+  await host.write(a, 'secret\n');
+  await until(() => retained(host, a).includes('[마스킹]'), 'cross-chunk sanitization');
+  assert.ok(!retained(host, a).includes(secret) && !liveOutput.join('').includes(secret));
+  await host.write(a, 'flood\n');
+  await until(() => retained(host, a).includes('FLOOD_DONE'), 'bounded flood completes');
+
+  const page = host.read(a, 0, 500);
+
+  assert.equal(page.retentionGap, true);
+  assert.ok(Buffer.byteLength(page.chunks.map(chunk => chunk.text).join('')) <= 4096);
+  assert.ok(page.chunks.every((chunk, index) => index === 0 || chunk.sequence > page.chunks[index - 1].sequence));
+  reattached.dispose();
+  await host.write(a, 'quit\n');
+  await until(() => host.getSnapshot(a).state === 'exited', 'out-of-band provider exit');
+  assert.equal(host.getSnapshot(a).providerExitCode, 0);
+  assert.equal((await host.stop(a)).cleanupVerified, true);
+  assert.ok(retained(host, a).endsWith('FINAL_WITHOUT_NEWLINE'), 'Verified exit must flush final sanitized output');
+  assert.equal((await host.stop(b)).cleanupVerified, true);
+  await host.release(a);
+  await host.release(b);
+  receipt.checks.push('two real TTYs', 'duplex Unicode input', 'detach and reattach', 'resize', 'sanitized pages and listeners', 'retention gap', 'natural exit and final flush', 'TERM-resistant descendant cleanup', 'opaque handles');
+
+  const failureHost = createHost();
+
+  await assert.rejects(failureHost.start({ executable: path.join(root, 'missing-provider'), args: [], cwd: root, env: {}, cols: 80, rows: 24 }), /failed to start/);
+  receipt.checks.push('provider spawn failure rejects');
+
+  const taintedHost = createHost(() => {
+    let buffered = '';
+    let readyEmitted = false;
+
+    return {
+      push(text) {
+        buffered += text;
+
+        if (buffered.includes(secret)) throw new Error('fixture sanitizer rejected sensitive data');
+
+        if (!readyEmitted && buffered.includes('READY')) {
+          readyEmitted = true;
+
+          return 'READY\n';
+        }
+
+        return '';
+      },
+      flush() { return buffered; },
+    };
+  });
+  const tainted = await launchFixture(taintedHost, 'tainted');
+  const rejectedOutput = [];
+  const taintedAttachment = await taintedHost.attach(tainted, chunk => rejectedOutput.push(chunk.text));
+
+  await taintedHost.write(tainted, 'secret\n');
+  await until(() => taintedHost.getSnapshot(tainted).outputSanitizerFailed, 'sanitizer failure');
+  assert.equal((await taintedHost.stop(tainted)).cleanupVerified, true);
+  assert.ok(!retained(taintedHost, tainted).includes(secret) && !rejectedOutput.join('').includes(secret), 'Failed sanitizer must never flush buffered sensitive text');
+  assert.ok(taintedHost.read(tainted, 0).chunks.some(chunk => chunk.gap));
+  taintedAttachment.dispose();
+  await taintedHost.release(tainted);
+  receipt.checks.push('sanitizer failure cannot flush raw buffered text');
+} catch (error) {
+  receipt.failure = error instanceof Error ? error.message : 'Unknown PTY probe failure';
+  process.exitCode = 1;
+} finally {
+  for (const host of hosts) {
+    try {
+      const results = await host.shutdown();
+
+      receipt.cleanup.push(...results);
+    } catch (error) {
+      receipt.cleanup.push({ cleanupVerified: false, error: error instanceof Error ? error.message : 'Unknown cleanup failure' });
+    }
+  }
+
+  try {
+    await until(() => identities.every(identity => !alive(identity.pid)), 'all recorded owned fixture processes gone', 15_000, true);
+    receipt.ownedProcessesGone = true;
+  } catch {
+    receipt.ownedProcessesGone = false;
+  }
+
+  const cleanupVerified = receipt.ownedProcessesGone && receipt.cleanup.every(result => result.cleanupVerified);
+
+  receipt.cleanupVerified = cleanupVerified;
+  receipt.finalHostState = hostState();
+
+  if (!cleanupVerified) process.exitCode = 1;
+
+  await writeFile(path.join(evidencePath, 'pty-receipt.json'), JSON.stringify(receipt, null, 2));
+  clearTimeout(deadline);
+  process.removeListener('SIGINT', requestAbort);
+  process.removeListener('SIGTERM', requestAbort);
+
+  if (cleanupVerified) {
+    await rm(root, { recursive: true });
+  } else {
+    setTimeout(() => process.exit(1), 1000);
+  }
+}
