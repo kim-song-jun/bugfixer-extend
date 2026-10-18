@@ -130,7 +130,11 @@ test('a non-conflict merge failure keeps its durable pending state and cause', a
 		const inspected = await service.inspect(integration.ownerId);
 		assert.equal(inspected.state, 'recoveryRequired');
 		assert.equal(inspected.pendingOperation?.kind, 'merge');
+		assert.equal('version' in inspected, false);
+		assert.equal('signature' in inspected, false);
 		assert.equal(readFileSync(join(integration.worktreePath, 'identity-failure.txt'), 'utf8'), 'preserved\n');
+		const reopened = new ManagedWorktreeService(join(_root, 'profile'));
+		assert.equal((await reopened.inspect(integration.ownerId)).pendingOperation?.id, inspected.pendingOperation?.id);
 	});
 });
 
@@ -140,7 +144,7 @@ test('ambient repository and config override variables cannot redirect managed G
 		mkdirSync(decoy);
 		git(decoy, 'init', '-q');
 		const serviceRoot = join(root, 'profile', 'managed-worktrees');
-		withEnv({
+		await withEnv({
 			GIT_DIR: join(decoy, '.git'), GIT_WORK_TREE: decoy, GIT_COMMON_DIR: join(decoy, '.git'),
 			GIT_INDEX_FILE: join(decoy, 'index'), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: decoy
 		}, async () => {

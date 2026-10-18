@@ -62,6 +62,7 @@ export type ReviewedMergeResult =
 	| { readonly state: 'conflict'; readonly integration: ManagedWorktreeLease; readonly conflictedPaths: readonly string[] };
 
 interface LeaseManifest extends ManagedWorktreeLease { readonly version: 1; readonly signature: string; }
+interface LeaseManifestPayload extends ManagedWorktreeLease { readonly version: 1; }
 interface OperationLock { readonly ownerId: string; readonly operation: 'merge' | 'remove'; readonly operationId: string; readonly pid: number; readonly processStart: string; readonly signature: string; }
 
 /** App-profile-owned Git worktrees. A merge preview is an exact, expiring snapshot, not approval. */
@@ -238,10 +239,24 @@ export class ManagedWorktreeService {
 		this.validateOwnerId(ownerId);
 		const manifestPath = this.manifestPath(ownerId);
 		const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as LeaseManifest;
-		const { signature, ...unsigned } = parsed;
+		const allowedKeys = new Set(['version', 'ownerId', 'kind', 'repositoryPath', 'commonDirectory', 'branch', 'worktreePath', 'baseCommit', 'head', 'state', 'pendingOperation', 'lastOperation', 'signature']);
+		if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).some(key => !allowedKeys.has(key))
+			|| typeof parsed.signature !== 'string' || !/^[0-9a-f]{64}$/i.test(parsed.signature)) {
+			throw new Error('Managed worktree manifest contains unsupported or malformed fields.');
+		}
+		if (parsed.pendingOperation && Object.keys(parsed.pendingOperation).some(key => !['id', 'kind', 'startedAt', 'sourceOwnerId', 'sourceHead', 'targetHead', 'expectedHead', 'retainedIntegrationOwnerId'].includes(key))) {
+			throw new Error('Managed worktree pending operation contains unsupported fields.');
+		}
+		if (parsed.lastOperation && Object.keys(parsed.lastOperation).some(key => !['id', 'kind', 'outcome', 'commit', 'reconciled'].includes(key))) {
+			throw new Error('Managed worktree operation receipt contains unsupported fields.');
+		}
+		const unsigned = this.manifestPayload(parsed);
 		const expectedSignature = this.sign(unsigned);
-		if (!timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expectedSignature, 'hex'))) { throw new Error('Managed worktree manifest signature is invalid.'); }
+		const actualSignature = Buffer.from(parsed.signature, 'hex');
+		const expectedSignatureBytes = Buffer.from(expectedSignature, 'hex');
+		if (actualSignature.length !== expectedSignatureBytes.length || !timingSafeEqual(actualSignature, expectedSignatureBytes)) { throw new Error('Managed worktree manifest signature is invalid.'); }
 		if (parsed.version !== 1 || parsed.ownerId !== ownerId || !['session', 'integration'].includes(parsed.kind)) { throw new Error('Managed worktree manifest identity is invalid.'); }
+		const verifiedLease = this.publicLease(unsigned);
 		const expectedWorktree = join(this.root, parsed.kind, ownerId);
 		const expectedBranch = `bugfixer/${parsed.kind}/${ownerId}`;
 		if (parsed.worktreePath !== expectedWorktree || parsed.branch !== expectedBranch) { throw new Error('Managed worktree path or ref identity was retargeted.'); }
@@ -257,11 +272,11 @@ export class ManagedWorktreeService {
 			if (existsSync(expectedWorktree)) { throw new Error('Removed worktree path unexpectedly exists; recovery is required.'); }
 			const retainedRef = await this.git(repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${expectedBranch}`]);
 			if (retainedRef !== parsed.head) { throw new Error('Removed worktree ref changed unexpectedly; recovery is required.'); }
-			return { ...parsed, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree };
+			return { ...verifiedLease, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree };
 		}
 		if (!existsSync(expectedWorktree)) {
 			if (parsed.pendingOperation?.kind !== 'remove') { throw new Error('Managed worktree is missing without a pending removal record.'); }
-			return { ...parsed, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree };
+			return { ...verifiedLease, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree };
 		}
 		const worktreeRoot = await this.git(expectedWorktree, ['rev-parse', '--show-toplevel']);
 		const worktreeCommonValue = await this.git(expectedWorktree, ['rev-parse', '--git-common-dir']);
@@ -271,7 +286,7 @@ export class ManagedWorktreeService {
 			throw new Error('Managed worktree repository, common-dir, or branch identity does not match its manifest.');
 		}
 		const head = await this.git(expectedWorktree, ['rev-parse', 'HEAD']);
-		return { ...parsed, ownerId, kind: parsed.kind, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree, baseCommit: parsed.baseCommit, head };
+		return { ...verifiedLease, ownerId, kind: parsed.kind, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree, baseCommit: parsed.baseCommit, head };
 	}
 
 	private async reconcilePendingOperation(lease: ManagedWorktreeLease): Promise<ManagedWorktreeLease> {
@@ -317,7 +332,7 @@ export class ManagedWorktreeService {
 	}
 
 	private writeLease(lease: ManagedWorktreeLease): ManagedWorktreeLease {
-		const unsigned = { version: 1 as const, ...lease };
+		const unsigned = this.manifestPayload(lease);
 		const manifest: LeaseManifest = { ...unsigned, signature: this.sign(unsigned) };
 		const path = this.manifestPath(lease.ownerId);
 		const temporary = `${path}.${randomUUID()}.tmp`;
@@ -327,6 +342,37 @@ export class ManagedWorktreeService {
 		const directoryFd = openSync(dirname(path), 'r');
 		try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
 		return lease;
+	}
+
+	private manifestPayload(lease: ManagedWorktreeLease): LeaseManifestPayload {
+		const pendingOperation = lease.pendingOperation ? {
+			id: lease.pendingOperation.id, kind: lease.pendingOperation.kind, startedAt: lease.pendingOperation.startedAt,
+			...(lease.pendingOperation.sourceOwnerId !== undefined ? { sourceOwnerId: lease.pendingOperation.sourceOwnerId } : {}),
+			...(lease.pendingOperation.sourceHead !== undefined ? { sourceHead: lease.pendingOperation.sourceHead } : {}),
+			...(lease.pendingOperation.targetHead !== undefined ? { targetHead: lease.pendingOperation.targetHead } : {}),
+			...(lease.pendingOperation.expectedHead !== undefined ? { expectedHead: lease.pendingOperation.expectedHead } : {}),
+			...(lease.pendingOperation.retainedIntegrationOwnerId !== undefined ? { retainedIntegrationOwnerId: lease.pendingOperation.retainedIntegrationOwnerId } : {})
+		} : undefined;
+		const lastOperation = lease.lastOperation ? {
+			id: lease.lastOperation.id, kind: lease.lastOperation.kind, outcome: lease.lastOperation.outcome,
+			...(lease.lastOperation.commit !== undefined ? { commit: lease.lastOperation.commit } : {}),
+			...(lease.lastOperation.reconciled !== undefined ? { reconciled: lease.lastOperation.reconciled } : {})
+		} : undefined;
+		return {
+			version: 1, ownerId: lease.ownerId, kind: lease.kind, repositoryPath: lease.repositoryPath,
+			commonDirectory: lease.commonDirectory, branch: lease.branch, worktreePath: lease.worktreePath,
+			baseCommit: lease.baseCommit, head: lease.head, state: lease.state, pendingOperation, lastOperation
+		};
+	}
+
+	private publicLease(payload: LeaseManifestPayload): ManagedWorktreeLease {
+		return {
+			ownerId: payload.ownerId, kind: payload.kind, repositoryPath: payload.repositoryPath,
+			commonDirectory: payload.commonDirectory, branch: payload.branch, worktreePath: payload.worktreePath,
+			baseCommit: payload.baseCommit, head: payload.head, state: payload.state,
+			...(payload.pendingOperation ? { pendingOperation: payload.pendingOperation } : {}),
+			...(payload.lastOperation ? { lastOperation: payload.lastOperation } : {})
+		};
 	}
 
 	private async withIntegrationLock<T>(ownerId: string, operation: OperationLock['operation'], run: () => Promise<T>): Promise<T> {
