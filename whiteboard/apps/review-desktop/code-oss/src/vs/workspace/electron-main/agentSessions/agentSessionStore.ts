@@ -172,6 +172,16 @@ export class AgentSessionStore {
 	}
 
 	/** Trusted host callers must bind recipientSessionId to the authenticated session principal. */
+	getInboxMessage(projectId: string, recipientSessionId: string, messageId: string): SessionMessageDTO | undefined {
+		this.assertOpen();
+		this.assertOwnedSession(projectId, recipientSessionId, 'recipient');
+		this.validateUuid(messageId, 'message ID');
+		const row = this.db.prepare(`SELECT id, project_id, sender_session_id, recipient_session_id, sequence, idempotency_key, body, created_at, read_at
+			FROM agent_session_messages WHERE id = ? AND project_id = ? AND recipient_session_id = ?`).get(messageId, projectId, recipientSessionId);
+		return row ? this.messageFromRow(row) : undefined;
+	}
+
+	/** Trusted host callers must bind recipientSessionId to the authenticated session principal. */
 	acknowledgeMessage(projectId: string, recipientSessionId: string, messageId: string): void {
 		this.assertOpen();
 		this.assertOwnedSession(projectId, recipientSessionId, 'recipient');
@@ -188,6 +198,18 @@ export class AgentSessionStore {
 		const { afterSequence, limit } = this.pageValues(options);
 		return this.db.prepare(`SELECT id, project_id, session_id, sequence, kind, message_id, created_at, read_at
 			FROM agent_session_notifications WHERE project_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`).all(projectId, afterSequence, limit).map(row => this.notificationFromRow(row));
+	}
+
+	notificationStatus(projectId: string): { readonly unreadCount: number; readonly latestSequence: number } {
+		this.assertOpen();
+		this.validateUuid(projectId, 'project ID');
+		const row = this.db.prepare(`SELECT
+			(SELECT COUNT(*) FROM agent_session_notifications WHERE project_id = ? AND read_at IS NULL) AS unread_count,
+			(SELECT COALESCE(MAX(sequence), 0) FROM agent_session_notifications WHERE project_id = ?) AS latest_sequence`).get(projectId, projectId)!;
+		const unreadCount = Number(row.unread_count);
+		const latestSequence = Number(row.latest_sequence);
+		if (!Number.isSafeInteger(unreadCount) || unreadCount < 0 || !Number.isSafeInteger(latestSequence) || latestSequence < 0) { throw new Error('Notification counters exceed the supported range.'); }
+		return { unreadCount, latestSequence };
 	}
 
 	markNotificationRead(projectId: string, notificationId: string): void {

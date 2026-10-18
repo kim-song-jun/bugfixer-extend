@@ -115,7 +115,7 @@ test('schema v21 migrates in place and preserves existing project tasks', () => 
 			revision: 4,
 		});
 		assert.deepEqual(database.agentSessions.listSessions('00000000-0000-4000-8000-000000000021'), []);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 24);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 25);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
@@ -135,7 +135,7 @@ test('frozen schema v22 migrates through v24 and preserves existing project and 
 		assert.equal(database.getProject('00000000-0000-4000-8000-000000000021')?.name, 'Frozen v21 project');
 		assert.equal(database.getTask('00000000-0000-4000-8000-000000000023')?.title, 'Preserved v21 task');
 		assert.deepEqual(database.agentSessions.listSessions('00000000-0000-4000-8000-000000000021'), []);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 24);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 25);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

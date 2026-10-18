@@ -11,16 +11,19 @@ import type {
 	AgentSessionPermissionPolicy,
 	AgentSessionProvider,
 	AgentSessionTranscriptPageOptions,
+	SessionMessageDTO,
 	CreateAgentSessionInput,
 	WorkspaceAgentSessionWorkspacePreparationDTO,
 	WorkspaceAgentSessionOutputEvent,
 } from '../common/workspaceAgentSessionProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT } from '../common/workspaceAgentSessionProtocol.js';
+import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage } from '../common/workspaceAgentCommunicationProtocol.js';
 import type { AgentSessionAttachResult, AgentSessionService } from './agentSessions/agentSessionService.js';
 import type { WorkspaceDatabase } from './workspaceDatabase.js';
 
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_READ_CHUNKS = 500;
+const MAX_MAILBOX_PAGE_BYTES = 512 * 1024;
 const CATCH_UP_READ_PAGE_SIZE = 100;
 const MAX_CATCH_UP_CHUNKS = 5_000;
 const MAX_ATTACHMENTS_PER_WINDOW = 8;
@@ -132,6 +135,44 @@ export class WorkspaceAgentSessionsChannel {
 					afterSequence: request.afterSequence === undefined ? 0 : this.sequence(request.afterSequence, 'notification cursor'),
 					limit: request.limit === undefined ? 50 : this.integer(request.limit, 1, 100, 'notification page limit'),
 				}) as T;
+			}
+			case 'notificationStatus': {
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				return this.database.agentSessions.notificationStatus(projectId) as T;
+			}
+			case 'listMessages': {
+				const request = this.parseSessionRequest(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const raw = this.record(arg);
+				const afterSequence = raw.afterSequence === undefined ? 0 : this.sequence(raw.afterSequence, 'mailbox cursor');
+				const limit = raw.limit === undefined ? 50 : this.integer(raw.limit, 1, 100, 'mailbox page limit');
+				const source = this.database.agentSessions.listInbox(projectId, request.sessionId, { afterSequence, limit });
+				const messages: WorkspaceAgentSessionMailboxPage['messages'][number][] = [];
+				const envelopeBytes = Buffer.byteLength(JSON.stringify({ messages: [], nextCursor: Number.MAX_SAFE_INTEGER, hasMore: false }), 'utf8');
+				let outputBytes = envelopeBytes;
+				for (const message of source) {
+					const item = projectMailboxMessage(message);
+					const bytes = Buffer.byteLength(JSON.stringify(item), 'utf8');
+					if (envelopeBytes + bytes > MAX_MAILBOX_PAGE_BYTES) { throw new Error('A stored message exceeds the mailbox response byte limit.'); }
+					const separatorBytes = messages.length > 0 ? 1 : 0;
+					if (outputBytes + separatorBytes + bytes > MAX_MAILBOX_PAGE_BYTES) { break; }
+					messages.push(item);
+					outputBytes += separatorBytes + bytes;
+				}
+				const page: WorkspaceAgentSessionMailboxPage = {
+					messages,
+					nextCursor: messages.at(-1)?.sequence ?? afterSequence,
+					hasMore: messages.length < source.length || source.length === limit,
+				};
+				return page as T;
+			}
+			case 'getMessage': {
+				const request = this.parseSessionRequest(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const messageId = this.uuid(this.record(arg).messageId, 'message ID');
+				const message = this.database.agentSessions.getInboxMessage(projectId, request.sessionId, messageId);
+				return (message ? projectMailboxMessage(message) : null) as T;
 			}
 			case 'markNotificationRead': {
 				const request = this.record(arg);
@@ -544,4 +585,11 @@ export class WorkspaceAgentSessionsChannel {
 	}
 
 	private sequence(value: unknown, label: string): number { return this.integer(value, 0, MAX_SEQUENCE, label); }
+}
+
+function projectMailboxMessage(message: SessionMessageDTO): WorkspaceAgentSessionMailboxMessage {
+	return {
+		id: message.id, senderSessionId: message.senderSessionId, recipientSessionId: message.recipientSessionId,
+		sequence: message.sequence, body: message.body, createdAt: message.createdAt, readAt: message.readAt,
+	};
 }

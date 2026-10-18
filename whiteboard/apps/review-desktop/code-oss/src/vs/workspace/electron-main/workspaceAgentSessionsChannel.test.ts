@@ -16,6 +16,7 @@ import type { ICodeWindow } from '../../platform/window/electron-main/window.js'
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
 import type { IDisposable } from '../../base/common/lifecycle.js';
 import type { AgentSessionTranscriptPageDTO, AgentSessionTurnSnapshot, SessionNotificationDTO } from '../common/workspaceAgentSessionProtocol.js';
+import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
@@ -187,16 +188,54 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		});
 		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, turnId: recipientTurn.id }), /does not belong/u);
 		database.agentSessions.sendMessage(project.project.id, session.id, { recipientSessionId: recipient.id, idempotencyKey: 'channel-alert', body: 'Review ready.' });
+		const mailboxRequest = { projectId: project.project.id, sessionId: recipient.id };
+		const mailbox = await channel.call<WorkspaceAgentSessionMailboxPage>(sender, 'listMessages', mailboxRequest);
+		assert.equal(mailbox.messages.length, 1);
+		assert.equal(mailbox.messages[0].body, 'Review ready.');
+		assert.equal(mailbox.messages[0].readAt, null, 'Human inspection must not acknowledge AI receipt.');
+		assert.equal('idempotencyKey' in mailbox.messages[0], false, 'The renderer does not receive the internal retry key.');
+		assert.equal(mailbox.nextCursor, mailbox.messages[0].sequence);
+		assert.equal((await channel.call<WorkspaceAgentSessionMailboxPage>(sender, 'listMessages', { ...mailboxRequest, afterSequence: mailbox.nextCursor })).messages.length, 0);
+		await assert.rejects(channel.call(forgedSender, 'listMessages', mailboxRequest), /open project window/u);
+		await assert.rejects(channel.call(sender, 'listMessages', { ...mailboxRequest, sessionId: otherSession.id }), /does not belong/u);
+		await assert.rejects(channel.call(sender, 'listMessages', { ...mailboxRequest, projectId: otherProject.project.id }), /does not match this window/u);
 		const notifications = await channel.call<SessionNotificationDTO[]>(sender, 'listNotifications', { projectId: project.project.id });
 		assert.equal(notifications.length, 1);
 		assert.equal(notifications[0].sessionId, recipient.id);
 		assert.equal(notifications[0].readAt, null);
+		assert.deepEqual(await channel.call(sender, 'notificationStatus', { projectId: project.project.id }), { unreadCount: 1, latestSequence: notifications[0].sequence });
 		await channel.call(sender, 'markNotificationRead', { projectId: project.project.id, notificationId: notifications[0].id });
 		await channel.call(sender, 'markNotificationRead', { projectId: project.project.id, notificationId: notifications[0].id });
 		assert.ok((await channel.call<SessionNotificationDTO[]>(sender, 'listNotifications', { projectId: project.project.id }))[0].readAt);
+		assert.deepEqual(await channel.call(sender, 'notificationStatus', { projectId: project.project.id }), { unreadCount: 0, latestSequence: notifications[0].sequence });
 		await assert.rejects(channel.call(forgedSender, 'markNotificationRead', { projectId: project.project.id, notificationId: notifications[0].id }), /open project window/u);
 		await assert.rejects(channel.call(sender, 'listNotifications', { projectId: otherProject.project.id }), /does not match this window/u);
 		await assert.rejects(channel.call(sender, 'markNotificationRead', { projectId: project.project.id, notificationId: randomUUID() }), /does not belong/u);
+
+		const escapedBody = String.fromCharCode(34, 92).repeat(7_000);
+		const largeMessages = Array.from({ length: 20 }, (_, index) => database.agentSessions.sendMessage(project.project.id, session.id, {
+			recipientSessionId: recipient.id, idempotencyKey: `byte-page-${index}`, body: `${index}:${escapedBody}`,
+		}));
+		let largePage = await channel.call<WorkspaceAgentSessionMailboxPage>(sender, 'listMessages', { ...mailboxRequest, afterSequence: mailbox.nextCursor, limit: 100 });
+		assert.ok(largePage.messages.length > 0 && largePage.messages.length < largeMessages.length, 'Escaped bodies must be paged by bytes before the count limit.');
+		assert.equal(largePage.hasMore, true);
+		const received = [...largePage.messages];
+		while (largePage.hasMore) {
+			assert.ok(Buffer.byteLength(JSON.stringify(largePage), 'utf8') <= 512 * 1024, 'The complete response envelope must fit the mailbox byte limit.');
+			assert.equal(largePage.nextCursor, largePage.messages.at(-1)!.sequence, 'A page cursor must stop at the last delivered message.');
+			largePage = await channel.call<WorkspaceAgentSessionMailboxPage>(sender, 'listMessages', { ...mailboxRequest, afterSequence: largePage.nextCursor, limit: 100 });
+			received.push(...largePage.messages);
+		}
+		assert.ok(Buffer.byteLength(JSON.stringify(largePage), 'utf8') <= 512 * 1024);
+		assert.deepEqual(received.map(message => message.id), largeMessages.map(message => message.id));
+		assert.deepEqual(received.map(message => message.body), largeMessages.map(message => message.body));
+		assert.equal((await channel.call<WorkspaceAgentSessionNotificationStatus>(sender, 'notificationStatus', { projectId: project.project.id })).unreadCount, 20, 'The project unread count includes records beyond the loaded page.');
+		const targetRequest = { ...mailboxRequest, messageId: mailbox.messages[0].id };
+		assert.deepEqual(await channel.call(sender, 'getMessage', targetRequest), mailbox.messages[0], 'An older notification target is available without scanning newer pages.');
+		assert.equal(await channel.call(sender, 'getMessage', { ...targetRequest, sessionId: session.id }), null, 'A message is never returned to a different recipient.');
+		assert.equal(await channel.call(sender, 'getMessage', { ...targetRequest, messageId: randomUUID() }), null);
+		await assert.rejects(channel.call(forgedSender, 'getMessage', targetRequest), /open project window/u);
+		await assert.rejects(channel.call(sender, 'getMessage', { ...targetRequest, projectId: otherProject.project.id }), /does not match this window/u);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

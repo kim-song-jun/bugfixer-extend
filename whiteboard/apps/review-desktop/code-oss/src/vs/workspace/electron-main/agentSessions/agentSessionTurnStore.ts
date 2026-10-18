@@ -27,6 +27,15 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_REFERENCE_COUNT = 100;
 const MAX_ERROR_SUMMARY_LENGTH = 2000;
 
+interface WorkflowLaunchValidation {
+	readonly reservationId: string;
+	readonly runId: string;
+	readonly nodeId: string;
+	readonly turnId: string;
+	readonly nodeRevision: number;
+	readonly maxConcurrentNodes: number;
+}
+
 const TURN_TRANSITIONS: Readonly<Record<AgentSessionTurnState, ReadonlySet<AgentSessionTurnState>>> = {
 	starting: new Set(['running', 'stopping', 'interrupted', 'failed']),
 	running: new Set(['stopping', 'exited', 'interrupted', 'failed']),
@@ -71,9 +80,15 @@ export class AgentSessionTurnStore {
 		const snapshotJson = JSON.stringify(snapshot);
 		if (Buffer.byteLength(snapshotJson, 'utf8') > 65_536) { throw new Error('The launch snapshot exceeds 64 KiB.'); }
 		const snapshotSha256 = digest(snapshotJson);
-		const id = randomUUID();
+		if (input.workflowLaunchAuthorization !== undefined) {
+			this.assertExactKeys(input.workflowLaunchAuthorization, ['reservationId'], 'workflow launch authorization');
+		}
 		const now = new Date().toISOString();
 		return this.transaction(() => {
+			const workflowLaunch = input.workflowLaunchAuthorization
+				? this.validateWorkflowLaunchAuthorization(input.workflowLaunchAuthorization.reservationId, input.projectId, input.sessionId, input.expectedSessionRevision, snapshot)
+				: undefined;
+			const id = workflowLaunch?.turnId ?? randomUUID();
 			const session = this.sessions.getSession(input.projectId, input.sessionId);
 			if (!session) { throw new Error('The session does not belong to this project.'); }
 			if (session.revision !== input.expectedSessionRevision) { throw new Error('The session revision is stale.'); }
@@ -102,6 +117,7 @@ export class AgentSessionTurnStore {
 				id, input.projectId, input.sessionId, ordinal, session.provider, session.model, session.profileRef,
 				snapshotJson, snapshotSha256, now, now,
 			);
+			if (workflowLaunch) { this.consumeWorkflowLaunchAuthorization(workflowLaunch, now); }
 			this.sessions.transitionSessionWithinTransaction(input.projectId, input.sessionId, input.expectedSessionRevision, 'starting');
 			return this.readTurnInternal(input.projectId, input.sessionId, id)!;
 		});
@@ -245,6 +261,80 @@ export class AgentSessionTurnStore {
 			}
 			return interrupted;
 		});
+	}
+
+	private validateWorkflowLaunchAuthorization(reservationId: string, projectId: string, sessionId: string, sessionRevision: number, snapshot: AgentSessionTurnSnapshot): WorkflowLaunchValidation {
+		this.validateUuid(reservationId, 'workflow launch reservation ID');
+		const reservation = this.db.prepare(`SELECT reservation.reserved_turn_id, reservation.project_id, reservation.workflow_id, reservation.run_id,
+			reservation.node_id, reservation.approval_fingerprint AS reservation_fingerprint, reservation.session_id, reservation.session_revision,
+			reservation.expires_at, reservation.consumed_at, reservation.revoked_at, run.state AS run_state, run.deadline_at,
+			run.plan_version, run.fingerprint, workflow.state AS workflow_state, workflow.plan_version AS workflow_plan_version,
+			approval.fingerprint AS approval_fingerprint, plan.fingerprint AS plan_fingerprint, plan.plan_json,
+			node.state AS node_state, node.revision AS node_revision, node.session_turn_id, node.session_id AS node_session_id
+			FROM agent_workflow_turn_reservations reservation
+			JOIN agent_workflow_runs run ON run.id = reservation.run_id AND run.workflow_id = reservation.workflow_id AND run.project_id = reservation.project_id
+			JOIN agent_workflows workflow ON workflow.id = reservation.workflow_id AND workflow.project_id = reservation.project_id
+			JOIN agent_workflow_approvals approval ON approval.workflow_id = run.workflow_id AND approval.project_id = run.project_id
+				AND approval.plan_version = run.plan_version AND approval.fingerprint = run.fingerprint
+			JOIN agent_workflow_plans plan ON plan.workflow_id = run.workflow_id AND plan.project_id = run.project_id AND plan.version = run.plan_version
+			JOIN agent_workflow_run_nodes node ON node.run_id = run.id AND node.workflow_id = run.workflow_id AND node.node_id = reservation.node_id
+			WHERE reservation.id = ?`).get(reservationId) as Record<string, unknown> | undefined;
+		if (!reservation || String(reservation.project_id) !== projectId || String(reservation.session_id) !== sessionId
+			|| String(reservation.node_session_id) !== sessionId || Number(reservation.session_revision) !== sessionRevision
+			|| String(reservation.reservation_fingerprint) !== String(reservation.fingerprint)
+			|| String(reservation.approval_fingerprint) !== String(reservation.fingerprint) || String(reservation.plan_fingerprint) !== String(reservation.fingerprint)
+			|| Number(reservation.workflow_plan_version) !== Number(reservation.plan_version)
+			|| reservation.consumed_at !== null || reservation.revoked_at !== null
+			|| Date.parse(String(reservation.expires_at)) <= Date.now() || Date.parse(String(reservation.deadline_at)) <= Date.now()
+			|| !['running'].includes(String(reservation.run_state)) || !['running'].includes(String(reservation.workflow_state))
+			|| reservation.node_state !== 'launching' || reservation.session_turn_id !== null) {
+			throw new Error('The workflow launch authorization is missing, stale, expired, cancelled, or already consumed.');
+		}
+		const plan = JSON.parse(String(reservation.plan_json)) as { maxConcurrentNodes: number; nodes?: Array<{ nodeId: string; sessionId: string; bindingId: string; taskId: string | null; provider: string; model: string; permissionPolicy: AgentSessionTurnSnapshot['permissionPolicy']; referenceIds: Array<{ kind: string; id: string }> }> };
+		if (!Number.isSafeInteger(plan.maxConcurrentNodes) || this.countWorkflowCapacitySlots(String(reservation.run_id), new Date().toISOString()) > plan.maxConcurrentNodes) {
+			throw new Error('The workflow maximum concurrency reservation is invalid.');
+		}
+		const node = plan.nodes?.find(candidate => candidate.nodeId === String(reservation.node_id));
+		if (!node || node.sessionId !== sessionId || node.bindingId !== snapshot.bindingId || node.taskId !== snapshot.taskId
+			|| node.provider !== snapshot.provider || node.model !== snapshot.model
+			|| node.permissionPolicy.mode !== snapshot.permissionPolicy.mode || node.permissionPolicy.approval !== snapshot.permissionPolicy.approval) {
+			throw new Error('The workflow turn snapshot does not match its approved reservation.');
+		}
+		const expectedReferences = node.referenceIds.filter(reference => reference.kind === 'knowledgeSnapshot').map(reference => reference.id).sort();
+		const actualReferences = snapshot.references.map(reference => reference.id).sort();
+		const expectedConvention = node.referenceIds.find(reference => reference.kind === 'conventionVersion')?.id ?? null;
+		if (JSON.stringify(expectedReferences) !== JSON.stringify(actualReferences) || (snapshot.convention?.id ?? null) !== expectedConvention) {
+			throw new Error('The workflow turn knowledge snapshot does not match its approved reservation.');
+		}
+		return {
+			reservationId, runId: String(reservation.run_id), nodeId: String(reservation.node_id),
+			turnId: String(reservation.reserved_turn_id), nodeRevision: Number(reservation.node_revision),
+			maxConcurrentNodes: plan.maxConcurrentNodes,
+		};
+	}
+
+	private consumeWorkflowLaunchAuthorization(launch: WorkflowLaunchValidation, now: string): void {
+		const consumed = this.db.prepare(`UPDATE agent_workflow_turn_reservations SET consumed_at = ?, consumed_turn_id = reserved_turn_id
+			WHERE id = ? AND reserved_turn_id = ? AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?`).run(now, launch.reservationId, launch.turnId, now);
+		if (Number(consumed.changes) !== 1) { throw new Error('The workflow launch authorization was consumed concurrently, cancelled, or expired.'); }
+		const linked = this.db.prepare(`UPDATE agent_workflow_run_nodes SET session_turn_id = ?, revision = revision + 1, updated_at = ?
+			WHERE run_id = ? AND node_id = ? AND revision = ? AND state = 'launching' AND session_turn_id IS NULL`)
+			.run(launch.turnId, now, launch.runId, launch.nodeId, launch.nodeRevision);
+		if (Number(linked.changes) !== 1) { throw new Error('The workflow node launch reservation changed before the turn was created.'); }
+	}
+
+	private countWorkflowCapacitySlots(runId: string, now: string): number {
+		return Number(this.db.prepare(`SELECT COUNT(*) AS count FROM agent_workflow_run_nodes node WHERE node.run_id = ? AND (
+			node.state IN ('running', 'cancelRequested') OR (
+				node.state IN ('launching', 'interrupted', 'recoveryRequired') AND node.session_turn_id IS NOT NULL AND EXISTS (
+					SELECT 1 FROM agent_session_turns turn WHERE turn.id = node.session_turn_id AND turn.cleanup_verified = 0
+				)
+			) OR EXISTS (
+				SELECT 1 FROM agent_workflow_turn_reservations reservation WHERE reservation.run_id = node.run_id
+				AND reservation.node_id = node.node_id AND reservation.consumed_at IS NULL AND reservation.revoked_at IS NULL
+				AND reservation.expires_at > ?
+			)
+		)`).get(runId, now)?.count ?? 0);
 	}
 
 	private validateSnapshot(input: AgentSessionTurnSnapshot): AgentSessionTurnSnapshot {
