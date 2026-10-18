@@ -172,6 +172,45 @@ export class AgentSessionService {
 		if ([...this.turns.values()].filter(turn => turn.launchPending).length + this.pendingStartReservations >= MAX_PENDING_STARTS) {
 			throw new Error('Too many session launches are pending.');
 		}
+		return this.startWithWorkspace(input, ticket.snapshot.permissionPolicy, snapshot => {
+			if (snapshot.sessionRevision !== ticket.sessionRevision || digestSnapshot(snapshot) !== ticket.snapshotDigest) {
+				throw new Error('The session workspace changed after its launch preview; create a new preview.');
+			}
+			return this.database.agentSessionTurns.createTurn({
+				projectId: input.projectId,
+				sessionId: input.sessionId,
+				expectedSessionRevision: snapshot.sessionRevision,
+				snapshot,
+			});
+		});
+	}
+
+	/** Trusted-main entry point. Reservation IDs must never be exposed through renderer IPC or MCP. */
+	async startWorkflowNode(input: {
+		readonly projectId: string;
+		readonly sessionId: string;
+		readonly permissionPolicy: AgentSessionPermissionPolicy;
+		readonly reservationId: string;
+	}): Promise<AgentSessionTurnDTO> {
+		this.assertAcceptingLaunches();
+		if (!input.reservationId) { throw new Error('A workflow launch reservation is required.'); }
+		if ([...this.turns.values()].filter(turn => turn.launchPending).length + this.pendingStartReservations >= MAX_PENDING_STARTS) {
+			throw new Error('Too many session launches are pending.');
+		}
+		return this.startWithWorkspace(input, input.permissionPolicy, snapshot => this.database.agentSessionTurns.createTurn({
+			projectId: input.projectId,
+			sessionId: input.sessionId,
+			expectedSessionRevision: snapshot.sessionRevision,
+			snapshot,
+			workflowLaunchAuthorization: { reservationId: input.reservationId },
+		}));
+	}
+
+	private async startWithWorkspace(
+		input: { readonly projectId: string; readonly sessionId: string },
+		permissionPolicy: AgentSessionPermissionPolicy,
+		createTurn: (snapshot: AgentSessionTurnSnapshot) => AgentSessionTurnDTO,
+	): Promise<AgentSessionTurnDTO> {
 		this.pendingStartReservations++;
 		const pending = this.beginWorkspaceOperation();
 		let workspace: AcquiredAgentSessionWorkspace | undefined;
@@ -179,23 +218,14 @@ export class AgentSessionService {
 		let live: LiveTurn | undefined;
 		try {
 			workspace = await this.workspaceResolver.acquire({
-				projectId: ticket.projectId,
-				sessionId: ticket.sessionId,
-				permissionPolicy: ticket.snapshot.permissionPolicy,
+				projectId: input.projectId,
+				sessionId: input.sessionId,
+				permissionPolicy,
 				signal: pending.controller.signal,
 			});
 			this.assertAcceptingLaunches();
 			const snapshot = workspace.snapshot;
-			if (snapshot.sessionRevision !== ticket.sessionRevision || digestSnapshot(snapshot) !== ticket.snapshotDigest) {
-				throw new Error('The session workspace changed after its launch preview; create a new preview.');
-			}
-			this.assertAcceptingLaunches();
-			turn = this.database.agentSessionTurns.createTurn({
-				projectId: input.projectId,
-				sessionId: input.sessionId,
-				expectedSessionRevision: snapshot.sessionRevision,
-				snapshot,
-			});
+			turn = createTurn(snapshot);
 			live = {
 				projectId: input.projectId,
 				sessionId: input.sessionId,

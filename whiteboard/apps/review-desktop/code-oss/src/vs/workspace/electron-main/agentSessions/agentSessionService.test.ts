@@ -9,15 +9,17 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { TaskFolderWriterLock } from '../providerRuns/taskFolderWriterLock.js';
 import { ManagedWorktreeService } from './managedWorktrees.js';
-import { AgentSessionService, type AgentSessionRuntimeFactory } from './agentSessionService.js';
+import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessionService.js';
 import { AgentSessionWorkspaceResolver, type AcquireAgentSessionWorkspaceInput, type AcquiredAgentSessionWorkspace } from './agentSessionWorkspace.js';
 
 const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
+const WORKFLOW_READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'on-request' };
 const MUTATING: AgentSessionPermissionPolicy = { mode: 'mutating', approval: 'on-request' };
 
 function git(cwd: string, ...args: string[]): string {
@@ -87,6 +89,52 @@ function createNeverLaunchRuntimeFactory(): { readonly factory: AgentSessionRunt
 	return { factory, starts: () => startCount };
 }
 
+function createRunningRuntimeFactory(): { readonly factory: AgentSessionRuntimeFactory; readonly starts: () => readonly string[] } {
+	const startedTurns: string[] = [];
+	const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
+	const snapshot = { state: 'running' as const, latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: false };
+	const factory: AgentSessionRuntimeFactory = {
+		async start(_turnSnapshot, turnId) { startedTurns.push(turnId); return handle; },
+		watchExit() { return { dispose() { } }; },
+		getSnapshot() { return snapshot; },
+		async write() { },
+		async resize() { },
+		async attach() { throw new Error('Attachment is not used by this launch contract.'); },
+		async stop() { return { state: 'stopped', cleanupVerified: true }; },
+		async release() { },
+	};
+	return { factory, starts: () => startedTurns };
+}
+
+function approveWorkflowLaunch(
+	fixture: ReturnType<typeof createFixture>,
+	permissionPolicy = WORKFLOW_READ_ONLY,
+	projectId = fixture.project.id,
+	sessionId = fixture.sharedSession.id,
+	bindingId = fixture.sharedBinding.id,
+) {
+	const session = fixture.database.agentSessions.getSession(projectId, sessionId)!;
+	const workflow = fixture.database.agentWorkflows.createWorkflow(projectId, {
+		projectId,
+		bindingId,
+		taskId: null,
+		maxConcurrentNodes: 1,
+		maxTotalTurns: 1,
+		maxDurationMs: 60_000,
+		nodes: [{
+			nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: session.provider, model: session.model,
+			taskId: null, bindingId, referenceIds: [], permissionPolicy, dependsOn: [],
+		}],
+		idempotencyKey: randomUUID(),
+	});
+	const plan = fixture.database.agentWorkflows.getPlan(projectId, workflow.id)!;
+	fixture.database.agentWorkflows.recordTrustedUiApproval(projectId, workflow.id, plan.version, plan.fingerprint, randomUUID());
+	const approved = fixture.database.agentWorkflows.getWorkflow(projectId, workflow.id)!;
+	const run = fixture.database.agentWorkflows.startWorkflow(projectId, workflow.id, approved.revision, randomUUID());
+	const reservation = fixture.database.agentWorkflows.reserveNodeTurnLaunch(projectId, workflow.id, run.id, 'implement', run.nodes[0].revision, session.revision);
+	return { session, reservation };
+}
+
 function createDelayedService(fixture: ReturnType<typeof createFixture>) {
 	class DelayedResolver extends AgentSessionWorkspaceResolver {
 		private nextHold?: { readonly entered: () => void; readonly gate: Promise<void> };
@@ -148,6 +196,76 @@ test('launch tickets are opaque, single-use, and scoped to their persisted proje
 		);
 		assert.equal(fixture.runtimeFactory.starts(), 0);
 		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, fixture.gitSession.id), []);
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('an approved workflow reservation launches its exact reserved durable turn through the runtime factory', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const { session, reservation } = approveWorkflowLaunch(fixture);
+		const turn = await service.startWorkflowNode({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY, reservationId: reservation.reservationId });
+		assert.equal(turn.id, reservation.turnId);
+		assert.equal(turn.state, 'running');
+		assert.deepEqual(runtime.starts(), [reservation.turnId]);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id).map(value => value.id), [reservation.turnId]);
+		await service.stop(fixture.project.id, session.id, turn.id);
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY });
+		const manualTurn = await service.start({ projectId: fixture.project.id, sessionId: session.id, ticketId: preview.ticketId });
+		assert.notEqual(manualTurn.id, reservation.turnId);
+		assert.deepEqual(runtime.starts(), [reservation.turnId, manualTurn.id]);
+		await service.stop(fixture.project.id, session.id, manualTurn.id);
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('an invalid workflow reservation releases the acquired writer lease without spawning a provider', { skip: process.platform !== 'darwin' && 'TaskFolderWriterLock uses macOS lockf for mutating shared-folder launches.' }, async () => {
+	const fixture = createFixture();
+	try {
+		fixture.database.enableOrdinaryFolderMutation(fixture.project.id, fixture.sharedBinding.id);
+		const { session, reservation } = approveWorkflowLaunch(fixture, MUTATING);
+		const foreignProject = fixture.database.createProject('Foreign workflow project');
+		const foreignBinding = fixture.database.createFolderBinding({ projectId: foreignProject.id, path: fixture.ordinary });
+		const foreignSession = fixture.database.agentSessions.createSession({ projectId: foreignProject.id, bindingId: foreignBinding.id, name: 'Foreign workflow session', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const foreign = approveWorkflowLaunch(fixture, WORKFLOW_READ_ONLY, foreignProject.id, foreignSession.id, foreignBinding.id);
+		await assert.rejects(fixture.service.startWorkflowNode({
+			projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: WORKFLOW_READ_ONLY, reservationId: foreign.reservation.reservationId,
+		}), /reservation|authorization|project/i);
+		await assert.rejects(fixture.service.startWorkflowNode({
+			projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: MUTATING, reservationId: randomUUID(),
+		}), /reservation|authorization/i);
+		const sqlite = Reflect.get(fixture.database, 'db') as DatabaseSync;
+		sqlite.prepare('UPDATE agent_workflow_turn_reservations SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 1_000).toISOString(), reservation.reservationId);
+		await assert.rejects(fixture.service.startWorkflowNode({
+			projectId: fixture.project.id, sessionId: session.id, permissionPolicy: MUTATING, reservationId: reservation.reservationId,
+		}), /expired|reservation|authorization/i);
+		assert.equal(fixture.runtimeFactory.starts(), 0);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id), []);
+		const lease = await fixture.writerLock.acquire(fixture.ordinary);
+		lease.release();
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('shutdown cancellation during workflow workspace acquisition cannot create a turn or spawn a provider', async () => {
+	const fixture = createFixture();
+	try {
+		const { session, reservation } = approveWorkflowLaunch(fixture);
+		const { service, resolver } = createDelayedService(fixture);
+		const hold = resolver.holdNextAcquire();
+		const start = service.startWorkflowNode({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY, reservationId: reservation.reservationId });
+		await hold.entered;
+		const shutdown = service.shutdown();
+		hold.release();
+		await assert.rejects(start, /shutting down/i);
+		assert.deepEqual(await shutdown, []);
+		assert.equal(fixture.runtimeFactory.starts(), 0);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id), []);
 	} finally {
 		dispose(fixture);
 	}
