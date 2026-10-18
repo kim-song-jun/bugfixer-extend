@@ -120,7 +120,7 @@ interface OwnedPty {
 	readonly resolveStartup: () => void;
 	readonly rejectStartup: (error: Error) => void;
 	readonly controlSockets: Set<Socket>;
-	readonly controlSocketTimers: Map<Socket, NodeJS.Timeout>;
+	readonly controlSocketTimers: Map<Socket, ReturnType<typeof setTimeout>>;
 	readonly ptyExitPromise: Promise<void>;
 	pty?: pty.IPty;
 	controlSocket?: Socket;
