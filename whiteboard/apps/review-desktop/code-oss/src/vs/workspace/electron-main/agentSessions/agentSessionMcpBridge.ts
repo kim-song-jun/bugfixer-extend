@@ -6,11 +6,17 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server, type Socket } from 'node:net';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionExplanationCitation, AgentSessionReportedCheck, AgentSessionExplanationTarget } from './agentSessionReviewStore.js';
+import { computeAgentSessionChangeHunks } from './agentSessionChangeHunks.js';
+import { sanitizeCompleteAgentText } from './agentOutputRedactor.js';
 import { AgentSessionCollaborationService, type AgentSessionCollaborationGrant } from './agentSessionCollaborationService.js';
 import { AgentSessionPreparationError, type AgentSessionPreparationRecovery } from './agentSessionPreparationError.js';
+import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 
 export const AGENT_SESSION_MCP_GATEWAY_MODULE = 'agentSessionMcpGateway.mjs';
 export const AGENT_SESSION_MCP_TOKEN_ENV = 'BUGFIXER_SESSION_MCP_TOKEN';
+
+export type AgentSessionReviewDatabase = Pick<WorkspaceDatabase, 'agentSessionTurns' | 'agentSessionChangeEvidence' | 'agentSessionContents' | 'agentSessionReviews'>;
 
 const MAX_FRAME_BYTES = 65_536;
 const MAX_CONNECTIONS = 8;
@@ -49,6 +55,7 @@ export class AgentSessionMcpBridge {
 	constructor(
 		private readonly collaboration: AgentSessionCollaborationService,
 		private readonly serverFactory: AgentSessionMcpServerFactory = listener => createServer(listener),
+		private readonly reviewDatabase?: AgentSessionReviewDatabase,
 	) { }
 
 	async issueAccess(input: AgentSessionMcpAccessInput): Promise<AgentSessionMcpAccess> {
@@ -72,6 +79,7 @@ export class AgentSessionMcpBridge {
 		let serverClosed = false;
 		let closePromise: Promise<void> | undefined;
 		const sockets = new Set<Socket>();
+		const knownSecrets = Object.freeze([...new Set([...(input.knownSecrets ?? []), token].filter(Boolean))]);
 		let port: number | undefined;
 		let server: Server | undefined;
 		let asynchronousServerFailure: unknown;
@@ -105,7 +113,7 @@ export class AgentSessionMcpBridge {
 			await cleanupOwnedResources();
 		};
 		try {
-			server = this.serverFactory(socket => acceptSocket(socket, grant, tokenDigest, this.collaboration, sockets, () => active));
+			server = this.serverFactory(socket => acceptSocket(socket, grant, tokenDigest, this.collaboration, this.reviewDatabase, knownSecrets, sockets, () => active));
 			server.maxConnections = MAX_CONNECTIONS;
 			server.on('error', error => {
 				if (!active) { return; }
@@ -131,7 +139,6 @@ export class AgentSessionMcpBridge {
 			}
 			throw new AgentSessionPreparationError(error instanceof Error ? error.message : String(error), true);
 		}
-		const knownSecrets = Object.freeze([...new Set([...(input.knownSecrets ?? []), token].filter(Boolean))]);
 		return Object.freeze({
 			port: port!,
 			gatewayEnvironment: Object.freeze({ [AGENT_SESSION_MCP_TOKEN_ENV]: token }),
@@ -147,6 +154,8 @@ function acceptSocket(
 	grant: AgentSessionCollaborationGrant,
 	expectedDigest: Buffer,
 	collaboration: AgentSessionCollaborationService,
+	reviewDatabase: AgentSessionReviewDatabase | undefined,
+	knownSecrets: readonly string[],
 	sockets: Set<Socket>,
 	isActive: () => boolean,
 ): void {
@@ -192,7 +201,7 @@ function acceptSocket(
 			if (!isRequestFrame(parsed) || requests.size >= MAX_IN_FLIGHT_PER_CONNECTION || requests.has(parsed.id)) { socket.destroy(); return; }
 			const controller = new AbortController();
 			requests.set(parsed.id, { controller });
-			void dispatch(collaboration, grant, parsed.method, parsed.params, controller.signal).then(
+			void dispatch(collaboration, grant, parsed.method, parsed.params, controller.signal, reviewDatabase, knownSecrets, isActive).then(
 				result => {
 					if (!isActive() || closed) { return; }
 					requests.delete(parsed.id);
@@ -201,7 +210,7 @@ function acceptSocket(
 				error => {
 					if (!isActive() || closed) { return; }
 					requests.delete(parsed.id);
-					writeFrame(socket, { type: 'response', id: parsed.id, error: safeError(error) });
+					writeFrame(socket, { type: 'response', id: parsed.id, error: safeError(error, knownSecrets) });
 				},
 			);
 		}
@@ -237,6 +246,9 @@ async function dispatch(
 	method: string,
 	params: Record<string, unknown>,
 	signal: AbortSignal,
+	reviewDatabase: AgentSessionReviewDatabase | undefined,
+	knownSecrets: readonly string[],
+	isActive: () => boolean,
 ): Promise<unknown> {
 	switch (method) {
 		case 'sessions.list':
@@ -273,6 +285,57 @@ async function dispatch(
 				expectedRevision: requiredInteger(params.expectedRevision, 'expectedRevision'),
 				idempotencyKey: requiredString(params.idempotencyKey, 'idempotencyKey'),
 			});
+		case 'changes.get': {
+			assertAllowedKeys(params, ['turnId', 'evidenceVersion', 'path']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const turnId = requiredUuid(params.turnId, 'turnId');
+			const evidenceVersion = requiredInteger(params.evidenceVersion, 'evidenceVersion');
+			const path = requiredString(params.path, 'path');
+			requireScopedTargetTurn(collaboration, grant, database, turnId, isActive, signal);
+			const evidence = database.agentSessionChangeEvidence.listVersions(grant.projectId, grant.sessionId, turnId, { afterVersion: evidenceVersion - 1, limit: 1 }).snapshots.find(item => item.version === evidenceVersion);
+			if (!evidence) { throw new Error('The requested change evidence version is unavailable in this session.'); }
+			if (!evidence.files.some(file => file.path === path)) { throw new Error('The requested file is not part of this change evidence version.'); }
+			const file = database.agentSessionContents.getFile({ scope: { projectId: grant.projectId, sessionId: grant.sessionId, turnId }, evidenceVersion, path });
+			if (!file || file.evidenceFingerprint !== evidence.fingerprint) { throw new Error('The requested retained file is unavailable for this evidence version.'); }
+			const hunks = computeAgentSessionChangeHunks(file);
+			if (hunks.timedOut) { throw new Error('Retained change hunk calculation timed out; retry the read.'); }
+			return boundedReviewResult({ evidence, file, hunks }, knownSecrets);
+		}
+		case 'change_explanations.latest': {
+			assertAllowedKeys(params, ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const target = reviewTarget(grant, params);
+			requireScopedTargetTurn(collaboration, grant, database, target.turnId, isActive, signal);
+			return boundedReviewResult(database.agentSessionReviews.getLatest(target), knownSecrets);
+		}
+		case 'change_explanations.list': {
+			assertAllowedKeys(params, ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId', 'afterRevision', 'limit']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const target = reviewTarget(grant, params);
+			requireScopedTargetTurn(collaboration, grant, database, target.turnId, isActive, signal);
+			const afterRevision = params.afterRevision === undefined ? 0 : requiredInteger(params.afterRevision, 'afterRevision');
+			const limit = params.limit === undefined ? 20 : requiredInteger(params.limit, 'limit');
+			if (limit < 1 || limit > 30) { throw new Error('Review history page size must be from 1 to 30.'); }
+			return boundedReviewResult(database.agentSessionReviews.listRevisions({ target, afterRevision, limit }), knownSecrets);
+		}
+		case 'change_explanations.draft': {
+			assertAllowedKeys(params, ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId', 'expectedLatestRevision', 'what', 'why', 'citations', 'checkClaims']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const target = reviewTarget(grant, params);
+			requireScopedTargetTurn(collaboration, grant, database, grant.turnId, isActive, signal);
+			requireScopedTargetTurn(collaboration, grant, database, target.turnId, isActive, signal);
+			const expectedLatestRevision = requiredInteger(params.expectedLatestRevision, 'expectedLatestRevision');
+			const what = requiredString(params.what, 'what');
+			const why = requiredString(params.why, 'why');
+			const citations = reviewCitations(params.citations);
+			const checkClaims = reviewCheckClaims(params.checkClaims);
+			const redactedInput = sanitizeExplanation(what, why, checkClaims, knownSecrets);
+			const dto = database.agentSessionReviews.recordAgentExplanation({
+				target, authorTurnId: grant.turnId, expectedLatestRevision,
+				what: redactedInput.what, why: redactedInput.why, citations, checkClaims: redactedInput.checkClaims,
+			});
+			return boundedReviewResult(dto, knownSecrets);
+		}
 		default:
 			throw new Error('The requested session collaboration tool is not supported.');
 	}
@@ -294,12 +357,128 @@ function requiredString(value: unknown, name: string): string {
 	return value;
 }
 
+function requiredUuid(value: unknown, name: string): string {
+	const result = requiredString(value, name);
+	assertUuid(result, name);
+	return result;
+}
+
 function assertAllowedKeys(params: Record<string, unknown>, allowed: readonly string[]): void {
 	if (Object.keys(params).some(key => !allowed.includes(key))) { throw new Error('The session collaboration tool contains unsupported arguments.'); }
 }
 
-function safeError(error: unknown): string {
-	return error instanceof Error ? error.message.slice(0, 500) : 'The collaboration request failed.';
+function safeError(error: unknown, knownSecrets: readonly string[]): string {
+	const message = error instanceof Error ? error.message : 'The collaboration request failed.';
+	return sanitizeCompleteAgentText(message, { knownSecrets }).slice(0, 500);
+}
+
+function requireReviewDatabase(database: AgentSessionReviewDatabase | undefined): AgentSessionReviewDatabase {
+	if (!database) { throw new Error('Retained change review tools are unavailable on this host.'); }
+	return database;
+}
+
+function requireScopedTargetTurn(
+	collaboration: AgentSessionCollaborationService,
+	grant: AgentSessionCollaborationGrant,
+	database: AgentSessionReviewDatabase,
+	turnId: string,
+	isActive: () => boolean,
+	signal: AbortSignal,
+) {
+	if (!isActive() || signal.aborted) { throw new Error('The session collaboration capability is revoked, invalid, or cancelled.'); }
+	collaboration.listSessions(grant, 1);
+	const turn = database.agentSessionTurns.getTurn(grant.projectId, grant.sessionId, turnId);
+	if (!turn || turn.projectId !== grant.projectId || turn.sessionId !== grant.sessionId) {
+		throw new Error('The requested turn is unavailable within this session capability.');
+	}
+	const liveTurn = database.agentSessionTurns.getTurn(grant.projectId, grant.sessionId, grant.turnId);
+	if (!liveTurn || liveTurn.state === 'exited' || liveTurn.state === 'failed' || liveTurn.state === 'interrupted') {
+		throw new Error('The session collaboration turn has ended.');
+	}
+	if (turn.ordinal > liveTurn.ordinal) { throw new Error('The requested evidence target must be from this turn or earlier in the same session.'); }
+	return turn;
+}
+
+function reviewTarget(grant: AgentSessionCollaborationGrant, params: Record<string, unknown>): AgentSessionExplanationTarget {
+	const hunkId = params.hunkId;
+	if (hunkId !== null && (typeof hunkId !== 'string' || !/^[0-9a-f]{64}$/iu.test(hunkId))) { throw new Error('hunkId must be null or a SHA-256 digest.'); }
+	const evidenceFingerprint = requiredString(params.evidenceFingerprint, 'evidenceFingerprint');
+	if (!/^[0-9a-f]{64}$/iu.test(evidenceFingerprint)) { throw new Error('evidenceFingerprint must be a SHA-256 digest.'); }
+	const evidenceVersion = requiredInteger(params.evidenceVersion, 'evidenceVersion');
+	if (evidenceVersion < 1) { throw new Error('evidenceVersion must be a positive integer.'); }
+	return {
+		projectId: grant.projectId,
+		sessionId: grant.sessionId,
+		turnId: requiredUuid(params.turnId, 'turnId'),
+		evidenceVersion,
+		evidenceFingerprint,
+		path: requiredString(params.path, 'path'),
+		hunkId,
+	};
+}
+
+function reviewCitations(value: unknown): readonly AgentSessionExplanationCitation[] {
+	if (!Array.isArray(value) || value.length > 20) { throw new Error('citations must contain at most 20 exact selected references or conventions.'); }
+	return value.map(candidate => {
+		if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) { throw new Error('Each citation must be an object.'); }
+		const citation = candidate as Record<string, unknown>;
+		assertAllowedKeys(citation, ['kind', 'id', 'version', 'sha256']);
+		if (citation.kind !== 'reference' && citation.kind !== 'convention') { throw new Error('Citation kind is invalid.'); }
+		const id = requiredUuid(citation.id, 'citation id');
+		const version = requiredInteger(citation.version, 'citation version');
+		const sha256 = requiredString(citation.sha256, 'citation sha256');
+		if (version < 1 || !/^[0-9a-f]{64}$/iu.test(sha256)) { throw new Error('Citation must identify a positive exact version and SHA-256 digest.'); }
+		return { kind: citation.kind, id, version, sha256 };
+	});
+}
+
+function reviewCheckClaims(value: unknown): readonly AgentSessionReportedCheck[] {
+	if (!Array.isArray(value) || value.length > 10) { throw new Error('checkClaims must contain at most 10 reported checks.'); }
+	return value.map(candidate => {
+		if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) { throw new Error('Each reported check must be an object.'); }
+		const check = candidate as Record<string, unknown>;
+		assertAllowedKeys(check, ['label', 'outcome', 'detail']);
+		if (typeof check.label !== 'string' || !['reportedPass', 'reportedFail', 'notRun'].includes(String(check.outcome))) { throw new Error('Reported check fields are invalid.'); }
+		if (check.detail !== undefined && typeof check.detail !== 'string') { throw new Error('Reported check detail must be text.'); }
+		return { label: check.label, outcome: check.outcome as AgentSessionReportedCheck['outcome'], ...(typeof check.detail === 'string' ? { detail: check.detail } : {}) };
+	});
+}
+
+function sanitizeExplanation(what: string, why: string, checks: readonly AgentSessionReportedCheck[], knownSecrets: readonly string[]) {
+	const sanitize = (text: string) => sanitizeCompleteAgentText(text, { knownSecrets });
+	return {
+		what: sanitize(what), why: sanitize(why),
+		checkClaims: checks.map(check => ({ ...check, label: sanitize(check.label), ...(check.detail === undefined ? {} : { detail: sanitize(check.detail) }) })),
+	};
+}
+
+function boundedReviewResult(value: unknown, knownSecrets: readonly string[]): unknown {
+	if (value === undefined) { return null; }
+	let redactionApplied = false;
+	const sanitizeValue = (candidate: unknown): unknown => {
+		if (typeof candidate === 'string') {
+			const sanitized = sanitizeCompleteAgentText(candidate, { knownSecrets });
+			redactionApplied ||= sanitized !== candidate;
+			return sanitized;
+		}
+		if (Array.isArray(candidate)) { return candidate.map(sanitizeValue); }
+		if (candidate && typeof candidate === 'object') {
+			return Object.fromEntries(Object.entries(candidate).map(([key, item]) => [key, sanitizeValue(item)]));
+		}
+		return candidate;
+	};
+	const sanitized = sanitizeValue(value);
+	const safeValue = redactionApplied && sanitized && typeof sanitized === 'object' && !Array.isArray(sanitized)
+		? { ...sanitized, redactionApplied: true }
+		: sanitized;
+	const safeJson = JSON.stringify(safeValue);
+	const toolResult = { content: [{ type: 'text', text: safeJson }], structuredContent: safeValue };
+	const bridgeFrame = `${JSON.stringify({ type: 'response', id: 'x'.repeat(32), result: safeValue })}\n`;
+	const mcpFrame = `${JSON.stringify({ jsonrpc: '2.0', id: 'x'.repeat(32), result: toolResult })}\n`;
+	if (Buffer.byteLength(bridgeFrame, 'utf8') > MAX_FRAME_BYTES - 512 || Buffer.byteLength(mcpFrame, 'utf8') > MAX_FRAME_BYTES - 512) {
+		throw new Error('The retained change review result exceeds the bounded MCP response size.');
+	}
+	return safeValue;
 }
 
 function writeFrame(socket: Socket, value: unknown): void {

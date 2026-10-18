@@ -37,7 +37,7 @@ import { ITerminalService } from '../../../../../workbench/contrib/terminal/brow
 import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, SessionNotificationDTO, SessionPageOptions, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO, CreateAgentWorkflowInput } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
-import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
+import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO, WorkspaceAgentChangeHunksDTO, WorkspaceAgentExplanationDTO, WorkspaceAgentExplanationPageDTO, WorkspaceAgentExplanationTargetDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import type { WorkspaceKnowledgeDTO } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
@@ -599,12 +599,22 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		selectorLabel.appendChild(selector); selectMount.appendChild(selectorLabel);
 		const widget = this.sessionChangesWidgetMount!;
 		const projectId = this.projectId;
-		const context: SessionChangesContext = { projectId, sessionId, turnId };
+		const selectedTurn = turns.find(turn => turn.id === turnId)!;
+		const knowledgeReferences = [
+			...(selectedTurn.snapshot.convention ? [{ kind: 'convention' as const, ...selectedTurn.snapshot.convention, label: selectedTurn.snapshot.convention.id }] : []),
+			...selectedTurn.snapshot.references.map(reference => ({ kind: 'reference' as const, ...reference, label: reference.id })),
+		];
+		const ipcScope = { projectId, sessionId, turnId };
+		const context: SessionChangesContext = { ...ipcScope, knowledgeReferences };
 		const contextKey = JSON.stringify([projectId, sessionId, turnId]);
 		const actions: SessionChangesActions = {
-			latest: () => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getLatestChangeEvidence', context) as Promise<WorkspaceAgentChangeEvidenceDTO | null>,
-			list: (beforeVersion, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listChangeEvidence', { ...context, beforeVersion, limit }) as Promise<WorkspaceAgentChangeEvidencePageDTO>,
-			file: (evidence, path) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getChangeFile', { ...context, evidenceVersion: evidence.version, fingerprint: evidence.fingerprint, path }) as Promise<WorkspaceAgentChangeFileDTO | null>,
+			latest: () => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getLatestChangeEvidence', ipcScope) as Promise<WorkspaceAgentChangeEvidenceDTO | null>,
+			list: (beforeVersion, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listChangeEvidence', { ...ipcScope, beforeVersion, limit }) as Promise<WorkspaceAgentChangeEvidencePageDTO>,
+			file: (evidence, path) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getChangeFile', { ...ipcScope, evidenceVersion: evidence.version, fingerprint: evidence.fingerprint, path }) as Promise<WorkspaceAgentChangeFileDTO | null>,
+			hunks: (evidence, path) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getChangeHunks', { ...ipcScope, evidenceVersion: evidence.version, fingerprint: evidence.fingerprint, path }) as Promise<WorkspaceAgentChangeHunksDTO | null>,
+			explanation: target => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getLatestChangeExplanation', target) as Promise<WorkspaceAgentExplanationDTO | null>,
+			explanationRevisions: (target, afterRevision, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listChangeExplanationRevisions', { ...target, afterRevision, limit }) as Promise<WorkspaceAgentExplanationPageDTO>,
+			saveExplanation: (target, expectedLatestRevision, what, why, citations, checkClaims, status) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'recordHumanChangeExplanation', { ...target, expectedLatestRevision, what, why, citations, checkClaims, status }) as Promise<WorkspaceAgentExplanationDTO>,
 			openDiff: (evidence, path, before, after, isCurrent) => this.openChangeDiff(context, evidence, path, before, after, isCurrent),
 		};
 		if (!this.sessionChangesController) {

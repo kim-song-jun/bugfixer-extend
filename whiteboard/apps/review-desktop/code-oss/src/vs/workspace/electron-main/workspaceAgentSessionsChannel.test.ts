@@ -228,6 +228,49 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 			assert.equal(retainedFile.before.file.content, 'const answer = 1;\n');
 			assert.equal(retainedFile.after.file.content, 'const answer = 4;\n');
 		}
+		const hunkEvidence = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentChangeHunksDTO>(sender, 'getChangeHunks', {
+			...contentScope, evidenceVersion: latestChanges.version, fingerprint: latestChanges.fingerprint, path: 'src/review.ts',
+		});
+		assert.equal(hunkEvidence.status, 'hunks');
+		const selectedHunk = hunkEvidence.hunks[0];
+		assert.ok(selectedHunk);
+		const explanationTarget = {
+			...contentScope, evidenceVersion: latestChanges.version, evidenceFingerprint: latestChanges.fingerprint,
+			path: 'src/review.ts', hunkId: selectedHunk.id,
+		};
+		assert.equal(await channel.call(sender, 'getLatestChangeExplanation', explanationTarget), null);
+		const humanDraft = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentExplanationDTO>(sender, 'recordHumanChangeExplanation', {
+			...explanationTarget, expectedLatestRevision: 0, what: '수정 내용을 확인했습니다.', why: '보관된 비교에서 요청된 값 변경을 확인했습니다.',
+			citations: [], checkClaims: [{ label: '빌드', outcome: 'notRun' }], status: 'draft',
+		});
+		assert.equal(humanDraft.actor, 'human');
+		assert.equal(humanDraft.authorTurnId, null);
+		assert.equal(humanDraft.status, 'draft');
+		assert.equal(humanDraft.verification, 'unverified');
+		assert.equal(humanDraft.checkClaims[0].outcome, 'notRun');
+		const confirmedExplanation = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentExplanationDTO>(sender, 'recordHumanChangeExplanation', {
+			...explanationTarget, expectedLatestRevision: humanDraft.revision, what: '수정 내용을 확인했습니다.', why: '보관된 비교에서 요청된 값 변경을 확인했습니다.',
+			citations: [], checkClaims: [], status: 'confirmed',
+		});
+		assert.equal(confirmedExplanation.actor, 'human');
+		assert.equal(confirmedExplanation.status, 'confirmed', 'Confirmation is scoped to explanation text only.');
+		assert.equal(confirmedExplanation.verification, 'unverified');
+		const explanationHistory = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentExplanationPageDTO>(sender, 'listChangeExplanationRevisions', { ...explanationTarget, afterRevision: 1, limit: 1 });
+		assert.deepEqual(explanationHistory.revisions.map(item => item.revision), [2]);
+		assert.equal(explanationHistory.hasMore, false);
+		const latestExplanation = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentExplanationDTO>(sender, 'getLatestChangeExplanation', explanationTarget);
+		assert.equal(latestExplanation.revision, 2);
+		assert.equal(latestExplanation.status, 'confirmed');
+		await assert.rejects(channel.call(sender, 'recordHumanChangeExplanation', {
+			...explanationTarget, expectedLatestRevision: 1, what: '다른 설명을 입력했습니다.', why: '낡은 편집 내용입니다.', citations: [], checkClaims: [], status: 'draft',
+		}), /stale/u);
+		await assert.rejects(channel.call(sender, 'getChangeHunks', { ...contentScope, evidenceVersion: latestChanges.version, fingerprint: latestChanges.fingerprint, path: 'src/review.ts', extra: true }), /documented scope/u);
+		await assert.rejects(channel.call(sender, 'getLatestChangeExplanation', { ...explanationTarget, actor: 'human' }), /documented scope/u);
+		await assert.rejects(channel.call(sender, 'recordHumanChangeExplanation', { ...explanationTarget, actor: 'human', expectedLatestRevision: 2, what: 'x', why: 'y', citations: [], checkClaims: [], status: 'confirmed' }), /documented scope/u);
+		await assert.rejects(channel.call(sender, 'getLatestChangeExplanation', { ...explanationTarget, projectId: otherProject.project.id }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'recordHumanChangeExplanation', { ...explanationTarget, hunkId: '0'.repeat(64), expectedLatestRevision: 2, what: 'x', why: 'y', citations: [], checkClaims: [], status: 'draft' }), /not present/u);
+		await assert.rejects(channel.call(forgedSender, 'getChangeHunks', { ...contentScope, evidenceVersion: latestChanges.version, fingerprint: latestChanges.fingerprint, path: 'src/review.ts' }), /open project window/u);
+		await assert.rejects(channel.call(sender, 'getLatestChangeExplanation', { ...explanationTarget, sessionId: session.id }), /does not belong/u);
 		await assert.rejects(channel.call(sender, 'getLatestChangeEvidence', { ...contentScope, extra: true }), /only their documented scope/u);
 		await assert.rejects(channel.call(forgedSender, 'getLatestChangeEvidence', contentScope), /open project window/u);
 		await assert.rejects(channel.call(sender, 'getLatestChangeEvidence', { ...contentScope, projectId: otherProject.project.id }), /does not match this window/u);

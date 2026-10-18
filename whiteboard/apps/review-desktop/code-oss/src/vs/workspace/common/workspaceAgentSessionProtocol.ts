@@ -233,7 +233,8 @@ export type WorkspaceAgentSessionsCommand =
 	| 'listSessions' | 'createSession' | 'workspacePreparation' | 'prepareWorkspace' | 'listTurns' | 'preview' | 'start' | 'stop'
 	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect' | 'readTranscript' | 'listNotifications' | 'markNotificationRead' | 'notificationStatus' | 'listMessages' | 'getMessage'
 	| 'listWorkflows' | 'getWorkflow' | 'createWorkflow' | 'reviseWorkflow' | 'approveWorkflow' | 'startWorkflow' | 'cancelWorkflow'
-	| 'getLatestChangeEvidence' | 'listChangeEvidence' | 'getChangeFile';
+	| 'getLatestChangeEvidence' | 'listChangeEvidence' | 'getChangeFile' | 'getChangeHunks'
+	| 'getLatestChangeExplanation' | 'listChangeExplanationRevisions' | 'recordHumanChangeExplanation';
 
 export interface WorkspaceAgentSessionProjectRequest { readonly projectId: string; }
 export type WorkspaceAgentSessionCreateRequest = CreateAgentSessionInput;

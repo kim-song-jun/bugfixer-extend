@@ -4,16 +4,17 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import test from 'node:test';
 import type { AgentSessionPermissionPolicy, AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { AgentSessionCollaborationService } from './agentSessionCollaborationService.js';
 import {
@@ -210,7 +211,7 @@ test('real MCP SDK client uses scoped loopback ports for all provider pairings a
 				pairClients.push(receiverClient);
 
 				const toolList = await senderClient.client.listTools();
-				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel']);
+				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
 				const request = {
 					name: 'messages_send',
 					arguments: { recipientSessionId: receiver.id, idempotencyKey: `stable-${senderProvider}-${receiverProvider}`, body: 'Inspect this collaboration request.' },
@@ -288,7 +289,7 @@ test('real MCP SDK exposes only scoped workflow status and cancel for its own se
 		);
 		client = await openMcpClient(access);
 		const listed = await client.client.listTools();
-		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel']);
+		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
 		const statusResult = await client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } });
 		const status = readSuccessfulToolPayload(statusResult, 'own workflows_status') as unknown as {
 			workflow: { id: string; state: string };
@@ -432,6 +433,100 @@ test('large escaped mailbox messages are byte-paged with exact cursors and unrep
 			fixture.database.close();
 			rmSync(directory, { recursive: true, force: true });
 		}
+	}
+});
+
+test('MCP change tools read exact retained hunks and can append only an agent draft for the live session turn', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-change-review-'));
+	const fixture = createFixture(directory);
+	const session = createSession(fixture, 'codex');
+	const turn = createTurn(fixture, session, READ_ONLY);
+	const otherSession = createSession(fixture, 'claude');
+	const otherTurn = createTurn(fixture, otherSession, READ_ONLY);
+	const relativePath = 'retained.txt';
+	const absolutePath = join(fixture.root, relativePath);
+	const unchangedPath = 'unchanged.txt';
+	const knownSecret = 'private-key-line\nquoted"segment\\tail';
+	const makeSnapshot = (capturedAt: string): AgentSessionContentSnapshot => {
+		const entries = [relativePath, unchangedPath].map(path => {
+			const content = readFileSync(join(fixture.root, path), 'utf8');
+			return { path, kind: 'file' as const, size: Buffer.byteLength(content, 'utf8'), sha256: createHash('sha256').update(content, 'utf8').digest('hex'), content };
+		});
+		const retainedTextBytes = entries.reduce((bytes, entry) => bytes + entry.size, 0);
+		return {
+			schemaVersion: 1, folderIdentity: turn.snapshot.folderIdentity, capturedAt,
+			inventoryCoverage: 'complete', contentCoverage: 'complete', entryCount: entries.length,
+			fileBytes: retainedTextBytes, retainedTextBytes, contentReadCount: entries.length, entries,
+		};
+	};
+	writeFileSync(absolutePath, `before MCP\n${knownSecret}\n`);
+	writeFileSync(join(fixture.root, unchangedPath), 'unchanged private project context\n');
+	const scope = { projectId: fixture.project.id, sessionId: session.id, turnId: turn.id };
+	fixture.database.agentSessionContents.recordBaseline({ scope, snapshot: makeSnapshot('2026-10-19T00:00:00.000Z'), revision: null });
+	const currentSession = fixture.database.agentSessions.getSession(fixture.project.id, session.id)!;
+	const running = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, turn.id, turn.revision, currentSession.revision, { state: 'running' });
+	writeFileSync(absolutePath, `after MCP\n${knownSecret}\n`);
+	fixture.database.agentSessionContents.recordAfter({ scope, snapshot: makeSnapshot('2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: null, cleanupVerified: true });
+	writeFileSync(absolutePath, 'later live folder state\n');
+	assert.equal(readFileSync(absolutePath, 'utf8'), 'later live folder state\n');
+	const evidence = fixture.database.agentSessionChangeEvidence.getLatest(fixture.project.id, session.id, turn.id)!;
+	const collaboration = new AgentSessionCollaborationService(fixture.database);
+	const bridge = new AgentSessionMcpBridge(collaboration, undefined, fixture.database);
+	let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
+	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
+	try {
+		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id, permissionPolicy: READ_ONLY, knownSecrets: [knownSecret] });
+		client = await openMcpClient(access);
+		const tools = (await client.client.listTools()).tools.map(tool => tool.name);
+		assert.ok(tools.includes('getChangeHunks'));
+		assert.ok(tools.includes('getLatestChangeExplanation'));
+		assert.ok(tools.includes('listChangeExplanationRevisions'));
+		assert.ok(tools.includes('recordAgentChangeExplanation'));
+		assert.equal(tools.includes('recordHumanChangeExplanation'), false);
+		const humanWrite = await client.client.callTool({ name: 'recordHumanChangeExplanation', arguments: {} });
+		assert.equal((humanWrite as { isError?: boolean }).isError, true);
+		const read = await client.client.callTool({ name: 'getChangeHunks', arguments: { turnId: turn.id, evidenceVersion: evidence.version, path: relativePath } });
+		const result = readSuccessfulToolPayload(read, 'getChangeHunks') as unknown as { redactionApplied: boolean; evidence: { fingerprint: string }; file: { before: { file: { content: string } }; after: { file: { content: string } } }; hunks: { hunks: readonly { id: string }[] } };
+		assert.equal(result.evidence.fingerprint, evidence.fingerprint);
+		assert.equal(result.redactionApplied, true);
+		assert.ok(result.file.before.file.content.startsWith('before MCP\n'));
+		assert.ok(result.file.after.file.content.startsWith('after MCP\n'));
+		assert.equal(result.file.before.file.content.includes(knownSecret), false);
+		assert.equal(result.file.after.file.content.includes(knownSecret), false);
+		assert.equal(result.file.after.file.content.includes('private-key-line'), false);
+		assert.equal(fixture.database.agentSessionContents.getFile({ scope, evidenceVersion: evidence.version, path: relativePath })?.after.state, 'text');
+		assert.equal(evidence.files.some(file => file.path === unchangedPath), false);
+		assert.equal(fixture.database.agentSessionContents.getFile({ scope, evidenceVersion: evidence.version, path: unchangedPath })?.after.state, 'text');
+		const unchangedRead = await client.client.callTool({ name: 'getChangeHunks', arguments: { turnId: turn.id, evidenceVersion: evidence.version, path: unchangedPath } });
+		assert.equal((unchangedRead as { isError?: boolean }).isError, true);
+		const hunkId = result.hunks.hunks[0]?.id;
+		assert.ok(hunkId);
+		const target = { turnId: turn.id, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: relativePath, hunkId };
+		const forbidden = await client.client.callTool({ name: 'recordAgentChangeExplanation', arguments: {
+			...target, expectedLatestRevision: 0, what: 'change', why: 'reason', citations: [], checkClaims: [], actor: 'human', status: 'confirmed', authorTurnId: otherTurn.id, verification: 'verified',
+		} });
+		assert.equal((forbidden as { isError?: boolean }).isError, true);
+		assert.equal(fixture.database.agentSessionReviews.getLatest({ ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: relativePath, hunkId }), undefined);
+		const crossSession = await client.client.callTool({ name: 'getChangeHunks', arguments: { turnId: otherTurn.id, evidenceVersion: evidence.version, path: relativePath } });
+		assert.equal((crossSession as { isError?: boolean }).isError, true);
+		const draft = await client.client.callTool({ name: 'recordAgentChangeExplanation', arguments: {
+			...target, expectedLatestRevision: 0, what: 'Changed the retained line.', why: 'It now matches the request.', citations: [], checkClaims: [{ label: 'Tests', outcome: 'reportedPass' }],
+		} });
+		const explanation = readSuccessfulToolPayload(draft, 'recordAgentChangeExplanation') as unknown as { actor: string; authorTurnId: string; status: string; verification: string; checkClaims: readonly { outcome: string }[] };
+		assert.equal(explanation.actor, 'agent');
+		assert.equal(explanation.authorTurnId, turn.id);
+		assert.equal(explanation.status, 'draft');
+		assert.equal(explanation.verification, 'unverified');
+		assert.equal(explanation.checkClaims[0]?.outcome, 'reportedPass');
+		const listed = await client.client.callTool({ name: 'listChangeExplanationRevisions', arguments: target });
+		assert.equal((readSuccessfulToolPayload(listed, 'listChangeExplanationRevisions') as unknown as { revisions: readonly unknown[] }).revisions.length, 1);
+		access.revokeAccess();
+		await assert.rejects(client.client.callTool({ name: 'getLatestChangeExplanation', arguments: target }), /revoked|closed|disconnected|transport/i);
+		assert.equal(running.turn.state, 'running');
+	} finally {
+		await closeOwnedMcpResources(client ? [client] : [], access ? [access] : []);
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
 	}
 });
 

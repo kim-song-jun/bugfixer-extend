@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/** Browser-safe, read-only views of retained per-turn file change evidence. */
+/** Browser-safe DTOs for retained per-turn change evidence and human-authored explanation records. */
 export type WorkspaceAgentChangeKind = 'created' | 'modified' | 'deleted' | 'renamed' | 'typeChanged' | 'symlinkChanged';
 
 export interface WorkspaceAgentChangeFileObservation {
@@ -68,4 +68,85 @@ export interface WorkspaceAgentChangeFileMetadataDTO {
 
 export interface WorkspaceAgentChangeTextFileDTO extends WorkspaceAgentChangeFileMetadataDTO {
 	readonly content: string;
+}
+
+export interface WorkspaceAgentChangeHunkRangeDTO {
+	readonly startLineNumber: number;
+	readonly startColumn: number;
+	readonly endLineNumber: number;
+	readonly endColumn: number;
+}
+
+export interface WorkspaceAgentChangeHunkDTO {
+	readonly id: string;
+	readonly originalStartLineNumber: number;
+	readonly originalEndLineNumberExclusive: number;
+	readonly modifiedStartLineNumber: number;
+	readonly modifiedEndLineNumberExclusive: number;
+	readonly ranges: readonly { readonly original: WorkspaceAgentChangeHunkRangeDTO; readonly modified: WorkspaceAgentChangeHunkRangeDTO }[];
+}
+
+export type WorkspaceAgentChangeHunkFileStateDTO =
+	| { readonly state: 'absent'; readonly sha256: null }
+	| { readonly state: 'text'; readonly sha256: string }
+	| { readonly state: 'unavailable'; readonly sha256: string | null; readonly reason: string };
+
+export interface WorkspaceAgentChangeHunksDTO {
+	readonly scope: { readonly projectId: string; readonly sessionId: string; readonly turnId: string };
+	readonly evidenceVersion: number;
+	readonly evidenceFingerprint: string;
+	readonly path: string;
+	readonly before: WorkspaceAgentChangeHunkFileStateDTO;
+	readonly after: WorkspaceAgentChangeHunkFileStateDTO;
+	readonly status: 'hunks' | 'noTextChange' | 'eolOnly' | 'presenceChanged' | 'unavailable' | 'partial';
+	readonly hunks: readonly WorkspaceAgentChangeHunkDTO[];
+	readonly truncated: boolean;
+	readonly timedOut: boolean;
+	readonly unavailableReason: string | null;
+}
+
+export interface WorkspaceAgentExplanationTargetDTO {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly turnId: string;
+	readonly evidenceVersion: number;
+	readonly evidenceFingerprint: string;
+	readonly path: string;
+	readonly hunkId: string | null;
+}
+
+export interface WorkspaceAgentExplanationCitationDTO {
+	readonly kind: 'reference' | 'convention';
+	readonly id: string;
+	readonly version: number;
+	readonly sha256: string;
+}
+
+export interface WorkspaceAgentReportedCheckDTO {
+	readonly label: string;
+	readonly outcome: 'reportedPass' | 'reportedFail' | 'notRun';
+	readonly detail?: string;
+}
+
+export interface WorkspaceAgentExplanationDTO {
+	readonly id: string;
+	readonly target: WorkspaceAgentExplanationTargetDTO;
+	readonly revision: number;
+	readonly turnSnapshotSha256: string;
+	readonly actor: 'agent' | 'human';
+	readonly authorTurnId: string | null;
+	readonly status: 'draft' | 'confirmed';
+	readonly what: string;
+	readonly why: string;
+	readonly citations: readonly WorkspaceAgentExplanationCitationDTO[];
+	readonly grounding: 'linked' | 'unlinked';
+	readonly checkClaims: readonly WorkspaceAgentReportedCheckDTO[];
+	readonly verification: 'unverified';
+	readonly createdAt: string;
+}
+
+export interface WorkspaceAgentExplanationPageDTO {
+	readonly revisions: readonly WorkspaceAgentExplanationDTO[];
+	readonly nextRevision: number;
+	readonly hasMore: boolean;
 }

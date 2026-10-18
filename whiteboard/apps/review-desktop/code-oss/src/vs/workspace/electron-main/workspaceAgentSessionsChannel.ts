@@ -16,13 +16,15 @@ import type {
 	WorkspaceAgentSessionWorkspacePreparationDTO,
 	WorkspaceAgentSessionOutputEvent,
 } from '../common/workspaceAgentSessionProtocol.js';
-import type { WorkspaceAgentChangeFileDTO } from '../common/workspaceAgentChangesProtocol.js';
+import type { WorkspaceAgentChangeFileDTO, WorkspaceAgentExplanationCitationDTO, WorkspaceAgentReportedCheckDTO } from '../common/workspaceAgentChangesProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT } from '../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage } from '../common/workspaceAgentCommunicationProtocol.js';
 import type {
 	AgentWorkflowDTO, AgentWorkflowNodePlan, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowRunDTO, AgentWorkflowStatusDTO,
 } from '../common/workspaceAgentWorkflowProtocol.js';
 import type { AgentSessionAttachResult, AgentSessionService } from './agentSessions/agentSessionService.js';
+import { computeAgentSessionChangeHunks } from './agentSessions/agentSessionChangeHunks.js';
+import type { AgentSessionExplanationTarget } from './agentSessions/agentSessionReviewStore.js';
 import type { WorkspaceDatabase } from './workspaceDatabase.js';
 
 const MAX_INPUT_BYTES = 64 * 1024;
@@ -250,6 +252,42 @@ export class WorkspaceAgentSessionsChannel {
 					throw new Error('Retained file content does not match the selected change evidence.');
 				}
 				return result as WorkspaceAgentChangeFileDTO as T;
+			}
+			case 'getChangeHunks': {
+				const request = this.parseChangeScope(arg, projectId, ['projectId', 'sessionId', 'turnId', 'evidenceVersion', 'fingerprint', 'path']);
+				this.requireSession(projectId, request.sessionId);
+				const raw = this.record(arg);
+				const evidenceVersion = this.integer(raw.evidenceVersion, 1, MAX_SEQUENCE, 'change evidence version');
+				const fingerprint = this.changeFingerprint(raw.fingerprint);
+				const path = this.safeChangePath(raw.path);
+				const file = this.getExactChangeFile(projectId, request.sessionId, request.turnId, evidenceVersion, fingerprint, path);
+				return (file ? computeAgentSessionChangeHunks(file) : null) as T;
+			}
+			case 'getLatestChangeExplanation': {
+				const target = this.parseExplanationTarget(arg, projectId);
+				this.requireSession(projectId, target.sessionId);
+				return (this.database.agentSessionReviews.getLatest(target) ?? null) as T;
+			}
+			case 'listChangeExplanationRevisions': {
+				const raw = this.record(arg);
+				const target = this.parseExplanationTarget(arg, projectId, ['afterRevision', 'limit'], ['afterRevision', 'limit']);
+				this.requireSession(projectId, target.sessionId);
+				const page = this.database.agentSessionReviews.listRevisions({ target, ...(raw.afterRevision === undefined ? {} : { afterRevision: this.integer(raw.afterRevision, 0, MAX_SEQUENCE, 'explanation revision cursor') }), ...(raw.limit === undefined ? {} : { limit: this.integer(raw.limit, 1, 100, 'explanation revision page limit') }) });
+				if (page.revisions.some(item => !sameExplanationTarget(item.target, target))) { throw new Error('Explanation revision page contains an out-of-scope target.'); }
+				return page as T;
+			}
+			case 'recordHumanChangeExplanation': {
+				const raw = this.record(arg);
+				const target = this.parseExplanationTarget(arg, projectId, ['expectedLatestRevision', 'what', 'why', 'citations', 'checkClaims', 'status']);
+				this.requireSession(projectId, target.sessionId);
+				if (target.hunkId !== null) { this.requireExactExplanationHunk(target); }
+				const result = this.database.agentSessionReviews.recordHumanExplanation({
+					target, expectedLatestRevision: this.integer(raw.expectedLatestRevision, 0, MAX_SEQUENCE, 'expected explanation revision'),
+					what: raw.what as string, why: raw.why as string, citations: raw.citations as readonly WorkspaceAgentExplanationCitationDTO[],
+					checkClaims: raw.checkClaims as readonly WorkspaceAgentReportedCheckDTO[], status: raw.status as 'draft' | 'confirmed',
+				});
+				if (!sameExplanationTarget(result.target, target) || result.actor !== 'human' || result.authorTurnId !== null || result.verification !== 'unverified') { throw new Error('Human explanation response contains invalid authority or scope.'); }
+				return result as T;
 			}
 			case 'listNotifications': {
 				const request = this.record(arg);
@@ -722,6 +760,49 @@ export class WorkspaceAgentSessionsChannel {
 		return { sessionId, turnId };
 	}
 
+	private parseExplanationTarget(value: unknown, projectId: string, extraKeys: readonly string[] = [], optionalKeys: readonly string[] = []): AgentSessionExplanationTarget {
+		const allowedKeys = ['projectId', 'sessionId', 'turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId', ...extraKeys];
+		const request = this.parseChangeScope(value, projectId, allowedKeys);
+		const raw = this.record(value);
+		const requiredKeys = allowedKeys.filter(key => !optionalKeys.includes(key));
+		if (requiredKeys.some(key => !Object.hasOwn(raw, key)) || Object.keys(raw).some(key => !allowedKeys.includes(key))) { throw new Error('Explanation requests must contain exactly their documented target and fields.'); }
+		const evidenceFingerprint = this.changeFingerprint(raw.evidenceFingerprint);
+		const hunkId = raw.hunkId;
+		if (hunkId !== null && (typeof hunkId !== 'string' || !/^[0-9a-f]{64}$/u.test(hunkId))) { throw new Error('Explanation hunk ID must be null or a SHA-256 digest.'); }
+		return {
+			projectId, sessionId: request.sessionId, turnId: request.turnId,
+			evidenceVersion: this.integer(raw.evidenceVersion, 1, MAX_SEQUENCE, 'change evidence version'),
+			evidenceFingerprint, path: this.safeChangePath(raw.path), hunkId: hunkId as string | null,
+		};
+	}
+
+	private changeFingerprint(value: unknown): string {
+		const fingerprint = this.string(value, 'change evidence fingerprint', 64);
+		if (!/^[0-9a-f]{64}$/u.test(fingerprint)) { throw new Error('A valid change evidence fingerprint is required.'); }
+		return fingerprint;
+	}
+
+	private getExactChangeFile(projectId: string, sessionId: string, turnId: string, evidenceVersion: number, fingerprint: string, path: string) {
+		const page = this.database.agentSessionChangeEvidence.listVersions(projectId, sessionId, turnId, { afterVersion: evidenceVersion - 1, limit: 1 });
+		const selected = page.snapshots[0];
+		if (!selected || selected.version !== evidenceVersion || selected.fingerprint !== fingerprint) { throw new Error('The selected change evidence version is unavailable or has changed.'); }
+		if (!selected.files.some(file => file.path === path)) { throw new Error('The requested path is not part of the selected change evidence.'); }
+		const scope = { projectId, sessionId, turnId };
+		const result = this.database.agentSessionContents.getFile({ scope, evidenceVersion, path });
+		if (!result) { return undefined; }
+		if (result.scope.projectId !== projectId || result.scope.sessionId !== sessionId || result.scope.turnId !== turnId
+			|| result.evidenceVersion !== evidenceVersion || result.path !== path || result.evidenceFingerprint !== fingerprint) {
+			throw new Error('Retained file content does not match the selected change evidence.');
+		}
+		return result;
+	}
+
+	private requireExactExplanationHunk(target: AgentSessionExplanationTarget): void {
+		if (target.hunkId === null) { return; }
+		const file = this.getExactChangeFile(target.projectId, target.sessionId, target.turnId, target.evidenceVersion, target.evidenceFingerprint, target.path);
+		if (!file || !computeAgentSessionChangeHunks(file).hunks.some(hunk => hunk.id === target.hunkId)) { throw new Error('The selected hunk is not present in the exact retained file content.'); }
+	}
+
 	private safeChangePath(value: unknown): string {
 		const path = this.string(value, 'change file path', 4096);
 		if (path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
@@ -795,4 +876,10 @@ function projectMailboxMessage(message: SessionMessageDTO): WorkspaceAgentSessio
 		id: message.id, senderSessionId: message.senderSessionId, recipientSessionId: message.recipientSessionId,
 		sequence: message.sequence, body: message.body, createdAt: message.createdAt, readAt: message.readAt,
 	};
+}
+
+function sameExplanationTarget(left: AgentSessionExplanationTarget, right: AgentSessionExplanationTarget): boolean {
+	return left.projectId === right.projectId && left.sessionId === right.sessionId && left.turnId === right.turnId
+		&& left.evidenceVersion === right.evidenceVersion && left.evidenceFingerprint === right.evidenceFingerprint
+		&& left.path === right.path && left.hunkId === right.hunkId;
 }

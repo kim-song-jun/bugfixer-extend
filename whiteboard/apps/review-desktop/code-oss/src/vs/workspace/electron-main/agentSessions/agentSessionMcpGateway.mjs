@@ -397,5 +397,87 @@ const TOOLS = [
 		},
 		method: 'workflows.cancel',
 	},
+	{
+		name: 'getChangeHunks', description: 'Read one changed file from an exact retained evidence version and its bounded hunk identities. redactionApplied means response text was redacted; hashes and hunk identities still describe the original retained bytes.',
+		inputSchema: { type: 'object', required: ['turnId', 'evidenceVersion', 'path'], properties: {
+			turnId: { type: 'string', format: 'uuid' }, evidenceVersion: { type: 'integer', minimum: 1 }, path: { type: 'string', minLength: 1, maxLength: 4096 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['turnId', 'evidenceVersion', 'path'])) { return { error: 'Unexpected tool arguments.' }; }
+			const turnId = stringField(args, 'turnId', 64);
+			const evidenceVersion = integerField(args, 'evidenceVersion', 1, Number.MAX_SAFE_INTEGER, 0, true);
+			const path = stringField(args, 'path', 4096);
+			return turnId.error ? turnId : evidenceVersion.error ? evidenceVersion : path.error || !path.value.length ? { error: 'path must be a non-empty relative file path.' } : { value: { turnId: turnId.value, evidenceVersion: evidenceVersion.value, path: path.value } };
+		},
+		method: 'changes.get',
+	},
+	{
+		name: 'getLatestChangeExplanation', description: 'Read the latest explanation for one exact retained evidence file or hunk.',
+		inputSchema: changeExplanationTargetSchema(),
+		validate(args) { return validateChangeExplanationTarget(args, ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId']); },
+		method: 'change_explanations.latest',
+	},
+	{
+		name: 'listChangeExplanationRevisions', description: 'Read bounded immutable explanation history for one exact retained evidence file or hunk.',
+		inputSchema: { ...changeExplanationTargetSchema(), properties: {
+			...changeExplanationTargetSchema().properties,
+			afterRevision: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 30 },
+		} },
+		validate(args) {
+			const target = validateChangeExplanationTarget(args, ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId', 'afterRevision', 'limit']);
+			if (target.error) { return target; }
+			const afterRevision = integerField(args, 'afterRevision', 0, Number.MAX_SAFE_INTEGER, 0);
+			const limit = integerField(args, 'limit', 1, 30, 20);
+			return afterRevision.error ? afterRevision : limit.error ? limit : { value: { ...target.value, afterRevision: afterRevision.value, limit: limit.value } };
+		},
+		method: 'change_explanations.list',
+	},
+	{
+		name: 'recordAgentChangeExplanation', description: 'Append an agent-authored draft explanation for exact retained evidence. Reported checks remain unverified claims.',
+		inputSchema: { ...changeExplanationTargetSchema(), required: ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId', 'expectedLatestRevision', 'what', 'why', 'citations', 'checkClaims'], properties: {
+			...changeExplanationTargetSchema().properties,
+			expectedLatestRevision: { type: 'integer', minimum: 0 }, what: { type: 'string', minLength: 1, maxLength: 4096 }, why: { type: 'string', minLength: 1, maxLength: 8192 },
+			citations: { type: 'array', maxItems: 20, items: { type: 'object', required: ['kind', 'id', 'version', 'sha256'], properties: {
+				kind: { type: 'string', enum: ['reference', 'convention'] }, id: { type: 'string', format: 'uuid' }, version: { type: 'integer', minimum: 1 }, sha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+			}, additionalProperties: false } },
+			checkClaims: { type: 'array', maxItems: 10, items: { type: 'object', required: ['label', 'outcome'], properties: {
+				label: { type: 'string', minLength: 1, maxLength: 256 }, outcome: { type: 'string', enum: ['reportedPass', 'reportedFail', 'notRun'] }, detail: { type: 'string', maxLength: 1024 },
+			}, additionalProperties: false } },
+		} },
+		validate(args) {
+			const allowed = ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId', 'expectedLatestRevision', 'what', 'why', 'citations', 'checkClaims'];
+			const target = validateChangeExplanationTarget(args, allowed);
+			if (target.error) { return target; }
+			const expectedLatestRevision = integerField(args, 'expectedLatestRevision', 0, Number.MAX_SAFE_INTEGER, 0, true);
+			const what = stringField(args, 'what', 4096);
+			const why = stringField(args, 'why', 8192);
+			if (expectedLatestRevision.error || what.error || why.error) { return expectedLatestRevision.error ? expectedLatestRevision : what.error ? what : why; }
+			if (!what.value.trim() || !why.value.trim() || !Array.isArray(args.citations) || !Array.isArray(args.checkClaims)) { return { error: 'Explanation text, citations, and checkClaims are invalid.' }; }
+			return { value: { ...target.value, expectedLatestRevision: expectedLatestRevision.value, what: what.value, why: why.value, citations: args.citations, checkClaims: args.checkClaims } };
+		},
+		method: 'change_explanations.draft',
+	},
 ];
 const TOOLS_BY_NAME = new Map(TOOLS.map(tool => [tool.name, tool]));
+
+function changeExplanationTargetSchema() {
+	return { type: 'object', required: ['turnId', 'evidenceVersion', 'evidenceFingerprint', 'path', 'hunkId'], properties: {
+		turnId: { type: 'string', format: 'uuid' }, evidenceVersion: { type: 'integer', minimum: 1 }, evidenceFingerprint: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+		path: { type: 'string', minLength: 1, maxLength: 4096 }, hunkId: { anyOf: [{ type: 'string', pattern: '^[0-9a-f]{64}$' }, { type: 'null' }] },
+	}, additionalProperties: false };
+}
+
+function validateChangeExplanationTarget(args, allowed) {
+	if (!allowedFields(args, allowed)) { return { error: 'Unexpected tool arguments.' }; }
+	const turnId = stringField(args, 'turnId', 64);
+	const evidenceVersion = integerField(args, 'evidenceVersion', 1, Number.MAX_SAFE_INTEGER, 0, true);
+	const evidenceFingerprint = stringField(args, 'evidenceFingerprint', 64);
+	const path = stringField(args, 'path', 4096);
+	const hunkId = args.hunkId;
+	if (turnId.error || evidenceVersion.error || evidenceFingerprint.error || path.error) { return turnId.error ? turnId : evidenceVersion.error ? evidenceVersion : evidenceFingerprint.error ? evidenceFingerprint : path; }
+	if (!/^[0-9a-f]{64}$/i.test(evidenceFingerprint.value) || !path.value.length
+		|| (hunkId !== null && (typeof hunkId !== 'string' || !/^[0-9a-f]{64}$/i.test(hunkId)))) {
+		return { error: 'The evidence fingerprint, path, or hunk ID is invalid.' };
+	}
+	return { value: { turnId: turnId.value, evidenceVersion: evidenceVersion.value, evidenceFingerprint: evidenceFingerprint.value, path: path.value, hunkId } };
+}

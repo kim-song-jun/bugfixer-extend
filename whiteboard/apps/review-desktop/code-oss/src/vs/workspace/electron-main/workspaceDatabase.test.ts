@@ -71,10 +71,10 @@ test('projects, bindings, tasks, review links and project view persist across da
 	});
 });
 
-test('frozen v26 database upgrades to v27 with its real change evidence and workspace rows unchanged', () => {
-	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-v26-migration-'));
+function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
+	const directory = mkdtempSync(join(tmpdir(), `bugfixer-workspace-db-v${version}-migration-`));
 	const sourcePath = join(directory, 'source.db');
-	const path = join(directory, 'frozen-v26.db');
+	const path = join(directory, `frozen-v${version}.db`);
 	const folder = join(directory, 'project');
 	mkdirSync(folder);
 	let database = WorkspaceDatabase.open(sourcePath);
@@ -92,17 +92,22 @@ test('frozen v26 database upgrades to v27 with its real change evidence and work
 			managedWorktreeOwnerId: null, permissionPolicy: { mode: 'read-only', approval: 'on-request' }, convention: null, references: [],
 		};
 		let turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
+		const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
+		const retainedSnapshot = (content: string, capturedAt: string): AgentSessionContentSnapshot => {
+			const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+			return { schemaVersion: 1, folderIdentity: snapshot.folderIdentity, capturedAt, inventoryCoverage: 'complete', contentCoverage: 'complete', entryCount: 1,
+				fileBytes: Buffer.byteLength(content, 'utf8'), retainedTextBytes: Buffer.byteLength(content, 'utf8'), contentReadCount: 1,
+				entries: [{ path: 'migration.txt', kind: 'file', size: Buffer.byteLength(content, 'utf8'), sha256, content }] };
+		};
+		database.agentSessionContents.recordBaseline({ scope, snapshot: retainedSnapshot('before migration', '2026-10-19T00:00:00.000Z'), revision: null });
 		database.agentSessionTranscripts.appendSanitizedTerminalChunk({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'preserved output' });
 		const identified = database.agentSessionTurns.recordProviderConversationId(project.id, session.id, turn.id, turn.revision, '00000000-0000-4000-8000-000000000031');
 		let currentSession = database.agentSessions.getSession(project.id, session.id)!;
 		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, identified.revision, currentSession.revision, { state: 'running' });
 		currentSession = running.session;
+		database.agentSessionContents.recordAfter({ scope, snapshot: retainedSnapshot('after migration', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: null, cleanupVerified: true });
 		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
-		const changeEvidence = database.agentSessionChangeEvidence.recordSnapshot({
-			projectId: project.id, sessionId: session.id, turnId: turn.id, expectedLatestVersion: 0,
-			folderIdentity: snapshot.folderIdentity, capturedAt: '2026-10-19T00:00:00.000Z', beforeRevision: null, afterRevision: null,
-			status: 'observed', coverage: 'complete', missingReason: null, attribution: 'unknown', attributionNote: null, files: [],
-		});
+		const changeEvidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
 		const plan: AgentWorkflowPlanInput = {
 			projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
 			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: 'codex', model: 'gpt-5-codex', taskId: task.id, bindingId: binding.id, referenceIds: [], permissionPolicy: { mode: 'read-only', approval: 'on-request' }, dependsOn: [] }],
@@ -114,35 +119,37 @@ test('frozen v26 database upgrades to v27 with its real change evidence and work
 		const run = database.agentWorkflows.startWorkflow(project.id, workflow.id, ready.revision, 'migration-start');
 		database.close();
 
-		// Compose the frozen v24, v25, and pinned v26 schema, then seed it with rows produced by the public stores.
+		// Compose independently frozen migrations, then seed rows produced by the public stores.
 		const frozenV24 = readFileSync(new URL('./agentSessions/fixtures/schema-v24.sql', import.meta.url), 'utf8');
 		const frozenV25Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v25.sql', import.meta.url), 'utf8');
 		const frozenV26Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v26.sql', import.meta.url), 'utf8');
-		const v26 = new DatabaseSync(path);
+		const frozenV27Delta = version === 27 ? readFileSync(new URL('./agentSessions/fixtures/schema-v27.sql', import.meta.url), 'utf8') : '';
+		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence',
+			...(version === 27 ? ['agent_session_content_baselines', 'agent_session_content_finals'] : []),
+			'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
+		const v27 = new DatabaseSync(path);
 		try {
-			v26.exec('PRAGMA foreign_keys = ON;');
-			v26.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}`);
-			const turnOwnerTrigger = v26.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
-			if (typeof turnOwnerTrigger !== 'string') { throw new Error('Frozen v26 fixture omitted the session turn ownership trigger.'); }
+			v27.exec('PRAGMA foreign_keys = ON;');
+			v27.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}\n${frozenV27Delta}`);
+			const turnOwnerTrigger = v27.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
+			if (typeof turnOwnerTrigger !== 'string') { throw new Error(`Frozen v${version} fixture omitted the session turn ownership trigger.`); }
 			// The source rows have already passed the public store's snapshot guard. Temporarily remove only its insert-time guard while copying the later session revision, then restore its exact frozen SQL before migration.
-			v26.exec('DROP TRIGGER agent_session_turn_owner_insert;');
+			v27.exec('DROP TRIGGER agent_session_turn_owner_insert;');
 			try {
 				const source = new DatabaseSync(sourcePath);
 				try {
-					const tables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
-					for (const table of tables) {
+					for (const table of relevantTables) {
 						const columns = source.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
 						const rows = source.prepare(`SELECT * FROM ${table}`).all();
 						if (!rows.length) { continue; }
 						const quotedColumns = columns.map(column => `\"${column}\"`).join(', ');
-						const insert = v26.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
+						const insert = v27.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
 						for (const row of rows) { insert.run(...columns.map(column => Reflect.get(row, column))); }
 					}
 				} finally { source.close(); }
-			} finally { v26.exec(turnOwnerTrigger); }
-		} finally { v26.close(); }
+			} finally { v27.exec(turnOwnerTrigger); }
+		} finally { v27.close(); }
 
-		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
 		const snapshotRows = (connection: DatabaseSync) => Object.fromEntries(relevantTables.map(table => {
 			const columns = connection.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
 			const rows = connection.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
@@ -150,7 +157,7 @@ test('frozen v26 database upgrades to v27 with its real change evidence and work
 		}));
 		const beforeMigration = new DatabaseSync(path);
 		const beforeRows = snapshotRows(beforeMigration);
-		assert.equal(Number(beforeMigration.prepare('PRAGMA user_version').get()?.user_version), 26);
+		assert.equal(Number(beforeMigration.prepare('PRAGMA user_version').get()?.user_version), version);
 		beforeMigration.close();
 
 		database = WorkspaceDatabase.open(path);
@@ -160,17 +167,30 @@ test('frozen v26 database upgrades to v27 with its real change evidence and work
 		assert.equal(database.getTask(task.id)?.title, 'Retain task');
 		assert.equal(database.agentSessionTurns.getTurn(project.id, session.id, turn.id)?.id, turn.id);
 		assert.deepEqual(database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id), changeEvidence);
+		const retainedMigrationFile = database.agentSessionContents.getFile({ scope, evidenceVersion: 1, path: 'migration.txt' });
+		if (version === 27) {
+			assert.equal(retainedMigrationFile?.before.state, 'text');
+			if (retainedMigrationFile?.before.state === 'text') { assert.equal(retainedMigrationFile.before.file.content, 'before migration'); }
+			assert.equal(retainedMigrationFile?.after.state, 'text');
+			if (retainedMigrationFile?.after.state === 'text') { assert.equal(retainedMigrationFile.after.file.content, 'after migration'); }
+		} else {
+			assert.equal(retainedMigrationFile?.before.state, 'unavailable');
+			assert.equal(retainedMigrationFile?.after.state, 'unavailable');
+		}
 		assert.equal(database.agentSessionTranscripts.readPage(project.id, session.id, turn.id).entries[0]?.text, 'preserved output');
 		assert.equal(database.agentWorkflows.getWorkflow(project.id, workflow.id)?.id, workflow.id);
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
-		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 27); }
+		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 28); }
 		finally { migratedSchema.close(); }
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
 	}
-});
+}
+
+test('frozen v26 database upgrades to v28 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
+test('frozen v27 database upgrades to v28 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
 
 test('agent-session content baselines and final bytes remain turn-scoped and durable across reopen', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-agent-session-content-'));

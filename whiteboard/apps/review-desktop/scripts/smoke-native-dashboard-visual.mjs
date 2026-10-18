@@ -1405,6 +1405,8 @@ try {
 
   const { AgentSessionCollaborationService } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionCollaborationService.js')).href);
 
+  const { computeAgentSessionChangeHunks } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionChangeHunks.js')).href);
+
   const screenshots = [];
 
   const viewports = [];
@@ -1632,7 +1634,7 @@ try {
 
       fixture.logHistory = seeded.receipt;
 
-      const changeEvidence = await seedChangeEvidence(logFixtureDatabase, fixture, projectFolder, tag);
+      const changeEvidence = await seedChangeEvidence(logFixtureDatabase, fixture, projectFolder, tag, computeAgentSessionChangeHunks);
 
       fixture.changeEvidence = changeEvidence.receipt;
 
@@ -1674,6 +1676,24 @@ try {
       const turns = verifiedHistoryDatabase.agentSessionTurns.listTurns(fixture.projectId, fixture.logHistory.sessionId);
 
       assert.deepEqual(turns.map(turn => turn.id), fixture.logHistory.turnIds, 'Both CI history turns must persist after the packaged-app journey');
+
+      assert.equal(verifiedHistoryDatabase.getTask(fixture.taskId)?.state, fixture.finalState, 'Explanation review must not change the dashboard task state');
+
+      assert.equal(verifiedHistoryDatabase.getTask(fixture.taskId)?.state, fixture.changeEvidence.seededTaskState, 'The review journey must leave the task at its seeded state');
+
+      const reviewTarget = fixture.changeEvidence.reviewTarget;
+
+      assert.equal(verifiedHistoryDatabase.agentWorkflows.listWorkflows(fixture.projectId).workflows.length, fixture.changeEvidence.workflowCountBefore, 'Explanation review must not create workflow approval or execution records');
+
+      const explanationHistory = verifiedHistoryDatabase.agentSessionReviews.listRevisions({ target: reviewTarget, limit: 100 });
+
+      assert.equal(explanationHistory.revisions.length, fixture.changeEvidence.seededExplanationRevisions + 2, 'The human draft and explanation-only confirmation must append to persisted fixture history');
+
+      assert.equal(explanationHistory.revisions.at(-1)?.actor, 'human');
+
+      assert.equal(explanationHistory.revisions.at(-1)?.status, 'confirmed');
+
+      assert.equal(explanationHistory.revisions.at(-1)?.verification, 'unverified');
 
       for (const turn of turns) {
         const stored = verifiedHistoryDatabase.agentSessionTranscripts.readPage(fixture.projectId, fixture.logHistory.sessionId, turn.id, { limit: 100 });
@@ -2035,7 +2055,7 @@ async function seedTranscriptHistory(database, fixture, projectFolder, tag) {
   };
 }
 
-async function seedChangeEvidence(database, fixture, projectFolder, tag) {
+async function seedChangeEvidence(database, fixture, projectFolder, tag, computeChangeHunks) {
   const name = `CI 변경 evidence fixture ${tag}`;
   const folderPath = path.join(projectFolder, `ci-change-evidence-${tag}`);
   await mkdir(folderPath, { recursive: true });
@@ -2054,7 +2074,26 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
 
   const folder = await statFolder(folderPath);
 
+  const conventionMarkdown = `# CI fixture rule ${tag}\n\nThis fixture-only rule is pinned to the synthetic turn. No provider was run.\n`;
+
+  const convention = database.knowledge.createConventionVersion({
+    projectId: fixture.projectId,
+    markdown: conventionMarkdown,
+    sourceSnapshotIds: [],
+    authoredBy: 'person',
+  });
+
+  const conventionCitation = {
+    kind: 'convention',
+    id: convention.id,
+    version: convention.version,
+    sha256: createHash('sha256').update(conventionMarkdown, 'utf8').digest('hex'),
+  };
+
   const scope = { projectId: fixture.projectId, sessionId: session.id };
+
+  const workflowCountBefore = database.agentWorkflows.listWorkflows(fixture.projectId).workflows.length;
+
   const currentSession = database.agentSessions.getSession(fixture.projectId, session.id);
 
   const turnSnapshot = {
@@ -2071,7 +2110,7 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
     folderIdentity: { canonicalPath: folder.canonicalPath, dev: folder.dev, ino: folder.ino },
     managedWorktreeOwnerId: null,
     permissionPolicy: { mode: 'read-only', approval: 'never' },
-    convention: null,
+    convention: { id: convention.id, version: convention.version, sha256: conventionCitation.sha256 },
     references: [],
   };
 
@@ -2141,6 +2180,34 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
   assert.equal(retainedDeletedFile.before.file.content, `remove ${tag}\n`);
   assert.equal(retainedDeletedFile?.after.state, 'absent');
 
+  const editedHunks = computeChangeHunks(retainedEdit);
+
+  assert.equal(editedHunks.status, 'hunks', 'The retained real-file modification must produce a selectable change hunk');
+
+  assert.equal(editedHunks.hunks.length, 1, 'The focused fixture edit must produce one stable hunk');
+
+  const reviewTarget = {
+    ...turnScope,
+    evidenceVersion: final.evidenceVersion,
+    evidenceFingerprint: final.fingerprint,
+    path: 'edited.txt',
+    hunkId: editedHunks.hunks[0].id,
+  };
+
+  const seededExplanationRevisions = 51;
+
+  for (let revision = 0; revision < seededExplanationRevisions; revision++) {
+    database.agentSessionReviews.recordAgentExplanation({
+      target: reviewTarget,
+      authorTurnId: turn.id,
+      expectedLatestRevision: revision,
+      what: `Fixture explanation ${revision + 1}: the retained text changed.`,
+      why: 'Synthetic native UI history only; no model or provider was executed.',
+      citations: [conventionCitation],
+      checkClaims: [{ label: 'CI fixture command', outcome: 'notRun', detail: 'No command was executed for this reported fixture claim.' }],
+    });
+  }
+
   return {
     receipt: {
       fixtureOnly: true,
@@ -2159,6 +2226,11 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
       editedBefore: `before ${tag}\n`,
       editedAfter: `after ${tag}\n`,
       postCaptureMutation: `later filesystem value ${tag}\n`,
+      conventionCitation,
+      reviewTarget,
+      seededExplanationRevisions,
+      seededTaskState: database.getTask(fixture.taskId)?.state,
+      workflowCountBefore,
     },
   };
 }
@@ -2595,15 +2667,174 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   await changes.locator('.ai-session-changes__file').filter({ hasText: 'deleted.txt' }).getByText('삭제됨', { exact: true }).waitFor();
 
   const binaryRow = changes.locator('.ai-session-changes__file').filter({ hasText: 'binary.dat' });
-  await binaryRow.getByRole('button', { name: '비교 열기', exact: true }).click();
-  const changeMessage = changes.locator('.ai-session-changes__message');
-  await changeMessage.waitFor({ state: 'visible' });
-  assert.match(await changeMessage.innerText(), /binary/u, 'Unavailable binary bytes must produce an honest error, not an empty diff');
+  await binaryRow.getByRole('button', { name: '파일 설명', exact: true }).click();
+
+  const binaryCompare = binaryRow.getByRole('button', { name: '비교 열기', exact: true });
+
+  await binaryCompare.waitFor({ state: 'visible' });
+
+  assert.equal(await binaryCompare.isDisabled(), true, 'Unavailable binary bytes must not open a misleading empty diff');
+
+  await changes.getByText('변경 구간을 확인할 수 없습니다.', { exact: true }).waitFor();
+
+  const binaryNote = changes.getByText(/비교 구간을 계산할 수 없습니다: .*binary/iu);
+
+  await binaryNote.waitFor({ state: 'visible' });
 
   await workspace.getByRole('tab', { name: '터미널', exact: true }).click();
   await workspace.getByRole('tab', { name: '변경', exact: true }).click();
   assert.equal(await turnSelector.inputValue(), evidenceFixture.turnId, 'Switching tabs must preserve the exact selected turn');
   await changes.getByText(`v${evidenceFixture.evidenceVersion} · ${evidenceFixture.fingerprint}`, { exact: true }).waitFor();
+
+  const editedRow = changes.locator('.ai-session-changes__file').filter({ hasText: 'edited.txt' });
+
+  const fileExplanation = editedRow.getByRole('button', { name: '파일 설명', exact: true });
+
+  if (await fileExplanation.isVisible()) { await fileExplanation.click(); }
+
+  const hunkSelector = changes.getByRole('combobox', { name: '설명을 연결할 변경 구간', exact: true });
+
+  await hunkSelector.waitFor({ state: 'visible' });
+
+  await hunkSelector.selectOption(evidenceFixture.reviewTarget.hunkId);
+
+  const whatInput = changes.locator('[placeholder="무엇이 바뀌었나요?"]');
+
+  const whyInput = changes.locator('[placeholder="왜 바뀌었나요?"]');
+
+  await whatInput.waitFor({ state: 'visible' });
+
+  const seedExplanationFacts = changes.locator('.ai-session-changes__detail .ai-session-changes__facts').filter({ hasText: '설명 버전 51' });
+
+  await seedExplanationFacts.waitFor({ state: 'visible' });
+
+  assert.equal(await hunkSelector.inputValue(), evidenceFixture.reviewTarget.hunkId, 'The explanation must be linked to the exact retained hunk');
+
+  assert.equal(await whatInput.inputValue(), 'Fixture explanation 51: the retained text changed.');
+
+  assert.equal(await whyInput.inputValue(), 'Synthetic native UI history only; no model or provider was executed.');
+
+  assert.ok((await changes.innerText()).includes('에이전트 작성 · 초안 · 실행 결과 미검증 · 설명 버전 51'), 'Synthetic agent text must remain a draft with unverified execution claims');
+
+  await changes.getByRole('heading', { name: '설명 기록 2–51', exact: true }).waitFor();
+
+  const revisionList = changes.locator('ol.ai-session-changes__revision-list');
+
+  assert.equal(await revisionList.locator('li').count(), 50, 'The latest explanation-history window must stay bounded to 50 revisions');
+
+  const citationLabel = changes.locator('.ai-session-changes__citation').filter({ hasText: evidenceFixture.conventionCitation.id });
+
+  const citationCheckbox = citationLabel.locator('input[type="checkbox"]');
+
+  assert.equal(await citationCheckbox.isChecked(), true, 'The pinned convention citation must be selected from the exact turn snapshot');
+
+  await whatInput.fill('Human review: the retained file changes the fixture line.');
+
+  await whyInput.fill('The stored before and after text show this one-line change; this review does not claim provider authorship.');
+
+  await changes.getByRole('button', { name: '초안 저장', exact: true }).click();
+
+  await changes.getByText('무엇: Human review: the retained file changes the fixture line.', { exact: true }).waitFor();
+
+  await changes.getByText(/사람 작성 · 초안 · 실행 결과 미검증 · revision 52/u).waitFor();
+
+  await whatInput.fill('Human confirmed explanation: the fixture line changed.');
+
+  await whyInput.fill('I reviewed the retained hunk and its pinned convention citation.');
+
+  const confirmExplanation = changes.getByRole('button', { name: '설명만 확인', exact: true });
+
+  await confirmExplanation.click();
+
+  await changes.getByText('무엇: Human confirmed explanation: the fixture line changed.', { exact: true }).waitFor();
+
+  await changes.getByText(/사람 작성 · 설명만 확인됨 · 실행 결과 미검증 · revision 53/u).waitFor();
+
+  await changes.getByRole('heading', { name: '설명 기록 4–53', exact: true }).waitFor();
+
+  assert.equal(await revisionList.locator('li').count(), 50, 'Saving must keep the latest explanation-history window bounded');
+
+  assert.ok((await changes.innerText()).includes(`고정 참고 규칙 · ${evidenceFixture.conventionCitation.id} · v${evidenceFixture.conventionCitation.version} · ${evidenceFixture.conventionCitation.sha256.slice(0, 12)}`), 'The persisted explanation must retain its exact pinned citation');
+
+  const olderExplanations = changes.getByRole('button', { name: '이전 설명 더 보기', exact: true });
+
+  await olderExplanations.scrollIntoViewIfNeeded();
+
+  await olderExplanations.click();
+
+  await changes.getByRole('heading', { name: '설명 기록 1–3', exact: true }).waitFor();
+
+  assert.equal(await revisionList.locator('li').count(), 3, 'The older explanation-history window must contain only the three earlier revisions');
+
+  await changes.getByText('Fixture explanation 1: the retained text changed. / 이유: Synthetic native UI history only; no model or provider was executed.', { exact: true }).waitFor();
+
+  const latestExplanations = changes.getByRole('button', { name: '최근 설명 보기', exact: true });
+
+  await latestExplanations.click();
+
+  await changes.getByRole('heading', { name: '설명 기록 4–53', exact: true }).waitFor();
+
+  assert.equal(await revisionList.locator('li').count(), 50, 'Returning to recent history must replace the older window without accumulating rows');
+
+  await changes.getByText('Fixture explanation 51: the retained text changed. / 이유: Synthetic native UI history only; no model or provider was executed.', { exact: true }).waitFor();
+
+  const explanationAction = changes.getByRole('button', { name: '설명만 확인', exact: true });
+
+  await explanationAction.scrollIntoViewIfNeeded();
+
+  const explanationLayout = await workspace.evaluate(element => {
+    const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '설명만 확인');
+    const bounds = action?.getBoundingClientRect();
+
+    return {
+      overflow: document.documentElement.scrollWidth > window.innerWidth,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= 0 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= 0 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(explanationLayout.overflow, false, `The explanation view must not overflow horizontally at ${tag}/1440`);
+
+  assert.equal(explanationLayout.actionReachable, true, `The explanation-only confirmation action must remain reachable at ${tag}/1440`);
+
+  const explanationScreenshot = path.join(output, `ai-session-change-explanation-${tag}-1440.png`);
+
+  await capturePage(page, explanationScreenshot);
+  screenshots.push(explanationScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-change-human-confirmed-hunk-explanation', width: 1440, height: 900, screenshot: explanationScreenshot, layout: explanationLayout });
+
+  await page.setViewportSize({ width: 760, height: 820 });
+
+  await page.waitForFunction(() => window.innerWidth === 760);
+
+  await explanationAction.scrollIntoViewIfNeeded();
+
+  const narrowExplanationLayout = await workspace.evaluate(element => {
+    const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '설명만 확인');
+    const bounds = action?.getBoundingClientRect();
+
+    return {
+      overflow: document.documentElement.scrollWidth > window.innerWidth,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= 0 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= 0 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(narrowExplanationLayout.overflow, false, `The narrow explanation view must not overflow at ${tag}/760`);
+
+  assert.equal(narrowExplanationLayout.actionReachable, true, `The explanation-only confirmation action must remain reachable at ${tag}/760`);
+
+  assert.ok((await changes.innerText()).includes('사람 작성 · 설명만 확인됨 · 실행 결과 미검증 · revision 53'), 'The narrow view must retain the confirmed explanation and unverified status');
+
+  const narrowExplanationScreenshot = path.join(output, `ai-session-change-explanation-${tag}-760.png`);
+
+  await capturePage(page, narrowExplanationScreenshot);
+  screenshots.push(narrowExplanationScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-change-human-confirmed-hunk-explanation-narrow', width: 760, height: 820, screenshot: narrowExplanationScreenshot, layout: narrowExplanationLayout });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await page.waitForFunction(() => window.innerWidth === 1440);
 
   const desktopScreenshot = path.join(output, `ai-session-changes-${tag}-1440.png`);
   await capturePage(page, desktopScreenshot);

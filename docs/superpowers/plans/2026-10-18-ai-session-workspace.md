@@ -138,6 +138,25 @@ Task 7a evidence: run `39165400760`, commit `abcf76bd34d30294f36792ba530b20a18c2
 
 Task 7b does not supply the missing explanations/check receipts, trusted local merge approval/conflict flow or PR publication approval from Task 7.
 
+#### Task 7c: Exact change explanations and human text review
+
+- [ ] Compute bounded whitespace-sensitive file hunks from retained content using the Code OSS diff engine. Bind IDs to exact project/session/turn, evidence version/fingerprint, raw before/after hashes and ranges; expose no hunk IDs on computation timeout.
+- [ ] Append immutable explanation revisions in schema v28 with exact target, author turn and knowledge snapshot. Validate selected reference/convention version and hash; preserve frozen-v26 and frozen-v27 rows and retained contents through migration.
+- [ ] Connect actual scoped MCP tools for changed-file content/hunks and explanation/history reads, plus agent-only draft writes. Revalidate the live launch capability, derive author/project/session, reject unrelated files and forged human/verified fields. Redact raw response string leaves before JSON escaping; response hashes still describe original retained bytes.
+- [ ] Add flat Korean file/hunk explanation editing, pinned citations, revision pagination and human draft/confirmation through project-window IPC. Keep user text on stale-write errors. Confirmation approves only explanation text; reported checks remain unverified.
+- [ ] Verify SQLite authority/immutability/CAS and actual SDK contracts in GitHub CI, then native light/dark desktop/narrow flows and screenshots for retained diff, citation selection, draft/confirmation/history and unchanged task/workflow state.
+
+Task 7c does not execute trusted build/test checks, approve a merge, complete a task, or publish a PR. Task 7 remains open until the remaining integration/publication flow and actual evidence pass their gates.
+
+#### Task 7d: Reviewed session commits and local integration
+
+- [ ] Prepare an exact-path commit proposal inside the app-owned session worktree. Bind its selected paths, current HEAD, retained evidence fingerprint and explanation revisions; recheck the actual bytes before applying the human-approved proposal.
+- [ ] Persist a separate trusted UI approval and outcome for the reviewed proposal. Show actual check receipts separately from unverified reported checks, and preserve partial failures for recovery.
+- [ ] Commit only the reviewed paths, then prepare the existing `ManagedWorktreeService.previewMerge` snapshot against an app-owned integration worktree. Revalidate both exact HEADs and the diff fingerprint after native human confirmation, before `mergeReviewed`.
+- [ ] Display preserved conflicts and repair/review state. Do not abort/reset or discard unique commits automatically; changed content requires a new proposal and approval. Leave the user's original checkout and branch unchanged.
+- [ ] Prepare a separate PR proposal containing remote, base, branch, title/body, exact diff and local integration outcome. Publication has a distinct fresh human approval; actual GitHub proof uses an explicitly authorized disposable repository/identity.
+- [ ] Exercise actual disposable Git fixtures serially in GitHub CI, then prove native review/confirmation/conflict/recovery flows with screenshots. No local Git fixture execution or provider calls.
+
 ### Task 8: First-use onboarding and full acceptance audit
 
 **Files:** Onboarding page/features and settings reentry, CLI capability discovery service, acceptance documents and packaged CI journeys.

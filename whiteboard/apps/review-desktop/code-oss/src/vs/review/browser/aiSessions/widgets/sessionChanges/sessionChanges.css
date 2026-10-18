@@ -17,4 +17,18 @@
 .ai-session-changes__file-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .ai-session-changes__file-info code { overflow-wrap: anywhere; color: var(--vscode-foreground); }
 .ai-session-changes__file-info span { color: var(--vscode-descriptionForeground); }
+.ai-session-changes__file-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-session-changes__detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__detail h3, .ai-session-changes__detail h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
+.ai-session-changes__field { display: flex; flex-direction: column; gap: 5px; color: var(--vscode-foreground); }
+.ai-session-changes__field select, .ai-session-changes__field textarea { width: 100%; min-width: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
+.ai-session-changes__field select { min-height: 32px; padding: 4px 8px; }
+.ai-session-changes__field textarea { min-height: 72px; padding: 7px 8px; resize: vertical; }
+.ai-session-changes__field select:focus-visible, .ai-session-changes__field textarea:focus-visible, .ai-session-changes__citation input:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-changes__field-title { margin: 0; color: var(--vscode-foreground); }
+.ai-session-changes__citation { display: flex; align-items: flex-start; gap: 8px; padding-block: 5px; border-bottom: 1px solid var(--vscode-panel-border); color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
+.ai-session-changes__citation input { margin-top: 3px; accent-color: var(--vscode-focusBorder); }
+.ai-session-changes__revision { padding-block: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__revision p { margin: 0 0 4px; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
+.ai-session-changes__revision p:first-child { color: var(--vscode-foreground); }
 @media (max-width: 600px) { .ai-session-changes__file { align-items: flex-start; flex-direction: column; } }

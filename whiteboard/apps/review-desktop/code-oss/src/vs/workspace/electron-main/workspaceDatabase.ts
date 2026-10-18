@@ -18,6 +18,7 @@ import { AgentSessionTranscriptStore } from './agentSessions/agentSessionTranscr
 import { AgentWorkflowStore } from './agentSessions/agentWorkflowStore.js';
 import { AgentSessionChangeEvidenceStore } from './agentSessions/agentSessionChangeEvidenceStore.js';
 import { AgentSessionContentStore } from './agentSessions/agentSessionContentStore.js';
+import { AgentSessionReviewStore } from './agentSessions/agentSessionReviewStore.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -305,7 +306,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 27;
+const schemaVersion = 28;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -321,6 +322,7 @@ export class WorkspaceDatabase {
 	readonly agentWorkflows: AgentWorkflowStore;
 	readonly agentSessionChangeEvidence: AgentSessionChangeEvidenceStore;
 	readonly agentSessionContents: AgentSessionContentStore;
+	readonly agentSessionReviews: AgentSessionReviewStore;
 
 	private constructor(private readonly db: DatabaseSync) {
 		this.knowledge = new WorkspaceKnowledgeStore(db, () => this.assertOpen());
@@ -332,6 +334,10 @@ export class WorkspaceDatabase {
 		this.agentSessionContents = new AgentSessionContentStore(db, () => this.assertOpen(),
 			(projectId, sessionId, turnId) => this.agentSessionTurns.getTurn(projectId, sessionId, turnId),
 			input => this.agentSessionChangeEvidence.recordSnapshot(input));
+		this.agentSessionReviews = new AgentSessionReviewStore(db, () => this.assertOpen(),
+			(projectId, sessionId, turnId) => this.agentSessionTurns.getTurn(projectId, sessionId, turnId),
+			(projectId, sessionId, turnId, evidenceVersion) => this.agentSessionChangeEvidence.listVersions(projectId, sessionId, turnId, { afterVersion: evidenceVersion - 1, limit: 1 }).snapshots.find(snapshot => snapshot.version === evidenceVersion),
+			input => this.agentSessionContents.getFile(input));
 	}
 
 	static open(path: string): WorkspaceDatabase {
@@ -385,6 +391,7 @@ export class WorkspaceDatabase {
 				if (version < 25) { WorkspaceDatabase.migrateV25(db); }
 				if (version < 26) { WorkspaceDatabase.migrateV26(db); }
 				if (version < 27) { WorkspaceDatabase.migrateV27(db); }
+				if (version < 28) { WorkspaceDatabase.migrateV28(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -1222,6 +1229,34 @@ export class WorkspaceDatabase {
 			CREATE TRIGGER agent_session_content_final_immutable_delete BEFORE DELETE ON agent_session_content_finals
 			BEGIN SELECT RAISE(ABORT, 'agent session content final versions are immutable'); END;
 			PRAGMA user_version = 27;
+		`);
+	}
+
+	private static migrateV28(db: DatabaseSync): void {
+		db.exec(`
+			CREATE TABLE agent_session_explanations (
+				id TEXT NOT NULL UNIQUE CHECK (length(id) = 36),
+				project_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				turn_id TEXT NOT NULL,
+				evidence_version INTEGER NOT NULL CHECK (evidence_version > 0),
+				evidence_fingerprint TEXT NOT NULL CHECK (length(evidence_fingerprint) = 64 AND evidence_fingerprint NOT GLOB '*[^0-9a-f]*'),
+				target_path TEXT NOT NULL CHECK (length(CAST(target_path AS BLOB)) BETWEEN 1 AND 4096 AND instr(target_path, char(0)) = 0),
+				hunk_id TEXT NOT NULL CHECK (hunk_id = '' OR (length(hunk_id) = 64 AND hunk_id NOT GLOB '*[^0-9a-f]*')),
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				turn_snapshot_sha256 TEXT NOT NULL CHECK (length(turn_snapshot_sha256) = 64 AND turn_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'),
+				payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND length(CAST(payload_json AS BLOB)) <= 30720),
+				created_at TEXT NOT NULL,
+				PRIMARY KEY (turn_id, evidence_version, target_path, hunk_id, revision),
+				FOREIGN KEY (turn_id, project_id, session_id) REFERENCES agent_session_turns(id, project_id, session_id) ON DELETE RESTRICT,
+				FOREIGN KEY (turn_id, evidence_version) REFERENCES agent_session_change_evidence(turn_id, version) ON DELETE RESTRICT
+			) STRICT;
+			CREATE INDEX agent_session_explanations_latest ON agent_session_explanations(project_id, session_id, turn_id, evidence_version, target_path, hunk_id, revision DESC);
+			CREATE TRIGGER agent_session_explanations_immutable_update BEFORE UPDATE ON agent_session_explanations
+			BEGIN SELECT RAISE(ABORT, 'agent session explanations are immutable'); END;
+			CREATE TRIGGER agent_session_explanations_immutable_delete BEFORE DELETE ON agent_session_explanations
+			BEGIN SELECT RAISE(ABORT, 'agent session explanations are immutable'); END;
+			PRAGMA user_version = 28;
 		`);
 	}
 

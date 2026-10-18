@@ -63,7 +63,7 @@ export class AgentSessionApplication {
 			},
 			getHostError: (projectId, workflowId, runId) => workflowScheduler?.getHostError(projectId, workflowId, runId) ?? null,
 		});
-		this.mcpBridge = new AgentSessionMcpBridge(this.collaboration);
+		this.mcpBridge = new AgentSessionMcpBridge(this.collaboration, undefined, database);
 		this.providerIdentityReceiver = new AgentProviderIdentityReceiver(database);
 		this.workspaceResolver = new AgentSessionWorkspaceResolver(database, this.worktrees, writerLock, () => this.recoveryReady);
 		this.service = new AgentSessionService(database, this.workspaceResolver, new AgentSessionPtyRuntimeFactory({
