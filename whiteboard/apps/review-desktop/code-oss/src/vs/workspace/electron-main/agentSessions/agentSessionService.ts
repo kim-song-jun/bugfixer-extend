@@ -20,6 +20,7 @@ import type {
 	AgentPtyStopResult,
 } from './agentPtyHost.js';
 import { AcquiredAgentSessionWorkspace, AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
+import { AgentSessionContentCaptureCleanupError } from './agentSessionContentCapture.js';
 
 const LAUNCH_TICKET_TTL_MS = 30_000;
 const MAX_LAUNCH_TICKETS = 128;
@@ -27,6 +28,7 @@ const MAX_PENDING_STARTS = 8;
 const MAX_ATTACHMENTS_PER_TURN = 8;
 const PROVIDER_IDENTITY_MISMATCH_ERROR = '프로바이더 대화 식별자가 현재 세션과 일치하지 않습니다.';
 const PROVIDER_IDENTITY_AND_TRANSCRIPT_ERROR = '프로바이더 대화 식별자가 현재 세션과 일치하지 않으며 실행 기록을 저장하지 못했습니다.';
+const CHANGE_EVIDENCE_ERROR = '실행 전후 파일 변경 증거를 저장하지 못했습니다.';
 
 declare const agentSessionRuntimeHandleBrand: unique symbol;
 
@@ -52,6 +54,14 @@ export interface AgentSessionRuntimeFactory {
 	attach(handle: AgentSessionRuntimeHandle, listener: (chunk: AgentPtyOutputChunk) => void, afterSequence: number): Promise<AgentPtyAttachment>;
 	stop(handle: AgentSessionRuntimeHandle): Promise<AgentPtyStopResult>;
 	release(handle: AgentSessionRuntimeHandle): Promise<void>;
+}
+
+/** Host-only lifecycle port for durable, exact-turn workspace change observations. */
+export interface AgentSessionChangeObserver {
+	/** Must finish persisting the before observation before the PTY runtime may start. */
+	beforeStart(turn: AgentSessionTurnDTO, signal: AbortSignal): Promise<void>;
+	/** Called after runtime cleanup was attempted and before the acquired workspace is released. */
+	afterCleanup(turn: AgentSessionTurnDTO, context: { readonly cleanupVerified: boolean; readonly spawnAttempted: boolean }): Promise<void>;
 }
 
 export interface AgentSessionAttachResult {
@@ -103,6 +113,12 @@ interface LiveTurn {
 	launchFailureExitSignal?: string | null;
 	transcriptPersistenceFailed: boolean;
 	providerIdentityMismatch: boolean;
+	changeEvidenceFailure: boolean;
+	beforeEvidenceFailure: boolean;
+	changeEvidenceFinalized: boolean;
+	captureCleanupRecovery?: AgentSessionContentCaptureCleanupError['recovery'];
+	ptyCleanupVerified: boolean;
+	workspaceReleased: boolean;
 	lifecycleFailure?: unknown;
 }
 
@@ -133,6 +149,7 @@ export class AgentSessionService {
 		private readonly database: WorkspaceDatabase,
 		private readonly workspaceResolver: AgentSessionWorkspaceResolver,
 		private readonly runtimeFactory: AgentSessionRuntimeFactory,
+		private readonly changeObserver?: AgentSessionChangeObserver,
 	) { }
 
 	async preview(input: { readonly projectId: string; readonly sessionId: string; readonly permissionPolicy: AgentSessionPermissionPolicy }): Promise<AgentSessionLaunchPreview> {
@@ -253,6 +270,11 @@ export class AgentSessionService {
 				launchFailureCleanupVerified: true,
 				transcriptPersistenceFailed: false,
 				providerIdentityMismatch: false,
+				changeEvidenceFailure: false,
+				beforeEvidenceFailure: false,
+				changeEvidenceFinalized: false,
+				ptyCleanupVerified: true,
+				workspaceReleased: false,
 			};
 			this.turns.set(turn.id, live);
 			this.pendingStartReservations--;
@@ -301,7 +323,8 @@ export class AgentSessionService {
 		const operation = this.trackStopOperation(live, this.stopOwnedTurn(live));
 		try {
 			const turn = await operation;
-			live.lifecycleFailure = undefined;
+			if (live.changeEvidenceFailure) { live.lifecycleFailure ??= new Error(CHANGE_EVIDENCE_ERROR); }
+			else { live.lifecycleFailure = undefined; }
 			return turn;
 		} catch (error) {
 			throw error;
@@ -411,6 +434,26 @@ export class AgentSessionService {
 		try {
 			await this.workspaceResolver.revalidate(live.workspace, live.turn.id);
 			if (live.abortController.signal.aborted || this.shuttingDown) { return; }
+			if (this.changeObserver) {
+				try {
+					await this.changeObserver.beforeStart(live.turn, live.abortController.signal);
+				} catch (error) {
+					if (error instanceof AgentSessionContentCaptureCleanupError) {
+						live.changeEvidenceFailure = true;
+						live.beforeEvidenceFailure = true;
+						live.captureCleanupRecovery = error.recovery;
+						live.lifecycleFailure = error.stopReason;
+					} else if (live.abortController.signal.aborted) { return; }
+					else {
+						live.changeEvidenceFailure = true;
+						live.beforeEvidenceFailure = true;
+						live.lifecycleFailure = error;
+					}
+					throw error;
+				}
+				if (live.abortController.signal.aborted || live.stopRequested || this.shuttingDown) { return; }
+			}
+			live.ptyCleanupVerified = false;
 			live.spawnAttempted = true;
 			live.runtime = await this.runtimeFactory.start(live.turn.snapshot, live.turn.id, live.abortController.signal);
 			live.exitSubscription = this.runtimeFactory.watchExit(live.runtime, snapshot => {
@@ -432,6 +475,7 @@ export class AgentSessionService {
 			if (error instanceof AgentSessionRuntimeStartError && error.recoveryHandle) { live.runtime = error.recoveryHandle; }
 			live.launchFailureCleanupVerified = !live.spawnAttempted
 				|| (!live.runtime && error instanceof AgentSessionRuntimeStartError && error.cleanupVerified);
+			live.ptyCleanupVerified = live.launchFailureCleanupVerified;
 			if (error instanceof AgentSessionRuntimeStartError) {
 				live.launchFailureExitCode = error.exitCode;
 				live.launchFailureExitSignal = error.exitSignal;
@@ -444,39 +488,50 @@ export class AgentSessionService {
 
 	private async finishFailedLaunch(live: LiveTurn): Promise<void> {
 		if (live.stopRequested) { return; }
-		let cleanupVerified = live.launchFailureCleanupVerified;
-		if (live.runtime) { cleanupVerified = await this.stopAndReleaseRuntime(live); }
+		let ptyCleanupVerified = live.launchFailureCleanupVerified;
+		if (live.runtime) { ptyCleanupVerified = await this.stopAndReleaseRuntime(live); }
+		let evidenceRecorded = false;
+		if (!live.captureCleanupRecovery) {
+			evidenceRecorded = await this.observeAfterCleanup(live, ptyCleanupVerified);
+		}
+		const cleanupVerified = ptyCleanupVerified && !live.captureCleanupRecovery;
 		const turn = this.requireTurn(live).turn;
 		if (!isTerminal(turn.state)) {
 			live.turn = this.transition(live, {
 				state: 'failed',
 				exitCode: live.launchFailureExitCode,
 				exitSignal: live.launchFailureExitSignal,
-				errorSummary: live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : 'The provider could not be started by the trusted session runtime.',
+				errorSummary: this.launchFailureSummary(live),
 				cleanupVerified,
 			}).turn;
 		}
 		if (cleanupVerified) { this.releaseWorkspace(live); }
+		if (!evidenceRecorded && cleanupVerified) { live.lifecycleFailure ??= new Error(CHANGE_EVIDENCE_ERROR); }
 	}
 
 	private async finishNaturalExit(live: LiveTurn, snapshot: AgentPtySnapshot): Promise<AgentSessionTurnDTO> {
 		if (live.stopRequested || isTerminal(this.requireTurn(live).turn.state)) { return this.requireTurn(live).turn; }
 		live.stopRequested = true;
-		const cleanupVerified = await this.stopAndReleaseRuntime(live);
+		const ptyCleanupVerified = await this.stopAndReleaseRuntime(live);
 		live.transcriptPersistenceFailed ||= snapshot.transcriptPersistenceFailed === true;
+		let evidenceRecorded = false;
+		if (!live.captureCleanupRecovery) {
+			evidenceRecorded = await this.observeAfterCleanup(live, ptyCleanupVerified);
+		}
+		const cleanupVerified = ptyCleanupVerified && !live.captureCleanupRecovery;
 		const current = this.requireTurn(live).turn;
 		if (!isTerminal(current.state)) {
-			live.turn = this.transition(live, live.providerIdentityMismatch ? {
+			live.turn = this.transition(live, !cleanupVerified ? {
 				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
-				errorSummary: this.providerIdentityMismatchSummary(live), cleanupVerified,
-			} : cleanupVerified && !live.transcriptPersistenceFailed ? {
+				errorSummary: this.cleanupFailureSummary(live, ptyCleanupVerified ? 'Provider exit was observed, but owned file-capture helper cleanup could not be verified.' : 'Provider exit was observed, but owned PTY cleanup could not be verified.'), cleanupVerified: false,
+			} : live.providerIdentityMismatch ? {
+				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
+				errorSummary: this.combinedFailureSummary(live, this.providerIdentityMismatchSummary(live)), cleanupVerified,
+			} : cleanupVerified && !live.transcriptPersistenceFailed && evidenceRecorded ? {
 				state: 'exited', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null, cleanupVerified: true,
-			} : cleanupVerified ? {
-				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
-				errorSummary: 'The durable session transcript could not be written; terminal output was withheld.', cleanupVerified: true,
 			} : {
 				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
-				errorSummary: 'Provider exit was observed, but owned PTY cleanup could not be verified.', cleanupVerified: false,
+				errorSummary: this.terminalEvidenceSummary(live), cleanupVerified: true,
 			}).turn;
 		}
 		if (cleanupVerified) { this.releaseWorkspace(live); }
@@ -491,28 +546,104 @@ export class AgentSessionService {
 		await live.startPromise;
 		current = this.requireTurn(live).turn;
 		if (isTerminal(current.state)) {
-			if (!current.cleanupVerified && live.runtime && await this.stopAndReleaseRuntime(live)) {
-				live.turn = this.database.agentSessionTurns.confirmTurnCleanup(live.projectId, live.sessionId, live.turnId, current.revision);
-				this.releaseWorkspace(live);
+			if (!current.cleanupVerified && live.runtime) { await this.stopAndReleaseRuntime(live); }
+			if (live.captureCleanupRecovery) { await this.retryCaptureCleanup(live); }
+			let evidenceRecorded = false;
+			if (!live.captureCleanupRecovery) {
+				evidenceRecorded = await this.observeAfterCleanup(live, live.ptyCleanupVerified);
 			}
+			const cleanupVerified = live.ptyCleanupVerified && !live.captureCleanupRecovery;
+			if (!current.cleanupVerified && cleanupVerified) {
+				live.turn = this.database.agentSessionTurns.confirmTurnCleanup(live.projectId, live.sessionId, live.turnId, current.revision);
+			}
+			if (cleanupVerified) { this.releaseWorkspace(live); }
+			if (!evidenceRecorded && !live.captureCleanupRecovery) { live.lifecycleFailure ??= new Error(CHANGE_EVIDENCE_ERROR); }
 			return live.turn;
 		}
-		let cleanupVerified = true;
-		if (live.runtime) { cleanupVerified = await this.stopAndReleaseRuntime(live); }
-		else if (live.launchFailed) { cleanupVerified = live.launchFailureCleanupVerified; }
+		let ptyCleanupVerified = live.ptyCleanupVerified;
+		if (live.runtime) { ptyCleanupVerified = await this.stopAndReleaseRuntime(live); }
+		else if (live.launchFailed) { ptyCleanupVerified = live.launchFailureCleanupVerified; }
+		if (live.captureCleanupRecovery) { await this.retryCaptureCleanup(live); }
+		let evidenceRecorded = false;
+		if (!live.captureCleanupRecovery) {
+			evidenceRecorded = await this.observeAfterCleanup(live, ptyCleanupVerified);
+		}
+		const cleanupVerified = ptyCleanupVerified && !live.captureCleanupRecovery;
 		if (cleanupVerified) {
-			live.turn = this.transition(live, live.providerIdentityMismatch ? {
-				state: 'failed', errorSummary: this.providerIdentityMismatchSummary(live), cleanupVerified: true,
-			} : live.transcriptPersistenceFailed ? {
-				state: 'failed', errorSummary: 'The durable session transcript could not be written; terminal output was withheld.', cleanupVerified: true,
+			live.turn = this.transition(live, live.providerIdentityMismatch || live.transcriptPersistenceFailed || live.changeEvidenceFailure || !evidenceRecorded ? {
+				state: 'failed', errorSummary: this.terminalEvidenceSummary(live), cleanupVerified: true,
 			} : { state: 'exited', cleanupVerified: true }).turn;
 			this.releaseWorkspace(live);
 		} else {
 			live.turn = this.transition(live, {
-				state: 'failed', errorSummary: live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : 'Session launch or stop could not verify cleanup of owned resources.', cleanupVerified: false,
+				state: 'failed', errorSummary: this.cleanupFailureSummary(live, 'Session launch or stop could not verify cleanup of owned resources.'), cleanupVerified: false,
 			}).turn;
 		}
 		return live.turn;
+	}
+
+	private async observeAfterCleanup(live: LiveTurn, cleanupVerified: boolean): Promise<boolean> {
+		if (!this.changeObserver) { live.changeEvidenceFinalized = true; return !live.changeEvidenceFailure; }
+		if (cleanupVerified && live.changeEvidenceFinalized) { return !live.changeEvidenceFailure; }
+		try {
+			const turn = this.requireTurn(live).turn;
+			await this.changeObserver.afterCleanup(turn, { cleanupVerified, spawnAttempted: live.spawnAttempted });
+			live.changeEvidenceFailure = live.beforeEvidenceFailure;
+			if (cleanupVerified) { live.changeEvidenceFinalized = true; }
+			return true;
+		} catch (error) {
+			live.changeEvidenceFailure = true;
+			if (error instanceof AgentSessionContentCaptureCleanupError) {
+				live.captureCleanupRecovery = error.recovery;
+				live.lifecycleFailure = error.stopReason;
+			} else { live.lifecycleFailure = error; }
+			return false;
+		}
+	}
+
+	private async retryCaptureCleanup(live: LiveTurn): Promise<boolean> {
+		const recovery = live.captureCleanupRecovery;
+		if (!recovery) { return true; }
+		try {
+			if (!await recovery.retryCleanup()) { return false; }
+			live.captureCleanupRecovery = undefined;
+			return true;
+		} catch (error) {
+			live.lifecycleFailure = error;
+			return false;
+		}
+	}
+
+	private launchFailureSummary(live: LiveTurn): string {
+		const summaries = [
+			live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : undefined,
+			live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : undefined,
+			live.changeEvidenceFailure ? CHANGE_EVIDENCE_ERROR : undefined,
+			!live.providerIdentityMismatch && !live.transcriptPersistenceFailed && !live.changeEvidenceFailure ? 'The provider could not be started by the trusted session runtime.' : undefined,
+		].filter((value): value is string => value !== undefined);
+		return summaries.join(' ');
+	}
+
+	private terminalEvidenceSummary(live: LiveTurn): string {
+		const summaries = [
+			live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : undefined,
+			live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : undefined,
+			live.changeEvidenceFailure ? CHANGE_EVIDENCE_ERROR : undefined,
+		].filter((value): value is string => value !== undefined);
+		return summaries.join(' ');
+	}
+
+	private combinedFailureSummary(live: LiveTurn, primary: string): string {
+		return live.changeEvidenceFailure ? `${primary} ${CHANGE_EVIDENCE_ERROR}` : primary;
+	}
+
+	private cleanupFailureSummary(live: LiveTurn, primary: string): string {
+		return [
+			primary,
+			live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : undefined,
+			live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : undefined,
+			live.changeEvidenceFailure ? CHANGE_EVIDENCE_ERROR : undefined,
+		].filter((value): value is string => value !== undefined).join(' ');
 	}
 
 	private providerIdentityMismatchSummary(live: LiveTurn): string {
@@ -520,11 +651,11 @@ export class AgentSessionService {
 	}
 
 	private async stopAndReleaseRuntime(live: LiveTurn): Promise<boolean> {
-		if (!live.runtime) { return true; }
+		if (!live.runtime) { return live.ptyCleanupVerified; }
 		let stopResult: AgentPtyStopResult;
 		try { stopResult = await this.runtimeFactory.stop(live.runtime); }
-		catch (error) { live.lifecycleFailure = error; return false; }
-		if (!stopResult.cleanupVerified) { return false; }
+		catch (error) { live.lifecycleFailure = error; live.ptyCleanupVerified = false; return false; }
+		if (!stopResult.cleanupVerified) { live.ptyCleanupVerified = false; return false; }
 		live.transcriptPersistenceFailed ||= this.runtimeFactory.getSnapshot(live.runtime).transcriptPersistenceFailed === true;
 		// Runtime stop flushes its final output before active attachments are disposed.
 		await Promise.all([...live.pendingAttachments]);
@@ -538,8 +669,9 @@ export class AgentSessionService {
 			live.exitSubscription = undefined;
 			await this.runtimeFactory.release(live.runtime);
 			live.runtime = undefined;
+			live.ptyCleanupVerified = true;
 			return true;
-		} catch (error) { live.lifecycleFailure = error; return false; }
+		} catch (error) { live.lifecycleFailure = error; live.ptyCleanupVerified = false; return false; }
 	}
 
 	private transition(live: LiveTurn, update: Parameters<WorkspaceDatabase['agentSessionTurns']['transitionTurn']>[5]): ReturnType<WorkspaceDatabase['agentSessionTurns']['transitionTurn']> {
@@ -575,6 +707,8 @@ export class AgentSessionService {
 	}
 
 	private releaseWorkspace(live: LiveTurn): void {
+		if (live.workspaceReleased) { return; }
+		live.workspaceReleased = true;
 		live.exitSubscription?.dispose();
 		live.exitSubscription = undefined;
 		this.workspaceResolver.release(live.workspace);
@@ -583,7 +717,7 @@ export class AgentSessionService {
 	private trackStopOperation(live: LiveTurn, operation: Promise<AgentSessionTurnDTO>): Promise<AgentSessionTurnDTO> {
 		let tracked!: Promise<AgentSessionTurnDTO>;
 		tracked = operation.then(turn => {
-			if (live.stopPromise === tracked && isTerminal(turn.state) && !turn.cleanupVerified) { live.stopPromise = undefined; }
+			if (live.stopPromise === tracked && isTerminal(turn.state) && (!turn.cleanupVerified || !live.changeEvidenceFinalized)) { live.stopPromise = undefined; }
 			return turn;
 		}, error => {
 			if (live.stopPromise === tracked) { live.stopPromise = undefined; }

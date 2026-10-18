@@ -55,6 +55,9 @@
 .ai-session__tab[aria-selected="true"] { color: var(--ai-foreground); font-weight: 650; }
 .ai-session__tab[aria-selected="true"]::after { position: absolute; right: 8px; bottom: -1px; left: 8px; height: 2px; background: var(--vscode-focusBorder); content: ''; }
 .ai-session__panel { min-height: 400px; padding-top: 12px; }
+.ai-session-changes__turn-label { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; color: var(--vscode-descriptionForeground); }
+.ai-session-changes__turn-label select { min-height: 32px; max-width: 100%; padding: 5px 8px; color: var(--vscode-foreground); background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border); font: inherit; }
+.ai-session-changes__turn-label select:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .ai-session__terminal { width: 100%; height: min(70vh, 720px); min-height: 300px; overflow: hidden; }
 .ai-session__state, .ai-session__muted, .ai-session__field-help { color: var(--ai-muted); }
 .ai-session__state { max-width: 72ch; margin: 18px 0; padding: 13px 0; border-top: 1px solid var(--ai-line); border-bottom: 1px solid var(--ai-line); }

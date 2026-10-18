@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -187,6 +187,53 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 			projectId: project.project.id, sessionId: recipient.id, expectedSessionRevision: recipient.revision,
 			snapshot: { ...snapshot, sessionId: recipient.id, sessionRevision: recipient.revision, provider: recipient.provider, model: recipient.model, profileRef: recipient.profileRef, managedWorktreeOwnerId: null },
 		});
+		const contentScope = { projectId: project.project.id, sessionId: recipient.id, turnId: recipientTurn.id };
+		const fileHash = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+		const contentSnapshot = (content: string, capturedAt: string) => ({
+			schemaVersion: 1 as const,
+			folderIdentity: snapshot.folderIdentity,
+			capturedAt,
+			inventoryCoverage: 'complete' as const,
+			contentCoverage: 'complete' as const,
+			entryCount: 1,
+			fileBytes: Buffer.byteLength(content, 'utf8'),
+			retainedTextBytes: Buffer.byteLength(content, 'utf8'),
+			contentReadCount: 1,
+			entries: [{ path: 'src/review.ts', kind: 'file' as const, size: Buffer.byteLength(content, 'utf8'), sha256: fileHash(content), content }],
+		});
+		const beforeCapture = contentSnapshot('const answer = 1;\n', new Date().toISOString());
+		database.agentSessionContents.recordBaseline({ scope: contentScope, snapshot: beforeCapture, revision: null });
+		const afterCapture = contentSnapshot('const answer = 2;\n', new Date(Date.now() + 1).toISOString());
+		database.agentSessionContents.recordAfter({ scope: contentScope, snapshot: afterCapture, expectedLatestVersion: 0, revision: null, cleanupVerified: true });
+		const nextCapture = contentSnapshot('const answer = 3;\n', new Date(Date.now() + 2).toISOString());
+		database.agentSessionContents.recordAfter({ scope: contentScope, snapshot: nextCapture, expectedLatestVersion: 1, revision: null, cleanupVerified: true });
+		const newestCapture = contentSnapshot('const answer = 4;\n', new Date(Date.now() + 3).toISOString());
+		database.agentSessionContents.recordAfter({ scope: contentScope, snapshot: newestCapture, expectedLatestVersion: 2, revision: null, cleanupVerified: true });
+		const latestChanges = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentChangeEvidenceDTO>(sender, 'getLatestChangeEvidence', contentScope);
+		assert.equal(latestChanges.turnId, recipientTurn.id);
+		const changePage = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentChangeEvidencePageDTO>(sender, 'listChangeEvidence', { ...contentScope, limit: 1 });
+		assert.equal(changePage.snapshots.length, 1);
+		const recentHistory = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentChangeEvidencePageDTO>(sender, 'listChangeEvidence', { ...contentScope, beforeVersion: latestChanges.version, limit: 1 });
+		assert.deepEqual(recentHistory.snapshots.map(item => item.version), [2]);
+		assert.equal(recentHistory.hasMore, true);
+		const olderHistory = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentChangeEvidencePageDTO>(sender, 'listChangeEvidence', { ...contentScope, beforeVersion: recentHistory.nextVersion, limit: 1 });
+		assert.deepEqual(olderHistory.snapshots.map(item => item.version), [1]);
+		assert.equal(olderHistory.hasMore, false);
+		const retainedFile = await channel.call<import('../common/workspaceAgentChangesProtocol.js').WorkspaceAgentChangeFileDTO>(sender, 'getChangeFile', {
+			...contentScope, evidenceVersion: latestChanges.version, fingerprint: latestChanges.fingerprint, path: 'src/review.ts',
+		});
+		assert.equal(retainedFile.before.state, 'text');
+		assert.equal(retainedFile.after.state, 'text');
+		if (retainedFile.before.state === 'text' && retainedFile.after.state === 'text') {
+			assert.equal(retainedFile.before.file.content, 'const answer = 1;\n');
+			assert.equal(retainedFile.after.file.content, 'const answer = 4;\n');
+		}
+		await assert.rejects(channel.call(sender, 'getLatestChangeEvidence', { ...contentScope, extra: true }), /only their documented scope/u);
+		await assert.rejects(channel.call(forgedSender, 'getLatestChangeEvidence', contentScope), /open project window/u);
+		await assert.rejects(channel.call(sender, 'getLatestChangeEvidence', { ...contentScope, projectId: otherProject.project.id }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'getLatestChangeEvidence', { ...contentScope, sessionId: otherSession.id }), /turn does not belong/u);
+		await assert.rejects(channel.call(sender, 'getChangeFile', { ...contentScope, evidenceVersion: latestChanges.version, fingerprint: latestChanges.fingerprint, path: '../secret' }), /safe root-relative/u);
+		await assert.rejects(channel.call(sender, 'getChangeFile', { ...contentScope, evidenceVersion: latestChanges.version, fingerprint: '0'.repeat(64), path: 'src/review.ts' }), /changed/u);
 		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, turnId: recipientTurn.id }), /does not belong/u);
 		database.agentSessions.sendMessage(project.project.id, session.id, { recipientSessionId: recipient.id, idempotencyKey: 'channel-alert', body: 'Review ready.' });
 		const mailboxRequest = { projectId: project.project.id, sessionId: recipient.id };

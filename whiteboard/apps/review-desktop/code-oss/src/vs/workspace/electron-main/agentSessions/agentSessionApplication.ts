@@ -6,7 +6,7 @@
 import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import type { AgentSessionProvider, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionProvider, AgentSessionTurnDTO, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../common/workspaceAgentSessionProtocol.js';
 import { AGENT_CLI_COMMAND_SPEC_VERSION, discoverAgentCliCapabilities, type AgentCliCapabilities } from './agentCliCapabilities.js';
 import { AgentSessionCollaborationService } from './agentSessionCollaborationService.js';
 import { createAgentSessionCommand } from './agentSessionCommands.js';
@@ -17,6 +17,7 @@ import { AgentSessionPreparationError } from './agentSessionPreparationError.js'
 import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
+import { AgentSessionContentCaptureCleanupError, captureAgentSessionContentSnapshot, type AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
 import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './managedWorktrees.js';
@@ -44,6 +45,8 @@ export class AgentSessionApplication {
 	private recoveryReady = false;
 	private readonly worktrees: ManagedWorktreeService;
 	private readonly workspacePreparationLocks = new OwnerOperationCoordinator();
+	/** Reserve at most eight capture slots; a failed DB write retains the exact captured bytes for retry. */
+	private readonly pendingFinalContents = new Map<string, { captured?: { readonly snapshot: AgentSessionContentSnapshot; readonly revision: string | null; readonly expectedLatestVersion: number } }>();
 
 	constructor(
 		private readonly database: WorkspaceDatabase,
@@ -68,8 +71,17 @@ export class AgentSessionApplication {
 			guardianScriptPath: this.runtimePaths().guardian,
 			prepareLaunch: (snapshot, turnId, signal) => this.prepareLaunch(snapshot, turnId, signal),
 			createJournal: (snapshot, turnId, knownSecrets) => new AgentSessionJournal(database.agentSessionTranscripts, snapshot, turnId, knownSecrets),
-		}));
+		}), {
+			beforeStart: async (turn, signal) => {
+				if (this.pendingFinalContents.size >= 8) { throw new Error('8개 세션의 실행·변경 기록을 처리 중입니다. 종료 또는 저장 재시도 후 다시 시작해 주세요.'); }
+				this.pendingFinalContents.set(turn.id, {});
+				const captured = await this.captureTurnContent(turn, signal);
+				database.agentSessionContents.recordBaseline({ scope: this.contentScope(turn), ...captured });
+			},
+			afterCleanup: (turn, context) => this.recordFinalContent(turn, context.cleanupVerified),
+		});
 		this.service.recoverStartup();
+		database.agentSessionContents.reconcileInterruptedCaptures();
 		workflowScheduler = this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}
@@ -132,6 +144,70 @@ export class AgentSessionApplication {
 			mcpGateway: join(appRoot, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', AGENT_SESSION_MCP_GATEWAY_MODULE),
 			providerIdentityHook: join(appRoot, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentProviderIdentityHook.mjs'),
 		};
+	}
+
+	private contentScope(turn: AgentSessionTurnDTO) {
+		return { projectId: turn.projectId, sessionId: turn.sessionId, turnId: turn.id };
+	}
+
+	private async captureTurnContent(turn: AgentSessionTurnDTO, signal: AbortSignal): Promise<{ readonly snapshot: AgentSessionContentSnapshot; readonly revision: string | null }> {
+		const revision = await this.contentRevision(turn);
+		if (signal.aborted) { throw new Error('파일 내용 수집이 취소됐습니다.'); }
+		const helper = join(this.resourcesPath, 'app', 'review-runtime', 'bin', 'bound-checkout');
+		assertExecutable(helper, 'The packaged bound-checkout helper');
+		const snapshot = await captureAgentSessionContentSnapshot(helper, turn.snapshot.folderIdentity, { signal, timeoutMs: 30_000 });
+		if (signal.aborted) { throw new Error('파일 내용 수집이 취소됐습니다.'); }
+		if (await this.contentRevision(turn) !== revision) { throw new Error('파일 내용을 수집하는 동안 Git 기준 커밋이 바뀌었습니다.'); }
+		return { snapshot, revision };
+	}
+
+	private async contentRevision(turn: AgentSessionTurnDTO): Promise<string | null> {
+		const ownerId = turn.snapshot.managedWorktreeOwnerId;
+		if (ownerId === null) { return null; }
+		const binding = this.database.listFolderBindings(turn.projectId).find(candidate => candidate.id === turn.snapshot.bindingId);
+		if (!binding?.vcsRoot) { throw new Error('세션 작업 복사본의 저장소 연결을 확인할 수 없습니다.'); }
+		const lease = await this.worktrees.inspectOptional(ownerId, binding.vcsRoot);
+		if (!lease || lease.kind !== 'session' || lease.state !== 'active' || lease.pendingOperation
+			|| lease.worktreePath !== turn.snapshot.folderIdentity.canonicalPath) {
+			throw new Error('세션 작업 복사본의 소유권과 Git 기준 커밋을 확인할 수 없습니다.');
+		}
+		return lease.head;
+	}
+
+	private async recordFinalContent(turn: AgentSessionTurnDTO, cleanupVerified: boolean): Promise<void> {
+		const scope = this.contentScope(turn);
+		const expectedLatestVersion = this.database.agentSessionChangeEvidence.getLatest(turn.projectId, turn.sessionId, turn.id)?.version ?? 0;
+		const recordUnavailable = (reason: string) => this.database.agentSessionContents.recordUnavailable({
+			scope, expectedLatestVersion, capturedAt: new Date().toISOString(), reason,
+		});
+		if (!cleanupVerified) {
+			recordUnavailable('실행 프로세스 정리가 확인되지 않아 종료 후 파일 내용을 확정하지 않았습니다.');
+			return;
+		}
+		if (!this.database.agentSessionContents.getBaseline(scope)) {
+			recordUnavailable('실행 전 파일 내용이 저장되지 않아 변경 전후를 비교할 수 없습니다.');
+			this.pendingFinalContents.delete(turn.id);
+			return;
+		}
+		const pending = this.pendingFinalContents.get(turn.id);
+		if (!pending) {
+			recordUnavailable('종료 시점의 파일 내용을 보유하고 있지 않습니다. 현재 파일을 이전 실행의 결과로 대체하지 않았습니다.');
+			return;
+		}
+		let captured = pending.captured;
+		if (!captured) {
+			try { captured = { ...await this.captureTurnContent(turn, new AbortController().signal), expectedLatestVersion }; }
+			catch (error) {
+				// A capture failure is durable missing evidence; current files are never substituted for old bytes.
+				if (error instanceof AgentSessionContentCaptureCleanupError) { throw error; }
+				recordUnavailable('실행 종료 후 파일 내용을 안전하게 수집하지 못했습니다. 이 기록으로 변경 내용을 확정할 수 없습니다.');
+				this.pendingFinalContents.delete(turn.id);
+				return;
+			}
+			pending.captured = captured;
+		}
+		this.database.agentSessionContents.recordAfter({ scope, ...captured, cleanupVerified: true });
+		this.pendingFinalContents.delete(turn.id);
 	}
 
 	private async inspectWorkspacePreparation(session: { readonly projectId: string; readonly id: string; readonly bindingId: string; readonly workspaceMode: 'gitWorktree' | 'sharedFolder' }): Promise<WorkspaceAgentSessionWorkspacePreparationDTO> {

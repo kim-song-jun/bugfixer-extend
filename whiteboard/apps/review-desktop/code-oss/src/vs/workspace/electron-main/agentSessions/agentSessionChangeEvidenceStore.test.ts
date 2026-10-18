@@ -106,6 +106,11 @@ test('append cursor makes exact retries idempotent, preserves A-B-A observations
 		assert.notEqual(changedMetadata.fingerprint, third.fingerprint);
 		assert.deepEqual(store.listVersions(project.id, session.id, turn.id, { limit: 2 }), { snapshots: [first, second], nextVersion: 2, hasMore: true });
 		assert.deepEqual(store.listVersions(project.id, session.id, turn.id, { afterVersion: 2, limit: 2 }).snapshots, [third, changedMetadata]);
+		assert.deepEqual(store.listVersions(project.id, session.id, turn.id, { beforeVersion: 4, limit: 2 }), { snapshots: [third, second], nextVersion: 2, hasMore: true });
+		assert.deepEqual(store.listVersions(project.id, session.id, turn.id, { beforeVersion: 2, limit: 2 }), { snapshots: [first], nextVersion: 1, hasMore: false });
+		assert.deepEqual(store.listVersions(project.id, session.id, turn.id, { beforeVersion: 1 }), { snapshots: [], nextVersion: 1, hasMore: false });
+		assert.throws(() => store.listVersions(project.id, session.id, turn.id, { beforeVersion: 0 }), /positive safe integer/i);
+		assert.throws(() => store.listVersions(project.id, session.id, turn.id, { beforeVersion: 3, afterVersion: 1 }), /one .* direction/i);
 		assert.throws(() => store.listVersions(project.id, session.id, turn.id, { afterVersion: -1 }), /cursor/i);
 		assert.throws(() => store.listVersions(project.id, session.id, turn.id, { limit: 101 }), /page size/i);
 	});

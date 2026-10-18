@@ -169,20 +169,26 @@ export class AgentSessionChangeEvidenceStore {
 		return row ? this.fromRow(row) : undefined;
 	}
 
-	listVersions(projectId: string, sessionId: string, turnId: string, options: { readonly afterVersion?: number; readonly limit?: number } = {}): AgentSessionChangeEvidencePage {
+	listVersions(projectId: string, sessionId: string, turnId: string, options: { readonly afterVersion?: number; readonly beforeVersion?: number; readonly limit?: number } = {}): AgentSessionChangeEvidencePage {
 		this.assertOpen();
 		this.requireTurn(projectId, sessionId, turnId);
-		this.assertAllowedKeys(options, [], ['afterVersion', 'limit'], 'page options');
+		this.assertAllowedKeys(options, [], ['afterVersion', 'beforeVersion', 'limit'], 'page options');
 		const afterVersion = options.afterVersion ?? 0;
+		const beforeVersion = options.beforeVersion;
 		const limit = options.limit ?? 50;
+		if (beforeVersion !== undefined && options.afterVersion !== undefined) { throw new Error('Choose one change evidence cursor direction.'); }
 		if (!Number.isSafeInteger(afterVersion) || afterVersion < 0) { throw new Error('Change evidence cursor must be a non-negative safe integer.'); }
+		if (beforeVersion !== undefined && (!Number.isSafeInteger(beforeVersion) || beforeVersion < 1)) { throw new Error('Change evidence previous-version cursor must be a positive safe integer.'); }
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) { throw new Error('Change evidence page size must be from 1 to 100.'); }
-		const rows = this.db.prepare(`SELECT id, project_id, session_id, turn_id, version, fingerprint, evidence_json, created_at
+		const rows = beforeVersion === undefined ? this.db.prepare(`SELECT id, project_id, session_id, turn_id, version, fingerprint, evidence_json, created_at
 			FROM agent_session_change_evidence WHERE project_id = ? AND session_id = ? AND turn_id = ? AND version > ?
-			ORDER BY version LIMIT ?`).all(projectId, sessionId, turnId, afterVersion, limit + 1) as EvidenceRow[];
+			ORDER BY version LIMIT ?`).all(projectId, sessionId, turnId, afterVersion, limit + 1) as EvidenceRow[]
+			: this.db.prepare(`SELECT id, project_id, session_id, turn_id, version, fingerprint, evidence_json, created_at
+			FROM agent_session_change_evidence WHERE project_id = ? AND session_id = ? AND turn_id = ? AND version < ?
+			ORDER BY version DESC LIMIT ?`).all(projectId, sessionId, turnId, beforeVersion, limit + 1) as EvidenceRow[];
 		const hasMore = rows.length > limit;
 		const snapshots = rows.slice(0, limit).map(row => this.fromRow(row));
-		return { snapshots, nextVersion: snapshots.at(-1)?.version ?? afterVersion, hasMore };
+		return { snapshots, nextVersion: snapshots.at(-1)?.version ?? beforeVersion ?? afterVersion, hasMore };
 	}
 
 	private getSnapshot(projectId: string, sessionId: string, turnId: string, version: number): AgentSessionChangeEvidenceDTO | undefined {
@@ -242,7 +248,7 @@ export class AgentSessionChangeEvidenceStore {
 		const source: AgentSessionChangeSource = turn.snapshot.managedWorktreeOwnerId === null ? 'ordinaryFolder' : 'managedWorktree';
 		const beforeRevision = this.revision(input.beforeRevision, 'before revision');
 		const afterRevision = this.revision(input.afterRevision, 'after revision');
-		if (source === 'managedWorktree' && (!beforeRevision || !afterRevision)) { throw new Error('Managed worktree change evidence requires before and after Git revisions.'); }
+		if (source === 'managedWorktree' && input.status === 'observed' && (!beforeRevision || !afterRevision)) { throw new Error('Observed managed worktree change evidence requires before and after Git revisions.'); }
 		return {
 			projectId: input.projectId, sessionId: input.sessionId, turnId: input.turnId,
 			turnSnapshotSha256: turn.snapshotSha256, source,

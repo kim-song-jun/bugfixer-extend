@@ -16,8 +16,9 @@ import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSe
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { TaskFolderWriterLock } from '../providerRuns/taskFolderWriterLock.js';
 import { ManagedWorktreeService } from './managedWorktrees.js';
-import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessionService.js';
+import { AgentSessionService, type AgentSessionChangeObserver, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessionService.js';
 import { AgentSessionWorkspaceResolver, type AcquireAgentSessionWorkspaceInput, type AcquiredAgentSessionWorkspace } from './agentSessionWorkspace.js';
+import { AgentSessionContentCaptureCleanupError } from './agentSessionContentCapture.js';
 
 const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
 const WORKFLOW_READ_ONLY: AgentSessionPermissionPolicy = READ_ONLY;
@@ -108,7 +109,7 @@ function createRunningRuntimeFactory(stopResult: AgentPtyStopResult = { state: '
 	return { factory, starts: () => startedTurns, releases: () => releaseCount };
 }
 
-function createExitRaceRuntimeFactory() {
+function createExitRaceRuntimeFactory(stopResult: AgentPtyStopResult = { state: 'stopped', cleanupVerified: true }) {
 	const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
 	const runningSnapshot: AgentPtySnapshot = { state: 'running', latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: false };
 	let currentSnapshot = runningSnapshot;
@@ -125,7 +126,7 @@ function createExitRaceRuntimeFactory() {
 		async write() { },
 		async resize() { },
 		async attach() { throw new Error('Attachment is not used by this lifecycle contract.'); },
-		async stop() { stopCount++; enteredStop(); await stopGate; return { state: 'stopped', cleanupVerified: true }; },
+		async stop() { stopCount++; enteredStop(); await stopGate; return stopResult; },
 		async release() { },
 	};
 	return {
@@ -311,6 +312,291 @@ test('unverified stop cleanup retains its runtime and blocks another launch prev
 	}
 });
 
+test('change observer brackets provider execution and final capture precedes workspace release', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	const events: string[] = [];
+	class OrderedResolver extends AgentSessionWorkspaceResolver {
+		releaseCount = 0;
+		override release(lease: AcquiredAgentSessionWorkspace): void {
+			this.releaseCount++;
+			events.push('workspace-release');
+			super.release(lease);
+		}
+	}
+	const resolver = new OrderedResolver(fixture.database, fixture.worktrees, fixture.writerLock, () => true);
+	const observer: AgentSessionChangeObserver = {
+		async beforeStart(turn, signal) {
+			assert.equal(turn.state, 'starting');
+			assert.equal(signal.aborted, false);
+			assert.equal(runtime.starts().length, 0, 'before observation must be durable before PTY start');
+			events.push(`before:${turn.id}`);
+		},
+		async afterCleanup(turn, context) {
+			assert.equal(context.cleanupVerified, true);
+			assert.equal(context.spawnAttempted, true);
+			assert.equal(runtime.releases(), 1, 'after observation must follow verified PTY release');
+			assert.equal(resolver.releaseCount, 0, 'workspace lease must remain held through after observation');
+			events.push(`after:${turn.id}`);
+		},
+	};
+	const service = new AgentSessionService(fixture.database, resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		events.length = 0;
+		resolver.releaseCount = 0;
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const stopped = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(stopped.state, 'exited');
+		assert.deepEqual(events, [`before:${started.id}`, `after:${started.id}`, 'workspace-release']);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('change evidence preparation failure prevents PTY start and remains visible after cleanup', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let afterContext: { readonly cleanupVerified: boolean; readonly spawnAttempted: boolean } | undefined;
+	const observer: AgentSessionChangeObserver = {
+		async beforeStart() { throw new Error('private collector failure detail'); },
+		async afterCleanup(_turn, context) { afterContext = context; },
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		await assert.rejects(service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId }), /failed to start/i);
+		const turn = fixture.database.agentSessionTurns.listTurns(fixture.project.id, fixture.sharedSession.id).at(-1)!;
+		assert.equal(runtime.starts().length, 0);
+		assert.equal(turn.state, 'failed');
+		assert.equal(turn.cleanupVerified, true);
+		assert.match(turn.errorSummary ?? '', /파일 변경 증거/);
+		assert.doesNotMatch(turn.errorSummary ?? '', /private collector failure detail/);
+		assert.deepEqual(afterContext, { cleanupVerified: true, spawnAttempted: false });
+		assert.equal((await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY })).snapshot.sessionId, fixture.sharedSession.id,
+			'verified no-spawn cleanup releases the workspace despite evidence failure');
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('capture helper cleanup uncertainty retains the turn and retries only its exact capability on explicit stop', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let cleanupAttempts = 0;
+	let afterCalls = 0;
+	const observer: AgentSessionChangeObserver = {
+		async beforeStart() {
+			throw new AgentSessionContentCaptureCleanupError({ pid: 54321, async retryCleanup() { cleanupAttempts++; return cleanupAttempts >= 2; } }, new Error('private helper cleanup detail'));
+		},
+		async afterCleanup(_turn, context) { afterCalls++; assert.equal(context.cleanupVerified, true); },
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		await assert.rejects(service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId }), /failed to start/i);
+		const startingFailure = fixture.database.agentSessionTurns.listTurns(fixture.project.id, fixture.sharedSession.id).at(-1)!;
+		assert.equal(startingFailure.state, 'failed');
+		assert.equal(startingFailure.cleanupVerified, false, 'no PTY does not imply the capture helper was cleaned up');
+		assert.equal(runtime.starts().length, 0);
+		await assert.rejects(service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY }), /unresolved host-owned process cleanup/i);
+		const firstRetry = await service.stop(fixture.project.id, fixture.sharedSession.id, startingFailure.id);
+		assert.equal(firstRetry.cleanupVerified, false);
+		assert.equal(cleanupAttempts, 1);
+		assert.equal(afterCalls, 0, 'final observation waits until owned helper cleanup is verified');
+		const secondRetry = await service.stop(fixture.project.id, fixture.sharedSession.id, startingFailure.id);
+		assert.equal(secondRetry.cleanupVerified, true);
+		assert.equal(cleanupAttempts, 2);
+		assert.equal(afterCalls, 1);
+		assert.equal(runtime.starts().length, 0);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('abort during before capture preserves typed helper cleanup recovery instead of treating it as clean cancellation', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let enter!: (turnId: string) => void;
+	const entered = new Promise<string>(resolve => { enter = resolve; });
+	let cleanupAttempts = 0;
+	const observer: AgentSessionChangeObserver = {
+		beforeStart(turn, signal) {
+			enter(turn.id);
+			return new Promise<void>((_resolve, reject) => {
+				signal.addEventListener('abort', () => reject(new AgentSessionContentCaptureCleanupError(
+					{ pid: 54323, async retryCleanup() { cleanupAttempts++; return true; } }, new Error('private aborted helper cleanup detail'),
+				)), { once: true });
+			});
+		},
+		async afterCleanup(_turn, context) { assert.equal(context.cleanupVerified, true); },
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const starting = service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const turnId = await entered;
+		const stopped = await service.stop(fixture.project.id, fixture.sharedSession.id, turnId);
+		assert.equal(stopped.state, 'failed', 'the cancelled capture did not establish the required before evidence');
+		assert.equal(stopped.cleanupVerified, true);
+		assert.equal(cleanupAttempts, 1);
+		assert.equal(runtime.starts().length, 0);
+		assert.match(stopped.errorSummary ?? '', /파일 변경 증거/);
+		assert.deepEqual(await starting, stopped);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('after-capture helper uncertainty retains the workspace until helper cleanup and final observation both succeed', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let cleanupAttempts = 0;
+	let afterCalls = 0;
+	const observer: AgentSessionChangeObserver = {
+		async beforeStart() { },
+		async afterCleanup(_turn, context) {
+			assert.equal(context.cleanupVerified, true);
+			afterCalls++;
+			if (afterCalls === 1) {
+				throw new AgentSessionContentCaptureCleanupError({ pid: 54322, async retryCleanup() { cleanupAttempts++; return cleanupAttempts >= 2; } }, new Error('private after-helper cleanup detail'));
+			}
+		},
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const uncertain = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(uncertain.cleanupVerified, false);
+		assert.match(uncertain.errorSummary ?? '', /파일 변경 증거/);
+		assert.equal(runtime.releases(), 1, 'verified PTY cleanup is released even while helper ownership remains uncertain');
+		assert.equal(afterCalls, 1);
+		await assert.rejects(service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY }), /unresolved host-owned process cleanup/i);
+		const firstRetry = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(firstRetry.cleanupVerified, false);
+		assert.equal(cleanupAttempts, 1);
+		assert.equal(afterCalls, 1, 'final observation waits for helper cleanup verification');
+		const recovered = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(recovered.cleanupVerified, true);
+		assert.equal(cleanupAttempts, 2);
+		assert.equal(afterCalls, 2, 'after observation retries only after the exact helper capability is cleaned');
+		assert.equal((await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY })).snapshot.sessionId, fixture.sharedSession.id);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('cancelling while before observation is pending aborts it without starting a provider', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let enter!: (turnId: string) => void;
+	const entered = new Promise<string>(resolve => { enter = resolve; });
+	const observer: AgentSessionChangeObserver = {
+		beforeStart(turn, signal) {
+			enter(turn.id);
+			return new Promise<void>(resolve => {
+				if (signal.aborted) { resolve(); return; }
+				signal.addEventListener('abort', () => resolve(), { once: true });
+			});
+		},
+		async afterCleanup(_turn, context) { assert.equal(context.spawnAttempted, false); },
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const starting = service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const turnId = await entered;
+		const stopped = await service.stop(fixture.project.id, fixture.sharedSession.id, turnId);
+		assert.equal(stopped.state, 'exited');
+		assert.equal(stopped.cleanupVerified, true);
+		assert.equal(runtime.starts().length, 0);
+		assert.deepEqual(await starting, stopped);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('after-observation failure remains visible, releases verified workspace, and retries only on explicit stop', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let afterCount = 0;
+	const observer: AgentSessionChangeObserver = {
+		async beforeStart() { },
+		async afterCleanup(_turn, context) {
+			assert.equal(context.cleanupVerified, true);
+			afterCount++;
+			if (afterCount === 1) { throw new Error('private persistence detail'); }
+		},
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const failed = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(failed.state, 'failed');
+		assert.equal(failed.cleanupVerified, true);
+		assert.match(failed.errorSummary ?? '', /파일 변경 증거/);
+		assert.doesNotMatch(failed.errorSummary ?? '', /private persistence detail/);
+		assert.equal(runtime.releases(), 1);
+		assert.equal(afterCount, 1);
+		await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(afterCount, 2, 'an explicit stop may retry a failed durable after observation');
+		await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(afterCount, 2, 'a successful final observation is not repeated');
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('unverified cleanup records partial evidence and retries exact turn only after explicit recovery stop', async () => {
+	const fixture = createFixture();
+	const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
+	const running: AgentPtySnapshot = { state: 'running', latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: false };
+	let cleanupVerified = false;
+	let releaseCount = 0;
+	const runtime: AgentSessionRuntimeFactory = {
+		async start() { return handle; },
+		watchExit() { return { dispose() { } }; },
+		getSnapshot() { return running; },
+		async write() { },
+		async resize() { },
+		async attach() { throw new Error('Attachment is not used by this test.'); },
+		async stop() { return { state: cleanupVerified ? 'stopped' : 'cleanupUnverified', cleanupVerified }; },
+		async release() { releaseCount++; },
+	};
+	const observations: boolean[] = [];
+	const observer: AgentSessionChangeObserver = {
+		async beforeStart() { },
+		async afterCleanup(_turn, context) { observations.push(context.cleanupVerified); },
+	};
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime, observer);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const uncertain = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(uncertain.cleanupVerified, false);
+		assert.deepEqual(observations, [false]);
+		await assert.rejects(service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY }), /unresolved host-owned process cleanup/i);
+		cleanupVerified = true;
+		const recovered = await service.stop(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(recovered.cleanupVerified, true);
+		assert.deepEqual(observations, [false, true]);
+		assert.equal(releaseCount, 1);
+		assert.equal((await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY })).snapshot.sessionId, fixture.sharedSession.id);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
 test('rejectProviderConversation fails and cleans only the exact owned turn while preserving its provider conversation ID', async () => {
 	const fixture = createFixture();
 	const runtime = createRunningRuntimeFactory();
@@ -360,6 +646,33 @@ test('provider identity rejection wins a natural exit-zero race and retains tran
 		assert.equal(failed.errorSummary, '프로바이더 대화 식별자가 현재 세션과 일치하지 않으며 실행 기록을 저장하지 못했습니다.');
 		assert.equal(runtime.stopCount(), 1);
 		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, fixture.sharedSession.id)?.state, 'failed');
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('natural exit cleanup uncertainty preserves concurrent provider identity and transcript failures', async () => {
+	const fixture = createFixture();
+	const runtime = createExitRaceRuntimeFactory({ state: 'cleanupUnverified', cleanupVerified: false, error: 'injected cleanup uncertainty' });
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const withConversation = fixture.database.agentSessionTurns.recordProviderConversationId(
+			fixture.project.id, fixture.sharedSession.id, started.id, started.revision, randomUUID(),
+		);
+		runtime.exitSuccessfully();
+		await runtime.stopEntered;
+		const rejection = service.rejectProviderConversation(fixture.project.id, fixture.sharedSession.id, started.id);
+		runtime.finishStop();
+		const failed = await rejection;
+		assert.equal(failed.state, 'failed');
+		assert.equal(failed.exitCode, 0);
+		assert.equal(failed.cleanupVerified, false);
+		assert.equal(failed.providerConversationId, withConversation.providerConversationId);
+		assert.match(failed.errorSummary ?? '', /대화 식별자가 현재 세션과 일치하지 않으며 실행 기록을 저장하지 못했습니다/);
+		assert.match(failed.errorSummary ?? '', /cleanup could not be verified/i);
+		assert.equal(runtime.stopCount(), 1);
 	} finally {
 		dispose(fixture);
 	}

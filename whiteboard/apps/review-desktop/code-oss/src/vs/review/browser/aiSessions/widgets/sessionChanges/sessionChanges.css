@@ -1,0 +1,20 @@
+.ai-session-changes { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ai-session-changes__toolbar { display: flex; gap: 8px; align-items: center; }
+.ai-session-changes__button { min-height: 32px; padding: 5px 10px; color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; cursor: pointer; }
+.ai-session-changes__button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+.ai-session-changes__button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-changes__button:disabled { opacity: .55; cursor: default; }
+.ai-session-changes__status, .ai-session-changes__message, .ai-session-changes__note, .ai-session-changes__empty { margin: 0; color: var(--vscode-descriptionForeground); }
+.ai-session-changes__message { color: var(--vscode-errorForeground); }
+.ai-session-changes__versions, .ai-session-changes__files { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.ai-session-changes__versions { max-height: 144px; overflow: auto; }
+.ai-session-changes__versions .ai-session-changes__button { width: 100%; text-align: left; }
+.ai-session-changes__versions .ai-session-changes__button[aria-pressed="true"] { border-color: var(--vscode-focusBorder); }
+.ai-session-changes__summary { display: flex; flex-direction: column; gap: 6px; padding-block: 8px; border-block: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__facts { margin: 0; color: var(--vscode-foreground); }
+.ai-session-changes__fingerprint { overflow-wrap: anywhere; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.ai-session-changes__file { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-width: 0; padding-block: 7px; border-bottom: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__file-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ai-session-changes__file-info code { overflow-wrap: anywhere; color: var(--vscode-foreground); }
+.ai-session-changes__file-info span { color: var(--vscode-descriptionForeground); }
+@media (max-width: 600px) { .ai-session-changes__file { align-items: flex-start; flex-direction: column; } }

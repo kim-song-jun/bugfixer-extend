@@ -1,6 +1,7 @@
 /** Exercise the packaged native project dashboard with a service-created fixture. */
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -1631,6 +1632,10 @@ try {
 
       fixture.logHistory = seeded.receipt;
 
+      const changeEvidence = await seedChangeEvidence(logFixtureDatabase, fixture, projectFolder, tag);
+
+      fixture.changeEvidence = changeEvidence.receipt;
+
       assert.equal(seeded.receipt.turnIds.length, 2, 'The isolated history fixture must contain two real persisted turns');
 
       for (const turnId of seeded.receipt.turnIds) {
@@ -1653,6 +1658,8 @@ try {
       await waitForExtensionReadiness(session, `transcript-logs-${tag}`);
 
       await verifyAiSessionTranscriptLogs(session.page, fixture, tag, screenshots, viewports);
+
+      await verifyAiSessionChangeEvidence(session.page, fixture, tag, screenshots, viewports);
     } catch (error) {
       await captureFailure(session.page, path.join(output, `ai-session-logs-${tag}-failure.png`), diagnostics);
 
@@ -2028,6 +2035,161 @@ async function seedTranscriptHistory(database, fixture, projectFolder, tag) {
   };
 }
 
+async function seedChangeEvidence(database, fixture, projectFolder, tag) {
+  const name = `CI 변경 evidence fixture ${tag}`;
+  const folderPath = path.join(projectFolder, `ci-change-evidence-${tag}`);
+  await mkdir(folderPath, { recursive: true });
+  const binding = database.createFolderBinding({ projectId: fixture.projectId, path: folderPath });
+  const session = database.agentSessions.createSession({
+    projectId: fixture.projectId,
+    bindingId: binding.id,
+    taskId: null,
+    name,
+    provider: 'codex',
+    model: 'ci-fixture-not-executed',
+    profileRef: 'ci-change-evidence-fixture-only',
+    workspaceMode: 'sharedFolder',
+  });
+  const folder = await statFolder(folderPath);
+  const scope = { projectId: fixture.projectId, sessionId: session.id };
+  const currentSession = database.agentSessions.getSession(fixture.projectId, session.id);
+  const turnSnapshot = {
+    schemaVersion: 1,
+    projectId: fixture.projectId,
+    sessionId: session.id,
+    sessionRevision: currentSession.revision,
+    bindingId: binding.id,
+    taskId: null,
+    provider: 'codex',
+    model: session.model,
+    profileRef: session.profileRef,
+    cwd: folder.canonicalPath,
+    folderIdentity: { canonicalPath: folder.canonicalPath, dev: folder.dev, ino: folder.ino },
+    managedWorktreeOwnerId: null,
+    permissionPolicy: { mode: 'read-only', approval: 'never' },
+    convention: null,
+    references: [],
+  };
+  const turn = database.agentSessionTurns.createTurn({
+    projectId: fixture.projectId,
+    sessionId: session.id,
+    expectedSessionRevision: currentSession.revision,
+    snapshot: turnSnapshot,
+  });
+  const turnScope = { ...scope, turnId: turn.id };
+
+  await writeFile(path.join(folderPath, 'edited.txt'), `before ${tag}\n`, 'utf8');
+  await writeFile(path.join(folderPath, 'deleted.txt'), `remove ${tag}\n`, 'utf8');
+  await writeFile(path.join(folderPath, 'binary.dat'), Buffer.from([0, 1, 2, 255]));
+  const before = await readChangeEvidenceSnapshot(folderPath, folder);
+  database.agentSessionContents.recordBaseline({ scope: turnScope, snapshot: before, revision: null });
+
+  const startingSession = database.agentSessions.getSession(fixture.projectId, session.id);
+  const running = database.agentSessionTurns.transitionTurn(
+    fixture.projectId, session.id, turn.id, turn.revision, startingSession.revision, { state: 'running' },
+  );
+  await writeFile(path.join(folderPath, 'edited.txt'), `after ${tag}\n`, 'utf8');
+  await rm(path.join(folderPath, 'deleted.txt'));
+  await writeFile(path.join(folderPath, 'created-empty.txt'), '', 'utf8');
+  await writeFile(path.join(folderPath, 'binary.dat'), Buffer.from([0, 9, 8, 255]));
+  const after = await readChangeEvidenceSnapshot(folderPath, folder);
+  const final = database.agentSessionContents.recordAfter({
+    scope: turnScope,
+    snapshot: after,
+    expectedLatestVersion: 0,
+    revision: null,
+    cleanupVerified: true,
+  });
+  const exited = database.agentSessionTurns.transitionTurn(
+    fixture.projectId, session.id, turn.id, running.turn.revision, running.session.revision,
+    { state: 'exited', exitCode: 0, cleanupVerified: true },
+  );
+  assert.equal(exited.turn.state, 'exited');
+
+  const retainedEdit = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'edited.txt' });
+  assert.equal(retainedEdit?.before.state, 'text');
+  assert.equal(retainedEdit?.after.state, 'text');
+  assert.equal(retainedEdit.before.file.content, `before ${tag}\n`);
+  assert.equal(retainedEdit.after.file.content, `after ${tag}\n`);
+  await writeFile(path.join(folderPath, 'edited.txt'), `later filesystem value ${tag}\n`, 'utf8');
+  const reopenedEdit = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'edited.txt' });
+  assert.equal(reopenedEdit?.after.state, 'text');
+  assert.equal(reopenedEdit.after.file.content, `after ${tag}\n`, 'The persisted diff must not reread the changed fixture folder');
+  const retainedEmptyFile = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'created-empty.txt' });
+  assert.equal(retainedEmptyFile?.before.state, 'absent');
+  assert.equal(retainedEmptyFile?.after.state, 'text');
+  assert.equal(retainedEmptyFile.after.file.content, '', 'A created zero-byte file must remain distinguishable from unavailable content');
+  const retainedDeletedFile = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'deleted.txt' });
+  assert.equal(retainedDeletedFile?.before.state, 'text');
+  assert.equal(retainedDeletedFile.before.file.content, `remove ${tag}\n`);
+  assert.equal(retainedDeletedFile?.after.state, 'absent');
+
+  return {
+    receipt: {
+      fixtureOnly: true,
+      providerExecuted: false,
+      ptyExecuted: false,
+      source: 'Isolated CI-profile SQLite content-store fixture built from real disposable files',
+      proofLimit: 'Verifies retained before/after file evidence and the native UI only; it does not prove provider execution or authorship.',
+      projectId: fixture.projectId,
+      sessionId: session.id,
+      turnId: turn.id,
+      name,
+      folderPath,
+      evidenceVersion: final.evidenceVersion,
+      fingerprint: final.fingerprint,
+      changedPaths: ['binary.dat', 'created-empty.txt', 'deleted.txt', 'edited.txt'],
+      editedBefore: `before ${tag}\n`,
+      editedAfter: `after ${tag}\n`,
+      postCaptureMutation: `later filesystem value ${tag}\n`,
+    },
+  };
+}
+
+async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
+  const names = (await Array.fromAsync(await opendir(folderPath), entry => entry.name)).sort(compareCodeUnits);
+  const entries = [];
+  let fileBytes = 0;
+  let retainedTextBytes = 0;
+  let contentReadCount = 0;
+  let hasUnavailableContent = false;
+
+  for (const name of names) {
+    const filePath = path.join(folderPath, name);
+    const bytes = await readFile(filePath);
+    const info = await stat(filePath);
+    assert.ok(info.isFile(), 'The evidence fixture contains only regular files');
+    fileBytes += bytes.byteLength;
+    contentReadCount++;
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (bytes.includes(0)) {
+      entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, contentUnavailableReason: 'binary' });
+      hasUnavailableContent = true;
+    } else {
+      const content = bytes.toString('utf8');
+      entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, content });
+      retainedTextBytes += bytes.byteLength;
+    }
+  }
+
+  return {
+    schemaVersion: 1,
+    folderIdentity: { canonicalPath: folderIdentity.canonicalPath, dev: folderIdentity.dev, ino: folderIdentity.ino },
+    capturedAt: new Date().toISOString(),
+    inventoryCoverage: 'complete',
+    contentCoverage: hasUnavailableContent ? 'partial' : 'complete',
+    entryCount: entries.length,
+    fileBytes,
+    retainedTextBytes,
+    contentReadCount,
+    entries,
+  };
+}
+
+function compareCodeUnits(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function mailboxFixtureSecret(tag) {
   return `WB_CI_MAILBOX_SECRET_${tag.toUpperCase()}_DO_NOT_PERSIST`;
 }
@@ -2378,6 +2540,92 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   await capturePage(page, narrowShot);
   screenshots.push(narrowShot);
   viewports.push({ theme: tag, state: 'ai-session-logs-narrow-760', width: 760, height: 820, screenshot: narrowShot, layout });
+}
+
+async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, viewports) {
+  const evidenceFixture = fixture.changeEvidence;
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
+  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+  if (!(await sidebar.isVisible())) { await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click(); }
+  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+  const workspace = page.locator('.ai-session-workspace');
+  const fixtureRow = workspace.locator('.ai-session__session-row').filter({ hasText: evidenceFixture.name });
+  await fixtureRow.waitFor({ state: 'visible' });
+  await fixtureRow.click();
+  await workspace.getByRole('heading', { name: evidenceFixture.name, exact: true }).waitFor();
+  await workspace.getByRole('tab', { name: '변경', exact: true }).click();
+
+  const changesPanel = workspace.locator('.ai-session__changes-panel');
+  const turnSelector = changesPanel.getByRole('combobox', { name: '변경을 확인할 실행 기록', exact: true });
+  await turnSelector.waitFor({ state: 'visible' });
+  assert.equal(await turnSelector.locator('option').count(), 1, 'The isolated change fixture must expose only its own turn');
+  assert.equal(await turnSelector.inputValue(), evidenceFixture.turnId, 'The change evidence must stay scoped to the fixture turn');
+  const changes = changesPanel.locator('.ai-session-changes');
+  await changes.getByText(`v${evidenceFixture.evidenceVersion} · ${evidenceFixture.fingerprint}`, { exact: true }).waitFor();
+  assert.ok((await changes.innerText()).includes('작성자 알 수 없음'), 'The UI must state that before/after evidence does not establish authorship');
+  for (const filePath of evidenceFixture.changedPaths) {
+    await changes.locator('.ai-session-changes__file').filter({ hasText: filePath }).waitFor();
+  }
+  await changes.locator('.ai-session-changes__file').filter({ hasText: 'created-empty.txt' }).getByText('추가됨', { exact: true }).waitFor();
+  await changes.locator('.ai-session-changes__file').filter({ hasText: 'deleted.txt' }).getByText('삭제됨', { exact: true }).waitFor();
+
+  const binaryRow = changes.locator('.ai-session-changes__file').filter({ hasText: 'binary.dat' });
+  await binaryRow.getByRole('button', { name: '비교 열기', exact: true }).click();
+  const changeMessage = changes.locator('.ai-session-changes__message');
+  await changeMessage.waitFor({ state: 'visible' });
+  assert.match(await changeMessage.innerText(), /binary/u, 'Unavailable binary bytes must produce an honest error, not an empty diff');
+
+  await workspace.getByRole('tab', { name: '터미널', exact: true }).click();
+  await workspace.getByRole('tab', { name: '변경', exact: true }).click();
+  assert.equal(await turnSelector.inputValue(), evidenceFixture.turnId, 'Switching tabs must preserve the exact selected turn');
+  await changes.getByText(`v${evidenceFixture.evidenceVersion} · ${evidenceFixture.fingerprint}`, { exact: true }).waitFor();
+
+  const desktopScreenshot = path.join(output, `ai-session-changes-${tag}-1440.png`);
+  await capturePage(page, desktopScreenshot);
+  screenshots.push(desktopScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-changes-retained-evidence', width: 1440, height: 900, screenshot: desktopScreenshot });
+
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  const narrowLayout = await workspace.evaluate(element => ({
+    overflow: document.documentElement.scrollWidth > window.innerWidth,
+    actionReachable: [...element.querySelectorAll('button')].filter(button => button.offsetParent !== null).every(button => {
+      const rect = button.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= window.innerWidth + 1;
+    }),
+  }));
+  assert.equal(narrowLayout.overflow, false, 'The narrow retained-change view must not overflow horizontally');
+  assert.equal(narrowLayout.actionReachable, true, 'Visible change actions must remain within the narrow viewport');
+  const narrowScreenshot = path.join(output, `ai-session-changes-${tag}-760.png`);
+  await capturePage(page, narrowScreenshot);
+  screenshots.push(narrowScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-changes-narrow-760', width: 760, height: 820, screenshot: narrowScreenshot, layout: narrowLayout });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
+  await changes.locator('.ai-session-changes__file').filter({ hasText: 'edited.txt' }).getByRole('button', { name: '비교 열기', exact: true }).click();
+  const diffEditor = page.locator('.monaco-diff-editor');
+  await diffEditor.waitFor({ state: 'visible' });
+  const originalLines = diffEditor.locator('.original-in-monaco-diff-editor .view-lines');
+  const modifiedLines = diffEditor.locator('.modified-in-monaco-diff-editor .view-lines');
+  await originalLines.getByText(evidenceFixture.editedBefore.trim(), { exact: true }).waitFor();
+  await modifiedLines.getByText(evidenceFixture.editedAfter.trim(), { exact: true }).waitFor();
+  const modifiedContentBeforeAttempt = await modifiedLines.innerText();
+  const modifiedEditor = diffEditor.locator('.modified-in-monaco-diff-editor');
+  await modifiedEditor.locator('.view-lines').click();
+  assert.equal(await modifiedEditor.evaluate(editor => {
+    const focused = document.activeElement;
+    return focused !== null && editor.contains(focused) && focused.matches('textarea.inputarea, .native-edit-context');
+  }), true, 'The retained modified editor must own its actual keyboard input before the edit attempt');
+  await page.keyboard.type(`CI_READONLY_EDIT_ATTEMPT_${tag}`);
+  assert.equal(await modifiedLines.innerText(), modifiedContentBeforeAttempt, 'Typing into the retained modified side must not change its in-memory content');
+  assert.equal((await diffEditor.innerText()).includes(`CI_READONLY_EDIT_ATTEMPT_${tag}`), false, 'The read-only diff must reject keyboard edits');
+  assert.equal(await diffEditor.innerText().then(text => text.includes(evidenceFixture.postCaptureMutation)), false, 'The diff must show stored content rather than the later filesystem mutation');
+  const diffScreenshot = path.join(output, `ai-session-change-diff-${tag}-1440.png`);
+  await capturePage(page, diffScreenshot);
+  screenshots.push(diffScreenshot);
+  viewports.push({ theme: tag, state: 'ai-session-change-retained-readonly-diff', width: 1440, height: 900, screenshot: diffScreenshot });
 }
 
 async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports) {

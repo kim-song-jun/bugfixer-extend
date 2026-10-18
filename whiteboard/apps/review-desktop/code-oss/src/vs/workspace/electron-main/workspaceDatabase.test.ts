@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import test from 'node:test';
 import type { AgentSessionTurnSnapshot } from '../common/workspaceAgentSessionProtocol.js';
 import type { AgentWorkflowPlanInput } from '../common/workspaceAgentWorkflowProtocol.js';
+import type { AgentSessionContentSnapshot } from './agentSessions/agentSessionContentCapture.js';
 
 import {
 	ReviewCommandConflictError,
@@ -70,10 +71,10 @@ test('projects, bindings, tasks, review links and project view persist across da
 	});
 });
 
-test('v25 database upgrades to v26 without changing existing tasks, turns, transcripts, or workflows', () => {
+test('frozen v26 database upgrades to v27 with its real change evidence and workspace rows unchanged', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-v26-migration-'));
 	const sourcePath = join(directory, 'source.db');
-	const path = join(directory, 'frozen-v25.db');
+	const path = join(directory, 'frozen-v26.db');
 	const folder = join(directory, 'project');
 	mkdirSync(folder);
 	let database = WorkspaceDatabase.open(sourcePath);
@@ -97,6 +98,11 @@ test('v25 database upgrades to v26 without changing existing tasks, turns, trans
 		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, identified.revision, currentSession.revision, { state: 'running' });
 		currentSession = running.session;
 		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
+		const changeEvidence = database.agentSessionChangeEvidence.recordSnapshot({
+			projectId: project.id, sessionId: session.id, turnId: turn.id, expectedLatestVersion: 0,
+			folderIdentity: snapshot.folderIdentity, capturedAt: '2026-10-19T00:00:00.000Z', beforeRevision: null, afterRevision: null,
+			status: 'observed', coverage: 'complete', missingReason: null, attribution: 'unknown', attributionNote: null, files: [],
+		});
 		const plan: AgentWorkflowPlanInput = {
 			projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
 			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: 'codex', model: 'gpt-5-codex', taskId: task.id, bindingId: binding.id, referenceIds: [], permissionPolicy: { mode: 'read-only', approval: 'on-request' }, dependsOn: [] }],
@@ -108,34 +114,35 @@ test('v25 database upgrades to v26 without changing existing tasks, turns, trans
 		const run = database.agentWorkflows.startWorkflow(project.id, workflow.id, ready.revision, 'migration-start');
 		database.close();
 
-		// Compose the frozen v24 schema and pinned v25 migration DDL, then seed it with rows produced by the public stores.
+		// Compose the frozen v24, v25, and pinned v26 schema, then seed it with rows produced by the public stores.
 		const frozenV24 = readFileSync(new URL('./agentSessions/fixtures/schema-v24.sql', import.meta.url), 'utf8');
 		const frozenV25Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v25.sql', import.meta.url), 'utf8');
-		const v25 = new DatabaseSync(path);
+		const frozenV26Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v26.sql', import.meta.url), 'utf8');
+		const v26 = new DatabaseSync(path);
 		try {
-			v25.exec('PRAGMA foreign_keys = ON;');
-			v25.exec(`${frozenV24}\n${frozenV25Delta}`);
-			const turnOwnerTrigger = v25.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
-			if (typeof turnOwnerTrigger !== 'string') { throw new Error('Frozen v25 fixture omitted the session turn ownership trigger.'); }
+			v26.exec('PRAGMA foreign_keys = ON;');
+			v26.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}`);
+			const turnOwnerTrigger = v26.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
+			if (typeof turnOwnerTrigger !== 'string') { throw new Error('Frozen v26 fixture omitted the session turn ownership trigger.'); }
 			// The source rows have already passed the public store's snapshot guard. Temporarily remove only its insert-time guard while copying the later session revision, then restore its exact frozen SQL before migration.
-			v25.exec('DROP TRIGGER agent_session_turn_owner_insert;');
+			v26.exec('DROP TRIGGER agent_session_turn_owner_insert;');
 			try {
 				const source = new DatabaseSync(sourcePath);
 				try {
-					const tables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
+					const tables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
 					for (const table of tables) {
 						const columns = source.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
 						const rows = source.prepare(`SELECT * FROM ${table}`).all();
 						if (!rows.length) { continue; }
 						const quotedColumns = columns.map(column => `\"${column}\"`).join(', ');
-						const insert = v25.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
+						const insert = v26.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
 						for (const row of rows) { insert.run(...columns.map(column => Reflect.get(row, column))); }
 					}
 				} finally { source.close(); }
-			} finally { v25.exec(turnOwnerTrigger); }
-		} finally { v25.close(); }
+			} finally { v26.exec(turnOwnerTrigger); }
+		} finally { v26.close(); }
 
-		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
+		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
 		const snapshotRows = (connection: DatabaseSync) => Object.fromEntries(relevantTables.map(table => {
 			const columns = connection.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
 			const rows = connection.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
@@ -143,7 +150,7 @@ test('v25 database upgrades to v26 without changing existing tasks, turns, trans
 		}));
 		const beforeMigration = new DatabaseSync(path);
 		const beforeRows = snapshotRows(beforeMigration);
-		assert.equal(Number(beforeMigration.prepare('PRAGMA user_version').get()?.user_version), 25);
+		assert.equal(Number(beforeMigration.prepare('PRAGMA user_version').get()?.user_version), 26);
 		beforeMigration.close();
 
 		database = WorkspaceDatabase.open(path);
@@ -152,12 +159,233 @@ test('v25 database upgrades to v26 without changing existing tasks, turns, trans
 		finally { afterMigration.close(); }
 		assert.equal(database.getTask(task.id)?.title, 'Retain task');
 		assert.equal(database.agentSessionTurns.getTurn(project.id, session.id, turn.id)?.id, turn.id);
+		assert.deepEqual(database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id), changeEvidence);
 		assert.equal(database.agentSessionTranscripts.readPage(project.id, session.id, turn.id).entries[0]?.text, 'preserved output');
 		assert.equal(database.agentWorkflows.getWorkflow(project.id, workflow.id)?.id, workflow.id);
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
-		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 26); }
+		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 27); }
 		finally { migratedSchema.close(); }
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('agent-session content baselines and final bytes remain turn-scoped and durable across reopen', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-agent-session-content-'));
+	const folder = join(directory, 'project');
+	mkdirSync(folder);
+	const databasePath = join(directory, 'workspace.db');
+	let database = WorkspaceDatabase.open(databasePath);
+	try {
+		const project = database.createProject('Content evidence');
+		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Retained bytes', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const canonicalFolder = realpathSync(folder);
+		const identity = statSync(canonicalFolder, { bigint: true });
+		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
+		const turn = database.agentSessionTurns.createTurn({
+			projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision,
+			snapshot: {
+				schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: null,
+				provider: session.provider, model: session.model, profileRef: null, cwd: canonicalFolder, folderIdentity,
+				managedWorktreeOwnerId: null, permissionPolicy: { mode: 'read-only', approval: 'on-request' }, convention: null, references: [],
+			},
+		});
+		const makeSnapshot = (content: string, capturedAt: string): AgentSessionContentSnapshot => {
+			const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+			return {
+				schemaVersion: 1, folderIdentity, capturedAt, inventoryCoverage: 'complete', contentCoverage: 'complete', entryCount: 1,
+				fileBytes: Buffer.byteLength(content, 'utf8'), retainedTextBytes: Buffer.byteLength(content, 'utf8'), contentReadCount: 1,
+				entries: [{ path: 'note.txt', kind: 'file', size: Buffer.byteLength(content, 'utf8'), sha256, content }],
+			};
+		};
+		const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
+		const metadataOnly = database.agentSessionChangeEvidence.recordSnapshot({
+			...scope, expectedLatestVersion: 0, folderIdentity, capturedAt: '2026-10-19T00:00:00.000Z', beforeRevision: null, afterRevision: null,
+			status: 'observed', coverage: 'complete', missingReason: null, attribution: 'unknown', attributionNote: null, files: [],
+		});
+		assert.equal(metadataOnly.version, 1);
+		const before = makeSnapshot('original bytes', '2026-10-19T00:00:30.000Z');
+		const after = makeSnapshot('provider changed bytes', '2026-10-19T00:01:00.000Z');
+		const baseline = database.agentSessionContents.recordBaseline({ scope, snapshot: before, revision: null });
+		assert.equal(database.agentSessionContents.recordBaseline({ scope, snapshot: before, revision: null }).fingerprint, baseline.fingerprint);
+		assert.throws(() => database.agentSessionContents.recordBaseline({ scope, snapshot: after, revision: null }), /immutable/);
+		const runningSession = database.agentSessions.getSession(project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
+		const missingReceipt: unknown = { scope, snapshot: after, expectedLatestVersion: 1, revision: null };
+		assert.throws(() => database.agentSessionContents.recordAfter(missingReceipt as Parameters<typeof database.agentSessionContents.recordAfter>[0]), /missing or unknown|cleanup receipt/);
+		assert.throws(() => database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 1, revision: null, cleanupVerified: false }), /cleanup receipt/);
+		assert.throws(() => database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 0, revision: null, cleanupVerified: true }), /stale/);
+		const final = database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 1, revision: null, cleanupVerified: true });
+		assert.equal(final.evidenceVersion, 2);
+		assert.equal(database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)?.attribution, 'unknown');
+		assert.equal(database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 1, revision: null, cleanupVerified: true }).evidenceVersion, 2);
+		assert.throws(() => database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 0, revision: null, cleanupVerified: true }), /stale/);
+		const metadataOnlyFile = database.agentSessionContents.getFile({ scope, evidenceVersion: 1, path: 'note.txt' });
+		assert.equal(metadataOnlyFile?.before.state, 'unavailable');
+		assert.equal(metadataOnlyFile?.after.state, 'unavailable');
+		assert.equal(metadataOnlyFile?.evidenceFingerprint, metadataOnly.fingerprint);
+		const exited = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
+		const unavailable = database.agentSessionContents.recordUnavailable({ scope, capturedAt: '2026-10-19T00:02:00.000Z', expectedLatestVersion: 2, reason: 'The after capture helper could not verify the folder.' });
+		assert.equal(unavailable.status, 'unverified');
+		assert.equal(unavailable.beforeFingerprint, baseline.fingerprint);
+		assert.equal(database.agentSessionContents.recordUnavailable({ scope, capturedAt: '2026-10-19T00:02:00.000Z', expectedLatestVersion: 2, reason: 'The after capture helper could not verify the folder.' }).evidenceVersion, 3);
+		assert.throws(() => database.agentSessionContents.recordUnavailable({ scope, capturedAt: '2026-10-19T00:02:00.000Z', expectedLatestVersion: 1, reason: 'The after capture helper could not verify the folder.' }), /stale/);
+		database.close();
+
+		database = WorkspaceDatabase.open(databasePath);
+		const retained = database.agentSessionContents.getFile({ scope, evidenceVersion: 2, path: 'note.txt' });
+		const evidenceV2 = database.agentSessionChangeEvidence.listVersions(project.id, session.id, turn.id, { afterVersion: 1, limit: 1 }).snapshots[0];
+		assert.equal(retained?.evidenceFingerprint, evidenceV2?.fingerprint);
+		assert.equal(retained?.before.state, 'text');
+		if (retained?.before.state === 'text') { assert.equal(retained.before.file.content, 'original bytes'); }
+		assert.equal(retained?.after.state, 'text');
+		if (retained?.after.state === 'text') { assert.equal(retained.after.file.content, 'provider changed bytes'); }
+		const unavailableFile = database.agentSessionContents.getFile({ scope, evidenceVersion: 3, path: 'note.txt' });
+		assert.equal(unavailableFile?.evidenceFingerprint, database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)?.fingerprint);
+		assert.equal(unavailableFile?.before.state, 'text');
+		assert.equal(unavailableFile?.after.state, 'unavailable');
+		assert.equal(database.agentSessionTurns.getTurn(project.id, session.id, turn.id)?.id, exited.id);
+		assert.throws(() => database.agentSessionContents.getFile({ scope, evidenceVersion: 2, path: 'a'.repeat(4097) }), /4096 UTF-8 bytes/);
+		assert.throws(() => database.agentSessionContents.getFile({ scope: { ...scope, projectId: session.id }, evidenceVersion: 1, path: 'note.txt' }), /does not identify|does not belong/);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('binary content gaps preserve complete metadata conclusions and changed hashes remain unavailable as text', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-content-binary-'));
+	const folder = join(directory, 'project');
+	mkdirSync(folder);
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	try {
+		const project = database.createProject('Binary content evidence');
+		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Binary content', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const canonicalFolder = realpathSync(folder);
+		const identity = statSync(canonicalFolder, { bigint: true });
+		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
+		const turn = database.agentSessionTurns.createTurn({
+			projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision,
+			snapshot: {
+				schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: null,
+				provider: session.provider, model: session.model, profileRef: null, cwd: canonicalFolder, folderIdentity,
+				managedWorktreeOwnerId: null, permissionPolicy: { mode: 'read-only', approval: 'on-request' }, convention: null, references: [],
+			},
+		});
+		const makeSnapshot = (bytes: Buffer, capturedAt: string): AgentSessionContentSnapshot => ({
+			schemaVersion: 1, folderIdentity, capturedAt, inventoryCoverage: 'complete', contentCoverage: 'partial', entryCount: 1,
+			fileBytes: bytes.byteLength, retainedTextBytes: 0, contentReadCount: 1,
+			entries: [{ path: 'image.bin', kind: 'file', size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), contentUnavailableReason: 'binary' }],
+		});
+		const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
+		const before = makeSnapshot(Buffer.from([0, 255]), '2026-10-19T00:00:00.000Z');
+		const unchanged = makeSnapshot(Buffer.from([0, 255]), '2026-10-19T00:01:00.000Z');
+		const changed = makeSnapshot(Buffer.from([1, 255]), '2026-10-19T00:02:00.000Z');
+		database.agentSessionContents.recordBaseline({ scope, snapshot: before, revision: null });
+		const runningSession = database.agentSessions.getSession(project.id, session.id)!;
+		database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
+		const noChange = database.agentSessionContents.recordAfter({ scope, snapshot: unchanged, expectedLatestVersion: 0, revision: null, cleanupVerified: true });
+		assert.equal(noChange.coverage, 'complete');
+		assert.equal(noChange.contentCoverage, 'partial');
+		assert.equal(database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)?.noChangesConfirmed, true);
+		const changedFinal = database.agentSessionContents.recordAfter({ scope, snapshot: changed, expectedLatestVersion: 1, revision: null, cleanupVerified: true });
+		assert.equal(changedFinal.coverage, 'complete');
+		const latestEvidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
+		assert.equal(latestEvidence.files[0]?.change, 'modified');
+		const file = database.agentSessionContents.getFile({ scope, evidenceVersion: 2, path: 'image.bin' });
+		assert.equal(file?.before.state, 'unavailable');
+		assert.equal(file?.after.state, 'unavailable');
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('managed-worktree content evidence requires revisions for observed results and accepts unknown revisions only as unverified', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-managed-session-content-'));
+	const folder = join(directory, 'worktree');
+	mkdirSync(folder);
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	try {
+		const project = database.createProject('Managed content evidence');
+		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Managed revisions', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'gitWorktree' });
+		const canonicalFolder = realpathSync(folder);
+		const identity = statSync(canonicalFolder, { bigint: true });
+		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
+		const turn = database.agentSessionTurns.createTurn({
+			projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision,
+			snapshot: {
+				schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: null,
+				provider: session.provider, model: session.model, profileRef: null, cwd: canonicalFolder, folderIdentity,
+				managedWorktreeOwnerId: session.id, permissionPolicy: { mode: 'read-only', approval: 'on-request' }, convention: null, references: [],
+			},
+		});
+		const content = 'worktree contents';
+		const sha256 = createHash('sha256').update(content, 'utf8').digest('hex');
+		const snapshot: AgentSessionContentSnapshot = {
+			schemaVersion: 1, folderIdentity, capturedAt: '2026-10-19T00:00:00.000Z', inventoryCoverage: 'complete', contentCoverage: 'complete', entryCount: 1,
+			fileBytes: Buffer.byteLength(content, 'utf8'), retainedTextBytes: Buffer.byteLength(content, 'utf8'), contentReadCount: 1,
+			entries: [{ path: 'note.txt', kind: 'file', size: Buffer.byteLength(content, 'utf8'), sha256, content }],
+		};
+		const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
+		database.agentSessionContents.recordBaseline({ scope, snapshot, revision: null });
+		const runningSession = database.agentSessions.getSession(project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
+		database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
+		assert.throws(() => database.agentSessionContents.recordAfter({ scope, snapshot, expectedLatestVersion: 0, revision: null, cleanupVerified: true }), /managed worktree.*revisions|required/i);
+		const unavailable = database.agentSessionContents.recordUnavailable({ scope, capturedAt: '2026-10-19T00:01:00.000Z', expectedLatestVersion: 0, reason: 'The post-turn worktree revision could not be verified.' });
+		assert.equal(unavailable.status, 'unverified');
+		assert.equal(unavailable.revision, null);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('startup reconciliation adds one unavailable final from a retained baseline without reading the project folder', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-content-reconciliation-'));
+	const folder = join(directory, 'project');
+	mkdirSync(folder);
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	try {
+		const project = database.createProject('Interrupted capture');
+		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: null, name: 'Interrupted capture', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const canonicalFolder = realpathSync(folder);
+		const identity = statSync(canonicalFolder, { bigint: true });
+		const folderIdentity = { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() };
+		const turn = database.agentSessionTurns.createTurn({
+			projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision,
+			snapshot: {
+				schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: null,
+				provider: session.provider, model: session.model, profileRef: null, cwd: canonicalFolder, folderIdentity,
+				managedWorktreeOwnerId: null, permissionPolicy: { mode: 'read-only', approval: 'on-request' }, convention: null, references: [],
+			},
+		});
+		const retained = 'before provider launch';
+		const sha256 = createHash('sha256').update(retained, 'utf8').digest('hex');
+		const snapshot: AgentSessionContentSnapshot = {
+			schemaVersion: 1, folderIdentity, capturedAt: '2026-10-19T00:00:00.000Z', inventoryCoverage: 'complete', contentCoverage: 'complete', entryCount: 1,
+			fileBytes: Buffer.byteLength(retained, 'utf8'), retainedTextBytes: Buffer.byteLength(retained, 'utf8'), contentReadCount: 1,
+			entries: [{ path: 'state.txt', kind: 'file', size: Buffer.byteLength(retained, 'utf8'), sha256, content: retained }],
+		};
+		const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
+		database.agentSessionContents.recordBaseline({ scope, snapshot, revision: null });
+		const runningSession = database.agentSessions.getSession(project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
+		database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'interrupted', errorSummary: 'Process stopped during startup recovery.' });
+		assert.equal(database.agentSessionContents.reconcileInterruptedCaptures(), 1);
+		assert.equal(database.agentSessionContents.reconcileInterruptedCaptures(), 0);
+		const result = database.agentSessionContents.getFile({ scope, evidenceVersion: 1, path: 'state.txt' });
+		assert.equal(result?.before.state, 'text');
+		if (result?.before.state === 'text') { assert.equal(result.before.file.content, retained); }
+		assert.equal(result?.after.state, 'unavailable');
+		assert.equal(database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)?.status, 'unverified');
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

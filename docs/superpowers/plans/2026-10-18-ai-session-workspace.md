@@ -120,11 +120,23 @@
 
 #### Task 7a: Durable observation metadata foundation
 
-- [ ] Add a main-only `AgentSessionChangeEvidenceStore`, wired through schema v26, with append-only per-turn versions and canonical fingerprints. Derive project/session/turn snapshot ownership from existing durable turns; reject mismatched source-folder identity.
-- [ ] Store bounded file observations (relative path, kind, size, content/link hashes), capture coverage and explicit `observed`/`unverified` state. Preserve `unknown`/`mixed` attribution and missing-evidence reasons; temporal file changes do not establish AI authorship. Do not add a definitive AI-author value.
-- [ ] Make exact latest retries idempotent by fingerprint with an expected-version precondition, preserve A→B→A as three observations, reject stale appends, and bound version reads with a cursor. Validate paths, duplicate entries, byte/count limits and revision identifiers before insertion.
-- [ ] Prove actual SQLite reopen, wrong-scope rejection, immutable history, actual filesystem hash changes, truncation/unverified semantics and frozen-v25 migration preservation in CI. No local tests or builds.
-- [ ] Keep metadata storage separate from the subsequent bounded before/after-content collector, per-hunk diff, reasons/checks, merge approval and PR publication. Hashes alone cannot reconstruct historical hunks. This foundation does not complete Task 7.
+- [x] Add a main-only `AgentSessionChangeEvidenceStore`, wired through schema v26, with append-only per-turn versions and canonical fingerprints. Derive project/session/turn snapshot ownership from existing durable turns; reject mismatched source-folder identity.
+- [x] Store bounded file observations (relative path, kind, size, content/link hashes), capture coverage and explicit `observed`/`unverified` state. Preserve `unknown`/`mixed` attribution and missing-evidence reasons; temporal file changes do not establish AI authorship. Do not add a definitive AI-author value.
+- [x] Make exact latest retries idempotent by fingerprint with an expected-version precondition, preserve A→B→A as three observations, reject stale appends, and bound version reads with a cursor. Validate paths, duplicate entries, byte/count limits and revision identifiers before insertion.
+- [x] Prove actual SQLite reopen, wrong-scope rejection, immutable history, actual filesystem hash changes, truncation/unverified semantics and frozen-v25 migration preservation in CI. No local tests or builds.
+- [x] Keep metadata storage separate from the subsequent bounded before/after-content collector, per-hunk diff, reasons/checks, merge approval and PR publication. Hashes alone cannot reconstruct historical hunks. This foundation does not complete Task 7.
+
+Task 7a evidence: run `39165400760`, commit `abcf76bd34d30294f36792ba530b20a18c2522d6`, passed 157 agent contract tests with five environment skips and the separately selected frozen-v25 migration preservation test. Its later typed build failed and was corrected in `bcea7c6`; these checks do not establish native UI, authenticated providers, or the rest of Task 7.
+
+#### Task 7b: Retained before/after contents and native file review
+
+- [ ] Capture immutable original bytes through the bound native helper before starting the provider; retain at most 300 file reads, 1 MiB per file and 8 MiB of strict UTF-8 text per snapshot. Keep complete metadata inventory separate from unavailable text, and never follow symlink targets.
+- [ ] Persist the exact turn/folder baseline and after snapshot with metadata evidence in schema v27. Prove frozen-v26 seeded data preservation, exact latest-version retry, metadata-only history coexistence, binary/deleted/type-changed files, bounded getters and restart reconciliation in CI.
+- [ ] Observe final contents after verified PTY cleanup and before releasing the folder. Retain the exact helper recovery capability on uncertain cleanup. Retry a failed DB write using the already captured bytes; never reread a later folder state as an earlier final result.
+- [ ] Add project-scoped read-only evidence/file IPC and a flat Korean Changes tab. Open retained text in the real read-only Code OSS diff editor; show absent sides, binary/invalid text, partial coverage and unknown authorship explicitly.
+- [ ] Verify actual native helper cancellation/recovery and diff review at desktop/narrow widths in GitHub macOS CI, including screenshots and failure states. No local builds, tests, providers, apps or browsers.
+
+Task 7b does not supply the missing explanations/check receipts, trusted local merge approval/conflict flow or PR publication approval from Task 7.
 
 ### Task 8: First-use onboarding and full acceptance audit
 

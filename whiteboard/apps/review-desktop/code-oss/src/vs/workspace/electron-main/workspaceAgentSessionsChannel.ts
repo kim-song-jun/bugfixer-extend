@@ -16,6 +16,7 @@ import type {
 	WorkspaceAgentSessionWorkspacePreparationDTO,
 	WorkspaceAgentSessionOutputEvent,
 } from '../common/workspaceAgentSessionProtocol.js';
+import type { WorkspaceAgentChangeFileDTO } from '../common/workspaceAgentChangesProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT } from '../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage } from '../common/workspaceAgentCommunicationProtocol.js';
 import type {
@@ -208,6 +209,47 @@ export class WorkspaceAgentSessionsChannel {
 				this.requireSession(projectId, request.sessionId);
 				const options = this.parseTranscriptOptions(this.record(arg).options);
 				return this.database.agentSessionTranscripts.readPage(projectId, request.sessionId, request.turnId, options) as T;
+			}
+			case 'getLatestChangeEvidence': {
+				const request = this.parseChangeScope(arg, projectId, ['projectId', 'sessionId', 'turnId']);
+				this.requireSession(projectId, request.sessionId);
+				const result = this.database.agentSessionChangeEvidence.getLatest(projectId, request.sessionId, request.turnId) ?? null;
+				if (result && (result.projectId !== projectId || result.sessionId !== request.sessionId || result.turnId !== request.turnId)) { throw new Error('Change evidence response scope does not match the request.'); }
+				return result as T;
+			}
+			case 'listChangeEvidence': {
+				const request = this.parseChangeScope(arg, projectId, ['projectId', 'sessionId', 'turnId', 'afterVersion', 'beforeVersion', 'limit']);
+				this.requireSession(projectId, request.sessionId);
+				const raw = this.record(arg);
+				if (raw.afterVersion !== undefined && raw.beforeVersion !== undefined) { throw new Error('Change evidence paging accepts either beforeVersion or afterVersion, not both.'); }
+				const page = this.database.agentSessionChangeEvidence.listVersions(projectId, request.sessionId, request.turnId, {
+					...(raw.beforeVersion !== undefined ? { beforeVersion: this.integer(raw.beforeVersion, 1, MAX_SEQUENCE, 'change evidence cursor') }
+						: { afterVersion: raw.afterVersion === undefined ? 0 : this.integer(raw.afterVersion, 0, MAX_SEQUENCE, 'change evidence cursor') }),
+					limit: raw.limit === undefined ? 50 : this.integer(raw.limit, 1, 100, 'change evidence page limit'),
+				});
+				if (page.snapshots.some(item => item.projectId !== projectId || item.sessionId !== request.sessionId || item.turnId !== request.turnId)) { throw new Error('Change evidence page contains an out-of-scope snapshot.'); }
+				return page as T;
+			}
+			case 'getChangeFile': {
+				const request = this.parseChangeScope(arg, projectId, ['projectId', 'sessionId', 'turnId', 'evidenceVersion', 'fingerprint', 'path']);
+				this.requireSession(projectId, request.sessionId);
+				const raw = this.record(arg);
+				const evidenceVersion = this.integer(raw.evidenceVersion, 1, MAX_SEQUENCE, 'change evidence version');
+				const fingerprint = this.string(raw.fingerprint, 'change evidence fingerprint', 64);
+				if (!/^[0-9a-f]{64}$/i.test(fingerprint)) { throw new Error('A valid change evidence fingerprint is required.'); }
+				const path = this.safeChangePath(raw.path);
+				const page = this.database.agentSessionChangeEvidence.listVersions(projectId, request.sessionId, request.turnId, { afterVersion: evidenceVersion - 1, limit: 1 });
+				const selected = page.snapshots[0];
+				if (!selected || selected.version !== evidenceVersion || selected.fingerprint !== fingerprint) { throw new Error('The selected change evidence version is unavailable or has changed.'); }
+				if (!selected.files.some(file => file.path === path || file.previousPath === path)) { throw new Error('The requested path is not part of the selected change evidence.'); }
+				const scope = { projectId, sessionId: request.sessionId, turnId: request.turnId };
+				const result = this.database.agentSessionContents.getFile({ scope, evidenceVersion, path });
+				if (!result) { return null as T; }
+				if (result.scope.projectId !== projectId || result.scope.sessionId !== request.sessionId || result.scope.turnId !== request.turnId
+					|| result.evidenceVersion !== evidenceVersion || result.path !== path || result.evidenceFingerprint !== fingerprint) {
+					throw new Error('Retained file content does not match the selected change evidence.');
+				}
+				return result as WorkspaceAgentChangeFileDTO as T;
 			}
 			case 'listNotifications': {
 				const request = this.record(arg);
@@ -666,6 +708,26 @@ export class WorkspaceAgentSessionsChannel {
 		const request = this.parseSessionRequest(value, projectId);
 		const raw = this.record(value);
 		return { ...request, turnId: this.uuid(raw.turnId, 'turn ID') };
+	}
+
+	private parseChangeScope(value: unknown, projectId: string, allowedKeys: readonly string[]) {
+		const raw = this.record(value);
+		if (Object.keys(raw).some(key => !allowedKeys.includes(key)) || !['projectId', 'sessionId', 'turnId'].every(key => Object.hasOwn(raw, key))) {
+			throw new Error('Change evidence requests must contain only their documented scope and paging fields.');
+		}
+		this.assertProjectId(raw.projectId, projectId);
+		const sessionId = this.uuid(raw.sessionId, 'session ID');
+		const turnId = this.uuid(raw.turnId, 'turn ID');
+		if (!this.database.agentSessionTurns.getTurn(projectId, sessionId, turnId)) { throw new Error('The turn does not belong to this project session.'); }
+		return { sessionId, turnId };
+	}
+
+	private safeChangePath(value: unknown): string {
+		const path = this.string(value, 'change file path', 4096);
+		if (path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+			throw new Error('The change file path must be a safe root-relative path.');
+		}
+		return path;
 	}
 
 	private parseAttach(value: unknown, projectId: string) {

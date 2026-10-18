@@ -1,8 +1,10 @@
 import { $, type Dimension } from '../../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
+import { generateUuid } from '../../../../../base/common/uuid.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { Disposable, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
+import { Schemas } from '../../../../../base/common/network.js';
 import { ipcRenderer } from '../../../../../base/parts/sandbox/electron-browser/globals.js';
 import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
@@ -17,10 +19,13 @@ import { Registry } from '../../../../../platform/registry/common/platform.js';
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
 import { INativeWorkbenchEnvironmentService } from '../../../../../workbench/services/environment/electron-browser/environmentService.js';
 import type { IEditorGroup } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
+import { EditorsOrder } from '../../../../../workbench/common/editor.js';
 import type { IEditorOpenContext } from '../../../../../workbench/common/editor.js';
+import type { ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
 import { EditorExtensions, type IEditorFactoryRegistry } from '../../../../../workbench/common/editor.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
+import { IModelService } from '../../../../../editor/common/services/model.js';
 import { IWorkbenchLayoutService, Parts } from '../../../../../workbench/services/layout/browser/layoutService.js';
 import { IPaneCompositePartService } from '../../../../../workbench/services/panecomposite/browser/panecomposite.js';
 import { ViewContainerLocation } from '../../../../../workbench/common/views.js';
@@ -32,6 +37,7 @@ import { ITerminalService } from '../../../../../workbench/contrib/terminal/brow
 import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, SessionNotificationDTO, SessionPageOptions, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO, CreateAgentWorkflowInput } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
+import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import type { WorkspaceKnowledgeDTO } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
@@ -44,6 +50,8 @@ import { createSessionLogs, type SessionLogsController, type SessionLogsContext,
 import { createSessionNotifications, type SessionNotificationsActions, type SessionNotificationsController } from '../../widgets/sessionNotifications/index.js';
 import { createSessionMessages, type SessionMessagesActions, type SessionMessagesController } from '../../widgets/sessionMessages/index.js';
 import { createSessionWorkflow, type SessionWorkflowActions, type SessionWorkflowController } from '../../widgets/sessionWorkflow/index.js';
+import { createSessionChanges, type SessionChangesActions, type SessionChangesContext, type SessionChangesController } from '../../widgets/sessionChanges/index.js';
+import { agentSessionStateLabel } from '../../entities/agentSession/index.js';
 import type { AgentSessionViewTab } from '../../features/sessionViewTabs/index.js';
 import { SessionTerminalController } from '../../shared/sessionTerminal/index.js';
 import { AgentSessionWorkspaceEditorInput } from './sessionWorkspaceEditorInput.js';
@@ -70,6 +78,30 @@ const SESSION_STORAGE_LOG_TURN = 'devfast.aiSessions.logTurn';
 interface PendingNotificationMessage {
 	readonly sessionId: string;
 	readonly messageId: string;
+}
+
+interface OwnedSessionChangeDiff {
+	readonly input: import('../../../../../workbench/common/editor.js').EditorInput;
+	readonly original: import('../../../../../editor/common/model.js').ITextModel;
+	readonly modified: import('../../../../../editor/common/model.js').ITextModel;
+	dispose(): void;
+}
+
+const sessionChangeDiffOwners = new WeakMap<IEditorService, OwnedSessionChangeDiff>();
+const sessionChangeDiffQueues = new WeakMap<IEditorService, Promise<void>>();
+
+async function withSessionChangeDiffQueue<T>(service: IEditorService, operation: () => Promise<T>): Promise<T> {
+	const previous = sessionChangeDiffQueues.get(service) ?? Promise.resolve();
+	let release!: () => void;
+	const reservation = new Promise<void>(resolve => { release = resolve; });
+	const queued = previous.then(() => reservation);
+	sessionChangeDiffQueues.set(service, queued);
+	await previous;
+	try { return await operation(); }
+	finally {
+		release();
+		if (sessionChangeDiffQueues.get(service) === queued) { sessionChangeDiffQueues.delete(service); }
+	}
 }
 
 export class AgentSessionWorkspaceEditorPane extends EditorPane {
@@ -112,6 +144,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private sessionWorkflowPanel: HTMLElement | undefined;
 	private sessionWorkflowMount: HTMLElement | undefined;
 	private sessionWorkflow: SessionWorkflowController | undefined;
+	private sessionChangesPanel: HTMLElement | undefined;
+	private sessionChangesMount: HTMLElement | undefined;
+	private sessionChangesTurnSelectMount: HTMLElement | undefined;
+	private sessionChangesWidgetMount: HTMLElement | undefined;
+	private sessionChangesController: SessionChangesController | undefined;
+	private sessionChangesContextKey: string | undefined;
+	private readonly selectedChangeTurns = new Map<string, string>();
 	private notificationsMount: HTMLElement | undefined;
 	private sessionNotifications: SessionNotificationsController | undefined;
 	private pendingNotificationMessage: PendingNotificationMessage | undefined;
@@ -124,6 +163,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@IFileService private readonly fileService: IFileService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IModelService private readonly modelService: IModelService,
 		@INativeWorkbenchEnvironmentService private readonly environment: INativeWorkbenchEnvironmentService) {
 		super(AgentSessionWorkspaceEditorPane.ID, group, telemetryService, themeService, storageService);
 		this.terminalService = terminalService;
@@ -131,6 +172,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this._register(toDisposable(() => this.sessionLogs?.dispose()));
 		this._register(toDisposable(() => this.sessionMessages?.dispose()));
 		this._register(toDisposable(() => this.sessionWorkflow?.dispose()));
+		this._register(toDisposable(() => this.sessionChangesController?.dispose()));
 		this._register(toDisposable(() => this.sessionNotifications?.dispose()));
 	}
 
@@ -145,7 +187,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	protected override setEditorVisible(visible: boolean): void {
 		this.editorVisible = visible;
-		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionNotifications?.setVisible(false); }
+		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionChangesController?.setVisible(false); this.sessionNotifications?.setVisible(false); }
 		else this.render();
 		this.updateLifecyclePolling();
 	}
@@ -162,6 +204,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.sessionLogs?.invalidateContext();
 			this.sessionMessages?.setVisible(false);
 			this.sessionWorkflow?.setVisible(false);
+			this.sessionChangesController?.setVisible(false);
 			this.sessionNotifications?.setVisible(false);
 			this.projectId = input.projectId;
 			this.dashboard = undefined;
@@ -516,6 +559,122 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return this.sessionWorkflowPanel;
 	}
 
+	private updateChangesPanel(sessionId: string): HTMLElement {
+		if (!this.sessionChangesPanel) {
+			this.sessionChangesPanel = document.createElement('div');
+			this.sessionChangesPanel.className = 'ai-session__changes-panel';
+			this.sessionChangesMount = document.createElement('div');
+			this.sessionChangesMount.className = 'ai-session__changes-mount';
+			this.sessionChangesTurnSelectMount = document.createElement('div');
+			this.sessionChangesTurnSelectMount.className = 'ai-session-changes__turn-select-mount';
+			this.sessionChangesWidgetMount = document.createElement('div');
+			this.sessionChangesWidgetMount.className = 'ai-session-changes__widget';
+			this.sessionChangesMount.append(this.sessionChangesTurnSelectMount, this.sessionChangesWidgetMount);
+			this.sessionChangesPanel.appendChild(this.sessionChangesMount);
+		}
+		const loadedTurns = this.turns.get(sessionId);
+		const selectMount = this.sessionChangesTurnSelectMount!;
+		selectMount.replaceChildren();
+		if (loadedTurns === undefined) {
+			const loading = document.createElement('p'); loading.className = 'ai-session-changes__empty'; loading.setAttribute('role', 'status'); loading.textContent = '실행 기록을 불러오는 중입니다.'; selectMount.appendChild(loading);
+			this.sessionChangesWidgetMount!.hidden = true;
+			this.sessionChangesController?.setVisible(false);
+			return this.sessionChangesPanel;
+		}
+		const turns = loadedTurns;
+		let turnId = this.selectedChangeTurns.get(sessionId);
+		if (!turns.some(turn => turn.id === turnId)) { turnId = turns.at(-1)?.id; if (turnId) { this.selectedChangeTurns.set(sessionId, turnId); } }
+		if (!turnId || !this.projectId) {
+			const empty = document.createElement('p'); empty.className = 'ai-session-changes__empty'; empty.textContent = '이 세션에는 확인할 실행 기록이 없습니다.'; selectMount.appendChild(empty);
+			this.sessionChangesWidgetMount!.hidden = true;
+			this.sessionChangesController?.setVisible(false);
+			return this.sessionChangesPanel;
+		}
+		this.sessionChangesWidgetMount!.hidden = false;
+		const selectorLabel = document.createElement('label'); selectorLabel.className = 'ai-session-changes__turn-label'; selectorLabel.textContent = '실행 기록';
+		const selector = document.createElement('select'); selector.setAttribute('aria-label', '변경을 확인할 실행 기록');
+		for (const turn of turns) { const option = document.createElement('option'); option.value = turn.id; option.textContent = `실행 ${turn.ordinal} · ${agentSessionStateLabel[turn.state]} · ${new Date(turn.createdAt).toLocaleString('ko-KR')}`; selector.appendChild(option); }
+		selector.value = turnId;
+		selector.addEventListener('change', () => { this.selectedChangeTurns.set(sessionId, selector.value); this.render(); });
+		selectorLabel.appendChild(selector); selectMount.appendChild(selectorLabel);
+		const widget = this.sessionChangesWidgetMount!;
+		const projectId = this.projectId;
+		const context: SessionChangesContext = { projectId, sessionId, turnId };
+		const contextKey = JSON.stringify([projectId, sessionId, turnId]);
+		const actions: SessionChangesActions = {
+			latest: () => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getLatestChangeEvidence', context) as Promise<WorkspaceAgentChangeEvidenceDTO | null>,
+			list: (beforeVersion, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listChangeEvidence', { ...context, beforeVersion, limit }) as Promise<WorkspaceAgentChangeEvidencePageDTO>,
+			file: (evidence, path) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getChangeFile', { ...context, evidenceVersion: evidence.version, fingerprint: evidence.fingerprint, path }) as Promise<WorkspaceAgentChangeFileDTO | null>,
+			openDiff: (evidence, path, before, after, isCurrent) => this.openChangeDiff(context, evidence, path, before, after, isCurrent),
+		};
+		if (!this.sessionChangesController) {
+			this.sessionChangesContextKey = contextKey;
+			this.sessionChangesController = createSessionChanges(widget, context, actions);
+		} else if (this.sessionChangesContextKey !== contextKey) {
+			this.sessionChangesContextKey = contextKey;
+			this.sessionChangesController.setContext(context, actions);
+		}
+		this.sessionChangesController.setVisible(this.editorVisible && this.activeTab === 'changes');
+		return this.sessionChangesPanel;
+	}
+
+	private async openChangeDiff(context: SessionChangesContext, evidence: WorkspaceAgentChangeEvidenceDTO, path: string, before: string, after: string, isCurrent: () => boolean): Promise<void> {
+		const editorService = this.editorService;
+		await withSessionChangeDiffQueue(editorService, async () => {
+			if (!isCurrent()) { return; }
+			const owned = sessionChangeDiffOwners.get(editorService);
+			if (owned) {
+				const identifier = editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).find(item => item.editor === owned.input);
+				if (identifier) { await editorService.closeEditor(identifier); }
+				if (sessionChangeDiffOwners.get(editorService) === owned) { owned.dispose(); }
+			}
+			if (!isCurrent()) { return; }
+			const token = `${encodeURIComponent(context.projectId)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(context.turnId)}/${generateUuid()}`;
+			const originalUri = URI.from({ scheme: Schemas.inMemory, path: `/agent-session-change/${token}/before/${encodeURIComponent(path)}` });
+			const modifiedUri = URI.from({ scheme: Schemas.inMemory, path: `/agent-session-change/${token}/after/${encodeURIComponent(path)}` });
+			let original: import('../../../../../editor/common/model.js').ITextModel | undefined;
+			let modified: import('../../../../../editor/common/model.js').ITextModel | undefined;
+			let openedInput: import('../../../../../workbench/common/editor.js').EditorInput | undefined;
+			try {
+				original = this.modelService.createModel(before, null, originalUri);
+				modified = this.modelService.createModel(after, null, modifiedUri);
+				const label = `v${evidence.version} · ${path} · 실행 ${evidence.turnId.slice(0, 8)}`;
+				const pane = await editorService.openEditor({ original: { resource: originalUri }, modified: { resource: modifiedUri }, label, description: evidence.fingerprint.slice(0, 12) }) as ITextDiffEditorPane | undefined;
+				openedInput = pane?.input;
+				if (!pane || !openedInput) { throw new Error('코드 비교 편집기를 열지 못했습니다.'); }
+				if (!isCurrent()) {
+					const identifier = editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).find(item => item.editor === openedInput);
+					if (identifier) { await editorService.closeEditor(identifier); }
+					original.dispose(); modified.dispose();
+					return;
+				}
+				const control = pane.getControl();
+				control?.updateOptions({ readOnly: true });
+				control?.getOriginalEditor().updateOptions({ readOnly: true });
+				control?.getModifiedEditor().updateOptions({ readOnly: true });
+				let closed = false;
+				let closeListener: { dispose(): void } | undefined;
+				const pair: OwnedSessionChangeDiff = {
+					input: openedInput, original, modified,
+					dispose: () => {
+						if (closed) { return; }
+						closed = true; closeListener?.dispose(); original!.dispose(); modified!.dispose();
+						if (sessionChangeDiffOwners.get(editorService) === pair) { sessionChangeDiffOwners.delete(editorService); }
+					},
+				};
+				sessionChangeDiffOwners.set(editorService, pair);
+				closeListener = editorService.onDidCloseEditor(event => { if (event.editor === openedInput) { pair.dispose(); } });
+			} catch (error) {
+				if (openedInput) {
+					const identifier = editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE).find(item => item.editor === openedInput);
+					if (identifier) { await editorService.closeEditor(identifier); }
+				}
+				original?.dispose(); modified?.dispose();
+				throw error;
+			}
+		});
+	}
+
 	private updateNotificationsMount(): HTMLElement {
 		if (!this.notificationsMount) {
 			this.notificationsMount = document.createElement('div');
@@ -611,11 +770,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		let logsShouldBeVisible = false;
 		let messagesShouldBeVisible = false;
 		let workflowShouldBeVisible = false;
+		let changesShouldBeVisible = false;
 		this.root.replaceChildren();
 		if (!this.projectId) {
 			this.sessionLogs?.setVisible(false);
 			this.sessionMessages?.setVisible(false);
 			this.sessionWorkflow?.setVisible(false);
+			this.sessionChangesController?.setVisible(false);
 			this.sessionNotifications?.setVisible(false);
 			return;
 		}
@@ -664,13 +825,16 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 					logsShouldBeVisible = this.editorVisible && this.activeTab === 'logs' && !!this.turns.get(session.id)?.length;
 					messagesShouldBeVisible = this.editorVisible && this.activeTab === 'messages';
 					workflowShouldBeVisible = this.editorVisible && this.activeTab === 'workflow';
+					changesShouldBeVisible = this.editorVisible && this.activeTab === 'changes';
 					const logsPanel = this.updateLogsPanel(session.id);
 					const messagesPanel = this.updateMessagesPanel(session.id);
 					const workflowPanel = this.updateWorkflowPanel(session);
+					const changesPanel = this.updateChangesPanel(session.id);
 					const rendered = renderSessionDetail(main, session, turn, this.activeTab, {
 						onStart: () => void this.prepareLaunch(session.id),
 						onStop: () => void this.stopTurn(), onTab: tab => this.setTab(tab),
 					}, taskNames.get(session.taskId ?? ''), logsPanel, messagesPanel, workflowPanel);
+					if (this.activeTab === 'changes') { main.querySelector<HTMLElement>('.ai-session__panel')?.replaceChildren(changesPanel); }
 					if (this.activeTab === 'terminal') this.renderTerminal(rendered.terminal, session, turn);
 					if (this.preview && this.previewSessionId === session.id) {
 						this.renderPreview(main, this.preview);
@@ -700,6 +864,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (!logsShouldBeVisible) { this.sessionLogs?.setVisible(false); }
 		if (!messagesShouldBeVisible) { this.sessionMessages?.setVisible(false); }
 		if (!workflowShouldBeVisible) { this.sessionWorkflow?.setVisible(false); }
+		if (!changesShouldBeVisible) { this.sessionChangesController?.setVisible(false); }
 		if (this.dashboard) { this.sessionNotifications?.setVisible(this.editorVisible); }
 		this.updateLifecyclePolling();
 	}
