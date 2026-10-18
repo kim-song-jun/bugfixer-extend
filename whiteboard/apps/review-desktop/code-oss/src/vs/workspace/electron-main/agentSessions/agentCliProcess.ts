@@ -92,7 +92,6 @@ async function runWithGuardian(
 			...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
 			execArgv: [],
 			detached: true,
-			shell: false,
 			stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
 			env: minimalGuardianEnvironment(options.env),
 		});

@@ -19,7 +19,7 @@
     "test:e2e:telemetry": "node scripts/e2e/run.mjs --journey telemetry-contract --runtime \"${REVIEW_E2E_RUNTIME:?stage a runtime, see scripts/e2e/TESTING.md}\"",
     "pretest": "pnpm run protocol:sync",
     "test": "node --test \"scripts/**/*.test.mjs\" && TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test \"code-oss/src/vs/review/**/*.test.ts\"",
-    "test:agent-sessions": "TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 \"code-oss/src/vs/workspace/electron-main/agentSessions/*.test.ts\"",
+    "test:agent-sessions": "TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 \"code-oss/src/vs/workspace/electron-main/agentSessions/*.test.ts\" code-oss/src/vs/workspace/electron-main/workspaceAgentSessionsChannel.test.ts",
     "test:agent-cli-help": "TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/cli-tests/agentCliHelp.integration.ts",
     "test:agent-session-workspaces": "TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionWorkspace.test.ts",
     "pretypecheck": "pnpm run protocol:sync",

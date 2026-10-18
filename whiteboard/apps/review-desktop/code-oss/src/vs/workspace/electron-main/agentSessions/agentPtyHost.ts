@@ -30,6 +30,7 @@ const CONTROL_HELLO_TIMEOUT_MS = 1_500;
 const CONTROL_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_CONTROL_CONNECTIONS = 4;
 const MAX_EXIT_LISTENERS = 8;
+const MAX_OUTPUT_LISTENERS = 8;
 
 // Handles are intentionally object-identity tokens. PID and PGID are never accepted from callers.
 declare const agentPtyHandleBrand: unique symbol;
@@ -371,11 +372,14 @@ export class AgentPtyHost {
 		const record = this.requireOwned(handle);
 		if (typeof listener !== 'function') { throw new Error('An output listener is required.'); }
 		validateCursor(afterSequence);
+		if (record.listeners.has(listener)) { throw new Error('The output listener already has an active PTY attachment.'); }
+		if (record.listeners.size >= MAX_OUTPUT_LISTENERS) { throw new Error('The PTY output attachment limit was reached.'); }
+		const initialPage = this.read(handle, afterSequence);
 		record.listeners.add(listener);
 		let attached = true;
 		return {
 			snapshot: snapshot(record),
-			initialPage: this.read(handle, afterSequence),
+			initialPage,
 			read: (cursor, limit) => {
 				if (!attached) { throw new Error('The PTY attachment is detached.'); }
 				return this.read(handle, cursor, limit);

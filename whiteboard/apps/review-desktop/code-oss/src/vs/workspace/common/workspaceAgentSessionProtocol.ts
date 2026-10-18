@@ -157,3 +157,35 @@ export interface AgentSessionTurnLifecycleResult {
 	readonly turn: AgentSessionTurnDTO;
 	readonly session: AgentSessionDTO;
 }
+
+/** Project-window IPC contract. Runtime authority is always derived from the sender's live window. */
+export type WorkspaceAgentSessionsCommand =
+	| 'listSessions' | 'createSession' | 'listTurns' | 'preview' | 'start' | 'stop'
+	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect';
+
+export interface WorkspaceAgentSessionProjectRequest { readonly projectId: string; }
+export type WorkspaceAgentSessionCreateRequest = CreateAgentSessionInput;
+export interface WorkspaceAgentSessionItemRequest extends WorkspaceAgentSessionProjectRequest { readonly sessionId: string; }
+export interface WorkspaceAgentSessionPreviewRequest extends WorkspaceAgentSessionItemRequest { readonly permissionPolicy: AgentSessionPermissionPolicy; }
+export interface WorkspaceAgentSessionStartRequest extends WorkspaceAgentSessionItemRequest { readonly ticketId: string; }
+export interface WorkspaceAgentSessionTurnRequest extends WorkspaceAgentSessionItemRequest { readonly turnId: string; }
+export interface WorkspaceAgentSessionAttachRequest extends WorkspaceAgentSessionTurnRequest { readonly afterSequence?: number; }
+export interface WorkspaceAgentSessionReadRequest extends WorkspaceAgentSessionTurnRequest {
+	readonly attachmentId: string;
+	readonly afterSequence: number;
+	readonly limit?: number;
+}
+export interface WorkspaceAgentSessionWriteRequest extends WorkspaceAgentSessionTurnRequest { readonly text: string; }
+export interface WorkspaceAgentSessionResizeRequest extends WorkspaceAgentSessionTurnRequest { readonly cols: number; readonly rows: number; }
+export interface WorkspaceAgentSessionDisconnectRequest extends WorkspaceAgentSessionTurnRequest { readonly attachmentId: string; }
+
+export interface WorkspaceAgentSessionOutputEvent {
+	readonly attachmentId: string;
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly turnId: string;
+	readonly chunk: { readonly sequence: number; readonly text: string; readonly gap: boolean };
+}
+
+export const WORKSPACE_AGENT_SESSIONS_CHANNEL = 'workspaceAgentSessions';
+export const WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT = 'workspaceAgentSessions/output';

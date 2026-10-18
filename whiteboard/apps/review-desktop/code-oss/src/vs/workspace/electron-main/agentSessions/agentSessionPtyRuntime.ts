@@ -6,7 +6,7 @@
 import { isAbsolute } from 'node:path';
 import type { IDisposable } from '../../../base/common/lifecycle.js';
 import type { AgentSessionPermissionPolicy, AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
-import { AgentPtyHost, AgentPtyStartError, type AgentPtyAttachment, type AgentPtyHandle, type AgentPtyHostOptions, type AgentPtyLaunch, type AgentPtyOutputChunk, type AgentPtyOutputPage, type AgentPtySnapshot, type AgentPtyStopResult } from './agentPtyHost.js';
+import { AgentPtyHost, AgentPtyStartError, type AgentPtyAttachment, type AgentPtyHandle, type AgentPtyHostOptions, type AgentPtyLaunch, type AgentPtyOutputChunk, type AgentPtySnapshot, type AgentPtyStopResult } from './agentPtyHost.js';
 import { createAgentPtyOutputSanitizer } from './agentOutputRedactor.js';
 import { AGENT_CLI_COMMAND_SPEC_VERSION } from './agentCliCapabilities.js';
 import type { AgentSessionCommandSpec } from './agentSessionCommands.js';

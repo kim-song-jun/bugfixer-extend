@@ -24,6 +24,7 @@ import { AcquiredAgentSessionWorkspace, AgentSessionWorkspaceResolver } from './
 const LAUNCH_TICKET_TTL_MS = 30_000;
 const MAX_LAUNCH_TICKETS = 128;
 const MAX_PENDING_STARTS = 8;
+const MAX_ATTACHMENTS_PER_TURN = 8;
 
 declare const agentSessionRuntimeHandleBrand: unique symbol;
 
@@ -273,6 +274,9 @@ export class AgentSessionService {
 	): Promise<AgentSessionAttachResult> {
 		const live = this.requireRunningTurn(projectId, sessionId, turnId);
 		if (typeof listener !== 'function') { throw new Error('A trusted session output listener is required.'); }
+		if (live.attachments.size + live.pendingAttachments.size >= MAX_ATTACHMENTS_PER_TURN) {
+			throw new Error('The session turn output attachment limit was reached.');
+		}
 		let resolvePending!: () => void;
 		const pending = new Promise<void>(resolve => { resolvePending = resolve; });
 		live.pendingAttachments.add(pending);

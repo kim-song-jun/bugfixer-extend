@@ -259,7 +259,26 @@ try {
   const a = await launchFixture(host, 'a');
   const b = await launchFixture(host, 'b');
   const liveOutput = [];
+
+  for (let index = 0; index < 10; index++) {
+    await assert.rejects(host.attach(a, () => undefined, Number.MAX_SAFE_INTEGER), /cursor/);
+  }
+
   const attachment = await host.attach(a, chunk => liveOutput.push(chunk.text));
+
+  const boundedAttachments = [];
+
+  try {
+    for (let index = 0; index < 7; index++) {
+      boundedAttachments.push(await host.attach(a, () => undefined));
+    }
+
+    await assert.rejects(host.attach(a, () => undefined), /attachment limit/);
+  } finally {
+    for (const extra of boundedAttachments) extra.dispose();
+  }
+
+  receipt.checks.push('real PTY output attachment fanout is bounded and released slots are reusable');
 
   assert.throws(() => host.getSnapshot(Object.freeze({})), /not created by this host/);
   await host.write(a, 'echo:한글-A\n');
@@ -484,6 +503,19 @@ try {
   await recordOwnedIdentity(naturalTurn.id, 'service-natural');
   const firstOutput = [];
   const firstAttachment = await service.attach(project.id, naturalSession.id, naturalTurn.id, chunk => firstOutput.push(chunk.text));
+
+  const boundedServiceAttachments = [];
+
+  try {
+    for (let index = 0; index < 7; index++) {
+      boundedServiceAttachments.push(await service.attach(project.id, naturalSession.id, naturalTurn.id, () => undefined));
+    }
+
+    await assert.rejects(service.attach(project.id, naturalSession.id, naturalTurn.id, () => undefined), /attachment limit/);
+  } finally {
+    for (const extra of boundedServiceAttachments) service.detach(project.id, naturalSession.id, naturalTurn.id, extra.attachmentId);
+  }
+
   await service.write(project.id, naturalSession.id, naturalTurn.id, 'echo:service-duplex\n');
   await until(() => firstOutput.join('').includes('ECHO:service-duplex'), 'service scoped duplex output');
   service.detach(project.id, naturalSession.id, naturalTurn.id, firstAttachment.attachmentId);
