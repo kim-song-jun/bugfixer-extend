@@ -301,6 +301,7 @@ try {
       flush() { return buffered; },
     };
   });
+
   const tainted = await launchFixture(taintedHost, 'tainted');
   const rejectedOutput = [];
   const taintedAttachment = await taintedHost.attach(tainted, chunk => rejectedOutput.push(chunk.text));
