@@ -135,7 +135,7 @@ function createCodexArgs(input: AgentSessionCommandInput): string[] {
 }
 
 function serializeCodexIdentityHook(command: string): string {
-	return `[{"hooks":[{"type":"command","command":${JSON.stringify(command)}}]}]`;
+	return `[{ hooks = [{ type = "command", command = ${serializeTomlValue(command)} }] }]`;
 }
 
 function codexMcpOverrides(server: AgentSessionMcpServer): Record<string, string | readonly string[]> {

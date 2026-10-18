@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { discoverAgentCliCapabilities } from '../agentCliCapabilities.js';
+import { createAgentSessionCommand } from '../agentSessionCommands.js';
 import { runBoundedAgentCliProcess } from '../agentCliProcess.js';
 
 describe('pinned provider CLI help and version discovery', () => {
@@ -97,14 +98,35 @@ describe('pinned provider CLI help and version discovery', () => {
 		try {
 			writeFileSync(configPath, originalConfig);
 			const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '', HOME: profile, CODEX_HOME: profile, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' };
-			const command = '"/app/Node.js" "/app/helpers/capture identity.mjs"';
-			const hookConfig = JSON.stringify([{ hooks: [{ type: 'command', command }] }]);
+			const commandSpec = createAgentSessionCommand({
+				provider: 'codex',
+				commandSpecVersion: 1,
+				capabilities: {
+					provider: 'codex', commandSpecVersion: 1, version: '0.163.0', interactive: true, model: true,
+					resumeById: true, newSessionId: true, workingDirectory: true, readOnlyPolicy: true, mutatingPolicy: true,
+					invocationMcpConfig: true, exclusiveMcpRoster: false, profileSelector: 'CODEX_HOME', requiredPermissionModes: ['--no-daemon'],
+				},
+				executable,
+				model: 'gpt-6.1-sol',
+				profileRef: 'ci-pinned-codex',
+				profileDirectory: profile,
+				cwd: profile,
+				sessionId: '550e8400-e29b-41d4-a716-446655440000',
+				permissionPolicy: { mode: 'mutating', approval: 'on-request' },
+				mcpServer: { name: 'bugfixer-session', command: '/app/session-mcp', args: [], envVariables: ['BUGFIXER_SESSION_TOKEN'] },
+				profileEnvironment: { CODEX_HOME: profile },
+				identityHookCommand: '"/app/Node.js" "/app/helpers/capture identity.mjs"',
+			});
+			const hookConfigIndex = commandSpec.args.findIndex((argument, index) => argument === '-c' && commandSpec.args[index + 1]?.startsWith('hooks.UserPromptSubmit='));
+			assert.notEqual(hookConfigIndex, -1, 'The command builder must include its invocation-scoped UserPromptSubmit config');
+			const hookConfigAssignment = commandSpec.args[hookConfigIndex + 1];
+			assert.ok(hookConfigAssignment);
 			const accepted = await runBoundedAgentCliProcess(executable, [
 				'mcp', 'list', '--json',
 				'-c', 'mcp_servers.bugfixer-session.command="/app/session-mcp"',
 				'-c', 'mcp_servers.bugfixer-session.args=[]',
 				'-c', 'mcp_servers.bugfixer-session.env_vars=["BUGFIXER_SESSION_TOKEN"]',
-				'-c', `hooks.UserPromptSubmit=${hookConfig}`,
+				'-c', hookConfigAssignment,
 			], { env, cwd: profile, timeoutMs: 10_000, maxOutputBytes: 256 * 1024 });
 			const roster = parseMcpRoster(accepted.stdout);
 			assert.deepEqual(roster.map(server => server.name).sort(), ['bugfixer-session', 'ci-sentinel']);

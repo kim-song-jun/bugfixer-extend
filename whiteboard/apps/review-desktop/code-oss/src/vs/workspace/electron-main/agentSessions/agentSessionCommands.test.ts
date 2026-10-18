@@ -77,11 +77,11 @@ describe('interactive agent CLI command builders', () => {
 			assert.ok(assignment);
 			return assignment.slice(key.length + 1);
 		};
-		const hook = JSON.parse(configValue(fresh.args, 'hooks.UserPromptSubmit'));
-		assert.deepEqual(hook, [{ hooks: [{ type: 'command', command }] }]);
-		assert.deepEqual(JSON.parse(configValue(resumed.args, 'hooks.UserPromptSubmit')), hook, 'The same static command must be used for resumed turns');
+		const hook = '[{ hooks = [{ type = "command", command = "\\\"/app/Node.js\\\" \\\"/app/helpers/capture identity.mjs\\\"" }] }]';
+		assert.equal(configValue(fresh.args, 'hooks.UserPromptSubmit'), hook);
+		assert.equal(configValue(resumed.args, 'hooks.UserPromptSubmit'), hook, 'The same static command must be used for resumed turns');
 		assert.equal(resumed.args.includes(conversationId), true);
-		assert.deepEqual(JSON.parse(configValue(readOnly.args, 'hooks.UserPromptSubmit')), hook);
+		assert.equal(configValue(readOnly.args, 'hooks.UserPromptSubmit'), hook);
 		assert.equal(fresh.args.includes('--no-daemon'), true);
 		assert.equal(fresh.args[fresh.args.indexOf('--model') + 1], 'gpt-6.1-sol');
 		assert.equal(fresh.args[fresh.args.indexOf('--cd') + 1], '/work/repo');
