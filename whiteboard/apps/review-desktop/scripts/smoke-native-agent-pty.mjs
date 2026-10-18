@@ -8,7 +8,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'This resource-intensive probe runs only in GitHub CI');
+
 assert.equal(process.platform, 'darwin');
+
 assert.ok(process.versions.electron, 'Use the packaged Electron executable with ELECTRON_RUN_AS_NODE=1');
 
 const [appPath, evidencePath] = process.argv.slice(2);
@@ -16,18 +18,27 @@ const [appPath, evidencePath] = process.argv.slice(2);
 assert.ok(appPath && evidencePath, 'Pass the packaged app and evidence directory');
 
 const resources = path.join(appPath, 'Contents', 'Resources', 'app');
+
 const nodeExecutable = path.join(resources, 'review-runtime', 'bin', 'node');
+
 const guardianScriptPath = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'pty', 'agentPtyGuardian.mjs');
+
 const hostModule = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentPtyHost.js');
 
 await mkdir(evidencePath, { recursive: true });
+
 await access(nodeExecutable, constants.X_OK);
+
 await access(guardianScriptPath, constants.R_OK);
 
 const { AgentPtyHost } = await import(pathToFileURL(hostModule).href);
+
 const root = await mkdtemp(path.join(os.tmpdir(), 'bfx-pty-probe-'));
+
 const secret = 'bfx-public-fixture-sensitive-value';
+
 const hosts = [];
+
 const identities = [];
 
 function hostState() {
@@ -63,6 +74,7 @@ const receipt = {
   cleanup: [],
   ownedProcesses: identities,
 };
+
 const abortController = new AbortController();
 
 function requestAbort() {
@@ -71,6 +83,7 @@ function requestAbort() {
 }
 
 process.once('SIGINT', requestAbort);
+
 process.once('SIGTERM', requestAbort);
 
 // The probe's fixture policy buffers complete lines, including tokens split across real PTY chunks.
@@ -146,6 +159,7 @@ function retained(host, handle) {
 }
 
 const fixturePath = path.join(root, 'interactive-fixture.mjs');
+
 const fixtureSource = `
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -185,6 +199,7 @@ await writeFile(fixturePath, fixtureSource, { mode: 0o600 });
 
 async function launchFixture(host, label) {
   const identityFile = path.join(root, `${label}.json`);
+
   const handle = await host.start({
     executable: nodeExecutable,
     args: [fixturePath, identityFile],

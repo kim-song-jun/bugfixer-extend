@@ -28,12 +28,17 @@ class FatalWaitError extends Error {}
 
 function renderCDPConsoleArgument(argument) {
   if (argument.type === 'undefined') return 'undefined';
+
   if (Object.hasOwn(argument, 'value')) return String(argument.value);
+
   if (argument.unserializableValue) return String(argument.unserializableValue);
+
   if (argument.description === 'Object' && argument.preview) {
     return `{${argument.preview.properties.map(({ name, value }) => `${name}: ${value}`).join(', ')}}`;
   }
+
   if (argument.subtype === 'array' && argument.preview) return undefined;
+
   return argument.description;
 }
 
@@ -52,30 +57,42 @@ function finalizeConsoleCaptures(captures, owned, cleanOwnedShutdown) {
   const cdpErrorsByText = new Map();
   const pageEvents = captures.flatMap(capture => capture.pageConsoleErrors);
   const cdpEvents = captures.flatMap(capture => capture.cdpConsoleErrors);
+
   for (const event of pageEvents) {
     const key = JSON.stringify([event.pid, event.renderedMessage]);
+
     if (!pageErrorsByText.has(key)) pageErrorsByText.set(key, []);
+
     pageErrorsByText.get(key).push(event);
   }
+
   for (const event of cdpEvents) {
     if (event.renderedMessage === null) continue;
+
     const key = JSON.stringify([event.pid, event.renderedMessage]);
+
     if (!cdpErrorsByText.has(key)) cdpErrorsByText.set(key, []);
+
     cdpErrorsByText.get(key).push(event);
   }
 
   const correlatedCDPEvents = new Set();
+
   for (const [key, matchingPageEvents] of pageErrorsByText) {
     const [pid, renderedMessage] = JSON.parse(key);
+
     const matchingCDPEvents = cdpErrorsByText.get(key) ?? [];
+
     const isOneToOne = matchingPageEvents.length === 1 && matchingCDPEvents.length === 1
       && matchingPageEvents[0].targetIndex === matchingCDPEvents[0].targetIndex;
 
     if (!isOneToOne) {
       for (const event of matchingPageEvents) {
         if (isCanceledThemeLoad(event.entry)) diagnostics.canceledThemeLoads.push(event);
+
         else diagnostics.console.push(event.entry);
       }
+
       diagnostics.consoleCorrelations.push({
         pid,
         renderedMessage,
@@ -89,12 +106,15 @@ function finalizeConsoleCaptures(captures, owned, cleanOwnedShutdown) {
     }
 
     const pageEvent = matchingPageEvents[0];
+
     const cdpEvent = matchingCDPEvents[0];
     correlatedCDPEvents.add(cdpEvent);
     const isCanceledCandidate = isCanceledExtensionScan(pageEvent.entry);
+
     const originatedDuringShutdown = Number.isFinite(cdpEvent.originTimestampEpochMilliseconds)
       && Number.isFinite(owned.shutdownStartEpochMilliseconds)
       && cdpEvent.originTimestampEpochMilliseconds >= owned.shutdownStartEpochMilliseconds;
+
     const isTeardownCancellation = isCanceledCandidate && originatedDuringShutdown && cleanOwnedShutdown;
 
     diagnostics.consoleCorrelations.push({
@@ -114,6 +134,7 @@ function finalizeConsoleCaptures(captures, owned, cleanOwnedShutdown) {
 
     if (isCanceledThemeLoad(pageEvent.entry)) {
       diagnostics.canceledThemeLoads.push(pageEvent);
+
     } else if (isTeardownCancellation) {
       diagnostics.teardownCancellations.push({
         ...pageEvent,
@@ -132,6 +153,7 @@ function finalizeConsoleCaptures(captures, owned, cleanOwnedShutdown) {
 
   for (const event of cdpEvents) {
     if (correlatedCDPEvents.has(event)) continue;
+
     diagnostics.console.push(event.entry);
     diagnostics.consoleCorrelations.push({
       pid: event.pid,
@@ -203,6 +225,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
   diagnostics.apps.push(owned);
   const stderr = [];
   child.stderr.on('data', chunk => stderr.push(chunk.toString()));
+
   const exited = new Promise(resolve => child.once('close', (code, signal) => {
     owned.exitObservedAt = new Date().toISOString();
     resolve({ code, signal });
@@ -240,6 +263,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
         pageConsoleErrors: [],
         cdpConsoleErrors: [],
       };
+
       consoleCaptures.push(capture);
 
       const capturePromise = (async () => {
@@ -263,6 +287,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
         });
         await capture.cdp.send('Runtime.enable');
       })();
+
       watchedPages.set(page, capturePromise);
       page.on('console', message => {
         if (message.type() !== 'error') return;
@@ -384,6 +409,7 @@ async function closeApp(session) {
   try {
 
     beginOwnedShutdown(session.owned);
+
     for (const capture of session.consoleCaptures) {
       if (!capture.cdp) continue;
       session.owned.consoleCaptureBoundaries.push({
@@ -392,6 +418,7 @@ async function closeApp(session) {
         clock: 'CDP Runtime.Timestamp epoch milliseconds / host Date.now epoch milliseconds',
       });
     }
+
     await session.browser.close();
   } finally {
     await stopOwned(session.child, session.exited, session.port, session.owned);
