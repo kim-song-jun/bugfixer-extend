@@ -69,6 +69,7 @@
 - [ ] Test forged launch/attach, wrong project, overlapping shared-folder writer, process crash and restart before enabling live launch.
 - [ ] Integrate `ITerminalService.createTerminal`/native PTY, terminal events and ownership; changing UI tabs must not relaunch the CLI.
 - [ ] Add versioned interactive Codex/Claude argv/MCP configuration builders, selected model, provider conversation IDs and explicit resume; inspect official installed-version support in CI without authenticated calls.
+- [ ] Verify the interactive Codex `--no-daemon` capability in CI and require it for app-owned launches, so the CLI does not delegate session lifetime to a shared background server. Keep explicit session IDs for resume and never select an unrelated `--last` conversation. Source: [Codex CLI reference](https://learn.chatgpt.com/docs/cli/reference), checked 2026-10-19. Local package metadata is Codex 0.163.0 and Claude 2.1.302; these versions were read without executing either CLI and are not capability/authentication proof.
 - [ ] CI actual PTY fixture exercises input/output/resize, two concurrent terminals, cancellation/descendant cleanup, disconnect/reopen, unknown lifecycle and startup failure.
 - [ ] Authenticated real CLI proof remains a separate acceptance gate; fixture success must not claim account/model proof.
 

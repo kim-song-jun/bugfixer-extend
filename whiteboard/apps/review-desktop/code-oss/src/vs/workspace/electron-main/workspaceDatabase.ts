@@ -13,6 +13,7 @@ import { validateDeclarativePackage } from './connectors/declarativePackage.js';
 import type { WorkspaceE2eStep } from '../common/workspaceE2eProtocol.js';
 import type { WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKnowledgeProtocol.js';
 import { AgentSessionStore } from './agentSessions/agentSessionStore.js';
+import { AgentSessionTurnStore } from './agentSessions/agentSessionTurnStore.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -300,7 +301,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 22;
+const schemaVersion = 23;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -311,10 +312,12 @@ export class WorkspaceDatabase {
 	private closed = false;
 	readonly knowledge: WorkspaceKnowledgeStore;
 	readonly agentSessions: AgentSessionStore;
+	readonly agentSessionTurns: AgentSessionTurnStore;
 
 	private constructor(private readonly db: DatabaseSync) {
 		this.knowledge = new WorkspaceKnowledgeStore(db, () => this.assertOpen());
 		this.agentSessions = new AgentSessionStore(db, () => this.assertOpen());
+		this.agentSessionTurns = new AgentSessionTurnStore(db, () => this.assertOpen(), this.agentSessions);
 	}
 
 	static open(path: string): WorkspaceDatabase {
@@ -363,6 +366,7 @@ export class WorkspaceDatabase {
 				if (version < 20) { WorkspaceDatabase.migrateV20(db); }
 				if (version < 21) { WorkspaceDatabase.migrateV21(db); }
 				if (version < 22) { WorkspaceDatabase.migrateV22(db); }
+				if (version < 23) { WorkspaceDatabase.migrateV23(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -846,6 +850,78 @@ export class WorkspaceDatabase {
 			) STRICT;
 			CREATE INDEX agent_session_notifications_page ON agent_session_notifications(project_id, sequence);
 			PRAGMA user_version = 22;
+		`);
+	}
+
+	private static migrateV23(db: DatabaseSync): void {
+		db.exec(`
+			CREATE TABLE agent_session_turns (
+				id TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+				state TEXT NOT NULL CHECK (state IN ('starting', 'running', 'stopping', 'exited', 'interrupted', 'failed')),
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+				model TEXT NOT NULL CHECK (length(trim(model)) BETWEEN 1 AND 200),
+				profile_ref TEXT CHECK (profile_ref IS NULL OR length(trim(profile_ref)) <= 512),
+				snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json) AND length(CAST(snapshot_json AS BLOB)) <= 65536),
+				snapshot_sha256 TEXT NOT NULL CHECK (length(snapshot_sha256) = 64 AND snapshot_sha256 NOT GLOB '*[^0-9a-f]*'),
+				provider_conversation_id TEXT CHECK (provider_conversation_id IS NULL OR (length(provider_conversation_id) = 36 AND provider_conversation_id NOT GLOB '*[^0-9a-fA-F-]*')),
+				exit_code INTEGER,
+				exit_signal TEXT CHECK (exit_signal IS NULL OR length(trim(exit_signal)) BETWEEN 1 AND 64),
+				error_summary TEXT CHECK (error_summary IS NULL OR length(error_summary) <= 2000),
+				cleanup_verified INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_verified IN (0, 1)),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				started_at TEXT,
+				finished_at TEXT,
+				UNIQUE (session_id, ordinal),
+				UNIQUE (id, project_id, session_id),
+				FOREIGN KEY (session_id, project_id) REFERENCES agent_sessions(id, project_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE INDEX agent_session_turns_page ON agent_session_turns(project_id, session_id, ordinal);
+			CREATE UNIQUE INDEX agent_session_turns_one_live ON agent_session_turns(session_id)
+				WHERE state IN ('starting', 'running', 'stopping');
+			CREATE TRIGGER agent_session_turn_owner_insert BEFORE INSERT ON agent_session_turns
+			BEGIN
+				SELECT CASE WHEN NOT EXISTS (
+					SELECT 1 FROM agent_sessions session WHERE session.id = NEW.session_id AND session.project_id = NEW.project_id
+					AND session.provider = NEW.provider AND session.model = NEW.model AND session.profile_ref IS NEW.profile_ref
+					AND json_extract(NEW.snapshot_json, '$.schemaVersion') = 1
+					AND json_extract(NEW.snapshot_json, '$.projectId') = NEW.project_id
+					AND json_extract(NEW.snapshot_json, '$.sessionId') = NEW.session_id
+					AND json_extract(NEW.snapshot_json, '$.sessionRevision') = session.revision
+					AND json_extract(NEW.snapshot_json, '$.bindingId') = session.binding_id
+					AND json_extract(NEW.snapshot_json, '$.taskId') IS session.task_id
+					AND json_extract(NEW.snapshot_json, '$.provider') = NEW.provider
+					AND json_extract(NEW.snapshot_json, '$.model') = NEW.model
+					AND json_extract(NEW.snapshot_json, '$.profileRef') IS NEW.profile_ref
+				) THEN RAISE(ABORT, 'agent session turn snapshot ownership must match its session') END;
+			END;
+			CREATE TRIGGER agent_session_turn_snapshot_immutable BEFORE UPDATE OF
+				id, project_id, session_id, ordinal, provider, model, profile_ref, snapshot_json, snapshot_sha256, created_at
+				ON agent_session_turns
+			BEGIN SELECT RAISE(ABORT, 'agent session turn launch snapshot is immutable'); END;
+			CREATE TRIGGER agent_session_turn_started_at_once BEFORE UPDATE OF started_at ON agent_session_turns
+			WHEN (OLD.started_at IS NOT NULL AND NEW.started_at IS NOT OLD.started_at)
+				OR (OLD.started_at IS NULL AND NEW.started_at IS NOT NULL AND NEW.state != 'running')
+				OR (OLD.started_at IS NULL AND NEW.started_at IS NULL AND NEW.state = 'running')
+			BEGIN SELECT RAISE(ABORT, 'agent session turn start time is set once when the provider is running'); END;
+			CREATE TRIGGER agent_session_turn_lifecycle_revision BEFORE UPDATE OF state, revision ON agent_session_turns
+			WHEN NEW.revision != OLD.revision + 1 OR NOT (
+				NEW.state = OLD.state
+				OR (OLD.state = 'starting' AND NEW.state IN ('running', 'stopping', 'interrupted', 'failed'))
+				OR (OLD.state = 'running' AND NEW.state IN ('stopping', 'exited', 'interrupted', 'failed'))
+				OR (OLD.state = 'stopping' AND NEW.state IN ('exited', 'interrupted', 'failed'))
+			)
+			BEGIN SELECT RAISE(ABORT, 'agent session turn lifecycle revision is invalid'); END;
+			CREATE TRIGGER agent_session_turn_conversation_immutable BEFORE UPDATE OF provider_conversation_id ON agent_session_turns
+			WHEN OLD.provider_conversation_id IS NOT NULL AND NEW.provider_conversation_id IS NOT OLD.provider_conversation_id
+			BEGIN SELECT RAISE(ABORT, 'provider conversation ID is immutable once recorded'); END;
+			CREATE TRIGGER agent_session_turn_immutable_delete BEFORE DELETE ON agent_session_turns
+			BEGIN SELECT RAISE(ABORT, 'agent session turn history is immutable'); END;
+			PRAGMA user_version = 23;
 		`);
 	}
 

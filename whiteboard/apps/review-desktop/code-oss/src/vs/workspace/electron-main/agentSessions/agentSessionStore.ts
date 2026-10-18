@@ -17,6 +17,7 @@ import type {
 	SessionNotificationDTO,
 	SessionPageOptions,
 } from '../../common/workspaceAgentSessionProtocol.js';
+import { canTransitionAgentSessionState, isAgentSessionState } from './agentSessionTransitions.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_PAGE_SIZE = 100;
@@ -27,19 +28,6 @@ const MAX_NAME_LENGTH = 200;
 const MAX_MODEL_LENGTH = 200;
 const MAX_PROFILE_REF_LENGTH = 512;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
-
-const TRANSITIONS: Readonly<Record<AgentSessionState, ReadonlySet<AgentSessionState>>> = {
-	created: new Set(['starting', 'stopped', 'failed']),
-	starting: new Set(['running', 'waitingForInput', 'waitingForApproval', 'idle', 'stopping', 'stopped', 'interrupted', 'failed']),
-	running: new Set(['waitingForInput', 'waitingForApproval', 'idle', 'stopping', 'stopped', 'interrupted', 'failed']),
-	waitingForInput: new Set(['running', 'idle', 'stopping', 'stopped', 'interrupted', 'failed']),
-	waitingForApproval: new Set(['running', 'idle', 'stopping', 'stopped', 'interrupted', 'failed']),
-	idle: new Set(['starting', 'running', 'stopping', 'stopped', 'interrupted', 'failed']),
-	stopping: new Set(['stopped', 'interrupted', 'failed']),
-	stopped: new Set(),
-	interrupted: new Set(['starting', 'stopping', 'stopped', 'failed']),
-	failed: new Set(['starting', 'stopped']),
-};
 
 export class AgentSessionStore {
 	constructor(private readonly db: DatabaseSync, private readonly assertOpen: () => void) { }
@@ -93,21 +81,35 @@ export class AgentSessionStore {
 
 	transitionSession(projectId: string, sessionId: string, expectedRevision: number, nextState: AgentSessionState): AgentSessionDTO {
 		this.assertOpen();
+		return this.transaction(() => {
+			this.assertNoLiveTurnOwnsLifecycle(sessionId);
+			return this.transitionSessionWithinTransaction(projectId, sessionId, expectedRevision, nextState);
+		});
+	}
+
+	/** Atomically applies the session transition policy for the turn store while it owns this same SQLite transaction. */
+	transitionSessionWithinTransaction(projectId: string, sessionId: string, expectedRevision: number, nextState: AgentSessionState): AgentSessionDTO {
+		this.assertOpen();
+		if (!this.db.isTransaction) { throw new Error('A turn-owned session transition requires an active SQLite transaction.'); }
 		this.validateUuid(projectId, 'project ID');
 		this.validateUuid(sessionId, 'session ID');
 		if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) { throw new Error('The expected session revision is invalid.'); }
-		if (!this.isSessionState(nextState)) { throw new Error('The requested session state is invalid.'); }
-		return this.transaction(() => {
-			const current = this.getSessionInternal(projectId, sessionId);
-			if (!current) { throw new Error('The session does not belong to this project.'); }
-			if (current.revision !== expectedRevision) { throw new Error('The session revision is stale.'); }
-			if (!TRANSITIONS[current.state].has(nextState)) { throw new Error('The session state transition is invalid.'); }
-			const now = new Date().toISOString();
-			const result = this.db.prepare(`UPDATE agent_sessions SET state = ?, revision = revision + 1, updated_at = ?
-				WHERE id = ? AND project_id = ? AND revision = ?`).run(nextState, now, sessionId, projectId, expectedRevision);
-			if (Number(result.changes) !== 1) { throw new Error('The session revision is stale.'); }
-			return this.getSessionInternal(projectId, sessionId)!;
-		});
+		if (!isAgentSessionState(nextState)) { throw new Error('The requested session state is invalid.'); }
+		const current = this.getSessionInternal(projectId, sessionId);
+		if (!current) { throw new Error('The session does not belong to this project.'); }
+		if (current.revision !== expectedRevision) { throw new Error('The session revision is stale.'); }
+		if (!canTransitionAgentSessionState(current.state, nextState)) { throw new Error('The session state transition is invalid.'); }
+		const now = new Date().toISOString();
+		const result = this.db.prepare(`UPDATE agent_sessions SET state = ?, revision = revision + 1, updated_at = ?
+			WHERE id = ? AND project_id = ? AND revision = ?`).run(nextState, now, sessionId, projectId, expectedRevision);
+		if (Number(result.changes) !== 1) { throw new Error('The session revision is stale.'); }
+		return this.getSessionInternal(projectId, sessionId)!;
+	}
+
+	private assertNoLiveTurnOwnsLifecycle(sessionId: string): void {
+		if (this.db.prepare(`SELECT 1 FROM agent_session_turns WHERE session_id = ? AND state IN ('starting', 'running', 'stopping') LIMIT 1`).get(sessionId)) {
+			throw new Error('A live session turn owns lifecycle updates; transition the turn instead.');
+		}
 	}
 
 	/** Persists mailbox text. Future UI and MCP exposure must pass through the content redaction boundary. */
@@ -220,10 +222,6 @@ export class AgentSessionStore {
 		if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) { throw new Error('The sequence cursor must be a non-negative safe integer.'); }
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) { throw new Error('The page limit must be between 1 and 100.'); }
 		return { afterSequence, limit };
-	}
-
-	private isSessionState(value: string): value is AgentSessionState {
-		return Object.hasOwn(TRANSITIONS, value);
 	}
 
 	private getSessionInternal(projectId: string, sessionId: string): AgentSessionDTO | undefined {

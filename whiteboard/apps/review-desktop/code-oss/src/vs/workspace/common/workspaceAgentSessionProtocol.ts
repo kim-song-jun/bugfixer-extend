@@ -79,3 +79,81 @@ export interface SessionPageOptions {
 	readonly afterSequence?: number;
 	readonly limit?: number;
 }
+
+export interface AgentSessionPermissionPolicy {
+	readonly mode: 'read-only' | 'mutating';
+	readonly approval: 'never' | 'on-request' | 'always';
+}
+
+export interface AgentSessionFolderIdentity {
+	readonly canonicalPath: string;
+	readonly dev: string;
+	readonly ino: string;
+}
+
+export interface AgentSessionKnowledgeRef {
+	readonly id: string;
+	readonly version: number;
+	readonly sha256: string;
+}
+
+/** Explicit launch-time allowlist. Secrets, argv, environment and provider account data do not belong here. */
+export interface AgentSessionTurnSnapshot {
+	readonly schemaVersion: 1;
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly sessionRevision: number;
+	readonly bindingId: string;
+	readonly taskId: string | null;
+	readonly provider: AgentSessionProvider;
+	readonly model: string;
+	readonly profileRef: string | null;
+	readonly cwd: string;
+	readonly folderIdentity: AgentSessionFolderIdentity;
+	readonly managedWorktreeOwnerId: string | null;
+	readonly permissionPolicy: AgentSessionPermissionPolicy;
+	readonly convention: AgentSessionKnowledgeRef | null;
+	readonly references: readonly AgentSessionKnowledgeRef[];
+}
+
+export type AgentSessionTurnState = 'starting' | 'running' | 'stopping' | 'exited' | 'interrupted' | 'failed';
+
+export interface CreateAgentSessionTurnInput {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly expectedSessionRevision: number;
+	readonly snapshot: AgentSessionTurnSnapshot;
+}
+
+export interface AgentSessionTurnDTO {
+	readonly id: string;
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly ordinal: number;
+	readonly state: AgentSessionTurnState;
+	readonly revision: number;
+	readonly snapshot: AgentSessionTurnSnapshot;
+	readonly snapshotSha256: string;
+	readonly providerConversationId: string | null;
+	readonly exitCode: number | null;
+	readonly exitSignal: string | null;
+	readonly errorSummary: string | null;
+	readonly cleanupVerified: boolean;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly startedAt: string | null;
+	readonly finishedAt: string | null;
+}
+
+export interface AgentSessionTurnUpdate {
+	readonly state: AgentSessionTurnState;
+	readonly exitCode?: number | null;
+	readonly exitSignal?: string | null;
+	readonly errorSummary?: string | null;
+	readonly cleanupVerified?: boolean;
+}
+
+export interface AgentSessionTurnLifecycleResult {
+	readonly turn: AgentSessionTurnDTO;
+	readonly session: AgentSessionDTO;
+}

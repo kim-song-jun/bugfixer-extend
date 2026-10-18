@@ -115,7 +115,27 @@ test('schema v21 migrates in place and preserves existing project tasks', () => 
 			revision: 4,
 		});
 		assert.deepEqual(database.agentSessions.listSessions('00000000-0000-4000-8000-000000000021'), []);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 22);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 23);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('frozen schema v22 migrates to v23 and preserves existing project and task data', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-v22-'));
+	const path = join(directory, 'workspace.db');
+	const legacy = new DatabaseSync(path);
+	try {
+		legacy.exec(readFileSync(new URL('./fixtures/workspace-v22.sql', import.meta.url), 'utf8'));
+		assert.equal(Number(legacy.prepare('PRAGMA user_version').get()?.user_version), 22);
+	} finally { legacy.close(); }
+	const database = WorkspaceDatabase.open(path);
+	try {
+		assert.equal(database.getProject('00000000-0000-4000-8000-000000000021')?.name, 'Frozen v21 project');
+		assert.equal(database.getTask('00000000-0000-4000-8000-000000000023')?.title, 'Preserved v21 task');
+		assert.deepEqual(database.agentSessions.listSessions('00000000-0000-4000-8000-000000000021'), []);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 23);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
