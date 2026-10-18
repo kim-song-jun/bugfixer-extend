@@ -29,11 +29,12 @@ import { INativeWorkbenchEnvironmentService } from '../../../workbench/services/
 import { ipcRenderer } from '../../../base/parts/sandbox/electron-browser/globals.js';
 import { WORKSPACE_DASHBOARD_CHANNEL, type WorkspaceDashboardDTO } from '../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_PROJECT_HOME_CHANNEL, type WorkspaceProjectDTO } from '../../../workspace/common/workspaceProjectHomeProtocol.js';
+import { openAgentSessionWorkspace } from '../aiSessions/index.js';
 
 import './projectSidebar.css';
 
 export const PROJECT_SIDEBAR_CONTAINER_ID = 'workbench.view.devfast.projectSidebar';
-export type ProjectSidebarSection = 'dashboard' | 'references' | 'conventions';
+export type ProjectSidebarSection = 'dashboard' | 'references' | 'conventions' | 'aiSessions';
 
 const onDidRequestProjectSectionEmitter = new Emitter<ProjectSidebarSection>();
 export const onDidRequestProjectSection: Event<ProjectSidebarSection> = onDidRequestProjectSectionEmitter.event;
@@ -50,6 +51,7 @@ export function setProjectSidebarSection(section: ProjectSidebarSection): void {
 
 const NAV_ITEMS: readonly { readonly section: ProjectSidebarSection; readonly label: string; readonly icon: ThemeIcon }[] = [
 	{ section: 'dashboard', label: '대시보드', icon: Codicon.dashboard },
+	{ section: 'aiSessions', label: 'AI 세션', icon: Codicon.terminal },
 	{ section: 'references', label: '레퍼런스', icon: Codicon.book },
 	{ section: 'conventions', label: '프로젝트 규칙', icon: Codicon.settingsGear },
 ];
@@ -285,7 +287,8 @@ class ProjectSidebarView extends ViewPane {
 			button.addEventListener('click', () => {
 				this.dismissSwitcherKeepingFocus();
 				setProjectSidebarSection(item.section);
-				onDidRequestProjectSectionEmitter.fire(item.section);
+				if (item.section === 'aiSessions') openAgentSessionWorkspace();
+				else onDidRequestProjectSectionEmitter.fire(item.section);
 			});
 			this.content.appendChild(button);
 			if (item.section === 'dashboard') this.content.appendChild(this.createFilesButton());

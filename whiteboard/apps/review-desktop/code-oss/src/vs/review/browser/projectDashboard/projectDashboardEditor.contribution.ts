@@ -66,6 +66,7 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 		window.addEventListener('resize', collapseNavigationOnNarrowResize);
 		this._register(toDisposable(() => window.removeEventListener('resize', collapseNavigationOnNarrowResize)));
 		this._register(onDidRequestProjectSection(section => {
+			if (section === 'aiSessions') return;
 			void this.openProjectDashboard(section, false, true).catch(error => this.notificationService.error(error));
 		}));
 		this._register(onDidRequestNewTask(() => {
@@ -75,6 +76,7 @@ class ProjectDashboardContribution extends Disposable implements IWorkbenchContr
 	}
 
 	private async openProjectDashboard(section?: ProjectSidebarSection, createTask = false, activate = false): Promise<void> {
+		if (section === 'aiSessions') return;
 		const launch = this.environment.reviewWindowLaunch;
 		if (launch.kind !== 'project') return;
 

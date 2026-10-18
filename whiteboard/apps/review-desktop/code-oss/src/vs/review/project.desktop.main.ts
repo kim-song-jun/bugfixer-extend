@@ -8,6 +8,7 @@
 // Register project navigation before the native Explorer so it is the first
 // sidebar default on the initial layout pass.
 import './browser/projectDashboard/projectSidebar.contribution.js';
+import './browser/aiSessions/index.js';
 import './navigator.desktop.main.js';
 import './browser/parts/canvas/reviewCanvasEditorRegistration.js';
 import './browser/projectDashboard/index.js';
