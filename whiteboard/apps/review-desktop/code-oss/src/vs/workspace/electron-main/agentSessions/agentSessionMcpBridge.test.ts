@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
@@ -21,6 +22,7 @@ import {
 } from './agentSessionMcpBridge.js';
 
 const POLICY: AgentSessionPermissionPolicy = { mode: 'mutating', approval: 'on-request' };
+const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
 const GATEWAY_PATH = new URL('./agentSessionMcpGateway.mjs', import.meta.url).pathname;
 
 function createFixture(directory: string) {
@@ -40,15 +42,28 @@ function createSession(fixture: ReturnType<typeof createFixture>, provider: 'cod
 	});
 }
 
-function createTurn(fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>) {
+function createTurn(fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>, permissionPolicy = POLICY) {
 	const stats = statSync(fixture.root, { bigint: true });
 	const snapshot: AgentSessionTurnSnapshot = {
 		schemaVersion: 1, projectId: fixture.project.id, sessionId: session.id, sessionRevision: session.revision,
 		bindingId: fixture.binding.id, taskId: fixture.task.id, provider: session.provider, model: session.model, profileRef: session.profileRef,
 		cwd: fixture.root, folderIdentity: { canonicalPath: fixture.root, dev: stats.dev.toString(), ino: stats.ino.toString() },
-		managedWorktreeOwnerId: null, permissionPolicy: POLICY, convention: null, references: [],
+		managedWorktreeOwnerId: null, permissionPolicy, convention: null, references: [],
 	};
 	return fixture.database.agentSessionTurns.createTurn({ projectId: fixture.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
+}
+
+function createWorkflow(fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>, permissionPolicy = POLICY) {
+	const workflow = fixture.database.agentWorkflows.createWorkflow(fixture.project.id, {
+		projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+		maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
+		nodes: [{
+			nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: session.provider, model: session.model,
+			taskId: fixture.task.id, bindingId: fixture.binding.id, referenceIds: [], permissionPolicy, dependsOn: [],
+		}],
+		idempotencyKey: randomUUID(),
+	});
+	return workflow;
 }
 
 async function openMcpClient(access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>>) {
@@ -142,7 +157,7 @@ test('real MCP SDK client uses scoped sockets for all provider pairings and dura
 				pairClients.push(receiverClient);
 
 				const toolList = await senderClient.client.listTools();
-				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait']);
+				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel']);
 				const request = {
 					name: 'messages_send',
 					arguments: { recipientSessionId: receiver.id, idempotencyKey: `stable-${senderProvider}-${receiverProvider}`, body: 'Inspect this collaboration request.' },
@@ -175,6 +190,117 @@ test('real MCP SDK client uses scoped sockets for all provider pairings and dura
 			}
 		}
 	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('real MCP SDK exposes only scoped workflow status and cancel for its own session membership', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-workflow-tools-'));
+	const fixture = createFixture(directory);
+	const sender = fixture.database.agentSessions.createSession({
+		projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+		name: 'Status owner', provider: 'codex', model: 'model-private-token', workspaceMode: 'sharedFolder',
+	});
+	const unrelated = createSession(fixture, 'claude');
+	const ownWorkflow = createWorkflow(fixture, sender, READ_ONLY);
+	const unrelatedWorkflow = createWorkflow(fixture, unrelated, READ_ONLY);
+	const senderTurn = createTurn(fixture, sender, READ_ONLY);
+	const foreignProject = fixture.database.createProject('Foreign MCP workflow');
+	const foreignBinding = fixture.database.createFolderBinding({ projectId: foreignProject.id, path: fixture.root });
+	const foreignTask = fixture.database.createTask({ projectId: foreignProject.id, bindingId: foreignBinding.id, title: 'Foreign task' });
+	const foreignSession = fixture.database.agentSessions.createSession({
+		projectId: foreignProject.id, bindingId: foreignBinding.id, taskId: foreignTask.id,
+		name: 'Foreign session', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder',
+	});
+	const foreignWorkflow = fixture.database.agentWorkflows.createWorkflow(foreignProject.id, {
+		projectId: foreignProject.id, bindingId: foreignBinding.id, taskId: foreignTask.id,
+		maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
+		nodes: [{ nodeId: 'foreign', sessionId: foreignSession.id, role: 'implementer', provider: 'codex', model: 'gpt-5-codex', taskId: foreignTask.id, bindingId: foreignBinding.id, referenceIds: [], permissionPolicy: READ_ONLY, dependsOn: [] }],
+		idempotencyKey: randomUUID(),
+	});
+	const collaboration = new AgentSessionCollaborationService(fixture.database, {
+		cancel: (projectId, workflowId, revision, key) => fixture.database.agentWorkflows.requestWorkflowCancellation(projectId, workflowId, revision, key),
+		getHostError: () => 'launchFailed',
+	});
+	const bridge = new AgentSessionMcpBridge(collaboration);
+	let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
+	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
+	try {
+		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: sender.id, turnId: senderTurn.id, permissionPolicy: READ_ONLY, knownSecrets: ['model-private-token'] });
+		client = await openMcpClient(access);
+		const listed = await client.client.listTools();
+		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel']);
+		const statusResult = await client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } });
+		const status = readSuccessfulToolPayload(statusResult, 'own workflows_status') as unknown as {
+			workflow: { id: string; state: string };
+			nodes: Array<{ role: string; provider: string; model: string }>;
+			hostError: string | null;
+		};
+		assert.equal(status.workflow.id, ownWorkflow.id);
+		assert.equal(status.workflow.state, 'waiting');
+		assert.deepEqual(status.nodes.map(node => ({ role: node.role, provider: node.provider, model: node.model })), [{ role: 'implementer', provider: 'codex', model: '***' }]);
+		assert.equal(status.hostError, 'launchFailed');
+		assert.equal('fingerprint' in status.workflow, false);
+		for (const workflowId of [unrelatedWorkflow.id, foreignWorkflow.id]) {
+			const rejected = await client.client.callTool({ name: 'workflows_status', arguments: { workflowId } });
+			assert.equal((rejected as { isError?: boolean }).isError, true);
+		}
+		const initialRevision = ownWorkflow.revision;
+		const cancelRequest = { name: 'workflows_cancel', arguments: { workflowId: ownWorkflow.id, expectedRevision: initialRevision, idempotencyKey: 'own-cancel-1' } };
+		const canceled = readSuccessfulToolPayload(await client.client.callTool(cancelRequest), 'workflows_cancel');
+		assert.deepEqual(canceled, { workflowId: ownWorkflow.id, revision: initialRevision + 1, state: 'cancelled', cancellationRequested: true });
+		assert.deepEqual(readSuccessfulToolPayload(await client.client.callTool(cancelRequest), 'idempotent workflows_cancel'), canceled);
+		const changedKey = await client.client.callTool({ name: 'workflows_cancel', arguments: { workflowId: ownWorkflow.id, expectedRevision: initialRevision, idempotencyKey: 'own-cancel-2' } });
+		assert.equal((changedKey as { isError?: boolean }).isError, true);
+		access.revokeAccess();
+		await assert.rejects(client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } }));
+	} finally {
+		await closeOwnedMcpResources(client ? [client] : [], access ? [access] : []);
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('near-limit SQLite workflow returns a bounded durable cancellation receipt when full MCP status exceeds the frame', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-large-workflow-'));
+	const fixture = createFixture(directory);
+	const model = 'm'.repeat(100);
+	const sessions = Array.from({ length: 64 }, (_, index) => fixture.database.agentSessions.createSession({
+		projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+		name: `Workflow node ${index.toString().padStart(2, '0')}`, provider: 'codex', model, workspaceMode: 'sharedFolder',
+	}));
+	const nodeIds = sessions.map((_, index) => `node-${index.toString().padStart(2, '0')}-${'x'.repeat(8)}`);
+	const workflow = fixture.database.agentWorkflows.createWorkflow(fixture.project.id, {
+		projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+		maxConcurrentNodes: 8, maxTotalTurns: 64, maxDurationMs: 60_000,
+		nodes: sessions.map((session, index) => ({
+			nodeId: nodeIds[index], sessionId: session.id, role: 'implementer', provider: 'codex', model,
+			taskId: fixture.task.id, bindingId: fixture.binding.id, referenceIds: [], permissionPolicy: READ_ONLY,
+			dependsOn: nodeIds.slice(0, index),
+		})),
+		idempotencyKey: randomUUID(),
+	});
+	const turn = createTurn(fixture, sessions[0], READ_ONLY);
+	const collaboration = new AgentSessionCollaborationService(fixture.database, {
+		cancel: (projectId, workflowId, revision, key) => fixture.database.agentWorkflows.requestWorkflowCancellation(projectId, workflowId, revision, key),
+		getHostError: () => null,
+	});
+	const bridge = new AgentSessionMcpBridge(collaboration);
+	let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
+	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
+	try {
+		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: sessions[0].id, turnId: turn.id, permissionPolicy: READ_ONLY });
+		client = await openMcpClient(access);
+		const oversizedStatus = await client.client.callTool({ name: 'workflows_status', arguments: { workflowId: workflow.id } });
+		assert.equal((oversizedStatus as { isError?: boolean }).isError, true);
+		const canceled = readSuccessfulToolPayload(await client.client.callTool({
+			name: 'workflows_cancel', arguments: { workflowId: workflow.id, expectedRevision: workflow.revision, idempotencyKey: 'large-plan-cancel' },
+		}), 'large-plan workflows_cancel');
+		assert.deepEqual(canceled, { workflowId: workflow.id, revision: workflow.revision + 1, state: 'cancelled', cancellationRequested: true });
+		assert.equal(fixture.database.agentWorkflows.getWorkflow(fixture.project.id, workflow.id)?.state, 'cancelled');
+	} finally {
+		await closeOwnedMcpResources(client ? [client] : [], access ? [access] : []);
 		fixture.database.close();
 		rmSync(directory, { recursive: true, force: true });
 	}

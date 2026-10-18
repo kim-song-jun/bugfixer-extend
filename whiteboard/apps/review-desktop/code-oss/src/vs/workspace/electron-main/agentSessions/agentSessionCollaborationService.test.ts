@@ -13,6 +13,7 @@ import { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { AgentSessionCollaborationService } from './agentSessionCollaborationService.js';
 
 const POLICY: AgentSessionPermissionPolicy = { mode: 'mutating', approval: 'on-request' };
+const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
 
 function createFixture(directory: string, databasePath = ':memory:') {
 	const root = join(directory, 'workspace');
@@ -33,7 +34,7 @@ function createSession(fixture: ReturnType<typeof createFixture>, provider: 'cod
 	});
 }
 
-function createTurn(fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>) {
+function createTurn(fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>, permissionPolicy = POLICY) {
 	const stats = statSync(fixture.root, { bigint: true });
 	const snapshot: AgentSessionTurnSnapshot = {
 		schemaVersion: 1,
@@ -48,16 +49,16 @@ function createTurn(fixture: ReturnType<typeof createFixture>, session: ReturnTy
 		cwd: fixture.root,
 		folderIdentity: { canonicalPath: fixture.root, dev: stats.dev.toString(), ino: stats.ino.toString() },
 		managedWorktreeOwnerId: null,
-		permissionPolicy: POLICY,
+		permissionPolicy,
 		convention: null,
 		references: [],
 	};
 	return fixture.database.agentSessionTurns.createTurn({ projectId: fixture.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
 }
 
-function authorize(collaboration: AgentSessionCollaborationService, fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>, turn: ReturnType<typeof createTurn>, knownSecrets: readonly string[] = []) {
+function authorize(collaboration: AgentSessionCollaborationService, fixture: ReturnType<typeof createFixture>, session: ReturnType<typeof createSession>, turn: ReturnType<typeof createTurn>, knownSecrets: readonly string[] = [], permissionPolicy = POLICY) {
 	return collaboration.authorizeTurn({
-		projectId: fixture.project.id, sessionId: session.id, turnId: turn.id, permissionPolicy: POLICY, knownSecrets,
+		projectId: fixture.project.id, sessionId: session.id, turnId: turn.id, permissionPolicy, knownSecrets,
 	});
 }
 
@@ -173,6 +174,65 @@ test('mailbox survives database restart while launch capabilities remain process
 		fixture = { ...fixture, database: WorkspaceDatabase.open(databasePath) };
 		assert.equal(fixture.database.agentSessions.listInbox(fixture.project.id, receiver.id, { limit: 10 })[0].id, sent.id);
 		assert.equal(fixture.database.agentSessions.listInbox(fixture.project.id, receiver.id, { limit: 10 })[0].body, sent.body);
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('workflow status is database-backed without a host and cancellation is explicitly unavailable', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-workflow-status-'));
+	const fixture = createFixture(directory);
+	try {
+		const session = createSession(fixture, 'codex');
+		const workflow = fixture.database.agentWorkflows.createWorkflow(fixture.project.id, {
+			projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+			maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
+			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: session.provider, model: session.model, taskId: fixture.task.id, bindingId: fixture.binding.id, referenceIds: [], permissionPolicy: READ_ONLY, dependsOn: [] }],
+			idempotencyKey: 'workflow-status-create',
+		});
+		const turn = createTurn(fixture, session, READ_ONLY);
+		const collaboration = new AgentSessionCollaborationService(fixture.database);
+		const grant = authorize(collaboration, fixture, session, turn, [], READ_ONLY);
+		const status = collaboration.getWorkflowStatus(grant, workflow.id);
+		assert.equal(status.workflow.id, workflow.id);
+		assert.equal(status.workflow.state, 'waiting');
+		assert.equal(status.nodes[0].state, 'notStarted');
+		assert.equal(status.hostError, null);
+		assert.throws(() => collaboration.cancelWorkflow(grant, { workflowId: workflow.id, expectedRevision: workflow.revision, idempotencyKey: 'workflow-status-cancel' }), /unavailable/i);
+		collaboration.revoke(grant);
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('workflow cancellation returns its durable receipt if the host synchronously revokes the caller grant', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-workflow-cancel-revoke-'));
+	const fixture = createFixture(directory);
+	try {
+		const session = createSession(fixture, 'codex');
+		const workflow = fixture.database.agentWorkflows.createWorkflow(fixture.project.id, {
+			projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+			maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
+			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: session.provider, model: session.model, taskId: fixture.task.id, bindingId: fixture.binding.id, referenceIds: [], permissionPolicy: READ_ONLY, dependsOn: [] }],
+			idempotencyKey: 'workflow-revoke-create',
+		});
+		const turn = createTurn(fixture, session, READ_ONLY);
+		let grant: ReturnType<typeof authorize> | undefined;
+		let collaboration!: AgentSessionCollaborationService;
+		collaboration = new AgentSessionCollaborationService(fixture.database, {
+			cancel: (projectId, workflowId, revision, key) => {
+				const canceled = fixture.database.agentWorkflows.requestWorkflowCancellation(projectId, workflowId, revision, key);
+				if (grant) { collaboration.revoke(grant); }
+				return canceled;
+			},
+			getHostError: () => null,
+		});
+		grant = authorize(collaboration, fixture, session, turn, [], READ_ONLY);
+		const receipt = collaboration.cancelWorkflow(grant, { workflowId: workflow.id, expectedRevision: workflow.revision, idempotencyKey: 'workflow-revoke-cancel' });
+		assert.deepEqual(receipt, { workflowId: workflow.id, revision: workflow.revision + 1, state: 'cancelled', cancellationRequested: true });
+		assert.throws(() => collaboration.getWorkflowStatus(grant!, workflow.id), /revoked|invalid/i);
 	} finally {
 		fixture.database.close();
 		rmSync(directory, { recursive: true, force: true });

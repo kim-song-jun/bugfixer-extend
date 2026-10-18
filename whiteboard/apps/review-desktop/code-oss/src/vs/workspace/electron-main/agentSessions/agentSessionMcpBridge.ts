@@ -281,6 +281,16 @@ async function dispatch(
 				limit: optionalInteger(params.limit, 50),
 				timeoutMs: optionalInteger(params.timeoutMs, 20_000),
 			}, signal);
+		case 'workflows.status':
+			assertAllowedKeys(params, ['workflowId']);
+			return collaboration.getWorkflowStatus(grant, requiredString(params.workflowId, 'workflowId'));
+		case 'workflows.cancel':
+			assertAllowedKeys(params, ['workflowId', 'expectedRevision', 'idempotencyKey']);
+			return collaboration.cancelWorkflow(grant, {
+				workflowId: requiredString(params.workflowId, 'workflowId'),
+				expectedRevision: requiredInteger(params.expectedRevision, 'expectedRevision'),
+				idempotencyKey: requiredString(params.idempotencyKey, 'idempotencyKey'),
+			});
 		default:
 			throw new Error('The requested session collaboration tool is not supported.');
 	}
@@ -289,6 +299,11 @@ async function dispatch(
 function optionalInteger(value: unknown, fallback: number): number {
 	if (value === undefined) { return fallback; }
 	if (!Number.isSafeInteger(value)) { throw new Error('The numeric tool argument is invalid.'); }
+	return value as number;
+}
+
+function requiredInteger(value: unknown, name: string): number {
+	if (!Number.isSafeInteger(value)) { throw new Error(`The ${name} tool argument is invalid.`); }
 	return value as number;
 }
 

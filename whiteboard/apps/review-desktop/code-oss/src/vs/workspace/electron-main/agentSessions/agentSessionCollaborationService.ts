@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentWorkflowDTO, AgentWorkflowPlan } from '../../common/workspaceAgentWorkflowProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { createAgentPtyOutputSanitizer, sanitizeCompleteAgentText } from './agentOutputRedactor.js';
 
@@ -49,6 +50,27 @@ export interface AgentSessionCollaborationPage {
 	readonly timedOut?: boolean;
 }
 
+export interface AgentSessionWorkflowHost {
+	cancel(projectId: string, workflowId: string, expectedRevision: number, idempotencyKey: string): AgentWorkflowDTO;
+	getHostError(projectId: string, workflowId: string, runId?: string): string | null;
+}
+
+export interface AgentSessionWorkflowPublicStatus {
+	readonly scope: { readonly bindingId: string; readonly taskId: string | null };
+	readonly workflow: { readonly id: string; readonly state: string; readonly revision: number; readonly planVersion: number; readonly updatedAt: string };
+	readonly limits: { readonly maxConcurrentNodes: number; readonly maxTotalTurns: number; readonly maxDurationMs: number };
+	readonly nodes: readonly { readonly nodeId: string; readonly role: string; readonly provider: string; readonly model: string; readonly state: string; readonly dependsOn: readonly string[] }[];
+	readonly run: null | { readonly id: string; readonly state: string; readonly revision: number; readonly deadlineAt: string; readonly nodes: readonly { readonly nodeId: string; readonly state: string }[] };
+	readonly hostError: string | null;
+}
+
+export interface AgentSessionWorkflowCancelReceipt {
+	readonly workflowId: string;
+	readonly revision: number;
+	readonly state: string;
+	readonly cancellationRequested: true;
+}
+
 interface GrantRecord {
 	readonly projectId: string;
 	readonly sessionId: string;
@@ -65,7 +87,10 @@ export class AgentSessionCollaborationService {
 	private readonly changeListeners = new Set<() => void>();
 	private activeWaiters = 0;
 
-	constructor(private readonly database: Pick<WorkspaceDatabase, 'agentSessions' | 'agentSessionTurns'>) { }
+	constructor(
+		private readonly database: Pick<WorkspaceDatabase, 'agentSessions' | 'agentSessionTurns' | 'agentWorkflows'>,
+		private readonly workflowHost?: AgentSessionWorkflowHost,
+	) { }
 
 	/** The host calls this only for the turn whose trusted launch snapshot supplied this policy. */
 	authorizeTurn(input: AgentSessionCollaborationGrantInput): AgentSessionCollaborationGrant {
@@ -165,6 +190,51 @@ export class AgentSessionCollaborationService {
 		this.database.agentSessions.acknowledgeMessage(record.projectId, record.sessionId, messageId);
 	}
 
+	getWorkflowStatus(grant: AgentSessionCollaborationGrant, workflowId: string): AgentSessionWorkflowPublicStatus {
+		const { record, workflow, plan } = this.requireOwnedWorkflow(grant, workflowId);
+		const run = this.database.agentWorkflows.getLatestRun(record.projectId, workflowId) ?? null;
+		const result: AgentSessionWorkflowPublicStatus = {
+			scope: { bindingId: this.sanitize(record, plan.bindingId).text, taskId: plan.taskId === null ? null : this.sanitize(record, plan.taskId).text },
+			workflow: {
+				id: this.sanitize(record, workflow.id).text, state: this.sanitize(record, workflow.state).text,
+				revision: workflow.revision, planVersion: workflow.planVersion, updatedAt: this.sanitize(record, workflow.updatedAt).text,
+			},
+			limits: { maxConcurrentNodes: plan.maxConcurrentNodes, maxTotalTurns: plan.maxTotalTurns, maxDurationMs: plan.maxDurationMs },
+			nodes: plan.nodes.map(node => ({
+				nodeId: this.sanitize(record, node.nodeId).text, role: this.sanitize(record, node.role).text,
+				provider: this.sanitize(record, node.provider).text, model: this.sanitize(record, node.model).text,
+				state: this.sanitize(record, run?.nodes.find(item => item.nodeId === node.nodeId)?.state ?? 'notStarted').text,
+				dependsOn: node.dependsOn.map(id => this.sanitize(record, id).text),
+			})),
+			run: run ? {
+				id: this.sanitize(record, run.id).text, state: this.sanitize(record, run.state).text,
+				revision: run.revision, deadlineAt: this.sanitize(record, run.deadlineAt).text,
+				nodes: run.nodes.map(node => ({ nodeId: this.sanitize(record, node.nodeId).text, state: this.sanitize(record, node.state).text })),
+			} : null,
+			hostError: this.sanitize(record, this.workflowHost?.getHostError(record.projectId, workflowId, run?.id) ?? '').text || null,
+		};
+		if (!fitsMcpToolResult(result)) { throw new Error('The workflow status cannot be represented within the session MCP response limit.'); }
+		return result;
+	}
+
+	cancelWorkflow(grant: AgentSessionCollaborationGrant, input: { readonly workflowId: string; readonly expectedRevision: number; readonly idempotencyKey: string }): AgentSessionWorkflowCancelReceipt {
+		const { record } = this.requireOwnedWorkflow(grant, input.workflowId);
+		if (!this.workflowHost) { throw new Error('Workflow cancellation is unavailable on this host.'); }
+		if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) { throw new Error('The expected workflow revision is invalid.'); }
+		if (typeof input.idempotencyKey !== 'string' || !input.idempotencyKey.trim() || input.idempotencyKey.length > 128) { throw new Error('The workflow cancel idempotency key is invalid.'); }
+		const key = this.sanitize(record, input.idempotencyKey);
+		if (key.redacted) { throw new Error('The workflow cancel idempotency key contains a trusted secret.'); }
+		const workflow = this.workflowHost.cancel(record.projectId, input.workflowId, input.expectedRevision, input.idempotencyKey);
+		const receipt: AgentSessionWorkflowCancelReceipt = {
+			workflowId: this.sanitize(record, workflow.id).text,
+			revision: workflow.revision,
+			state: this.sanitize(record, workflow.state).text,
+			cancellationRequested: true,
+		};
+		if (!fitsMcpToolResult(receipt)) { throw new Error('The workflow cancellation receipt cannot be represented within the session MCP response limit.'); }
+		return receipt;
+	}
+
 	async waitForMessages(
 		grant: AgentSessionCollaborationGrant,
 		options: { readonly afterSequence?: number; readonly limit?: number; readonly timeoutMs?: number },
@@ -208,6 +278,21 @@ export class AgentSessionCollaborationService {
 
 	private receiverIsActive(projectId: string, sessionId: string): boolean {
 		return this.database.agentSessionTurns.listTurns(projectId, sessionId).some(turn => turn.state === 'starting' || turn.state === 'running' || turn.state === 'stopping');
+	}
+
+	private requireOwnedWorkflow(grant: AgentSessionCollaborationGrant, workflowId: string): {
+		readonly record: GrantRecord;
+		readonly workflow: AgentWorkflowDTO;
+		readonly plan: AgentWorkflowPlan;
+	} {
+		const record = this.requireGrant(grant);
+		assertUuid(workflowId, 'workflow ID');
+		const workflow = this.database.agentWorkflows.getWorkflow(record.projectId, workflowId);
+		const plan = workflow ? this.database.agentWorkflows.getPlan(record.projectId, workflowId, workflow.planVersion) : undefined;
+		if (!workflow || !plan || !plan.nodes.some(node => node.sessionId === record.sessionId)) {
+			throw new Error('The workflow is unavailable to this session in the granted project.');
+		}
+		return { record, workflow, plan };
 	}
 
 	private sanitize(record: GrantRecord, value: string): { text: string; redacted: boolean } {

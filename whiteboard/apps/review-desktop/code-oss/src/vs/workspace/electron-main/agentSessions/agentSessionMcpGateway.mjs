@@ -322,5 +322,30 @@ const TOOLS = [
 		},
 		method: 'messages.wait',
 	},
+	{
+		name: 'workflows_status', description: 'Read bounded status for a workflow that includes this session.',
+		inputSchema: { type: 'object', required: ['workflowId'], properties: { workflowId: { type: 'string', format: 'uuid' } }, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['workflowId'])) { return { error: 'Unexpected tool arguments.' }; }
+			const workflowId = stringField(args, 'workflowId', 64);
+			return workflowId.error ? workflowId : { value: { workflowId: workflowId.value } };
+		},
+		method: 'workflows.status',
+	},
+	{
+		name: 'workflows_cancel', description: 'Request cancellation for a workflow that includes this session.',
+		inputSchema: { type: 'object', required: ['workflowId', 'expectedRevision', 'idempotencyKey'], properties: {
+			workflowId: { type: 'string', format: 'uuid' }, expectedRevision: { type: 'integer', minimum: 1 }, idempotencyKey: { type: 'string', minLength: 1, maxLength: 128 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['workflowId', 'expectedRevision', 'idempotencyKey'])) { return { error: 'Unexpected tool arguments.' }; }
+			const workflowId = stringField(args, 'workflowId', 64);
+			const expectedRevision = integerField(args, 'expectedRevision', 1, Number.MAX_SAFE_INTEGER, 0, true);
+			const idempotencyKey = stringField(args, 'idempotencyKey', 128);
+			const bad = [workflowId, expectedRevision, idempotencyKey].find(field => field.error);
+			return bad ?? (idempotencyKey.value.length ? { value: { workflowId: workflowId.value, expectedRevision: expectedRevision.value, idempotencyKey: idempotencyKey.value } } : { error: 'idempotencyKey must not be empty.' });
+		},
+		method: 'workflows.cancel',
+	},
 ];
 const TOOLS_BY_NAME = new Map(TOOLS.map(tool => [tool.name, tool]));

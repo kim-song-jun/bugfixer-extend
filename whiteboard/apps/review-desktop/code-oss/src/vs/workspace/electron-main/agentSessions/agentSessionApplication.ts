@@ -49,7 +49,14 @@ export class AgentSessionApplication {
 		private readonly resourcesPath: string,
 	) {
 		this.worktrees = new ManagedWorktreeService(worktreeProfileDirectory);
-		this.collaboration = new AgentSessionCollaborationService(database);
+		let workflowScheduler: AgentWorkflowScheduler | undefined;
+		this.collaboration = new AgentSessionCollaborationService(database, {
+			cancel: (projectId, workflowId, expectedRevision, idempotencyKey) => {
+				if (!workflowScheduler) { throw new Error('Workflow cancellation is unavailable while the host is initializing.'); }
+				return workflowScheduler.cancel(projectId, workflowId, expectedRevision, idempotencyKey);
+			},
+			getHostError: (projectId, workflowId, runId) => workflowScheduler?.getHostError(projectId, workflowId, runId) ?? null,
+		});
 		this.mcpBridge = new AgentSessionMcpBridge(this.collaboration);
 		this.workspaceResolver = new AgentSessionWorkspaceResolver(database, this.worktrees, writerLock, () => this.recoveryReady);
 		this.service = new AgentSessionService(database, this.workspaceResolver, new AgentSessionPtyRuntimeFactory({
@@ -59,7 +66,7 @@ export class AgentSessionApplication {
 			createJournal: (snapshot, turnId, knownSecrets) => new AgentSessionJournal(database.agentSessionTranscripts, snapshot, turnId, knownSecrets),
 		}));
 		this.service.recoverStartup();
-		this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
+		workflowScheduler = this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}
 
