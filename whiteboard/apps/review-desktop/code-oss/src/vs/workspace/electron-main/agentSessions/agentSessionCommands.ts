@@ -10,6 +10,7 @@ import { AGENT_CLI_COMMAND_SPEC_VERSION, type AgentCliCapabilities } from './age
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_CLI_VALUE = /^[\p{L}\p{N}._:/@+-]+$/u;
 const MAX_PATH_LENGTH = 4096;
+const MAX_IDENTITY_HOOK_COMMAND_LENGTH = 4096;
 
 export interface AgentSessionMcpServer {
 	/** App-generated stable name; caller-supplied MCP server names are not accepted at IPC boundaries. */
@@ -34,6 +35,8 @@ export interface AgentSessionCommandInput {
 	readonly resumeProviderSessionId?: string;
 	readonly permissionPolicy: ProviderPermissionPolicy;
 	readonly mcpServer: AgentSessionMcpServer;
+	/** Trusted packaged command for Codex's invocation-scoped UserPromptSubmit hook; Codex still requires user trust via /hooks. */
+	readonly identityHookCommand?: string;
 	readonly claudeMcpConfigPath?: string;
 	/** Only the selected existing local profile's documented home/config selector is accepted. */
 	readonly profileEnvironment: Readonly<Record<string, string>>;
@@ -92,6 +95,13 @@ function validateInput(input: AgentSessionCommandInput): void {
 	if (input.permissionPolicy.mode === 'read-only' && input.permissionPolicy.approval !== 'never') { throw new Error('Read-only sessions require the never approval policy.'); }
 	if (input.permissionPolicy.mode === 'mutating' && input.permissionPolicy.approval !== 'on-request') { throw new Error('Mutating sessions require the on-request approval policy.'); }
 	if (input.permissionPolicy.mode !== 'read-only' && input.permissionPolicy.mode !== 'mutating') { throw new Error('The requested permission mode is unsupported.'); }
+	if (input.identityHookCommand !== undefined) {
+		if (input.provider !== 'codex') { throw new Error('Identity prompt hooks are supported only by the Codex invocation config.'); }
+		if (typeof input.identityHookCommand !== 'string' || input.identityHookCommand.trim().length === 0
+			|| input.identityHookCommand.length > MAX_IDENTITY_HOOK_COMMAND_LENGTH || /[\u0000-\u001f\u007f]/.test(input.identityHookCommand)) {
+			throw new Error('The Codex identity hook command must be non-empty, bounded, and free of control characters.');
+		}
+	}
 	if (input.mcpServer.name !== 'bugfixer-session' || !isAbsolute(input.mcpServer.command) || input.mcpServer.command.length > MAX_PATH_LENGTH
 		|| /[\u0000-\u001f\u007f]/.test(input.mcpServer.command) || input.mcpServer.args.length > 4
 		|| input.mcpServer.args.some(arg => !isAbsolute(arg) || arg.length > MAX_PATH_LENGTH || /[\u0000-\u001f\u007f]/.test(arg))) {
@@ -118,7 +128,14 @@ function createCodexArgs(input: AgentSessionCommandInput): string[] {
 		args.push('--sandbox', 'read-only', '--ask-for-approval', 'never');
 	}
 	for (const [key, value] of Object.entries(codexMcpOverrides(input.mcpServer))) { args.push('-c', `${key}=${serializeTomlValue(value)}`); }
+	if (input.identityHookCommand !== undefined) {
+		args.push('-c', `hooks.UserPromptSubmit=${serializeCodexIdentityHook(input.identityHookCommand)}`);
+	}
 	return args;
+}
+
+function serializeCodexIdentityHook(command: string): string {
+	return `[{"hooks":[{"type":"command","command":${JSON.stringify(command)}}]}]`;
 }
 
 function codexMcpOverrides(server: AgentSessionMcpServer): Record<string, string | readonly string[]> {

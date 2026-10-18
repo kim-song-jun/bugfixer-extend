@@ -65,6 +65,44 @@ describe('interactive agent CLI command builders', () => {
 		assert.deepEqual(overrides.get('mcp_servers.bugfixer-session.env_vars'), ['BUGFIXER_SESSION_TOKEN', 'BUGFIXER_TRACE_ID']);
 	});
 
+	it('adds one static invocation-scoped UserPromptSubmit command hook without changing MCP, model, permissions, or resume behavior', () => {
+		const command = '"/app/Node.js" "/app/helpers/capture identity.mjs"';
+		const fresh = createAgentSessionCommand(input({ identityHookCommand: command }));
+		const resumed = createAgentSessionCommand(input({ identityHookCommand: command, resumeProviderSessionId: conversationId }));
+		const readOnly = createAgentSessionCommand(input({ identityHookCommand: command, permissionPolicy: { mode: 'read-only', approval: 'never' } }));
+		const configValue = (args: readonly string[], key: string): string => {
+			const index = args.findIndex((argument, position) => argument === '-c' && args[position + 1]?.startsWith(`${key}=`));
+			assert.notEqual(index, -1, `Expected one invocation config override for ${key}`);
+			const assignment = args[index + 1];
+			assert.ok(assignment);
+			return assignment.slice(key.length + 1);
+		};
+		const hook = JSON.parse(configValue(fresh.args, 'hooks.UserPromptSubmit'));
+		assert.deepEqual(hook, [{ hooks: [{ type: 'command', command }] }]);
+		assert.deepEqual(JSON.parse(configValue(resumed.args, 'hooks.UserPromptSubmit')), hook, 'The same static command must be used for resumed turns');
+		assert.equal(resumed.args.includes(conversationId), true);
+		assert.deepEqual(JSON.parse(configValue(readOnly.args, 'hooks.UserPromptSubmit')), hook);
+		assert.equal(fresh.args.includes('--no-daemon'), true);
+		assert.equal(fresh.args[fresh.args.indexOf('--model') + 1], 'gpt-6.1-sol');
+		assert.equal(fresh.args[fresh.args.indexOf('--cd') + 1], '/work/repo');
+		assert.equal(fresh.args.includes('--approve-for-me'), true);
+		assert.deepEqual(readOnly.args.slice(0, 9), ['--no-daemon', '--model', 'gpt-6.1-sol', '--cd', '/work/repo', '--sandbox', 'read-only', '--ask-for-approval', 'never']);
+		assert.equal(fresh.args.some(argument => argument.includes('dangerously-bypass') || argument.includes('skip-git-repo-check')), false);
+		assert.equal(fresh.args.includes(conversationId), false);
+		assert.deepEqual(fresh.forwardedMcpEnvironmentVariableNames, ['BUGFIXER_SESSION_TOKEN']);
+		assert.equal(fresh.env.CODEX_HOME, '/private/profile');
+		const configKeys: string[] = [];
+		for (let index = 0; index < fresh.args.length; index++) {
+			if (fresh.args[index] !== '-c') { continue; }
+			const assignment = fresh.args[index + 1];
+			assert.ok(assignment);
+			const separator = assignment.indexOf('=');
+			assert.ok(separator > 0);
+			configKeys.push(assignment.slice(0, separator));
+		}
+		assert.deepEqual(configKeys, ['mcp_servers.bugfixer-session.command', 'mcp_servers.bugfixer-session.args', 'mcp_servers.bugfixer-session.env_vars', 'hooks.UserPromptSubmit']);
+	});
+
 	it('builds interactive Claude with a strict app MCP config and read-only built-in tool allowlist', () => {
 		const spec = createAgentSessionCommand(input({
 			provider: 'claude',
@@ -96,5 +134,22 @@ describe('interactive agent CLI command builders', () => {
 	it('rejects unknown version and caller supplied MCP environment values', () => {
 		assert.throws(() => createAgentSessionCommand(input({ commandSpecVersion: 2 })), /version is unsupported/);
 		assert.throws(() => createAgentSessionCommand(input({ mcpServer: { ...input().mcpServer, envVariables: ['Bearer-secret-value'] } })), /variable names/);
+	});
+
+	it('rejects invalid Codex identity hook commands and hooks for unsupported providers', () => {
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: '' })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: ' \t ' })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: '/app/hook\u0000unsafe' })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: '/app/hook\runsafe' })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: '/app/hook\nunsafe' })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: '/app/'.padEnd(4097, 'x') })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({ identityHookCommand: 42 as unknown as string })), /identity hook command/);
+		assert.throws(() => createAgentSessionCommand(input({
+			provider: 'claude',
+			capabilities: { ...capabilities, provider: 'claude', exclusiveMcpRoster: true, profileSelector: 'CLAUDE_CONFIG_DIR' },
+			profileEnvironment: { CLAUDE_CONFIG_DIR: '/private/profile' },
+			claudeMcpConfigPath: '/private/session-mcp.json',
+			identityHookCommand: '/app/hook',
+		})), /only by the Codex/);
 	});
 });

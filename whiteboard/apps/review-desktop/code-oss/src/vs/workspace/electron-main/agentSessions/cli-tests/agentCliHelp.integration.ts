@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -77,6 +77,38 @@ describe('pinned provider CLI help and version discovery', () => {
 			assert.equal(bridge.transport.command, '/app/session-mcp');
 			assert.deepEqual(bridge.transport.args, []);
 			assert.deepEqual(bridge.transport.env_vars, ['BUGFIXER_SESSION_TOKEN']);
+		} finally {
+			rmSync(profile, { recursive: true, force: true });
+		}
+	});
+
+	it('Codex mcp list accepts the invocation UserPromptSubmit command config (config-parser proof only)', async () => {
+		const executable = requiredExecutable('BUGFIXER_CODEX_CLI');
+		const profile = mkdtempSync(join(tmpdir(), 'agent-cli-prompt-hook-'));
+		const configPath = join(profile, 'config.toml');
+		const originalConfig = [
+			'[features]',
+			'plugins = false',
+			'',
+			'[mcp_servers.ci-sentinel]',
+			'command = "/usr/bin/true"',
+			'args = []',
+		].join('\n');
+		try {
+			writeFileSync(configPath, originalConfig);
+			const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '', HOME: profile, CODEX_HOME: profile, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' };
+			const command = '"/app/Node.js" "/app/helpers/capture identity.mjs"';
+			const hookConfig = JSON.stringify([{ hooks: [{ type: 'command', command }] }]);
+			const accepted = await runBoundedAgentCliProcess(executable, [
+				'mcp', 'list', '--json',
+				'-c', 'mcp_servers.bugfixer-session.command="/app/session-mcp"',
+				'-c', 'mcp_servers.bugfixer-session.args=[]',
+				'-c', 'mcp_servers.bugfixer-session.env_vars=["BUGFIXER_SESSION_TOKEN"]',
+				'-c', `hooks.UserPromptSubmit=${hookConfig}`,
+			], { env, cwd: profile, timeoutMs: 10_000, maxOutputBytes: 256 * 1024 });
+			const roster = parseMcpRoster(accepted.stdout);
+			assert.deepEqual(roster.map(server => server.name).sort(), ['bugfixer-session', 'ci-sentinel']);
+			assert.equal(readFileSync(configPath, 'utf8'), originalConfig, 'Invocation config parsing must not rewrite the profile config file');
 		} finally {
 			rmSync(profile, { recursive: true, force: true });
 		}
