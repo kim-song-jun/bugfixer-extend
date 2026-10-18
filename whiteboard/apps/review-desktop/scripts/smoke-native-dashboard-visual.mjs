@@ -1,14 +1,17 @@
 /** Exercise the packaged native project dashboard with a service-created fixture. */
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 import { chromium } from 'playwright';
 
 const [appArgument, outputArgument] = process.argv.slice(2);
+
+const execFileAsync = promisify(execFile);
 
 assert.ok(appArgument, 'Pass the assembled Whiteboard.app path');
 
@@ -37,12 +40,14 @@ const diagnostics = {
   rendererClockSamples: [],
   isolatedAppLogs: [],
   processOutput: [],
+  startupFailures: [],
   instrumentationDrops: {
     nativeLifecycleEvents: 0,
     rendererClockSamples: 0,
     isolatedAppLogs: 0,
     processOutput: 0,
     processOutputBytes: 0,
+    startupFailures: 0,
   },
 };
 
@@ -59,6 +64,12 @@ const MAX_LOG_DIRECTORY_ENTRIES = 512;
 const MAX_LOG_FILE_BYTES = 64 * 1024;
 
 const MAX_LOG_CAPTURE_BYTES = 512 * 1024;
+
+const MAX_STARTUP_DIAGNOSTIC_RECORDS = 8;
+
+const MAX_STARTUP_RESPONSE_BYTES = 8192;
+
+const MAX_STARTUP_PROCESS_ROWS = 256;
 
 const LOG_FILE_NAMES = /^(?:main|renderer(?:\d+)?|sharedprocess|ptyhost|exthost|window)\.log$/;
 
@@ -119,6 +130,12 @@ function createTimedTextCapture() {
     text() {
       return Buffer.concat(chunks.map(({ buffer }) => buffer)).toString('utf8');
     },
+    observedBytes() {
+      return observedBytes;
+    },
+    retainedBytes() {
+      return retainedBytes;
+    },
   };
 }
 
@@ -139,6 +156,219 @@ async function awaitDiagnosticOperation(operation, timeoutMs) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function sanitizeStartupText(value) {
+  return String(value)
+    .replace(/(authorization|token|secret|password|nonce|api[-_]?key)(["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, '$1$2[redacted]')
+    .replace(/(?:\/Users\/|\/private\/var\/folders\/|\/tmp\/)[^\s"'<>]*/g, '[local-path]')
+    .slice(0, MAX_STARTUP_RESPONSE_BYTES);
+}
+
+function sanitizeStartupEndpointBody(endpoint, body, port) {
+  let parsed;
+
+  try { parsed = JSON.parse(body); }
+  catch { return sanitizeStartupText(body); }
+
+  if (endpoint === '/json/version' && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const keys = ['Browser', 'Protocol-Version', 'User-Agent', 'V8-Version', 'WebKit-Version'];
+    const result = {};
+
+    for (const key of keys) {
+      if (typeof parsed[key] === 'string') result[key] = sanitizeStartupText(parsed[key]).slice(0, 512);
+    }
+
+    result.webSocketDebuggerUrl = typeof parsed.webSocketDebuggerUrl === 'string'
+      ? `ws://127.0.0.1:${port}/devtools/browser/[redacted]`
+      : null;
+
+    return JSON.stringify(result);
+  }
+
+  if (endpoint === '/json/list' && Array.isArray(parsed)) {
+    return JSON.stringify({
+      targetCount: parsed.length,
+      targets: parsed.slice(0, 32).map(target => ({
+        type: typeof target?.type === 'string' ? target.type.slice(0, 64) : null,
+        title: typeof target?.title === 'string' ? sanitizeStartupText(target.title).slice(0, 256) : null,
+        url: sanitizeStartupTargetUrl(target?.url),
+        hasWebSocketDebuggerUrl: typeof target?.webSocketDebuggerUrl === 'string',
+      })),
+      truncated: parsed.length > 32,
+    });
+  }
+
+  return sanitizeStartupText(body);
+}
+
+function sanitizeStartupTargetUrl(value) {
+  if (typeof value !== 'string') return null;
+  if (value === 'about:blank') return value;
+
+  try {
+    const url = new URL(value);
+
+    return `${url.protocol}//${url.host}/[redacted]`;
+  } catch {
+    return sanitizeStartupText(value).slice(0, 256);
+  }
+}
+
+async function readBoundedStartupBody(response) {
+  if (!response.body) return { body: '', truncated: false };
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let byteLength = 0;
+  let truncated = false;
+  let cancelError;
+
+  try {
+    while (byteLength < MAX_STARTUP_RESPONSE_BYTES) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+      const remaining = MAX_STARTUP_RESPONSE_BYTES - byteLength;
+      const chunk = Buffer.from(value.subarray(0, remaining));
+      chunks.push(chunk);
+      byteLength += chunk.byteLength;
+
+      if (value.byteLength > remaining) {
+        truncated = true;
+        break;
+      }
+    }
+
+    if (byteLength >= MAX_STARTUP_RESPONSE_BYTES) truncated = true;
+  } finally {
+    try { await reader.cancel(); }
+    catch (error) { cancelError = sanitizeStartupText(`${error?.name ?? 'Error'}: ${error?.message ?? 'response cancellation failed'}`).slice(0, 256); }
+  }
+
+  return { body: Buffer.concat(chunks).toString('utf8'), truncated, cancelError };
+}
+
+async function readStartupEndpoint(port, endpoint) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_000);
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: controller.signal });
+    const body = await readBoundedStartupBody(response);
+
+    return {
+      endpoint,
+      status: response.status,
+      ok: response.ok,
+      body: sanitizeStartupEndpointBody(endpoint, body.body, port),
+      bodyTruncated: body.truncated,
+      bodyCancelError: body.cancelError ?? null,
+    };
+  } catch (error) {
+    return {
+      endpoint,
+      status: null,
+      ok: false,
+      body: '',
+      bodyTruncated: false,
+      bodyCancelError: null,
+      error: sanitizeStartupText(`${error?.name ?? 'Error'}: ${error?.message ?? 'request failed'}`).slice(0, 512),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readOwnedProcessTree(rootPid) {
+  if (!Number.isInteger(rootPid) || rootPid < 1) return { status: 'root-pid-unavailable', processes: [], truncated: false };
+
+  try {
+    const { stdout } = await execFileAsync('/bin/ps', ['-Ao', 'pid=,ppid=,pgid=,comm='], {
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024,
+      timeout: 2_000,
+    });
+    const all = stdout.split('\n').flatMap(line => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+
+      return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), command: path.basename(match[4]).slice(0, 96) }] : [];
+    });
+    const included = new Set([rootPid]);
+    let changed = true;
+
+    while (changed && included.size < MAX_STARTUP_PROCESS_ROWS) {
+      changed = false;
+
+      for (const item of all) {
+        if (included.has(item.pid) || !included.has(item.ppid)) continue;
+
+        included.add(item.pid);
+        changed = true;
+
+        if (included.size >= MAX_STARTUP_PROCESS_ROWS) break;
+      }
+    }
+
+    const processes = all.filter(item => included.has(item.pid)).slice(0, MAX_STARTUP_PROCESS_ROWS);
+
+    return { status: 'captured', processes, truncated: processes.length < included.size || included.size >= MAX_STARTUP_PROCESS_ROWS };
+  } catch (error) {
+    return {
+      status: 'collection-error',
+      processes: [],
+      truncated: false,
+      error: sanitizeStartupText(`${error?.name ?? 'Error'}: ${error?.message ?? 'process query failed'}`).slice(0, 512),
+    };
+  }
+}
+
+async function readStartupLogDirectory(userData) {
+  const logsRoot = path.join(userData, 'logs');
+
+  try {
+    const directoryStat = await stat(logsRoot);
+
+    if (!directoryStat.isDirectory()) return { status: 'not-directory', matchingFiles: [] };
+
+    const entries = await opendir(logsRoot);
+    const matchingFiles = [];
+
+    for await (const entry of entries) {
+      if (entry.isFile() && LOG_FILE_NAMES.test(entry.name) && matchingFiles.length < 24) matchingFiles.push(entry.name);
+    }
+
+    return { status: 'present', matchingFiles, truncated: matchingFiles.length >= 24 };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'not-found', matchingFiles: [] };
+
+    return {
+      status: 'read-error',
+      matchingFiles: [],
+      error: sanitizeStartupText(`${error?.name ?? 'Error'}: ${error?.message ?? 'log directory query failed'}`).slice(0, 512),
+    };
+  }
+}
+
+async function captureStartupFailureDiagnostics(port, userData, child, stdout, stderr, owned) {
+  const [version, targets, processTree, logs] = await Promise.all([
+    readStartupEndpoint(port, '/json/version'),
+    readStartupEndpoint(port, '/json/list'),
+    readOwnedProcessTree(child.pid),
+    readStartupLogDirectory(userData),
+  ]);
+
+  appendBoundedRecord(diagnostics.startupFailures, {
+    pid: child.pid ?? null,
+    port,
+    capturedAt: new Date().toISOString(),
+    childExit: owned.exit ?? null,
+    endpoints: [version, targets],
+    processTree,
+    logs,
+    stdout: { observedBytes: stdout.observedBytes(), retainedBytes: stdout.retainedBytes(), tail: sanitizeStartupText(stdout.text().slice(-2048)) },
+    stderr: { observedBytes: stderr.observedBytes(), retainedBytes: stderr.retainedBytes(), tail: sanitizeStartupText(stderr.text().slice(-2048)) },
+  }, 'startupFailures');
 }
 
 function recordNativeLifecycle(capture, event, details = {}) {
@@ -720,6 +950,20 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
     return { child, exited, browser, page, port, targetId: target.id, stdout, stderr, owned, consoleCaptures };
   } catch (error) {
     const cleanupFailures = [];
+
+    if (!browser) {
+      try { await captureStartupFailureDiagnostics(port, userData, child, stdout, stderr, owned); }
+      catch (diagnosticError) {
+        appendBoundedRecord(diagnostics.startupFailures, {
+          pid: child.pid ?? null,
+          port,
+          capturedAt: new Date().toISOString(),
+          status: 'collection-error',
+          error: sanitizeStartupText(`${diagnosticError?.name ?? 'Error'}: ${diagnosticError?.message ?? 'startup diagnostic collection failed'}`).slice(0, 512),
+        }, 'startupFailures');
+      }
+    }
+
     const browserClose = startBrowserClose(browser, owned);
 
     await collectBrowserClose(browserClose, owned, cleanupFailures);

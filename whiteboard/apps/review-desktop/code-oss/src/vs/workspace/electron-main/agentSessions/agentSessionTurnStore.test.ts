@@ -43,6 +43,74 @@ function snapshotFor(fixture: ReturnType<typeof createFixture>, overrides: Parti
 	};
 }
 
+function stopWithTerminalTurn(fixture: ReturnType<typeof createFixture>, cleanupVerified: boolean) {
+	const starting = fixture.database.agentSessionTurns.createTurn({
+		projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: fixture.session.revision, snapshot: snapshotFor(fixture),
+	});
+	const running = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, starting.id, starting.revision, fixture.session.revision + 1, { state: 'running' });
+	const stopping = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, starting.id, running.turn.revision, running.session.revision, { state: 'stopping' });
+	return fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, starting.id, stopping.turn.revision, stopping.session.revision, {
+		state: 'exited', exitSignal: 'SIGTERM', cleanupVerified,
+	});
+}
+
+test('a manually created next turn resumes a stopped session only after exact prior cleanup proof', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-turn-stopped-resume-'));
+	const fixture = createFixture(directory);
+	try {
+		const stopped = stopWithTerminalTurn(fixture, true);
+		assert.equal(stopped.session.state, 'stopped');
+		assert.equal(stopped.turn.cleanupVerified, true);
+		assert.throws(() => fixture.database.agentSessions.transitionSession(fixture.project.id, fixture.session.id, stopped.session.revision, 'starting'), /state transition is invalid/i);
+		const next = fixture.database.agentSessionTurns.createTurn({
+			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: stopped.session.revision,
+			snapshot: snapshotFor(fixture, { sessionRevision: stopped.session.revision }),
+		});
+		assert.equal(next.ordinal, 2);
+		assert.equal(next.state, 'starting');
+		assert.equal(fixture.database.agentSessionTurns.getPreviousTurn(fixture.project.id, fixture.session.id, next.id)?.id, stopped.turn.id);
+		assert.equal(fixture.database.agentSessionTurns.getTurn(fixture.project.id, fixture.session.id, stopped.turn.id)?.state, 'exited');
+		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, fixture.session.id)?.state, 'starting');
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('stopped-session resume rolls back for missing or unverified prior turns', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-turn-stopped-denied-'));
+	let fixture = createFixture(directory);
+	try {
+		const stopped = stopWithTerminalTurn(fixture, false);
+		assert.equal(stopped.session.state, 'stopped');
+		assert.equal(stopped.turn.cleanupVerified, false);
+		assert.throws(() => fixture.database.agentSessionTurns.createTurn({
+			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: stopped.session.revision,
+			snapshot: snapshotFor(fixture, { sessionRevision: stopped.session.revision }),
+		}), /cleanup-verified previous turn/i);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, fixture.session.id).map(turn => turn.id), [stopped.turn.id]);
+		assert.deepEqual(fixture.database.agentSessions.getSession(fixture.project.id, fixture.session.id), stopped.session);
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+
+	const emptyDirectory = mkdtempSync(join(tmpdir(), 'agent-session-turn-stopped-empty-'));
+	fixture = createFixture(emptyDirectory);
+	try {
+		const stopped = fixture.database.agentSessions.transitionSession(fixture.project.id, fixture.session.id, fixture.session.revision, 'stopped');
+		assert.throws(() => fixture.database.agentSessionTurns.createTurn({
+			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: stopped.revision,
+			snapshot: snapshotFor(fixture, { sessionRevision: stopped.revision }),
+		}), /cleanup-verified previous turn/i);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, fixture.session.id), []);
+		assert.deepEqual(fixture.database.agentSessions.getSession(fixture.project.id, fixture.session.id), stopped);
+	} finally {
+		fixture.database.close();
+		rmSync(emptyDirectory, { recursive: true, force: true });
+	}
+});
+
 test('launch snapshots and turn ordinals survive reopen; exit does not complete the task', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-turn-reopen-'));
 	let fixture = createFixture(directory);
@@ -52,6 +120,7 @@ test('launch snapshots and turn ordinals survive reopen; exit does not complete 
 			snapshot: snapshotFor(fixture),
 		});
 		assert.equal(turn.ordinal, 1);
+		assert.equal(fixture.database.agentSessionTurns.getPreviousTurn(fixture.project.id, fixture.session.id, turn.id), undefined);
 		assert.equal(turn.state, 'starting');
 		assert.equal(turn.snapshotSha256, hash(JSON.stringify(turn.snapshot)));
 		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, fixture.session.id)?.state, 'starting');
@@ -80,6 +149,8 @@ test('launch snapshots and turn ordinals survive reopen; exit does not complete 
 			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: exited.session.revision, snapshot: nextSnapshot,
 		});
 		assert.equal(next.ordinal, 2);
+		assert.equal(fixture.database.agentSessionTurns.getPreviousTurn(fixture.project.id, fixture.session.id, next.id)?.id, turn.id);
+		assert.throws(() => fixture.database.agentSessionTurns.getPreviousTurn(fixture.project.id, fixture.session.id, '00000000-0000-4000-8000-000000000099'), /does not belong/);
 	} finally {
 		fixture.database.close();
 		rmSync(directory, { recursive: true, force: true });

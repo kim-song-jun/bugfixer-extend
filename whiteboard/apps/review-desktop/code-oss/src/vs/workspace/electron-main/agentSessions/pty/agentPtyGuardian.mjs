@@ -8,7 +8,9 @@ import { connect } from 'node:net';
 
 const MAX_CONTROL_MESSAGE_BYTES = 256 * 1024;
 const CLEANUP_GRACE_MS = 1500;
-const [socketPath, capability] = process.argv.slice(2);
+const guardianArguments = process.argv.slice(2);
+const [portArgument, capability] = guardianArguments;
+const port = typeof portArgument === 'string' && /^[1-9][0-9]{0,4}$/.test(portArgument) ? Number(portArgument) : NaN;
 let socket;
 let pending = '';
 let authenticated = false;
@@ -106,12 +108,12 @@ function handleControlMessage(value) {
 	socket.destroy();
 }
 
-if (typeof socketPath !== 'string' || !socketPath.startsWith('/') || Buffer.byteLength(socketPath, 'utf8') > 100
+if (guardianArguments.length !== 2 || !Number.isSafeInteger(port) || port < 1 || port > 65_535
 	|| typeof capability !== 'string' || !/^[a-f0-9]{64}$/.test(capability)) {
 	process.exit(2);
 }
 
-socket = connect(socketPath);
+socket = connect({ host: '127.0.0.1', port });
 socket.once('connect', () => send({ event: 'hello', capability, pid: process.pid }));
 socket.on('data', chunk => {
 	pending += chunk.toString('utf8');

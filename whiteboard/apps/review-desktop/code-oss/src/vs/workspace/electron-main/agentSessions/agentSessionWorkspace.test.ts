@@ -165,7 +165,7 @@ test('shared-folder identity and mutation grant are revalidated before a turn ca
 	const fixture = createFixture();
 	try {
 		const readonly = await fixture.resolver.acquire({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
-		assert.equal(readonly.snapshot.cwd, fixture.ordinary);
+		assert.equal(readonly.snapshot.cwd, realpathSync(fixture.ordinary));
 		assert.equal(readonly.snapshot.managedWorktreeOwnerId, null);
 		fixture.resolver.release(readonly);
 
@@ -293,7 +293,7 @@ test('unresolved host cleanup blocks another session turn; renderer-supplied cle
 		const targetSession = fixture.database.agentSessions.createSession({
 			projectId: targetProject.id, bindingId: targetBinding.id, name: 'Target session', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder',
 		});
-		assert.equal(historicalTurn.snapshot.folderIdentity.canonicalPath, historicalFolder);
+		assert.equal(historicalTurn.snapshot.folderIdentity.canonicalPath, realpathSync(historicalFolder));
 		await assert.rejects(fixture.resolver.acquire({ projectId: targetProject.id, sessionId: targetSession.id, permissionPolicy: READ_ONLY }), /launch folder|cleanup|recovery/i);
 	} finally {
 		dispose(fixture);

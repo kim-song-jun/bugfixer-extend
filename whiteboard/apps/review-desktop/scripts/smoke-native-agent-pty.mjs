@@ -24,11 +24,13 @@ const nodeExecutable = path.join(resources, 'review-runtime', 'bin', 'node');
 
 const guardianScriptPath = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'pty', 'agentPtyGuardian.mjs');
 
-const hostModule = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentPtyHost.js');
+const hostModule = path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentSessionNativeRuntime.js');
 
 const sessionModules = path.dirname(hostModule);
 
 const probeGuardianScriptPath = path.join(sessionModules, 'agentCliProbeGuardian.mjs');
+
+const identityHookScriptPath = path.join(sessionModules, 'agentProviderIdentityHook.mjs');
 
 await mkdir(evidencePath, { recursive: true });
 
@@ -38,29 +40,14 @@ await access(guardianScriptPath, constants.R_OK);
 
 await access(probeGuardianScriptPath, constants.R_OK);
 
-const { AgentPtyHost } = await import(pathToFileURL(hostModule).href);
+await access(identityHookScriptPath, constants.R_OK);
 
-const { runBoundedAgentCliProcess } = await import(pathToFileURL(path.join(sessionModules, 'agentCliProcess.js')).href);
-
-const { createAgentPtyOutputSanitizer } = await import(pathToFileURL(path.join(sessionModules, 'agentOutputRedactor.js')).href);
-
-const { AgentSessionPtyRuntimeFactory } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionPtyRuntime.js')).href);
-
-const { AgentSessionJournal } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionJournal.js')).href);
-
-const { AgentSessionPreparationError } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionPreparationError.js')).href);
-
-const { AGENT_CLI_COMMAND_SPEC_VERSION } = await import(pathToFileURL(path.join(sessionModules, 'agentCliCapabilities.js')).href);
-
-const { AgentSessionService, AgentSessionRuntimeStartError } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionService.js')).href);
-
-const { AgentSessionWorkspaceResolver } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionWorkspace.js')).href);
-
-const { ManagedWorktreeService } = await import(pathToFileURL(path.join(sessionModules, 'managedWorktrees.js')).href);
-
-const { TaskFolderWriterLock } = await import(pathToFileURL(path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'providerRuns', 'taskFolderWriterLock.js')).href);
-
-const { WorkspaceDatabase } = await import(pathToFileURL(path.join(resources, 'out', 'vs', 'workspace', 'electron-main', 'workspaceDatabase.js')).href);
+const {
+  AgentPtyHost, runBoundedAgentCliProcess, createAgentPtyOutputSanitizer, AgentSessionPtyRuntimeFactory,
+  AgentSessionJournal, AgentSessionPreparationError, AGENT_CLI_COMMAND_SPEC_VERSION,
+  AgentSessionService, AgentSessionRuntimeStartError, AgentSessionWorkspaceResolver,
+  ManagedWorktreeService, TaskFolderWriterLock, WorkspaceDatabase,
+} = await import(pathToFileURL(hostModule).href);
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'bfx-pty-probe-'));
 

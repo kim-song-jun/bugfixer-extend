@@ -332,6 +332,7 @@ test('interrupted sessions recover, failed sessions restart, and stopped session
 		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'stopping');
 		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'stopped');
 		assert.throws(() => database.agentSessions.transitionSession(project.id, session.id, session.revision, 'starting'), /transition/i);
+		assert.throws(() => database.agentSessions.resumeStoppedSessionForTurnWithinTransaction(project.id, session.id, session.revision, randomUUID()), /active SQLite transaction/i);
 		assert.deepEqual(database.agentSessions.getSession(project.id, session.id), session);
 	} finally {
 		database.close();

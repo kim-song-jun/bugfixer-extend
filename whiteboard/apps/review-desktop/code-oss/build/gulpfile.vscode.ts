@@ -107,6 +107,7 @@ const vscodeResourceIncludes = [
 	'out-build/vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'out-build/vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
 	'out-build/vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
+	'out-build/vs/workspace/electron-main/agentSessions/agentProviderIdentityHook.mjs',
 
 	// NLS
 	'out-build/nls.messages.json',

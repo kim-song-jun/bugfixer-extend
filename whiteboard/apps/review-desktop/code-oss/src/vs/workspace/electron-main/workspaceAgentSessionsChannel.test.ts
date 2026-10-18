@@ -379,14 +379,16 @@ test('workflow IPC scopes plans, requires native confirmation, and rejects stale
 test('pending PTY attach is revoked on navigation, catches up output, and pending start stops its exact turn on destruction', { skip: !nativePtyTestEnabled }, async () => {
 	const root = mkdtempSync(join(tmpdir(), 'workspace-agent-session-pty-channel-'));
 	const projectFolder = join(root, 'project');
+	const secondProjectFolder = join(root, 'second-project');
 	const profileFolder = join(root, 'profile');
 	mkdirSync(projectFolder);
+	mkdirSync(secondProjectFolder);
 	mkdirSync(profileFolder);
 	const database = WorkspaceDatabase.open(join(root, 'workspace.db'));
 	const descriptor = URI.file(join(root, 'project.code-workspace')).toString();
 	const secondDescriptor = URI.file(join(root, 'second.code-workspace')).toString();
 	const project = database.createProjectWorkspace('PTY project', projectFolder, descriptor);
-	const secondProject = database.createProjectWorkspace('Second project', projectFolder, secondDescriptor);
+	const secondProject = database.createProjectWorkspace('Second project', secondProjectFolder, secondDescriptor);
 	const session = database.agentSessions.createSession({
 		projectId: project.project.id, bindingId: project.binding.id, name: 'Output fixture', provider: 'codex', model: 'fixture', workspaceMode: 'sharedFolder',
 	});

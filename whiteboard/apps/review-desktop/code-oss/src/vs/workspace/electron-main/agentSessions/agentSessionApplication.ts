@@ -10,6 +10,7 @@ import type { AgentSessionProvider, WorkspaceAgentSessionWorkspacePreparationDTO
 import { AGENT_CLI_COMMAND_SPEC_VERSION, discoverAgentCliCapabilities, type AgentCliCapabilities } from './agentCliCapabilities.js';
 import { AgentSessionCollaborationService } from './agentSessionCollaborationService.js';
 import { createAgentSessionCommand } from './agentSessionCommands.js';
+import { AgentProviderIdentityReceiver, type AgentProviderIdentityAccess } from './agentProviderIdentity.js';
 import { AgentSessionMcpBridge, AGENT_SESSION_MCP_GATEWAY_MODULE, AGENT_SESSION_MCP_TOKEN_ENV } from './agentSessionMcpBridge.js';
 import { AgentSessionPtyRuntimeFactory } from './agentSessionPtyRuntime.js';
 import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
@@ -29,12 +30,14 @@ export interface AgentSessionRuntimePaths {
 	readonly guardian: string;
 	readonly cliProbeGuardian: string;
 	readonly mcpGateway: string;
+	readonly providerIdentityHook: string;
 }
 
 /** Owns the real app services behind the validated project-window session IPC. */
 export class AgentSessionApplication {
 	readonly collaboration: AgentSessionCollaborationService;
 	readonly mcpBridge: AgentSessionMcpBridge;
+	private readonly providerIdentityReceiver: AgentProviderIdentityReceiver;
 	readonly workspaceResolver: AgentSessionWorkspaceResolver;
 	readonly service: AgentSessionService;
 	readonly workflowScheduler: AgentWorkflowScheduler;
@@ -58,6 +61,7 @@ export class AgentSessionApplication {
 			getHostError: (projectId, workflowId, runId) => workflowScheduler?.getHostError(projectId, workflowId, runId) ?? null,
 		});
 		this.mcpBridge = new AgentSessionMcpBridge(this.collaboration);
+		this.providerIdentityReceiver = new AgentProviderIdentityReceiver(database);
 		this.workspaceResolver = new AgentSessionWorkspaceResolver(database, this.worktrees, writerLock, () => this.recoveryReady);
 		this.service = new AgentSessionService(database, this.workspaceResolver, new AgentSessionPtyRuntimeFactory({
 			guardianNodeExecutable: this.runtimePaths().standaloneNode,
@@ -126,6 +130,7 @@ export class AgentSessionApplication {
 			guardian: join(appRoot, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'pty', 'agentPtyGuardian.mjs'),
 			cliProbeGuardian: join(appRoot, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentCliProbeGuardian.mjs'),
 			mcpGateway: join(appRoot, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', AGENT_SESSION_MCP_GATEWAY_MODULE),
+			providerIdentityHook: join(appRoot, 'out', 'vs', 'workspace', 'electron-main', 'agentSessions', 'agentProviderIdentityHook.mjs'),
 		};
 	}
 
@@ -163,6 +168,7 @@ export class AgentSessionApplication {
 				assertReadable(paths.guardian, 'The packaged PTY guardian');
 				assertReadable(paths.cliProbeGuardian, 'The packaged CLI probe guardian');
 				assertReadable(paths.mcpGateway, 'The packaged session MCP gateway');
+				if (snapshot.provider === 'codex') { assertReadable(paths.providerIdentityHook, 'The packaged Codex provider identity hook'); }
 				const profileRef = this.normalizeProfileRef(snapshot.provider, snapshot.profileRef ?? undefined);
 				if (profileRef !== snapshot.profileRef) { throw new Error('The saved session profile reference is not normalized for its provider.'); }
 				const profileDirectory = join(userInfo().homedir || homedir(), snapshot.provider === 'codex' ? '.codex' : '.claude');
@@ -185,6 +191,7 @@ export class AgentSessionApplication {
 		const { paths, profileRef, profileDirectory, executable, runtimeEnv } = trusted;
 		if (signal.aborted) { throw new AgentSessionPreparationError('The session launch was cancelled while checking the selected CLI.', true); }
 		let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
+		let identityAccess: AgentProviderIdentityAccess | undefined;
 		let privateDirectory: string | undefined;
 		let configPath: string | undefined;
 		let accessRevoked = false;
@@ -192,9 +199,14 @@ export class AgentSessionApplication {
 		let configFileRemoved = false;
 		let privateDirectoryRemoved = false;
 		const revokeAccess = () => {
-			if (!access || accessRevoked) { return; }
-			access.revokeAccess();
-			accessRevoked = true;
+			const failures: unknown[] = [];
+			if (access && !accessRevoked) {
+				try { access.revokeAccess(); accessRevoked = true; } catch (error) { failures.push(error); }
+			}
+			if (identityAccess) {
+				try { identityAccess.revokeAccess(); } catch (error) { failures.push(error); }
+			}
+			if (failures.length) { throw new AggregateError(failures, 'Session launch access revocation could not be verified.'); }
 		};
 		const releasePrivateConfig = async () => {
 			const failures: unknown[] = [];
@@ -209,6 +221,9 @@ export class AgentSessionApplication {
 			if (access && !bridgeConfigReleased) {
 				try { await access.releasePrivateConfig(); bridgeConfigReleased = true; } catch (error) { failures.push(error); }
 			}
+			if (identityAccess) {
+				try { await identityAccess.releasePrivateConfig(); } catch (error) { failures.push(error); }
+			}
 			if (failures.length) { throw new AggregateError(failures, 'Private session launch resources could not be released.'); }
 		};
 		try {
@@ -217,45 +232,82 @@ export class AgentSessionApplication {
 				permissionPolicy: snapshot.permissionPolicy,
 			});
 			if (signal.aborted) { throw new Error('The session launch was cancelled while creating its MCP capability.'); }
-			const gateway = { name: 'bugfixer-session' as const, command: paths.standaloneNode, args: [paths.mcpGateway, ...access.gatewayArguments], envVariables: [AGENT_SESSION_MCP_TOKEN_ENV] };
+			const gateway = { name: 'bugfixer-session' as const, command: paths.standaloneNode, args: [paths.mcpGateway, String(access.port)], envVariables: [AGENT_SESSION_MCP_TOKEN_ENV] };
+			const previousTurn = this.database.agentSessionTurns.getPreviousTurn(snapshot.projectId, snapshot.sessionId, turnId);
+			let resumeProviderSessionId: string | undefined;
+			if (snapshot.provider === 'codex' && previousTurn) {
+				if (!previousTurn.providerConversationId) {
+					throw new Error('이전 Codex 실행에서 대화 식별 정보를 받지 못해 이어서 실행할 수 없습니다. 새 세션에서 다시 시작해 주세요.');
+				}
+				resumeProviderSessionId = previousTurn.providerConversationId;
+			} else if (snapshot.provider === 'claude' && previousTurn) {
+				if (previousTurn.providerConversationId && previousTurn.providerConversationId !== snapshot.sessionId) {
+					throw new Error('이전 Claude 실행의 식별 정보가 현재 세션과 일치하지 않아 이어서 실행할 수 없습니다.');
+				}
+				resumeProviderSessionId = snapshot.sessionId;
+			}
+			if (snapshot.provider === 'codex') {
+				identityAccess = await this.providerIdentityReceiver.issue({
+					projectId: snapshot.projectId,
+					sessionId: snapshot.sessionId,
+					turnId,
+					expectedConversationId: previousTurn?.providerConversationId ?? null,
+					onIdentityMismatch: () => {
+						void this.service.rejectProviderConversation(snapshot.projectId, snapshot.sessionId, turnId)
+							.catch(() => console.error('Codex provider identity mismatch could not stop its session.'));
+					},
+				});
+			}
 			if (snapshot.provider === 'claude') {
 				privateDirectory = mkdtempSync(join(tmpdir(), 'bugfixer-session-config-'));
 				configPath = join(privateDirectory, `claude-${turnId}.json`);
 				writeFileSync(configPath, JSON.stringify({ mcpServers: { 'bugfixer-session': {
 					command: paths.standaloneNode,
-					args: [paths.mcpGateway, ...access.gatewayArguments],
+					args: [paths.mcpGateway, String(access.port)],
 					env: { [AGENT_SESSION_MCP_TOKEN_ENV]: '$' + `{${AGENT_SESSION_MCP_TOKEN_ENV}}` },
 				} } }), { mode: 0o600, flag: 'wx' });
 			}
 			const command = createAgentSessionCommand({
 				provider: snapshot.provider, commandSpecVersion: AGENT_CLI_COMMAND_SPEC_VERSION, capabilities,
 				executable, model: snapshot.model, profileRef, profileDirectory, cwd: snapshot.cwd, sessionId: snapshot.sessionId,
+				resumeProviderSessionId,
+				...(identityAccess ? { identityHookCommand: `${shellQuote(paths.standaloneNode)} ${shellQuote(paths.providerIdentityHook)}` } : {}),
 				permissionPolicy: snapshot.permissionPolicy, mcpServer: gateway,
 				...(configPath ? { claudeMcpConfigPath: configPath } : {}),
 				profileEnvironment: { [snapshot.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR']: profileDirectory },
 			});
 			if (signal.aborted) { throw new Error('The session launch was cancelled before PTY creation.'); }
-			const launchEnv: Record<string, string> = { ...command.env, ...runtimeEnv, ...access.gatewayEnvironment };
+			const launchEnv: Record<string, string> = {
+				...command.env, ...runtimeEnv, ...access.gatewayEnvironment,
+				...(identityAccess ? {
+					BUGFIXER_PROVIDER_IDENTITY_PORT: String(identityAccess.port),
+					BUGFIXER_PROVIDER_IDENTITY_NONCE: identityAccess.nonce,
+				} : {}),
+			};
 			return {
 				command, permissionPolicy: snapshot.permissionPolicy, profileDirectory,
 				launch: { executable: command.executable, args: command.args, cwd: command.cwd, env: launchEnv, cols: 100, rows: 30 },
-				knownSecrets: access.knownSecrets,
+				knownSecrets: [...access.knownSecrets, ...(identityAccess ? [identityAccess.nonce] : [])],
 				revokeAccess,
 				releasePrivateConfig,
 			};
 		} catch (error) {
 			const preparationFailure = error instanceof AgentSessionPreparationError ? error : undefined;
 			const revokeAllAccess = () => {
-				revokeAccess();
-				preparationFailure?.recovery?.revokeAccess();
+				const failures: unknown[] = [];
+				try { revokeAccess(); } catch (cleanupError) { failures.push(cleanupError); }
+				try { preparationFailure?.recovery?.revokeAccess(); } catch (cleanupError) { failures.push(cleanupError); }
+				if (failures.length) { throw new AggregateError(failures, 'Session launch access revocation could not be verified.'); }
 			};
 			const releaseAllPrivateConfig = async () => {
-				await releasePrivateConfig();
-				await preparationFailure?.recovery?.releasePrivateConfig();
+				const failures: unknown[] = [];
+				try { await releasePrivateConfig(); } catch (cleanupError) { failures.push(cleanupError); }
+				try { await preparationFailure?.recovery?.releasePrivateConfig(); } catch (cleanupError) { failures.push(cleanupError); }
+				if (failures.length) { throw new AggregateError(failures, 'Session launch resources could not be released.'); }
 			};
 			const failures: unknown[] = [];
 			try { revokeAllAccess(); } catch (cleanupError) { failures.push(cleanupError); }
-			if (!access || accessRevoked) { try { await releaseAllPrivateConfig(); } catch (cleanupError) { failures.push(cleanupError); } }
+			try { await releaseAllPrivateConfig(); } catch (cleanupError) { failures.push(cleanupError); }
 			if (failures.length) {
 				throw new AgentSessionPreparationError(
 					new AggregateError([error, ...failures], 'Session launch preparation failed and its private resources could not be fully released.').message,
@@ -269,6 +321,8 @@ export class AgentSessionApplication {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+function shellQuote(value: string): string { return `'${value.replace(/'/g, "'\"'\"'")}'`; }
 
 function hasErrorCode(error: unknown, code: string): boolean {
 	return typeof error === 'object' && error !== null && 'code' in error && (error as NodeJS.ErrnoException).code === code;

@@ -25,6 +25,8 @@ const LAUNCH_TICKET_TTL_MS = 30_000;
 const MAX_LAUNCH_TICKETS = 128;
 const MAX_PENDING_STARTS = 8;
 const MAX_ATTACHMENTS_PER_TURN = 8;
+const PROVIDER_IDENTITY_MISMATCH_ERROR = '프로바이더 대화 식별자가 현재 세션과 일치하지 않습니다.';
+const PROVIDER_IDENTITY_AND_TRANSCRIPT_ERROR = '프로바이더 대화 식별자가 현재 세션과 일치하지 않으며 실행 기록을 저장하지 못했습니다.';
 
 declare const agentSessionRuntimeHandleBrand: unique symbol;
 
@@ -100,6 +102,7 @@ interface LiveTurn {
 	launchFailureExitCode?: number | null;
 	launchFailureExitSignal?: string | null;
 	transcriptPersistenceFailed: boolean;
+	providerIdentityMismatch: boolean;
 	lifecycleFailure?: unknown;
 }
 
@@ -249,6 +252,7 @@ export class AgentSessionService {
 				spawnAttempted: false,
 				launchFailureCleanupVerified: true,
 				transcriptPersistenceFailed: false,
+				providerIdentityMismatch: false,
 			};
 			this.turns.set(turn.id, live);
 			this.pendingStartReservations--;
@@ -302,6 +306,16 @@ export class AgentSessionService {
 		} catch (error) {
 			throw error;
 		}
+	}
+
+	/** Trusted provider adapter callback. A mismatch fails only the exact turn owned by this host. */
+	async rejectProviderConversation(projectId: string, sessionId: string, turnId: string): Promise<AgentSessionTurnDTO> {
+		const live = this.turns.get(turnId);
+		if (!live || live.projectId !== projectId || live.sessionId !== sessionId) {
+			throw new Error('The provider conversation mismatch does not belong to this project, session, and turn.');
+		}
+		live.providerIdentityMismatch = true;
+		return this.stop(projectId, sessionId, turnId);
 	}
 
 	async attach(
@@ -438,7 +452,7 @@ export class AgentSessionService {
 				state: 'failed',
 				exitCode: live.launchFailureExitCode,
 				exitSignal: live.launchFailureExitSignal,
-				errorSummary: live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : 'The provider could not be started by the trusted session runtime.',
+				errorSummary: live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : 'The provider could not be started by the trusted session runtime.',
 				cleanupVerified,
 			}).turn;
 		}
@@ -452,7 +466,10 @@ export class AgentSessionService {
 		live.transcriptPersistenceFailed ||= snapshot.transcriptPersistenceFailed === true;
 		const current = this.requireTurn(live).turn;
 		if (!isTerminal(current.state)) {
-			live.turn = this.transition(live, cleanupVerified && !live.transcriptPersistenceFailed ? {
+			live.turn = this.transition(live, live.providerIdentityMismatch ? {
+				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
+				errorSummary: this.providerIdentityMismatchSummary(live), cleanupVerified,
+			} : cleanupVerified && !live.transcriptPersistenceFailed ? {
 				state: 'exited', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null, cleanupVerified: true,
 			} : cleanupVerified ? {
 				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
@@ -484,16 +501,22 @@ export class AgentSessionService {
 		if (live.runtime) { cleanupVerified = await this.stopAndReleaseRuntime(live); }
 		else if (live.launchFailed) { cleanupVerified = live.launchFailureCleanupVerified; }
 		if (cleanupVerified) {
-			live.turn = this.transition(live, live.transcriptPersistenceFailed ? {
+			live.turn = this.transition(live, live.providerIdentityMismatch ? {
+				state: 'failed', errorSummary: this.providerIdentityMismatchSummary(live), cleanupVerified: true,
+			} : live.transcriptPersistenceFailed ? {
 				state: 'failed', errorSummary: 'The durable session transcript could not be written; terminal output was withheld.', cleanupVerified: true,
 			} : { state: 'exited', cleanupVerified: true }).turn;
 			this.releaseWorkspace(live);
 		} else {
 			live.turn = this.transition(live, {
-				state: 'failed', errorSummary: 'Session launch or stop could not verify cleanup of owned resources.', cleanupVerified: false,
+				state: 'failed', errorSummary: live.providerIdentityMismatch ? this.providerIdentityMismatchSummary(live) : 'Session launch or stop could not verify cleanup of owned resources.', cleanupVerified: false,
 			}).turn;
 		}
 		return live.turn;
+	}
+
+	private providerIdentityMismatchSummary(live: LiveTurn): string {
+		return live.transcriptPersistenceFailed ? PROVIDER_IDENTITY_AND_TRANSCRIPT_ERROR : PROVIDER_IDENTITY_MISMATCH_ERROR;
 	}
 
 	private async stopAndReleaseRuntime(live: LiveTurn): Promise<boolean> {

@@ -4,10 +4,6 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, mkdtempSync } from 'node:fs';
-import { rmdir, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createServer, type Server, type Socket } from 'node:net';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
 import { AgentSessionCollaborationService, type AgentSessionCollaborationGrant } from './agentSessionCollaborationService.js';
@@ -31,32 +27,24 @@ export interface AgentSessionMcpAccessInput {
 }
 
 export interface AgentSessionMcpAccess {
-	/** The private Unix socket path is a nonsecret argument; only the capability value is an environment value. */
-	readonly gatewayArguments: readonly string[];
+	/** Ephemeral loopback port is a nonsecret gateway argument; only the capability is an environment value. */
+	readonly port: number;
 	/** The token is forwarded to the app-owned gateway through the launch's allowlisted environment only. */
 	readonly gatewayEnvironment: Readonly<Record<string, string>>;
 	readonly knownSecrets: readonly string[];
 	/** Idempotent synchronous deny, socket destruction, and wait cancellation. */
 	revokeAccess(): void;
-	/** Removes only this grant's private socket and temporary directory after revokeAccess. */
+	/** Awaits this grant's loopback listener and connections closing after revokeAccess. */
 	releasePrivateConfig(): Promise<void>;
-}
-
-export interface AgentSessionMcpBridgeOptions {
-	/** Trusted app temp root; injectable to isolate setup and cleanup in focused tests. */
-	readonly temporaryDirectory?: string;
-	readonly chmod?: typeof chmodSync;
-	readonly unlink?: typeof unlink;
-	readonly rmdir?: typeof rmdir;
 }
 
 interface ActiveRequest {
 	readonly controller: AbortController;
 }
 
-/** Main-process capability broker. It owns a private Unix socket and no process handles. */
+/** Main-process capability broker. It owns a scoped loopback listener and no provider process handles. */
 export class AgentSessionMcpBridge {
-	constructor(private readonly collaboration: AgentSessionCollaborationService, private readonly options: AgentSessionMcpBridgeOptions = {}) { }
+	constructor(private readonly collaboration: AgentSessionCollaborationService) { }
 
 	async issueAccess(input: AgentSessionMcpAccessInput): Promise<AgentSessionMcpAccess> {
 		assertUuid(input.projectId, 'project ID');
@@ -77,12 +65,9 @@ export class AgentSessionMcpBridge {
 		let active = true;
 		let grantRevoked = false;
 		let serverClosed = false;
-		let socketRemoved = false;
-		let directoryRemoved = false;
 		let closePromise: Promise<void> | undefined;
 		const sockets = new Set<Socket>();
-		let privateDirectory: string | undefined;
-		let socketPath: string | undefined;
+		let port: number | undefined;
 		let server: Server | undefined;
 		let asynchronousServerFailure: unknown;
 		const revokeAccess = () => {
@@ -108,32 +93,25 @@ export class AgentSessionMcpBridge {
 				try { await closePromise; serverClosed = true; }
 				catch (error) { closePromise = undefined; failures.push(error); }
 			}
-			if (socketPath && !socketRemoved) {
-				try { await (this.options.unlink ?? unlink)(socketPath); socketRemoved = true; }
-				catch (error) { if (isMissingFile(error)) { socketRemoved = true; } else { failures.push(error); } }
-			}
-			if (privateDirectory && !directoryRemoved) {
-				try { await (this.options.rmdir ?? rmdir)(privateDirectory); directoryRemoved = true; }
-				catch (error) { if (isMissingFile(error)) { directoryRemoved = true; } else { failures.push(error); } }
-			}
-			if (failures.length) { throw new AggregateError(failures, 'Session MCP private resources could not be released.'); }
+			if (failures.length) { throw new AggregateError(failures, 'Session MCP listener resources could not be released.'); }
 		};
 		const releasePrivateConfig = async () => {
 			if (!grantRevoked) { throw new Error('Session MCP access must be revoked before private configuration is released.'); }
 			await cleanupOwnedResources();
 		};
 		try {
-			privateDirectory = mkdtempSync(join(this.options.temporaryDirectory ?? tmpdir(), 'bugfixer-session-mcp-'));
-			socketPath = join(privateDirectory, 'bridge.sock');
 			server = createServer(socket => acceptSocket(socket, grant, tokenDigest, this.collaboration, sockets, () => active));
 			server.maxConnections = MAX_CONNECTIONS;
 			server.on('error', error => {
 				if (!active) { return; }
 				try { revokeAccess(); } catch (revokeError) { asynchronousServerFailure = new AggregateError([error, revokeError], 'Session MCP server failed and access revocation needs retry.'); }
 			});
-			await listen(server, socketPath);
-			(this.options.chmod ?? chmodSync)(privateDirectory, 0o700);
-			(this.options.chmod ?? chmodSync)(socketPath, 0o600);
+			await listen(server);
+			const address = server.address();
+			if (!address || typeof address === 'string' || address.address !== '127.0.0.1' || address.port < 1 || address.port > 65_535) {
+				throw new Error('Session MCP bridge did not bind an ephemeral loopback port.');
+			}
+			port = address.port;
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
 			try { revokeAccess(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
@@ -149,9 +127,8 @@ export class AgentSessionMcpBridge {
 			throw new AgentSessionPreparationError(error instanceof Error ? error.message : String(error), true);
 		}
 		const knownSecrets = Object.freeze([...new Set([...(input.knownSecrets ?? []), token].filter(Boolean))]);
-		const ownedSocketPath = socketPath!;
 		return Object.freeze({
-			gatewayArguments: Object.freeze([ownedSocketPath]),
+			port: port!,
 			gatewayEnvironment: Object.freeze({ [AGENT_SESSION_MCP_TOKEN_ENV]: token }),
 			knownSecrets,
 			revokeAccess,
@@ -326,13 +303,13 @@ function writeFrame(socket: Socket, value: unknown): void {
 	socket.write(frame);
 }
 
-function listen(server: Server, socketPath: string): Promise<void> {
+function listen(server: Server): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const onError = (error: Error) => { server.off('listening', onListening); reject(error); };
 		const onListening = () => { server.off('error', onError); resolve(); };
 		server.once('error', onError);
 		server.once('listening', onListening);
-		server.listen(socketPath);
+		server.listen({ host: '127.0.0.1', port: 0, exclusive: true });
 	});
 }
 
@@ -345,8 +322,4 @@ function closeServer(server: Server): Promise<void> {
 
 function assertUuid(value: string, label: string): void {
 	if (typeof value !== 'string' || !UUID.test(value)) { throw new Error(`The ${label} must be a UUID.`); }
-}
-
-function isMissingFile(error: unknown): boolean {
-	return !!error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
 }

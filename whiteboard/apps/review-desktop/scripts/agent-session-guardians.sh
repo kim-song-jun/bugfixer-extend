@@ -2,9 +2,11 @@
 # Shared exact resource list for build, cross-platform handoff, and packaged-app gates.
 
 AGENT_SESSION_GUARDIAN_PATHS=(
+  "vs/workspace/electron-main/agentSessions/agentSessionNativeRuntime.js"
   "vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs"
   "vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs"
   "vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs"
+  "vs/workspace/electron-main/agentSessions/agentProviderIdentityHook.mjs"
 )
 
 require_agent_session_guardians() {

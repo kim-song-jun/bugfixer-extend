@@ -4,10 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { clearTimeout, setTimeout } from 'node:timers';
 import * as pty from 'node-pty';
 import type { IDisposable } from '../../../base/common/lifecycle.js';
@@ -141,9 +139,8 @@ interface OwnedPty {
 	readonly exitListeners: Set<(snapshot: AgentPtySnapshot) => void>;
 	readonly disposables: IDisposable[];
 	readonly capability: string;
-	readonly socketPath: string;
+	controlPort: number;
 	readonly controlServer: Server;
-	readonly privateDirectory: string;
 	readonly resolveStartup: () => void;
 	readonly rejectStartup: (error: Error) => void;
 	readonly controlSockets: Set<Socket>;
@@ -203,13 +200,6 @@ export class AgentPtyHost {
 		const sanitizer = this.options.createSanitizer();
 		if (!sanitizer || typeof sanitizer.push !== 'function' || typeof sanitizer.flush !== 'function') { throw new Error('The PTY output sanitizer is invalid.'); }
 
-		const privateDirectory = await mkdtemp(join(tmpdir(), 'bfx-pty-'));
-		await chmod(privateDirectory, 0o700);
-		const socketPath = join(privateDirectory, 'c.sock');
-		if (Buffer.byteLength(socketPath, 'utf8') > 100) {
-			await rm(privateDirectory, { recursive: true, force: true });
-			throw new Error('The private PTY control socket path is too long.');
-		}
 		const capability = randomBytes(32).toString('hex');
 		const server = createServer();
 		const handle = Object.freeze({}) as unknown as AgentPtyHandle;
@@ -228,9 +218,8 @@ export class AgentPtyHost {
 			exitListeners: new Set(),
 			disposables: [],
 			capability,
-			socketPath,
+			controlPort: 0,
 			controlServer: server,
-			privateDirectory,
 			resolveStartup,
 			rejectStartup,
 			controlSockets: new Set(),
@@ -275,20 +264,19 @@ export class AgentPtyHost {
 
 		try {
 			try {
-				await listen(server, socketPath);
+				record.controlPort = await listen(server);
 				record.controlServerWasListening = true;
 			} catch (error) {
-				record.controlServerBindFailed = true;
+				record.controlServerWasListening = server.listening;
+				record.controlServerBindFailed = !server.listening;
 				throw error;
 			}
-			if (this.shuttingDown || signal?.aborted) { throw new Error('The PTY launch was cancelled before guardian creation.'); }
-			await chmod(socketPath, 0o600);
 			if (this.shuttingDown || signal?.aborted) { throw new Error('The PTY launch was cancelled before guardian creation.'); }
 			const guardianEnvironment: Record<string, string> = {
 				PATH: process.env.PATH ?? '/usr/bin:/bin',
 				...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
 			};
-			const child = pty.spawn(this.options.guardianNodeExecutable, [this.options.guardianScriptPath, socketPath, capability], {
+			const child = pty.spawn(this.options.guardianNodeExecutable, [this.options.guardianScriptPath, String(record.controlPort), capability], {
 				name: 'xterm-256color',
 				cols: launch.cols,
 				rows: launch.rows,
@@ -614,7 +602,7 @@ export class AgentPtyHost {
 			} catch {
 				record.state = 'cleanupUnverified';
 				this.notifyExitListeners(record);
-				return { state: 'cleanupUnverified', cleanupVerified: false, error: 'PTY control resources could not be removed.' };
+				return { state: 'cleanupUnverified', cleanupVerified: false, error: 'PTY control resources could not be closed.' };
 			}
 		}
 		this.notifyExitListeners(record);
@@ -632,15 +620,19 @@ export class AgentPtyHost {
 			// listen rejected before binding, so there was no active server to close.
 		} else if (!record.controlServerWasListening) {
 			return false;
+		} else if (!record.controlServer.listening && record.controlSockets.size === 0) {
+			return true;
 		} else {
 			if (!record.controlServerClosePromise) {
-				record.controlServerClosePromise = new Promise<void>(resolve => {
-					record.controlServer.close(() => resolve());
+				record.controlServerClosePromise = new Promise<void>((resolve, reject) => {
+					record.controlServer.close(error => error ? reject(error) : resolve());
+				}).catch(error => {
+					record.controlServerClosePromise = undefined;
+					throw error;
 				});
 			}
 			if (!(await waitForPromise(record.controlServerClosePromise, CONTROL_CLOSE_TIMEOUT_MS))) { return false; }
 		}
-		await rm(record.privateDirectory, { recursive: true, force: true });
 		return true;
 	}
 
@@ -786,13 +778,21 @@ function isGuardianHello(value: unknown, capability: string, expectedPid: number
 	return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
-function listen(server: Server, socketPath: string): Promise<void> {
+function listen(server: Server): Promise<number> {
 	return new Promise((resolve, reject) => {
 		const onError = (error: Error) => { server.off('listening', onListening); reject(error); };
-		const onListening = () => { server.off('error', onError); resolve(); };
+		const onListening = () => {
+			server.off('error', onError);
+			const address = server.address();
+			if (!address || typeof address === 'string' || address.address !== '127.0.0.1' || address.port < 1 || address.port > 65_535) {
+				reject(new Error('The PTY guardian control server did not bind an ephemeral loopback port.'));
+				return;
+			}
+			resolve(address.port);
+		};
 		server.once('error', onError);
 		server.once('listening', onListening);
-		server.listen(socketPath);
+		server.listen({ host: '127.0.0.1', port: 0, exclusive: true });
 	});
 }
 

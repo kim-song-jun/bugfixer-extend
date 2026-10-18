@@ -9,11 +9,12 @@ const MAX_FRAME_BYTES = 65_536;
 const MAX_IN_FLIGHT = 8;
 const MAX_STDOUT_QUEUE_BYTES = 1_048_576;
 const PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
-const socketPath = process.argv[2];
+const portArgument = process.argv[2];
+const port = typeof portArgument === 'string' && /^[1-9][0-9]{0,4}$/.test(portArgument) ? Number(portArgument) : NaN;
 const token = process.env.BUGFIXER_SESSION_MCP_TOKEN;
 let activeSocket;
 
-if (process.argv.length !== 3 || !socketPath || !token || socketPath.length > 4096 || token.length > 256) {
+if (process.argv.length !== 3 || !Number.isSafeInteger(port) || port < 1 || port > 65_535 || !token || token.length > 256) {
 	process.stderr.write('Session MCP gateway launch configuration is invalid.\n');
 	process.exitCode = 1;
 } else {
@@ -24,7 +25,7 @@ if (process.argv.length !== 3 || !socketPath || !token || socketPath.length > 40
 }
 
 async function run() {
-	const socket = connect(socketPath);
+	const socket = connect({ host: '127.0.0.1', port });
 	activeSocket = socket;
 	socket.setNoDelay(true);
 	let socketBuffer = Buffer.alloc(0);

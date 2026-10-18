@@ -73,6 +73,7 @@
 .ai-session__preview-list dt { color: var(--ai-muted); }
 .ai-session__preview-list dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .ai-session__preview .ai-session__field-help { margin: 14px 0; }
+.ai-session__provider-identity-notice { padding-left: 10px; border-left: 2px solid var(--ai-accent); }
 .ai-session__message { margin: 12px 0 0; color: var(--ai-muted); }
 .ai-session__message--error { color: var(--vscode-errorForeground, #c3283b); }
 .ai-session__narrow-toolbar { display: none; }

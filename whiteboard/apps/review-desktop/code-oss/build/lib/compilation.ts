@@ -123,6 +123,7 @@ const agentSessionGuardianResources = [
 	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
+	'vs/workspace/electron-main/agentSessions/agentProviderIdentityHook.mjs',
 ] as const;
 
 /** Copies standalone agent-session Node entrypoints as explicit runtime resources. */

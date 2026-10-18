@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { connect } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -71,7 +71,7 @@ async function openMcpClient(access: Awaited<ReturnType<AgentSessionMcpBridge['i
 		PATH: process.env.PATH ?? '',
 		[AGENT_SESSION_MCP_TOKEN_ENV]: access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV],
 	};
-	const transport = new StdioClientTransport({ command: process.execPath, args: [GATEWAY_PATH, ...access.gatewayArguments], env, stderr: 'pipe' });
+	const transport = new StdioClientTransport({ command: process.execPath, args: [GATEWAY_PATH, String(access.port)], env, stderr: 'pipe' });
 	const client = new Client({ name: 'bugfixer-session-collaboration-test', version: '1.0.0' });
 	try { await client.connect(transport); }
 	catch (error) {
@@ -93,8 +93,8 @@ async function closeOwnedMcpResources(
 	if (failures.length) { throw new AggregateError(failures, 'Owned MCP fixture resources did not close cleanly.'); }
 }
 
-function assertSocketDenied(socketPath: string, token: string): Promise<void> {
-	const socket = connect(socketPath);
+function assertBridgeDenied(port: number, token: string): Promise<void> {
+	const socket = connect({ host: '127.0.0.1', port });
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		const finish = (error?: Error) => {
@@ -111,8 +111,36 @@ function assertSocketDenied(socketPath: string, token: string): Promise<void> {
 		}));
 		socket.once('close', () => finish());
 		socket.once('error', error => {
-			if (['EPIPE', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) { finish(); }
+			if (['EPIPE', 'ECONNREFUSED', 'ECONNRESET'].includes((error as NodeJS.ErrnoException).code ?? '')) { finish(); }
 			else { finish(error); }
+		});
+	});
+}
+
+function assertUnauthenticatedConnectionTimesOut(port: number): Promise<void> {
+	const socket = connect({ host: '127.0.0.1', port });
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			socket.destroy();
+			reject(new Error('The MCP bridge did not close an unauthenticated connection within its bounded auth timeout.'));
+		}, 8_000);
+		socket.once('connect', () => undefined);
+		socket.once('close', () => { clearTimeout(timeout); resolve(); });
+		socket.once('error', error => {
+			clearTimeout(timeout);
+			if ((error as NodeJS.ErrnoException).code === 'ECONNRESET') { resolve(); }
+			else { reject(error); }
+		});
+	});
+}
+
+function assertBridgeUnavailable(port: number): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const socket = connect({ host: '127.0.0.1', port });
+		socket.once('connect', () => { socket.destroy(); reject(new Error('The released MCP bridge port accepted a connection.')); });
+		socket.once('error', error => {
+			if ((error as NodeJS.ErrnoException).code === 'ECONNREFUSED') { resolve(); }
+			else { reject(error); }
 		});
 	});
 }
@@ -133,7 +161,7 @@ function readSuccessfulToolPayload(result: unknown, operation: string): Record<s
 	return payload as Record<string, unknown>;
 }
 
-test('real MCP SDK client uses scoped sockets for all provider pairings and durable receipts', async () => {
+test('real MCP SDK client uses scoped loopback ports for all provider pairings and durable receipts', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-sdk-'));
 	const fixture = createFixture(directory);
 	const collaboration = new AgentSessionCollaborationService(fixture.database);
@@ -385,7 +413,7 @@ test('gateway rejects a duplicate in-flight JSON-RPC ID before dispatching its s
 		const receiver = createSession(fixture, 'claude');
 		const turn = createTurn(fixture, sender);
 		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: sender.id, turnId: turn.id, permissionPolicy: POLICY });
-		child = spawn(process.execPath, [GATEWAY_PATH, ...access.gatewayArguments], {
+		child = spawn(process.execPath, [GATEWAY_PATH, String(access.port)], {
 			env: { PATH: process.env.PATH ?? '', [AGENT_SESSION_MCP_TOKEN_ENV]: access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV] },
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
@@ -461,12 +489,10 @@ test('MCP token is secret-redacted and revocation promptly cancels a waiting too
 		const senderTurn = createTurn(fixture, sender);
 		createTurn(fixture, receiver);
 		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: sender.id, turnId: senderTurn.id, permissionPolicy: POLICY });
-		const socketPath = access.gatewayArguments[0];
-		const privateDirectory = socketPath.slice(0, socketPath.lastIndexOf('/'));
-		assert.equal(statSync(privateDirectory).mode & 0o777, 0o700);
-		assert.equal(statSync(socketPath).mode & 0o777, 0o600);
+		assert.ok(Number.isSafeInteger(access.port) && access.port >= 1 && access.port <= 65_535);
 		assert.deepEqual(Object.keys(access.gatewayEnvironment), [AGENT_SESSION_MCP_TOKEN_ENV]);
-		await assertSocketDenied(socketPath, 'wrong-capability');
+		await assertBridgeDenied(access.port, 'wrong-capability');
+		await assertUnauthenticatedConnectionTimesOut(access.port);
 		mcp = await openMcpClient(access);
 		const token = access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV];
 		assert.ok(access.knownSecrets.includes(token));
@@ -481,7 +507,7 @@ test('MCP token is secret-redacted and revocation promptly cancels a waiting too
 		const rows = sqlite.prepare('SELECT body, idempotency_key FROM agent_session_messages').all();
 		assert.equal(JSON.stringify(rows).includes(token), false);
 		access.revokeAccess();
-		await assertSocketDenied(socketPath, token);
+		await assertBridgeDenied(access.port, token);
 
 		const receiverTurn = fixture.database.agentSessionTurns.listTurns(fixture.project.id, receiver.id)[0];
 		receiverAccess = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: receiver.id, turnId: receiverTurn.id, permissionPolicy: POLICY });
@@ -493,11 +519,9 @@ test('MCP token is secret-redacted and revocation promptly cancels a waiting too
 		receiverAccess.revokeAccess();
 		await assert.rejects(waiting, /cancelled|revoked|disconnected|closed|transport/i);
 		assert.equal(Reflect.get(collaboration, 'activeWaiters'), 0, 'revocation must release the backend waiter');
-		const receiverSocketPath = receiverAccess.gatewayArguments[0];
-		const receiverDirectory = receiverSocketPath.slice(0, receiverSocketPath.lastIndexOf('/'));
+		const receiverPort = receiverAccess.port;
 		await receiverAccess.releasePrivateConfig();
-		assert.equal(existsSync(receiverSocketPath), false);
-		assert.equal(existsSync(receiverDirectory), false);
+		await assertBridgeUnavailable(receiverPort);
 	} finally {
 		try {
 			await closeOwnedMcpResources([receiverClient, mcp].filter(client => client !== undefined), [receiverAccess, access].filter(item => item !== undefined));

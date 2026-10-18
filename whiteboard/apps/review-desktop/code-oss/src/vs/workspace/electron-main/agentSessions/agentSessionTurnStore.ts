@@ -96,6 +96,8 @@ export class AgentSessionTurnStore {
 				|| session.bindingId !== snapshot.bindingId || session.taskId !== snapshot.taskId) {
 				throw new Error('The launch snapshot provider, model, profile, and ownership must match the persisted session.');
 			}
+			if (session.state === 'stopped' && workflowLaunch) { throw new Error('A stopped session cannot be restarted by a workflow launch reservation.'); }
+			const stoppedManualResume = session.state === 'stopped' && workflowLaunch === undefined;
 			const binding = this.db.prepare('SELECT path FROM folder_bindings WHERE id = ? AND project_id = ?').get(session.bindingId, input.projectId) as { path: string } | undefined;
 			if (!binding) { throw new Error('The launch binding does not belong to the session project.'); }
 			if (session.workspaceMode === 'sharedFolder') {
@@ -106,7 +108,7 @@ export class AgentSessionTurnStore {
 				throw new Error('A Git worktree launch must carry the session-owned worktree lease identity.');
 			}
 			this.assertKnowledgeReferences(session, snapshot);
-			if (!['created', 'idle', 'interrupted', 'failed'].includes(session.state)) { throw new Error('The session is not ready to start a new turn.'); }
+			if (!stoppedManualResume && !['created', 'idle', 'interrupted', 'failed'].includes(session.state)) { throw new Error('The session is not ready to start a new turn.'); }
 			const ordinal = Number(this.db.prepare('SELECT COALESCE(MAX(ordinal), 0) + 1 AS next_ordinal FROM agent_session_turns WHERE project_id = ? AND session_id = ?')
 				.get(input.projectId, input.sessionId)?.next_ordinal ?? 1);
 			this.db.prepare(`INSERT INTO agent_session_turns (
@@ -118,7 +120,11 @@ export class AgentSessionTurnStore {
 				snapshotJson, snapshotSha256, now, now,
 			);
 			if (workflowLaunch) { this.consumeWorkflowLaunchAuthorization(workflowLaunch, now); }
-			this.sessions.transitionSessionWithinTransaction(input.projectId, input.sessionId, input.expectedSessionRevision, 'starting');
+			if (stoppedManualResume) {
+				this.sessions.resumeStoppedSessionForTurnWithinTransaction(input.projectId, input.sessionId, input.expectedSessionRevision, id);
+			} else {
+				this.sessions.transitionSessionWithinTransaction(input.projectId, input.sessionId, input.expectedSessionRevision, 'starting');
+			}
 			return this.readTurnInternal(input.projectId, input.sessionId, id)!;
 		});
 	}
@@ -158,6 +164,18 @@ export class AgentSessionTurnStore {
 		this.assertOwnedSession(projectId, sessionId);
 		return this.db.prepare(`SELECT id FROM agent_session_turns WHERE project_id = ? AND session_id = ? ORDER BY ordinal`)
 			.all(projectId, sessionId).map(row => this.readTurnInternal(projectId, sessionId, String(row.id))!);
+	}
+
+	getPreviousTurn(projectId: string, sessionId: string, turnId: string): AgentSessionTurnDTO | undefined {
+		this.assertOpen();
+		this.assertOwnedSession(projectId, sessionId);
+		this.validateUuid(turnId, 'turn ID');
+		const current = this.readTurnInternal(projectId, sessionId, turnId);
+		if (!current) { throw new Error('The turn does not belong to this project and session.'); }
+		const previous = this.db.prepare(`SELECT id FROM agent_session_turns
+			WHERE project_id = ? AND session_id = ? AND ordinal < ? ORDER BY ordinal DESC LIMIT 1`)
+			.get(projectId, sessionId, current.ordinal) as Record<string, SQLOutputValue> | undefined;
+		return previous ? this.readTurnInternal(projectId, sessionId, String(previous.id)) : undefined;
 	}
 
 	transitionTurn(

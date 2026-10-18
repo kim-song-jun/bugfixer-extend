@@ -97,6 +97,7 @@ const desktopEntryPoints = [
 	'vs/review/navigator.desktop.main',
 	'vs/review/project.desktop.main',
 	'vs/review/electron-utility/reviewDesktopHostMain',
+	'vs/workspace/electron-main/agentSessions/agentSessionNativeRuntime',
 	'vs/workbench/contrib/debug/node/telemetryApp',
 	'vs/platform/files/node/watcher/watcherMain',
 	'vs/platform/terminal/node/ptyHostMain',
@@ -153,6 +154,7 @@ const desktopResourcePatterns = [
 	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
+	'vs/workspace/electron-main/agentSessions/agentProviderIdentityHook.mjs',
 
 	// HTML
 	'vs/code/electron-browser/workbench/workbench.html',
@@ -390,9 +392,11 @@ async function copyResources(outDir: string): Promise<void> {
 }
 
 const agentSessionGuardianResources = [
+	'vs/workspace/electron-main/agentSessions/agentSessionNativeRuntime.js',
 	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
+	'vs/workspace/electron-main/agentSessions/agentProviderIdentityHook.mjs',
 ] as const;
 
 async function assertAgentSessionGuardianResources(outDir: string): Promise<void> {

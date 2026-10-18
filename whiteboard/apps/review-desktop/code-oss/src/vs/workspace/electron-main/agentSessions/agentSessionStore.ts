@@ -106,6 +106,44 @@ export class AgentSessionStore {
 		return this.getSessionInternal(projectId, sessionId)!;
 	}
 
+	/** Resumes a stopped session only for its exact newly-created manual turn after verified prior-turn cleanup. */
+	resumeStoppedSessionForTurnWithinTransaction(projectId: string, sessionId: string, expectedRevision: number, turnId: string): AgentSessionDTO {
+		this.assertOpen();
+		if (!this.db.isTransaction) { throw new Error('A stopped-session resume requires an active SQLite transaction.'); }
+		this.validateUuid(projectId, 'project ID');
+		this.validateUuid(sessionId, 'session ID');
+		this.validateUuid(turnId, 'turn ID');
+		if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) { throw new Error('The expected session revision is invalid.'); }
+		const session = this.getSessionInternal(projectId, sessionId);
+		if (!session || session.state !== 'stopped') { throw new Error('Only a stopped session can use this turn-owned resume transition.'); }
+		if (session.revision !== expectedRevision) { throw new Error('The session revision is stale.'); }
+		const nextTurn = this.db.prepare(`SELECT ordinal, state FROM agent_session_turns
+			WHERE id = ? AND project_id = ? AND session_id = ?`).get(turnId, projectId, sessionId) as Record<string, SQLOutputValue> | undefined;
+		if (!nextTurn || nextTurn.state !== 'starting') { throw new Error('The stopped-session resume requires its exact scoped starting turn.'); }
+		const latestTurn = this.db.prepare(`SELECT id FROM agent_session_turns
+			WHERE project_id = ? AND session_id = ? ORDER BY ordinal DESC LIMIT 1`).get(projectId, sessionId);
+		if (!latestTurn || String(latestTurn.id) !== turnId) { throw new Error('Only the latest turn may resume a stopped session.'); }
+		const ordinal = Number(nextTurn.ordinal);
+		const previousTurn = ordinal > 1 ? this.db.prepare(`SELECT id, ordinal, state, cleanup_verified FROM agent_session_turns
+			WHERE project_id = ? AND session_id = ? AND ordinal = ?`).get(projectId, sessionId, ordinal - 1) as Record<string, SQLOutputValue> | undefined : undefined;
+		if (!previousTurn || Number(previousTurn.ordinal) !== ordinal - 1
+			|| !['exited', 'failed', 'interrupted'].includes(String(previousTurn.state)) || Number(previousTurn.cleanup_verified) !== 1) {
+			throw new Error('A stopped session requires a terminal, cleanup-verified previous turn before manual resume.');
+		}
+		if (this.db.prepare(`SELECT 1 FROM agent_workflow_run_nodes
+			WHERE project_id = ? AND session_id = ? AND session_turn_id = ? LIMIT 1`).get(projectId, sessionId, turnId)) {
+			throw new Error('A workflow-linked turn cannot use the manual stopped-session resume transition.');
+		}
+		const now = new Date().toISOString();
+		const changed = this.db.prepare(`UPDATE agent_sessions SET state = 'starting', revision = revision + 1, updated_at = ?
+			WHERE id = ? AND project_id = ? AND revision = ? AND state = 'stopped'
+			AND EXISTS (SELECT 1 FROM agent_session_turns next WHERE next.id = ? AND next.project_id = ? AND next.session_id = ? AND next.state = 'starting')
+			AND NOT EXISTS (SELECT 1 FROM agent_workflow_run_nodes node WHERE node.project_id = ? AND node.session_id = ? AND node.session_turn_id = ?)`)
+			.run(now, sessionId, projectId, expectedRevision, turnId, projectId, sessionId, projectId, sessionId, turnId);
+		if (Number(changed.changes) !== 1) { throw new Error('The stopped-session turn resume is stale or no longer eligible.'); }
+		return this.getSessionInternal(projectId, sessionId)!;
+	}
+
 	private assertNoLiveTurnOwnsLifecycle(sessionId: string): void {
 		if (this.db.prepare(`SELECT 1 FROM agent_session_turns WHERE session_id = ? AND state IN ('starting', 'running', 'stopping') LIMIT 1`).get(sessionId)) {
 			throw new Error('A live session turn owns lifecycle updates; transition the turn instead.');

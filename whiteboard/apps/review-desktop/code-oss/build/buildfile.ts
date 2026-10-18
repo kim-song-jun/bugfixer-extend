@@ -29,7 +29,8 @@ export const workbenchDesktop = [
 	createModuleDescription('vs/review/review.desktop.main'),
 	createModuleDescription('vs/review/navigator.desktop.main'),
 	createModuleDescription('vs/review/project.desktop.main'),
-	createModuleDescription('vs/review/electron-utility/reviewDesktopHostMain')
+	createModuleDescription('vs/review/electron-utility/reviewDesktopHostMain'),
+	createModuleDescription('vs/workspace/electron-main/agentSessions/agentSessionNativeRuntime')
 ];
 
 export const keyboardMaps = [

@@ -313,9 +313,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private async startPreviewedTurn(): Promise<void> {
 		if (!this.projectId || !this.preview || !this.previewSessionId || this.operation) return;
+		const projectId = this.projectId;
+		const sessionId = this.previewSessionId;
+		const preview = this.preview;
 		this.operation = true; this.render();
 		try {
-			const turn = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'start', { projectId: this.projectId, sessionId: this.previewSessionId, ticketId: this.preview.ticketId }) as AgentSessionTurnDTO;
+			const turn = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'start', { projectId, sessionId, ticketId: preview.ticketId }) as AgentSessionTurnDTO;
+			if (this.projectId !== projectId || this.previewSessionId !== sessionId) { return; }
 			this.preview = undefined; this.previewSessionId = undefined;
 			await this.loadTurns(turn.sessionId);
 			this.sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId: this.projectId }) as readonly AgentSessionDTO[];
@@ -842,10 +846,16 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		mcpScope.textContent = snapshot.provider === 'codex'
 			? '앱의 MCP 권한은 이 프로젝트와 세션에 적용됩니다. Codex의 기존 MCP 도구는 프로필 설정을 따르며, 파일 및 외부 서비스 접근 범위는 별도로 적용됩니다.'
 			: '앱의 MCP 권한은 이 프로젝트와 세션에 적용됩니다. 파일 도구의 읽기 전용 설정은 기존 프로필 도구와 외부 서비스 접근 범위를 제한하지 않습니다.';
+		const identityNotice = document.createElement('p'); identityNotice.className = 'ai-session__field-help ai-session__provider-identity-notice';
+		if (snapshot.provider === 'codex') {
+			identityNotice.textContent = '처음에는 /hooks에서 UserPromptSubmit을 한 번 신뢰한 뒤 프롬프트를 입력해 주세요. 연결은 세션 식별 정보만 전달합니다. 새 대화는 앱에서 새 AI 세션을 만들어 시작하세요.';
+		}
 		const actions = document.createElement('div'); actions.className = 'ai-session__form-actions';
 		const start = document.createElement('button'); start.id = 'ai-session-preview-start'; start.type = 'button'; start.className = 'ai-session__primary'; start.disabled = this.operation; start.textContent = '확인하고 실행'; start.addEventListener('click', () => void this.startPreviewedTurn());
 		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.preview = undefined; this.previewSessionId = undefined; this.render(); });
-		actions.append(start, cancel); section.append(title, list, note, mcpScope, actions); parent.appendChild(section);
+		actions.append(start, cancel); section.append(title, list, note, mcpScope);
+		if (snapshot.provider === 'codex') { section.appendChild(identityNotice); }
+		section.appendChild(actions); parent.appendChild(section);
 	}
 
 	private renderEmpty(parent: HTMLElement, canCreate: boolean): void {

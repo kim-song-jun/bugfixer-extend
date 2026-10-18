@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import type { AgentPtySnapshot, AgentPtyStopResult } from './agentPtyHost.js';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { TaskFolderWriterLock } from '../providerRuns/taskFolderWriterLock.js';
@@ -89,8 +90,9 @@ function createNeverLaunchRuntimeFactory(): { readonly factory: AgentSessionRunt
 	return { factory, starts: () => startCount };
 }
 
-function createRunningRuntimeFactory(): { readonly factory: AgentSessionRuntimeFactory; readonly starts: () => readonly string[] } {
+function createRunningRuntimeFactory(stopResult: AgentPtyStopResult = { state: 'stopped', cleanupVerified: true }): { readonly factory: AgentSessionRuntimeFactory; readonly starts: () => readonly string[]; readonly releases: () => number } {
 	const startedTurns: string[] = [];
+	let releaseCount = 0;
 	const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
 	const snapshot = { state: 'running' as const, latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: false };
 	const factory: AgentSessionRuntimeFactory = {
@@ -100,10 +102,42 @@ function createRunningRuntimeFactory(): { readonly factory: AgentSessionRuntimeF
 		async write() { },
 		async resize() { },
 		async attach() { throw new Error('Attachment is not used by this launch contract.'); },
-		async stop() { return { state: 'stopped', cleanupVerified: true }; },
+		async stop() { return stopResult; },
+		async release() { releaseCount++; },
+	};
+	return { factory, starts: () => startedTurns, releases: () => releaseCount };
+}
+
+function createExitRaceRuntimeFactory() {
+	const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
+	const runningSnapshot: AgentPtySnapshot = { state: 'running', latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: false };
+	let currentSnapshot = runningSnapshot;
+	let exitListener: ((snapshot: AgentPtySnapshot) => void) | undefined;
+	let stopCount = 0;
+	let enteredStop!: () => void;
+	const stopEntered = new Promise<void>(resolve => { enteredStop = resolve; });
+	let finishStop!: () => void;
+	const stopGate = new Promise<void>(resolve => { finishStop = resolve; });
+	const factory: AgentSessionRuntimeFactory = {
+		async start() { return handle; },
+		watchExit(_handle, listener) { exitListener = listener; return { dispose() { } }; },
+		getSnapshot() { return currentSnapshot; },
+		async write() { },
+		async resize() { },
+		async attach() { throw new Error('Attachment is not used by this lifecycle contract.'); },
+		async stop() { stopCount++; enteredStop(); await stopGate; return { state: 'stopped', cleanupVerified: true }; },
 		async release() { },
 	};
-	return { factory, starts: () => startedTurns };
+	return {
+		factory,
+		stopEntered,
+		finishStop,
+		stopCount: () => stopCount,
+		exitSuccessfully() {
+			currentSnapshot = { ...runningSnapshot, state: 'exited', providerExitCode: 0, transcriptPersistenceFailed: true };
+			exitListener?.(currentSnapshot);
+		},
+	};
 }
 
 function approveWorkflowLaunch(
@@ -132,7 +166,7 @@ function approveWorkflowLaunch(
 	const approved = fixture.database.agentWorkflows.getWorkflow(projectId, workflow.id)!;
 	const run = fixture.database.agentWorkflows.startWorkflow(projectId, workflow.id, approved.revision, randomUUID());
 	const reservation = fixture.database.agentWorkflows.reserveNodeTurnLaunch(projectId, workflow.id, run.id, 'implement', run.nodes[0].revision, session.revision);
-	return { session, reservation };
+	return { session, reservation, workflowId: workflow.id, runId: run.id };
 }
 
 function createDelayedService(fixture: ReturnType<typeof createFixture>) {
@@ -209,7 +243,7 @@ test('an approved workflow reservation launches its exact reserved durable turn 
 	const runtime = createRunningRuntimeFactory();
 	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
 	try {
-		const { session, reservation } = approveWorkflowLaunch(fixture);
+		const { session, reservation, workflowId, runId } = approveWorkflowLaunch(fixture);
 		const turn = await service.startWorkflowNode({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY, reservationId: reservation.reservationId });
 		assert.equal(turn.id, reservation.turnId);
 		assert.equal(turn.state, 'running');
@@ -221,6 +255,22 @@ test('an approved workflow reservation launches its exact reserved durable turn 
 		assert.equal(stoppedWorkflowTurn.exitCode, null, 'An explicit stop does not claim successful provider execution.');
 		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, session.id)?.state, 'stopped');
 		assert.equal(fixture.database.agentSessionTurns.getTurn(fixture.project.id, session.id, turn.id)?.state, stoppedWorkflowTurn.state);
+		assert.throws(() => approveWorkflowLaunch(fixture, WORKFLOW_READ_ONLY, fixture.project.id, session.id, fixture.sharedBinding.id), /created or idle/i);
+		const priorWorkflowRunBeforeResume = fixture.database.agentWorkflows.getRun(fixture.project.id, workflowId, runId)!;
+		const priorWorkflowNodeBeforeResume = priorWorkflowRunBeforeResume.nodes[0];
+		const workflowManualPreview = await service.preview({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: READ_ONLY });
+		const resumedWorkflowSessionTurn = await service.start({ projectId: fixture.project.id, sessionId: session.id, ticketId: workflowManualPreview.ticketId });
+		assert.equal(resumedWorkflowSessionTurn.ordinal, 2);
+		assert.notEqual(resumedWorkflowSessionTurn.id, reservation.turnId);
+		const priorWorkflowRun = fixture.database.agentWorkflows.getRun(fixture.project.id, workflowId, runId)!;
+		assert.equal(priorWorkflowRun.revision, priorWorkflowRunBeforeResume.revision);
+		assert.equal(priorWorkflowRun.nodes[0].revision, priorWorkflowNodeBeforeResume.revision);
+		assert.equal(priorWorkflowRun.nodes[0].sessionTurnId, reservation.turnId);
+		assert.notEqual(priorWorkflowRun.nodes[0].sessionTurnId, resumedWorkflowSessionTurn.id,
+			'Manual resume must not bind its new turn to the prior workflow node.');
+		assert.deepEqual(runtime.starts(), [reservation.turnId, resumedWorkflowSessionTurn.id]);
+		assert.equal((await service.stop(fixture.project.id, session.id, resumedWorkflowSessionTurn.id)).cleanupVerified, true,
+			'Verify cleanup before another session reuses the same shared folder.');
 		const manualSession = fixture.database.agentSessions.createSession({
 			projectId: fixture.project.id, bindingId: fixture.sharedBinding.id, name: 'Manual ticket session',
 			provider: 'claude', model: 'sonnet', workspaceMode: 'sharedFolder',
@@ -228,9 +278,88 @@ test('an approved workflow reservation launches its exact reserved durable turn 
 		const preview = await service.preview({ projectId: fixture.project.id, sessionId: manualSession.id, permissionPolicy: READ_ONLY });
 		const manualTurn = await service.start({ projectId: fixture.project.id, sessionId: manualSession.id, ticketId: preview.ticketId });
 		assert.notEqual(manualTurn.id, reservation.turnId);
-		assert.deepEqual(runtime.starts(), [reservation.turnId, manualTurn.id]);
+		assert.deepEqual(runtime.starts(), [reservation.turnId, resumedWorkflowSessionTurn.id, manualTurn.id]);
 		const stoppedManualTurn = await service.stop(fixture.project.id, manualSession.id, manualTurn.id);
 		assert.equal(stoppedManualTurn.cleanupVerified, true);
+		const resumePreview = await service.preview({ projectId: fixture.project.id, sessionId: manualSession.id, permissionPolicy: READ_ONLY });
+		const resumedManualTurn = await service.start({ projectId: fixture.project.id, sessionId: manualSession.id, ticketId: resumePreview.ticketId });
+		assert.equal(resumedManualTurn.ordinal, 2);
+		assert.equal(fixture.database.agentSessionTurns.getPreviousTurn(fixture.project.id, manualSession.id, resumedManualTurn.id)?.id, stoppedManualTurn.id);
+		assert.deepEqual(runtime.starts(), [reservation.turnId, resumedWorkflowSessionTurn.id, manualTurn.id, resumedManualTurn.id]);
+		assert.equal((await service.stop(fixture.project.id, manualSession.id, resumedManualTurn.id)).cleanupVerified, true);
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('unverified stop cleanup retains its runtime and blocks another launch preview', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory({ state: 'cleanupUnverified', cleanupVerified: false, error: 'injected cleanup uncertainty' });
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const turn = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const stopped = await service.stop(fixture.project.id, fixture.sharedSession.id, turn.id);
+		assert.equal(stopped.state, 'failed');
+		assert.equal(stopped.cleanupVerified, false);
+		assert.equal(runtime.releases(), 0, 'uncertain PTY ownership must remain retained by the service');
+		await assert.rejects(service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY }), /unresolved host-owned process cleanup/i);
+		assert.deepEqual(runtime.starts(), [turn.id]);
+	} finally {
+		await service.shutdown();
+		dispose(fixture);
+	}
+});
+
+test('rejectProviderConversation fails and cleans only the exact owned turn while preserving its provider conversation ID', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const withConversation = fixture.database.agentSessionTurns.recordProviderConversationId(
+			fixture.project.id, fixture.sharedSession.id, started.id, started.revision, randomUUID(),
+		);
+		await assert.rejects(service.rejectProviderConversation(randomUUID(), fixture.sharedSession.id, started.id), /does not belong/i);
+		await assert.rejects(service.rejectProviderConversation(fixture.project.id, fixture.gitSession.id, started.id), /does not belong/i);
+		assert.deepEqual(runtime.starts(), [started.id]);
+
+		const rejected = await service.rejectProviderConversation(fixture.project.id, fixture.sharedSession.id, started.id);
+		assert.equal(rejected.state, 'failed');
+		assert.equal(rejected.cleanupVerified, true);
+		assert.equal(rejected.providerConversationId, withConversation.providerConversationId);
+		assert.equal(rejected.errorSummary, '프로바이더 대화 식별자가 현재 세션과 일치하지 않습니다.');
+		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, fixture.sharedSession.id)?.state, 'failed');
+		assert.deepEqual(await service.rejectProviderConversation(fixture.project.id, fixture.sharedSession.id, started.id), rejected);
+		assert.deepEqual(runtime.starts(), [started.id]);
+	} finally {
+		dispose(fixture);
+	}
+});
+
+test('provider identity rejection wins a natural exit-zero race and retains transcript failure cause', async () => {
+	const fixture = createFixture();
+	const runtime = createExitRaceRuntimeFactory();
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const started = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		const withConversation = fixture.database.agentSessionTurns.recordProviderConversationId(
+			fixture.project.id, fixture.sharedSession.id, started.id, started.revision, randomUUID(),
+		);
+		runtime.exitSuccessfully();
+		await runtime.stopEntered;
+		const rejection = service.rejectProviderConversation(fixture.project.id, fixture.sharedSession.id, started.id);
+		runtime.finishStop();
+		const failed = await rejection;
+		assert.equal(failed.state, 'failed');
+		assert.equal(failed.exitCode, 0);
+		assert.equal(failed.cleanupVerified, true);
+		assert.equal(failed.providerConversationId, withConversation.providerConversationId);
+		assert.equal(failed.errorSummary, '프로바이더 대화 식별자가 현재 세션과 일치하지 않으며 실행 기록을 저장하지 못했습니다.');
+		assert.equal(runtime.stopCount(), 1);
+		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, fixture.sharedSession.id)?.state, 'failed');
 	} finally {
 		dispose(fixture);
 	}
