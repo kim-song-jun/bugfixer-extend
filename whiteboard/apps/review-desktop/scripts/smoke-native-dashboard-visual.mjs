@@ -1,7 +1,7 @@
 /** Exercise the packaged native project dashboard with a service-created fixture. */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, opendir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -22,7 +22,268 @@ await mkdir(output, { recursive: true });
 
 const root = await mkdtemp('/tmp/wb-native-ui-');
 
-const diagnostics = { apps: [], console: [], consoleRecords: [], consoleCorrelations: [], canceledThemeLoads: [], teardownCancellations: [], readinessMarks: [], pageErrors: [], failedRequests: [], themes: [] };
+const diagnostics = {
+  apps: [],
+  console: [],
+  consoleRecords: [],
+  consoleCorrelations: [],
+  canceledThemeLoads: [],
+  teardownCancellations: [],
+  readinessMarks: [],
+  pageErrors: [],
+  failedRequests: [],
+  themes: [],
+  nativeLifecycleEvents: [],
+  rendererClockSamples: [],
+  isolatedAppLogs: [],
+  processOutput: [],
+  instrumentationDrops: {
+    nativeLifecycleEvents: 0,
+    rendererClockSamples: 0,
+    isolatedAppLogs: 0,
+    processOutput: 0,
+    processOutputBytes: 0,
+  },
+};
+
+const MAX_NATIVE_DIAGNOSTIC_RECORDS = 2048;
+
+const MAX_CAPTURE_BYTES = 256 * 1024;
+
+const MAX_CAPTURE_CHUNKS = 128;
+
+const MAX_LOG_FILES = 24;
+
+const MAX_LOG_DIRECTORY_ENTRIES = 512;
+
+const MAX_LOG_FILE_BYTES = 64 * 1024;
+
+const MAX_LOG_CAPTURE_BYTES = 512 * 1024;
+
+const LOG_FILE_NAMES = /^(?:main|renderer(?:\d+)?|sharedprocess|ptyhost|exthost|window)\.log$/;
+
+function appendBoundedRecord(destination, record, dropKey) {
+  if (destination.length >= MAX_NATIVE_DIAGNOSTIC_RECORDS) {
+    diagnostics.instrumentationDrops[dropKey]++;
+
+    return;
+  }
+
+  destination.push(record);
+}
+
+function createTimedTextCapture() {
+  const chunks = [];
+  let retainedBytes = 0;
+  let observedBytes = 0;
+
+  return {
+    append(chunk) {
+      const buffer = Buffer.from(chunk);
+      const timestampEpochMilliseconds = Date.now();
+      observedBytes += buffer.length;
+
+      if (buffer.length >= MAX_CAPTURE_BYTES) {
+        const removedBytes = retainedBytes + buffer.length - MAX_CAPTURE_BYTES;
+
+        diagnostics.instrumentationDrops.processOutputBytes += Math.max(0, removedBytes);
+        chunks.length = 0;
+        chunks.push({ timestampEpochMilliseconds, buffer: Buffer.from(buffer.subarray(buffer.length - MAX_CAPTURE_BYTES)) });
+        retainedBytes = MAX_CAPTURE_BYTES;
+
+        return;
+      }
+
+      chunks.push({ timestampEpochMilliseconds, buffer });
+      retainedBytes += buffer.length;
+
+      while (retainedBytes > MAX_CAPTURE_BYTES || chunks.length > MAX_CAPTURE_CHUNKS) {
+        const removed = chunks.shift();
+
+        retainedBytes -= removed.buffer.length;
+        diagnostics.instrumentationDrops.processOutputBytes += removed.buffer.length;
+      }
+
+    },
+    snapshot(pid, stream) {
+      appendBoundedRecord(diagnostics.processOutput, {
+        pid,
+        stream,
+        observedBytes,
+        retainedBytes,
+        truncatedBytes: Math.max(0, observedBytes - retainedBytes),
+        truncated: observedBytes > retainedBytes,
+        chunks: chunks.map(({ timestampEpochMilliseconds, buffer }) => ({ timestampEpochMilliseconds, text: buffer.toString('utf8') })),
+      }, 'processOutput');
+    },
+    text() {
+      return Buffer.concat(chunks.map(({ buffer }) => buffer)).toString('utf8');
+    },
+  };
+}
+
+async function awaitDiagnosticOperation(operation, timeoutMs) {
+  let timeout;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          const error = new Error('Diagnostic operation timed out');
+          error.name = 'DiagnosticTimeoutError';
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function recordNativeLifecycle(capture, event, details = {}) {
+  appendBoundedRecord(diagnostics.nativeLifecycleEvents, {
+    pid: capture.pid,
+    targetIndex: capture.targetIndex,
+    targetId: capture.targetId ?? null,
+    frameId: details.frameId ?? null,
+    parentFrameId: details.parentFrameId ?? null,
+    isTopFrame: details.isTopFrame ?? null,
+    event,
+    hostEpochMilliseconds: Date.now(),
+    hostMonotonicNanoseconds: process.hrtime.bigint().toString(),
+    ...details,
+  }, 'nativeLifecycleEvents');
+}
+
+async function captureIsolatedAppLogs(userData, pid) {
+  const logsRoot = path.join(userData, 'logs');
+  const candidates = [];
+  let totalBytes = 0;
+  let logsDirectoryMissing = false;
+  let inspectedEntries = 0;
+
+  async function collect(directory, depth) {
+    if (depth > 2 || candidates.length >= MAX_LOG_FILES) return;
+
+    let handle;
+
+    try { handle = await opendir(directory); }
+    catch (error) {
+      if (error.code === 'ENOENT' && directory === logsRoot) logsDirectoryMissing = true;
+
+      if (error.code !== 'ENOENT') appendBoundedRecord(diagnostics.isolatedAppLogs, { pid, relativePath: path.relative(userData, directory), status: 'directory-read-error', errorCode: error.code ?? 'unknown' }, 'isolatedAppLogs');
+
+      return;
+    }
+
+    for await (const entry of handle) {
+
+      if (candidates.length >= MAX_LOG_FILES || inspectedEntries >= MAX_LOG_DIRECTORY_ENTRIES) {
+        diagnostics.instrumentationDrops.isolatedAppLogs++;
+
+        break;
+      }
+
+      inspectedEntries++;
+
+      const candidate = path.join(directory, entry.name);
+
+      if (entry.isDirectory()) {
+        await collect(candidate, depth + 1);
+      } else if (entry.isFile() && LOG_FILE_NAMES.test(entry.name)) {
+        candidates.push(candidate);
+      }
+
+    }
+  }
+
+  await collect(logsRoot, 0);
+
+  if (logsDirectoryMissing) appendBoundedRecord(diagnostics.isolatedAppLogs, { pid, relativePath: 'logs', status: 'directory-not-found' }, 'isolatedAppLogs');
+
+  candidates.sort();
+
+  for (const candidate of candidates) {
+
+    if (totalBytes >= MAX_LOG_CAPTURE_BYTES) {
+      diagnostics.instrumentationDrops.isolatedAppLogs++;
+
+      continue;
+    }
+
+    const relativePath = path.relative(userData, candidate);
+
+    try {
+      const fileStat = await stat(candidate);
+
+      if (!fileStat.isFile()) continue;
+
+      const bytesToRead = Math.min(fileStat.size, MAX_LOG_FILE_BYTES, MAX_LOG_CAPTURE_BYTES - totalBytes);
+      const start = Math.max(0, fileStat.size - bytesToRead);
+      const handle = await open(candidate, 'r');
+      const buffer = Buffer.alloc(bytesToRead);
+
+      let bytesRead;
+
+      try { ({ bytesRead } = await handle.read(buffer, 0, bytesToRead, start)); }
+      finally { await handle.close(); }
+
+      totalBytes += bytesRead;
+
+      appendBoundedRecord(diagnostics.isolatedAppLogs, {
+        pid,
+        relativePath,
+        fileSizeBytes: fileStat.size,
+        capturedBytes: bytesRead,
+        truncatedBytes: Math.max(0, fileStat.size - bytesRead),
+        readStartByte: start,
+        truncated: start > 0 || bytesRead < fileStat.size,
+        text: buffer.subarray(0, bytesRead).toString('utf8'),
+      }, 'isolatedAppLogs');
+    } catch (error) {
+      appendBoundedRecord(diagnostics.isolatedAppLogs, { pid, relativePath, status: 'file-read-error', errorCode: error.code ?? 'unknown' }, 'isolatedAppLogs');
+    }
+  }
+}
+
+async function sampleRendererClock(capture, phase) {
+  const hostBefore = { epochMilliseconds: Date.now(), monotonicNanoseconds: process.hrtime.bigint().toString() };
+
+  try {
+    const response = await awaitDiagnosticOperation(capture.cdp.send('Runtime.evaluate', {
+      expression: '({ dateNow: Date.now(), performanceTimeOrigin: performance.timeOrigin, performanceNow: performance.now() })',
+      returnByValue: true,
+    }), 2_000);
+
+    const hostAfter = { epochMilliseconds: Date.now(), monotonicNanoseconds: process.hrtime.bigint().toString() };
+    appendBoundedRecord(diagnostics.rendererClockSamples, {
+      pid: capture.pid,
+      targetIndex: capture.targetIndex,
+      targetId: capture.targetId ?? null,
+      phase,
+      hostBefore,
+      hostAfter,
+      renderer: response.result?.value ?? null,
+      exception: response.exceptionDetails ? {
+        text: response.exceptionDetails.text?.slice(0, 256) ?? 'renderer evaluation exception',
+        exceptionClass: response.exceptionDetails.exception?.className?.slice(0, 128) ?? null,
+      } : null,
+    }, 'rendererClockSamples');
+  } catch (error) {
+    const hostAfter = { epochMilliseconds: Date.now(), monotonicNanoseconds: process.hrtime.bigint().toString() };
+    appendBoundedRecord(diagnostics.rendererClockSamples, {
+      pid: capture.pid,
+      targetIndex: capture.targetIndex,
+      targetId: capture.targetId ?? null,
+      phase,
+      hostBefore,
+      hostAfter,
+      renderer: null,
+      instrumentationError: error?.name?.slice(0, 128) ?? 'Error',
+    }, 'rendererClockSamples');
+  }
+}
 
 class FatalWaitError extends Error {}
 
@@ -207,7 +468,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
   const port = await reservePort();
 
   const args = [
-    '--disable-telemetry', '--skip-welcome',
+    '--disable-telemetry', '--skip-welcome', '--log', 'trace',
     `--user-data-dir=${userData}`, `--extensions-dir=${extensions}`,
     `--remote-debugging-port=${port}`,
     ...(descriptor ? [descriptor] : []),
@@ -217,18 +478,21 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.VSCODE_DEV;
   delete env.VSCODE_CLI;
-  const child = spawn(executable, args, { env, stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   let spawnError;
   child.once('error', error => { spawnError = error; });
   const owned = { pid: child.pid, ppid: process.pid, command: executable, args, port, userData, startedAt: new Date().toISOString(), consoleCaptureBoundaries: [] };
   diagnostics.apps.push(owned);
-  const stderr = [];
-  child.stderr.on('data', chunk => stderr.push(chunk.toString()));
+  const stdout = createTimedTextCapture();
+  const stderr = createTimedTextCapture();
+  child.stdout.on('data', chunk => stdout.append(chunk));
+  child.stderr.on('data', chunk => stderr.append(chunk));
 
   const exited = new Promise(resolve => child.once('close', (code, signal) => {
     owned.exitObservedAt = new Date().toISOString();
-    resolve({ code, signal });
+    owned.exit = { code, signal };
+    resolve(owned.exit);
   }));
 
   let browser;
@@ -238,7 +502,9 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
       if (spawnError) throw new FatalWaitError(`Packaged app failed to start: ${spawnError.message}`);
 
-      if (child.exitCode !== null || child.signalCode !== null) throw new FatalWaitError(`Packaged app exited: ${JSON.stringify(await exited)}\n${stderr.join('').slice(-4000)}`);
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new FatalWaitError(`Packaged app exited before startup completed: ${JSON.stringify({ code: child.exitCode, signal: child.signalCode })}\n${stderr.text().slice(-4000)}`);
+      }
 
       const response = await fetch(`http://127.0.0.1:${port}/json/list`).catch(() => undefined);
 
@@ -260,15 +526,26 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
       const capture = {
         targetIndex: consoleCaptures.length,
+        targetId: consoleCaptures.length === 0 ? target.id : null,
+        pid: child.pid,
         pageConsoleErrors: [],
         cdpConsoleErrors: [],
+        cdpListeners: [],
+        contextFrames: new Map(),
+        frameParents: new Map(),
       };
 
       consoleCaptures.push(capture);
 
       const capturePromise = (async () => {
         capture.cdp = await page.context().newCDPSession(page);
-        capture.cdp.on('Runtime.consoleAPICalled', event => {
+
+        const listen = (name, listener) => {
+          capture.cdp.on(name, listener);
+          capture.cdpListeners.push([name, listener]);
+        };
+
+        listen('Runtime.consoleAPICalled', event => {
           if (event.type !== 'error') return;
 
           const previews = event.args.map(renderCDPConsoleArgument);
@@ -282,10 +559,99 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
             renderedMessage,
             originTimestampEpochMilliseconds: event.timestamp ?? null,
             originClock: 'CDP Runtime.Timestamp epoch milliseconds',
+            observedHostEpochMilliseconds: Date.now(),
+            observedHostMonotonicNanoseconds: process.hrtime.bigint().toString(),
             targetIndex: capture.targetIndex,
           });
         });
+        listen('Runtime.executionContextsCleared', () => {
+          capture.contextFrames.clear();
+          recordNativeLifecycle(capture, 'execution-contexts-cleared', { effect: 'renderer-context-reset' });
+        });
+        listen('Runtime.executionContextCreated', event => {
+          const auxData = event.context?.auxData ?? {};
+          const frameId = auxData.frameId ?? null;
+
+          if (frameId && capture.contextFrames.size < 256) capture.contextFrames.set(event.context.id, frameId);
+
+          recordNativeLifecycle(capture, 'execution-context-created', {
+            executionContextId: event.context?.id ?? null,
+            contextType: event.context?.type ?? null,
+            frameId,
+            isDefaultContext: auxData.isDefault ?? null,
+            isTopFrame: frameId && capture.frameParents.has(frameId) ? capture.frameParents.get(frameId) === null : null,
+          });
+        });
+        listen('Runtime.executionContextDestroyed', event => {
+          recordNativeLifecycle(capture, 'execution-context-destroyed', {
+            executionContextId: event.executionContextId ?? null,
+            frameId: capture.contextFrames.get(event.executionContextId) ?? null,
+          });
+          capture.contextFrames.delete(event.executionContextId);
+        });
+        listen('Page.frameNavigated', event => {
+          const frameId = event.frame?.id ?? null;
+          const parentFrameId = event.frame?.parentId ?? null;
+
+          if (frameId && capture.frameParents.size < 256) capture.frameParents.set(frameId, parentFrameId);
+
+          recordNativeLifecycle(capture, 'cdp-frame-navigated', {
+            frameId,
+            parentFrameId,
+            loaderId: event.frame?.loaderId ?? null,
+            isTopFrame: !parentFrameId,
+          });
+        });
+        listen('Page.frameDetached', event => {
+          capture.frameParents.delete(event.frameId);
+          recordNativeLifecycle(capture, 'cdp-frame-detached', {
+            frameId: event.frameId ?? null,
+            reason: event.reason?.slice(0, 128) ?? null,
+          });
+        });
+        listen('Inspector.detached', event => recordNativeLifecycle(capture, 'inspector-detached', { reason: event.reason?.slice(0, 128) ?? null }));
+
+        try {
+          await awaitDiagnosticOperation(capture.cdp.send('Page.enable'), 2_000);
+          const { frameTree } = await awaitDiagnosticOperation(capture.cdp.send('Page.getFrameTree'), 2_000);
+          let remainingFrames = 256;
+          let frameTreeTruncated = false;
+
+          const recordFrameTree = (node, parentFrameId = null) => {
+
+            if (!node?.frame) return;
+
+            if (remainingFrames <= 0) {
+              frameTreeTruncated = true;
+
+              return;
+            }
+
+            remainingFrames--;
+            const frameId = node.frame.id;
+            const actualParentId = node.frame.parentId ?? parentFrameId;
+
+            if (frameId) capture.frameParents.set(frameId, actualParentId);
+
+            recordNativeLifecycle(capture, 'initial-frame-tree', {
+              frameId: frameId ?? null,
+              parentFrameId: actualParentId,
+              loaderId: node.frame.loaderId ?? null,
+              isTopFrame: !actualParentId,
+            });
+
+            for (const child of node.childFrames ?? []) recordFrameTree(child, frameId ?? null);
+          };
+
+          recordFrameTree(frameTree);
+
+          if (frameTreeTruncated) diagnostics.instrumentationDrops.nativeLifecycleEvents++;
+        } catch (error) {
+          recordNativeLifecycle(capture, 'page-lifecycle-instrumentation-failed', { errorName: error?.name?.slice(0, 128) ?? 'Error' });
+        }
+
         await capture.cdp.send('Runtime.enable');
+        await sampleRendererClock(capture, 'attached-after-runtime-enable');
       })();
 
       watchedPages.set(page, capturePromise);
@@ -299,10 +665,22 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
           pid: child.pid,
           entry,
           renderedMessage,
+          observedHostEpochMilliseconds: Date.now(),
+          observedHostMonotonicNanoseconds: process.hrtime.bigint().toString(),
           targetIndex: capture.targetIndex,
           worker: Boolean(message.worker()),
         });
       });
+      page.on('framenavigated', frame => {
+        const parent = frame.parentFrame();
+        recordNativeLifecycle(capture, 'page-frame-navigated', {
+          frameId: null,
+          parentFrameId: null,
+          isTopFrame: !parent,
+          urlScheme: (() => { try { return new URL(frame.url()).protocol; } catch { return 'unknown:'; } })(),
+        });
+      });
+      page.on('close', () => recordNativeLifecycle(capture, 'page-close'));
       page.on('pageerror', error => diagnostics.pageErrors.push(error.stack ?? error.message));
       page.on('requestfailed', request => {
         const failure = request.failure()?.errorText ?? 'unknown';
@@ -312,6 +690,10 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
       return capturePromise;
     };
+
+    browser.on('disconnected', () => {
+      for (const capture of consoleCaptures) recordNativeLifecycle(capture, 'browser-disconnected');
+    });
 
     for (const context of browser.contexts()) {
       context.on('page', page => {
@@ -335,13 +717,41 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
     await watchPage(page);
 
-    return { child, exited, browser, page, port, targetId: target.id, stderr, owned, consoleCaptures };
+    return { child, exited, browser, page, port, targetId: target.id, stdout, stderr, owned, consoleCaptures };
   } catch (error) {
-    try {
+    const cleanupFailures = [];
+    const browserClose = startBrowserClose(browser, owned);
 
-      if (browser) await browser.close();
-    } finally {
+    await collectBrowserClose(browserClose, owned, cleanupFailures);
+
+    try {
       await stopOwned(child, exited, port, owned);
+      owned.ownedProcessCleanupStatus = 'verified';
+    }
+    catch (cleanupError) {
+      owned.ownedProcessCleanupStatus = 'unverified';
+      cleanupFailures.push(cleanupError);
+    }
+
+    if (owned.ownedProcessCleanupStatus !== 'verified') {
+      closeOwnedPipes(child, owned);
+    }
+
+    stdout.snapshot(child.pid, 'stdout');
+    stderr.snapshot(child.pid, 'stderr');
+
+    try {
+      await captureIsolatedAppLogs(userData, child.pid);
+      owned.logCaptureStatus = 'complete';
+    }
+    catch (captureError) {
+      owned.logCaptureStatus = 'incomplete';
+      cleanupFailures.push(captureError);
+      appendBoundedRecord(diagnostics.isolatedAppLogs, { pid: child.pid, status: 'diagnostic-collection-error', errorName: captureError?.name?.slice(0, 128) ?? 'Error' }, 'isolatedAppLogs');
+    }
+
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError([error, ...cleanupFailures], 'Packaged app startup failed and cleanup was incomplete', { cause: error });
     }
 
     throw error;
@@ -382,6 +792,52 @@ async function stopOwned(child, exited, port, owned) {
   if (!closed) throw new Error(`Packaged app PID ${child.pid ?? 'unknown'} did not exit after SIGKILL`);
 }
 
+function startBrowserClose(browser, owned) {
+  if (!browser) {
+    owned.browserCloseStatus = 'not-started';
+    return undefined;
+  }
+
+  return Promise.resolve()
+    .then(() => browser.close())
+    .then(() => ({ status: 'closed' }), error => ({ status: 'failed', error }));
+}
+
+async function collectBrowserClose(browserClose, owned, failures) {
+  if (!browserClose) return;
+
+  const outcome = await settleWithin(browserClose, 2_000);
+
+  if (outcome.status === 'settled' && outcome.value.status === 'closed') {
+    owned.browserCloseStatus = 'closed';
+    return;
+  }
+
+  owned.browserCloseStatus = 'unverified';
+  failures.push(outcome.status === 'settled' ? outcome.value.error : new Error('Browser close was not observed within the bounded cleanup period'));
+}
+
+function closeOwnedPipes(child, owned) {
+  owned.outputDrainStatus = 'closed-after-bounded-cleanup';
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+}
+
+async function settleWithin(promise, timeoutMs) {
+  let timeout;
+
+  try {
+    const outcome = await Promise.race([
+      promise.then(value => ({ status: 'settled', value })),
+      new Promise(resolve => { timeout = setTimeout(() => resolve({ status: 'timeout' }), timeoutMs); }),
+    ]);
+
+    return outcome;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function exitedWithin(exited, timeoutMs) {
 
   let timeout;
@@ -400,13 +856,30 @@ async function isPortClosed(port) {
   const socket = net.createConnection({ host: '127.0.0.1', port });
 
   return new Promise(resolve => {
-    socket.once('connect', () => { socket.destroy(); resolve(false); });
-    socket.once('error', error => resolve(error.code === 'ECONNREFUSED'));
+    let settled = false;
+
+    const finish = closed => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(closed);
+    };
+
+    socket.setTimeout(1_000, () => finish(false));
+    socket.once('connect', () => finish(false));
+    socket.once('error', error => finish(error.code === 'ECONNREFUSED'));
   });
 }
 
 async function closeApp(session) {
+  const cleanupFailures = [];
+  let browserClose;
+
   try {
+
+    for (const capture of session.consoleCaptures) {
+      if (capture.cdp) await sampleRendererClock(capture, 'before-owned-shutdown');
+    }
 
     beginOwnedShutdown(session.owned);
 
@@ -419,17 +892,79 @@ async function closeApp(session) {
       });
     }
 
-    await session.browser.close();
-  } finally {
-    await stopOwned(session.child, session.exited, session.port, session.owned);
-    await waitFor(() => isPortClosed(session.port), `owned CDP port ${session.port} to close`, 10_000);
-    session.owned.closedAt = new Date().toISOString();
-    session.owned.exit = await session.exited;
-    session.owned.portClosed = true;
-    session.owned.portClosedAt = session.owned.closedAt;
-    const cleanOwnedShutdown = session.owned.exit.code === 0 && session.owned.exit.signal === null && session.owned.portClosed;
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
 
-    finalizeConsoleCaptures(session.consoleCaptures, session.owned, cleanOwnedShutdown);
+  browserClose = startBrowserClose(session.browser, session.owned);
+
+  await collectBrowserClose(browserClose, session.owned, cleanupFailures);
+
+  try {
+    await stopOwned(session.child, session.exited, session.port, session.owned);
+    session.owned.ownedProcessCleanupStatus = 'verified';
+  } catch (error) {
+    cleanupFailures.push(error);
+    session.owned.ownedProcessCleanupStatus = 'unverified';
+  }
+
+  try {
+    await waitFor(() => isPortClosed(session.port), `owned CDP port ${session.port} to close`, 10_000);
+    session.owned.portClosed = true;
+    session.owned.portClosedAt = new Date().toISOString();
+  } catch (error) {
+    cleanupFailures.push(error);
+    session.owned.portClosed = false;
+    session.owned.portCloseError = error?.name?.slice(0, 128) ?? 'Error';
+  }
+
+  try {
+    for (const capture of session.consoleCaptures) {
+      for (const [name, listener] of capture.cdpListeners) capture.cdp?.off(name, listener);
+      capture.cdpListeners.length = 0;
+
+      if (capture.cdp) {
+        try {
+          await awaitDiagnosticOperation(capture.cdp.detach(), 2_000);
+          recordNativeLifecycle(capture, 'cdp-session-disposed');
+        } catch (error) {
+          recordNativeLifecycle(capture, 'cdp-session-disposal-failed', { errorName: error?.name?.slice(0, 128) ?? 'Error' });
+        }
+      }
+    }
+    await captureIsolatedAppLogs(session.owned.userData, session.child.pid);
+  } catch (error) {
+    cleanupFailures.push(error);
+    appendBoundedRecord(diagnostics.isolatedAppLogs, { pid: session.child.pid, status: 'diagnostic-collection-error', errorName: error?.name?.slice(0, 128) ?? 'Error' }, 'isolatedAppLogs');
+  }
+
+  if (session.owned.exitObservedAt && session.owned.exit) {
+    session.owned.closedAt = new Date().toISOString();
+    session.owned.exitObservationStatus = 'verified';
+  } else {
+    session.owned.exitObservationStatus = 'unverified';
+    session.owned.outputDrainStatus = 'closed-after-bounded-cleanup';
+    session.child.stdout?.destroy();
+    session.child.stderr?.destroy();
+    appendBoundedRecord(diagnostics.processOutput, {
+      pid: session.child.pid,
+      stream: 'owned-pipes',
+      status: 'closed-after-bounded-cleanup',
+      reason: 'child-close-event-unobserved',
+    }, 'processOutput');
+    cleanupFailures.push(new Error('Owned app close event was not observed after bounded cleanup'));
+  }
+
+  session.stdout.snapshot(session.child.pid, 'stdout');
+  session.stderr.snapshot(session.child.pid, 'stderr');
+
+  const cleanOwnedShutdown = Boolean(session.owned.exitObservedAt && session.owned.exit
+    && session.owned.exit.code === 0 && session.owned.exit.signal === null && session.owned.portClosed);
+
+  finalizeConsoleCaptures(session.consoleCaptures, session.owned, cleanOwnedShutdown);
+
+  if (cleanupFailures.length > 0) {
+    throw new AggregateError(cleanupFailures, 'Owned app shutdown or diagnostic collection was not fully verified', { cause: cleanupFailures[0] });
   }
 }
 
