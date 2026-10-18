@@ -20,6 +20,9 @@ if (process.argv.length !== 3 || !Number.isSafeInteger(port) || port < 1 || port
 } else {
 	void run().catch(() => {
 		process.stderr.write('Session MCP gateway could not connect to the trusted app bridge.\n');
+		process.stdin.pause();
+		process.stdin.destroy();
+		activeSocket?.destroy();
 		process.exitCode = 1;
 	});
 }
@@ -30,6 +33,7 @@ async function run() {
 	socket.setNoDelay(true);
 	let socketBuffer = Buffer.alloc(0);
 	let authenticated = false;
+	let disconnected = false;
 	let nextId = 0;
 	const pendingBridge = new Map();
 	const pendingMcp = new Map();
@@ -39,21 +43,46 @@ async function run() {
 		socket.once('error', reject);
 	});
 	await socketReady;
-	socket.write(`${JSON.stringify({ type: 'auth', token })}\n`);
+	await writeSocketFrame(socket, `${JSON.stringify({ type: 'auth', token })}\n`);
 	await new Promise((resolve, reject) => {
+		let settled = false;
+		const finish = error => {
+			if (settled) { return; }
+			settled = true;
+			socket.off('data', onData);
+			socket.off('error', onError);
+			socket.off('end', onEnd);
+			socket.off('close', onClose);
+			if (error) { reject(error); } else { resolve(); }
+		};
 		const onData = chunk => {
 			socketBuffer = Buffer.concat([socketBuffer, chunk]);
 			const newline = socketBuffer.indexOf(0x0a);
-			if (newline < 0) { if (socketBuffer.length > MAX_FRAME_BYTES) { reject(new Error('Oversized bridge frame.')); } return; }
+			if (newline < 0) { if (socketBuffer.length > MAX_FRAME_BYTES) { finish(new Error('Oversized bridge frame.')); } return; }
 			const frame = parseBridgeFrame(socketBuffer.subarray(0, newline));
 			socketBuffer = socketBuffer.subarray(newline + 1);
-			socket.off('data', onData);
-			if (frame?.type !== 'auth' || frame.ok !== true) { reject(new Error('Bridge authentication was denied.')); }
-			else { authenticated = true; resolve(); }
+			if (frame?.type !== 'auth' || frame.ok !== true) { finish(new Error('Bridge authentication was denied.')); }
+			else { authenticated = true; finish(); }
 		};
+		const onError = error => finish(error);
+		const onEnd = () => finish(new Error('The trusted app bridge disconnected during authentication.'));
+		const onClose = () => finish(new Error('The trusted app bridge disconnected during authentication.'));
 		socket.on('data', onData);
-		socket.once('error', reject);
+		socket.once('error', onError);
+		socket.once('end', onEnd);
+		socket.once('close', onClose);
 	});
+	const disconnect = () => {
+		if (disconnected) { return; }
+		disconnected = true;
+		process.stdin.pause();
+		process.stdin.destroy();
+		const error = new Error('The trusted app bridge disconnected.');
+		for (const [id, pending] of pendingBridge) {
+			pendingBridge.delete(id);
+			pending.reject(error);
+		}
+	};
 
 	socket.on('data', chunk => {
 		socketBuffer = Buffer.concat([socketBuffer, chunk]);
@@ -71,14 +100,9 @@ async function run() {
 			pending.resolve(frame);
 		}
 	});
-	socket.on('error', () => {
-		for (const pending of pendingBridge.values()) { pending.reject(new Error('The trusted app bridge disconnected.')); }
-		pendingBridge.clear();
-	});
-	socket.on('close', () => {
-		for (const pending of pendingBridge.values()) { pending.reject(new Error('The trusted app bridge disconnected.')); }
-		pendingBridge.clear();
-	});
+	socket.on('error', disconnect);
+	socket.on('end', disconnect);
+	socket.on('close', disconnect);
 
 	let stdioBuffer = Buffer.alloc(0);
 	const failInput = message => {
@@ -87,8 +111,9 @@ async function run() {
 		socket.destroy();
 	};
 	process.stdin.on('data', chunk => {
+		if (disconnected) { return; }
 		let offset = 0;
-		while (offset < chunk.length && !stdoutFailed) {
+		while (offset < chunk.length && !stdoutFailed && !disconnected) {
 			const newline = chunk.indexOf(0x0a, offset);
 			if (newline < 0) {
 				const remainder = chunk.length - offset;
@@ -122,7 +147,7 @@ async function run() {
 			if (pendingMcp.size >= MAX_IN_FLIGHT) { writeJsonRpcError(message.id, -32000, 'Too many requests are in flight.'); continue; }
 			const marker = { cancelled: false, controller: new AbortController(), bridgeId: undefined };
 			pendingMcp.set(key, marker);
-			void handleMcp(message, socket, pendingBridge, () => `${++nextId}`, marker).then(
+			void handleMcp(message, socket, pendingBridge, () => `${++nextId}`, marker, () => disconnected).then(
 				result => { if (!marker.cancelled) { writeJsonRpcResponse(message.id, result); } },
 				error => { if (!marker.cancelled) { writeJsonRpcError(message.id, Number.isInteger(error?.code) ? error.code : -32603, safeMessage(error)); } },
 			).finally(() => { if (pendingMcp.get(key) === marker) { pendingMcp.delete(key); } });
@@ -132,10 +157,10 @@ async function run() {
 		if (stdioBuffer.length) { writeJsonRpcError(null, -32700, 'Input ended with an incomplete request frame.'); }
 		socket.end();
 	});
-	process.on('SIGTERM', () => { socket.destroy(); process.exit(0); });
+	process.on('SIGTERM', () => { process.stdin.pause(); process.stdin.destroy(); socket.destroy(); process.exitCode = 0; });
 }
 
-async function handleMcp(message, socket, pendingBridge, allocateBridgeId, marker) {
+async function handleMcp(message, socket, pendingBridge, allocateBridgeId, marker, isDisconnected) {
 	const params = message.params && typeof message.params === 'object' ? message.params : {};
 	switch (message.method) {
 		case 'initialize': {
@@ -151,12 +176,12 @@ async function handleMcp(message, socket, pendingBridge, allocateBridgeId, marke
 		}
 		case 'ping': return {};
 		case 'tools/list': return { tools: TOOLS };
-		case 'tools/call': return callTool(params, socket, pendingBridge, allocateBridgeId, marker);
+		case 'tools/call': return callTool(params, socket, pendingBridge, allocateBridgeId, marker, isDisconnected);
 		default: throw Object.assign(new Error(`Unsupported MCP method: ${message.method}`), { code: -32601 });
 	}
 }
 
-async function callTool(params, socket, pendingBridge, allocateBridgeId, marker) {
+async function callTool(params, socket, pendingBridge, allocateBridgeId, marker, isDisconnected) {
 	if (typeof params.name !== 'string' || !TOOLS_BY_NAME.has(params.name)) {
 		return toolError('The requested session collaboration tool is not supported.');
 	}
@@ -167,17 +192,26 @@ async function callTool(params, socket, pendingBridge, allocateBridgeId, marker)
 	const id = allocateBridgeId();
 	marker.bridgeId = id;
 	const result = await new Promise((resolve, reject) => {
-		const onAbort = () => {
+		const rejectPending = error => {
+			const pending = pendingBridge.get(id);
+			if (!pending) { return; }
 			pendingBridge.delete(id);
-			socket.write(`${JSON.stringify({ type: 'cancel', id })}\n`);
-			reject(new Error('The mailbox request was cancelled.'));
+			pending.reject(error);
+		};
+		const onAbort = () => {
+			if (!pendingBridge.has(id)) { return; }
+			if (isSocketWritable(socket, isDisconnected)) {
+				void writeSocketFrame(socket, `${JSON.stringify({ type: 'cancel', id })}\n`, isDisconnected).catch(error => socket.destroy(error));
+			}
+			rejectPending(new Error('The mailbox request was cancelled.'));
 		};
 		pendingBridge.set(id, { resolve: frame => { marker.controller.signal.removeEventListener('abort', onAbort); resolve(frame); }, reject: error => { marker.controller.signal.removeEventListener('abort', onAbort); reject(error); } });
 		marker.controller.signal.addEventListener('abort', onAbort, { once: true });
 		if (marker.controller.signal.aborted) { onAbort(); return; }
+		if (isDisconnected() || !isSocketWritable(socket, isDisconnected)) { rejectPending(new Error('The trusted app bridge is disconnected.')); return; }
 		const frame = Buffer.from(`${JSON.stringify({ type: 'request', id, method: tool.method, params: validated.value })}\n`, 'utf8');
-		if (frame.length > MAX_FRAME_BYTES) { pendingBridge.delete(id); reject(new Error('The session MCP request exceeds the size limit.')); return; }
-		socket.write(frame);
+		if (frame.length > MAX_FRAME_BYTES) { rejectPending(new Error('The session MCP request exceeds the size limit.')); return; }
+		void writeSocketFrame(socket, frame, isDisconnected).catch(rejectPending);
 	});
 	if (result.error) { return toolError(result.error); }
 	return { content: [{ type: 'text', text: JSON.stringify(result.result) }], structuredContent: result.result };
@@ -205,6 +239,21 @@ function toolError(message) { return { isError: true, content: [{ type: 'text', 
 
 function parseBridgeFrame(bytes) {
 	try { return JSON.parse(bytes.toString('utf8')); } catch { return undefined; }
+}
+
+function isSocketWritable(socket, isDisconnected) {
+	return !isDisconnected() && !socket.destroyed && socket.writable && !socket.writableEnded;
+}
+
+function writeSocketFrame(socket, frame, isDisconnected = () => false) {
+	if (!isSocketWritable(socket, isDisconnected)) { return Promise.reject(new Error('The trusted app bridge is disconnected.')); }
+	return new Promise((resolve, reject) => {
+		try {
+			socket.write(frame, error => error ? reject(error) : resolve());
+		} catch (error) {
+			reject(error);
+		}
+	});
 }
 
 function paramsHaveRequestId(params) {

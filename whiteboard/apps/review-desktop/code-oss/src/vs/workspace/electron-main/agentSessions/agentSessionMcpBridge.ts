@@ -38,13 +38,18 @@ export interface AgentSessionMcpAccess {
 	releasePrivateConfig(): Promise<void>;
 }
 
+type AgentSessionMcpServerFactory = (listener: (socket: Socket) => void) => Server;
+
 interface ActiveRequest {
 	readonly controller: AbortController;
 }
 
 /** Main-process capability broker. It owns a scoped loopback listener and no provider process handles. */
 export class AgentSessionMcpBridge {
-	constructor(private readonly collaboration: AgentSessionCollaborationService) { }
+	constructor(
+		private readonly collaboration: AgentSessionCollaborationService,
+		private readonly serverFactory: AgentSessionMcpServerFactory = listener => createServer(listener),
+	) { }
 
 	async issueAccess(input: AgentSessionMcpAccessInput): Promise<AgentSessionMcpAccess> {
 		assertUuid(input.projectId, 'project ID');
@@ -100,7 +105,7 @@ export class AgentSessionMcpBridge {
 			await cleanupOwnedResources();
 		};
 		try {
-			server = createServer(socket => acceptSocket(socket, grant, tokenDigest, this.collaboration, sockets, () => active));
+			server = this.serverFactory(socket => acceptSocket(socket, grant, tokenDigest, this.collaboration, sockets, () => active));
 			server.maxConnections = MAX_CONNECTIONS;
 			server.on('error', error => {
 				if (!active) { return; }

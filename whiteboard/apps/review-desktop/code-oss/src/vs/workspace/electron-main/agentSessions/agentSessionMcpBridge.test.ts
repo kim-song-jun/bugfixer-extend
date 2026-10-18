@@ -66,18 +66,31 @@ function createWorkflow(fixture: ReturnType<typeof createFixture>, session: Retu
 	return workflow;
 }
 
-async function openMcpClient(access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>>) {
+async function openMcpClient(
+	access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>>,
+	token = access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV],
+	connectionTimeoutMs = 60_000,
+) {
 	const env = {
 		PATH: process.env.PATH ?? '',
-		[AGENT_SESSION_MCP_TOKEN_ENV]: access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV],
+		[AGENT_SESSION_MCP_TOKEN_ENV]: token,
 	};
 	const transport = new StdioClientTransport({ command: process.execPath, args: [GATEWAY_PATH, String(access.port)], env, stderr: 'pipe' });
 	const client = new Client({ name: 'bugfixer-session-collaboration-test', version: '1.0.0' });
-	try { await client.connect(transport); }
-	catch (error) {
+	let connectionTimer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			client.connect(transport),
+			new Promise<never>((_, reject) => {
+				connectionTimer = setTimeout(() => reject(new Error('Timed out connecting the MCP SDK to its gateway.')), connectionTimeoutMs);
+			}),
+		]);
+	} catch (error) {
 		try { await transport.close(); }
 		catch (cleanupError) { throw new AggregateError([error, cleanupError], 'MCP client setup and transport cleanup failed.'); }
 		throw error;
+	} finally {
+		if (connectionTimer) { clearTimeout(connectionTimer); }
 	}
 	return { client, close: () => client.close() };
 }
@@ -143,6 +156,18 @@ function assertBridgeUnavailable(port: number): Promise<void> {
 			else { reject(error); }
 		});
 	});
+}
+
+async function assertRejectsWithin(promise: Promise<unknown>, timeoutMs: number, message: string): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			assert.rejects(promise),
+			new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error(message)), timeoutMs); }),
+		]);
+	} finally {
+		if (timeout) { clearTimeout(timeout); }
+	}
 }
 
 function readSuccessfulToolPayload(result: unknown, operation: string): Record<string, unknown> {
@@ -256,6 +281,11 @@ test('real MCP SDK exposes only scoped workflow status and cancel for its own se
 	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
 	try {
 		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: sender.id, turnId: senderTurn.id, permissionPolicy: READ_ONLY, knownSecrets: ['model-private-token'] });
+		await assertRejectsWithin(
+			openMcpClient(access, 'invalid-test-capability', 1_500),
+			2_000,
+			'The real MCP SDK must observe gateway authentication failure within two seconds.',
+		);
 		client = await openMcpClient(access);
 		const listed = await client.client.listTools();
 		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel']);
@@ -282,7 +312,11 @@ test('real MCP SDK exposes only scoped workflow status and cancel for its own se
 		const changedKey = await client.client.callTool({ name: 'workflows_cancel', arguments: { workflowId: ownWorkflow.id, expectedRevision: initialRevision, idempotencyKey: 'own-cancel-2' } });
 		assert.equal((changedKey as { isError?: boolean }).isError, true);
 		access.revokeAccess();
-		await assert.rejects(client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } }));
+		await assertRejectsWithin(
+			client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } }),
+			2_000,
+			'An MCP tool call submitted after grant revocation must fail within two seconds.',
+		);
 	} finally {
 		await closeOwnedMcpResources(client ? [client] : [], access ? [access] : []);
 		fixture.database.close();
@@ -464,9 +498,12 @@ test('gateway rejects a duplicate in-flight JSON-RPC ID before dispatching its s
 		assert.equal(sqlite.prepare('SELECT id FROM agent_session_messages WHERE idempotency_key = ?').all('escaped-id-must-not-send').length, 0);
 	} finally {
 		access?.revokeAccess();
-		if (child && child.exitCode === null) {
+		if (child && child.exitCode === null && child.signalCode === null) {
+			const exited = new Promise<void>(resolve => child!.once('exit', () => resolve()));
 			child.kill('SIGTERM');
-			await new Promise<void>(resolve => child!.once('exit', () => resolve()));
+			const killTimer = setTimeout(() => { if (child!.exitCode === null && child!.signalCode === null) { child!.kill('SIGKILL'); } }, 1_000);
+			try { await exited; }
+			finally { clearTimeout(killTimer); }
 		}
 		if (access) { await access.releasePrivateConfig(); }
 		fixture.database.close();
