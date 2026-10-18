@@ -42,9 +42,33 @@ await access(probeGuardianScriptPath, constants.R_OK);
 
 await access(identityHookScriptPath, constants.R_OK);
 
-const bootstrapNodePath = path.join(resources, 'out', 'bootstrap-node.js');
+const bootstrapForkPath = path.join(resources, 'out', 'bootstrap-fork.js');
 
-await import(pathToFileURL(bootstrapNodePath).href);
+await access(bootstrapForkPath, constants.R_OK);
+
+const previousEntrypoint = process.env.VSCODE_ESM_ENTRYPOINT;
+
+const previousHandlesUncaughtErrors = process.env.VSCODE_HANDLES_UNCAUGHT_ERRORS;
+
+process.env.VSCODE_ESM_ENTRYPOINT = 'vs/workspace/electron-main/agentSessions/agentSessionNativeRuntime';
+
+process.env.VSCODE_HANDLES_UNCAUGHT_ERRORS = 'true';
+
+try {
+  await import(pathToFileURL(bootstrapForkPath).href);
+} finally {
+  if (previousEntrypoint === undefined) {
+    delete process.env.VSCODE_ESM_ENTRYPOINT;
+  } else {
+    process.env.VSCODE_ESM_ENTRYPOINT = previousEntrypoint;
+  }
+
+  if (previousHandlesUncaughtErrors === undefined) {
+    delete process.env.VSCODE_HANDLES_UNCAUGHT_ERRORS;
+  } else {
+    process.env.VSCODE_HANDLES_UNCAUGHT_ERRORS = previousHandlesUncaughtErrors;
+  }
+}
 
 const {
   AgentPtyHost, runBoundedAgentCliProcess, createAgentPtyOutputSanitizer, AgentSessionPtyRuntimeFactory,
@@ -52,6 +76,12 @@ const {
   AgentSessionService, AgentSessionRuntimeStartError, AgentSessionWorkspaceResolver,
   ManagedWorktreeService, TaskFolderWriterLock, WorkspaceDatabase,
 } = await import(pathToFileURL(hostModule).href);
+
+assert.equal(typeof AgentPtyHost, 'function', 'Packaged Electron bootstrap must load the production PTY host');
+
+assert.equal(typeof AgentSessionService, 'function', 'Packaged Electron bootstrap must load the production session service');
+
+assert.equal(typeof WorkspaceDatabase, 'function', 'Packaged Electron bootstrap must load the production workspace database');
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'bfx-pty-probe-'));
 
@@ -93,6 +123,7 @@ function hostState() {
 const receipt = {
   commit: process.env.GITHUB_SHA,
   runtime: { node: process.versions.node, electron: process.versions.electron, modules: process.versions.modules },
+  bootstrap: { entry: 'out/bootstrap-fork.js', loadedModule: 'vs/workspace/electron-main/agentSessions/agentSessionNativeRuntime' },
   baseline: hostState(),
   checks: [],
   cleanup: [],
