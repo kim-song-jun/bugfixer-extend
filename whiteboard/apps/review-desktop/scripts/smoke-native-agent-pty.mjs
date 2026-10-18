@@ -331,6 +331,7 @@ try {
   assert.ok(page.chunks.every((chunk, index) => index === 0 || chunk.sequence > page.chunks[index - 1].sequence));
   reattached.dispose();
   let providerExit;
+
   const exitObserver = host.watchExit(a, snapshot => {
     if (snapshot.state === 'exited') providerExit = snapshot;
   });
