@@ -122,9 +122,10 @@ export function transpileTask(src: string, out: string, esbuild?: boolean): task
 const agentSessionGuardianResources = [
 	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
+	'vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
 ] as const;
 
-/** Copies the two app-owned Node guardians as explicit runtime resources. */
+/** Copies standalone agent-session Node entrypoints as explicit runtime resources. */
 export function copyAgentSessionGuardianResourcesTask(out: string): task.Task {
 	const copy: task.Task = async () => {
 		const sourceRoot = path.join(import.meta.dirname, '../../src');

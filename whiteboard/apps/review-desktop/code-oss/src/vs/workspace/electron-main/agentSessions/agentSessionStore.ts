@@ -113,11 +113,14 @@ export class AgentSessionStore {
 	}
 
 	/** Persists mailbox text. Future UI and MCP exposure must pass through the content redaction boundary. */
-	sendMessage(projectId: string, senderSessionId: string, input: SendSessionMessageInput): SessionMessageDTO {
+	sendMessage(projectId: string, senderSessionId: string, input: SendSessionMessageInput, policy?: { readonly maxUnreadMessages: number }): SessionMessageDTO {
 		this.assertOpen();
 		this.validateUuid(projectId, 'project ID');
 		this.validateUuid(senderSessionId, 'sender session ID');
 		this.validateUuid(input.recipientSessionId, 'recipient session ID');
+		if (policy !== undefined && (!Number.isFinite(policy.maxUnreadMessages) || !Number.isSafeInteger(policy.maxUnreadMessages) || policy.maxUnreadMessages < 1 || policy.maxUnreadMessages > 1000)) {
+			throw new Error('The trusted unread message limit must be an integer between 1 and 1000.');
+		}
 		if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey.trim().length === 0 || input.idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
 			throw new Error('The idempotency key must contain 1 to 128 characters.');
 		}
@@ -135,6 +138,11 @@ export class AgentSessionStore {
 					throw new Error('The idempotency key was already used for a different message request.');
 				}
 				return this.messageFromRow(prior);
+			}
+			if (policy) {
+				const unread = Number(this.db.prepare(`SELECT COUNT(*) AS unread FROM agent_session_messages
+					WHERE project_id = ? AND recipient_session_id = ? AND read_at IS NULL`).get(projectId, input.recipientSessionId)?.unread ?? 0);
+				if (unread >= policy.maxUnreadMessages) { throw new Error('The recipient mailbox unread queue is full.'); }
 			}
 			const sequence = Number(this.db.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM agent_session_messages WHERE project_id = ? AND recipient_session_id = ?').get(projectId, input.recipientSessionId)?.next_sequence ?? 1);
 			const messageId = randomUUID();

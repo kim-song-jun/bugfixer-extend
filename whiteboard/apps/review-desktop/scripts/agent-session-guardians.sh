@@ -4,6 +4,7 @@
 AGENT_SESSION_GUARDIAN_PATHS=(
   "vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs"
   "vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs"
+  "vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs"
 )
 
 require_agent_session_guardians() {
@@ -12,7 +13,7 @@ require_agent_session_guardians() {
   local relative_path
   for relative_path in "${AGENT_SESSION_GUARDIAN_PATHS[@]}"; do
     if [[ ! -s "$output_root/$relative_path" ]]; then
-      echo "$context is missing required agent session guardian: $output_root/$relative_path" >&2
+      echo "$context is missing required agent session runtime resource: $output_root/$relative_path" >&2
       return 1
     fi
   done

@@ -149,9 +149,10 @@ const commonResourcePatterns = [
 // Resources for desktop target
 const desktopResourcePatterns = [
 	...commonResourcePatterns,
-	// App-owned Node guardians are runtime files and must survive production bundling.
+	// Standalone session Node entrypoints must survive production bundling.
 	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
+	'vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
 
 	// HTML
 	'vs/code/electron-browser/workbench/workbench.html',
@@ -391,6 +392,7 @@ async function copyResources(outDir: string): Promise<void> {
 const agentSessionGuardianResources = [
 	'vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs',
 	'vs/workspace/electron-main/agentSessions/agentCliProbeGuardian.mjs',
+	'vs/workspace/electron-main/agentSessions/agentSessionMcpGateway.mjs',
 ] as const;
 
 async function assertAgentSessionGuardianResources(outDir: string): Promise<void> {

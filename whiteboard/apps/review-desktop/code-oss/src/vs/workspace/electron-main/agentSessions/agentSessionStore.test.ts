@@ -175,6 +175,37 @@ test('same idempotency key and same body returns one message and one notificatio
 	});
 });
 
+test('optional unread queue limit is atomic, preserves retries at capacity, and frees space on acknowledgement', () => {
+	withDatabase(database => {
+		const { project, binding } = projectFixture(database);
+		const sender = database.agentSessions.createSession(sessionInput(project.id, binding.id));
+		const recipient = database.agentSessions.createSession(sessionInput(project.id, binding.id, { provider: 'claude', model: 'sonnet' }));
+		const policy = { maxUnreadMessages: 100 };
+		let lastMessage: ReturnType<typeof database.agentSessions.sendMessage> | undefined;
+		for (let index = 0; index < 100; index++) {
+			lastMessage = database.agentSessions.sendMessage(project.id, sender.id, {
+				recipientSessionId: recipient.id, idempotencyKey: `queue-${index}`, body: `Unread ${index}`,
+			}, policy);
+		}
+		const retry = database.agentSessions.sendMessage(project.id, sender.id, {
+			recipientSessionId: recipient.id, idempotencyKey: 'queue-99', body: 'Unread 99',
+		}, policy);
+		assert.equal(retry.id, lastMessage?.id);
+		assert.throws(() => database.agentSessions.sendMessage(project.id, sender.id, {
+			recipientSessionId: recipient.id, idempotencyKey: 'queue-overflow', body: 'Unread overflow',
+		}, policy), /unread queue is full/i);
+		database.agentSessions.acknowledgeMessage(project.id, recipient.id, retry.id);
+		const next = database.agentSessions.sendMessage(project.id, sender.id, {
+			recipientSessionId: recipient.id, idempotencyKey: 'queue-after-ack', body: 'Capacity freed',
+		}, policy);
+		assert.equal(database.agentSessions.listInbox(project.id, recipient.id, { limit: 100 }).filter(message => message.readAt === null).length, 100);
+		assert.equal(database.agentSessions.listInbox(project.id, recipient.id, { afterSequence: 100, limit: 1 })[0].id, next.id);
+		assert.throws(() => database.agentSessions.sendMessage(project.id, sender.id, {
+			recipientSessionId: recipient.id, idempotencyKey: 'invalid-cap', body: 'No',
+		}, { maxUnreadMessages: 1000.5 }), /integer between 1 and 1000/i);
+	});
+});
+
 test('message and notification reads and acknowledgements enforce project and recipient ownership', () => {
 	withDatabase(database => {
 		const first = projectFixture(database, 'First project');
