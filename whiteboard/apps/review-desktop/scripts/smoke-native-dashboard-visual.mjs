@@ -383,12 +383,12 @@ async function readOwnedProcessTree(rootPid) {
   if (!Number.isInteger(rootPid) || rootPid < 1) return { status: 'root-pid-unavailable', processes: [], truncated: false };
 
   try {
-
     const { stdout } = await execFileAsync('/bin/ps', ['-Ao', 'pid=,ppid=,pgid=,comm='], {
       encoding: 'utf8',
       maxBuffer: 128 * 1024,
       timeout: 2_000,
     });
+
     const all = stdout.split('\n').flatMap(line => {
       const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
 
