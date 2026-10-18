@@ -115,6 +115,28 @@ export class AgentSessionTurnStore {
 		return this.readTurnInternal(projectId, sessionId, turnId);
 	}
 
+	/** Records cleanup proof from the trusted host without changing the terminal outcome or session state. */
+	confirmTurnCleanup(projectId: string, sessionId: string, turnId: string, expectedTurnRevision: number): AgentSessionTurnDTO {
+		this.assertOpen();
+		this.validateUuid(projectId, 'project ID');
+		this.validateUuid(sessionId, 'session ID');
+		this.validateUuid(turnId, 'turn ID');
+		if (!Number.isSafeInteger(expectedTurnRevision) || expectedTurnRevision < 1) { throw new Error('The expected turn revision is invalid.'); }
+		return this.transaction(() => {
+			const turn = this.readTurnInternal(projectId, sessionId, turnId);
+			if (!turn) { throw new Error('The turn does not belong to this project and session.'); }
+			if (turn.revision !== expectedTurnRevision) { throw new Error('The turn revision is stale.'); }
+			if (!this.isTerminal(turn.state)) { throw new Error('Cleanup proof may only be recorded for a terminal turn.'); }
+			if (turn.cleanupVerified) { return turn; }
+			const now = new Date().toISOString();
+			const changed = this.db.prepare(`UPDATE agent_session_turns SET cleanup_verified = 1, revision = revision + 1, updated_at = ?
+				WHERE id = ? AND project_id = ? AND session_id = ? AND revision = ? AND state IN ('exited', 'interrupted', 'failed') AND cleanup_verified = 0`)
+				.run(now, turnId, projectId, sessionId, expectedTurnRevision);
+			if (Number(changed.changes) !== 1) { throw new Error('The turn revision is stale or the turn is not terminal.'); }
+			return this.readTurnInternal(projectId, sessionId, turnId)!;
+		});
+	}
+
 	listTurns(projectId: string, sessionId: string): AgentSessionTurnDTO[] {
 		this.assertOpen();
 		this.assertOwnedSession(projectId, sessionId);

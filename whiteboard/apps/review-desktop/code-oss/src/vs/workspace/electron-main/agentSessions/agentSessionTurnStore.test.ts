@@ -144,6 +144,38 @@ test('a provider launch failure moves a starting turn and session to failed with
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
+
+test('trusted cleanup confirmation is terminal-only, project-scoped, revisioned, and preserves the original outcome', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-turn-cleanup-proof-'));
+	const fixture = createFixture(directory);
+	try {
+		const starting = fixture.database.agentSessionTurns.createTurn({
+			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: fixture.session.revision, snapshot: snapshotFor(fixture),
+		});
+		assert.throws(() => fixture.database.agentSessionTurns.confirmTurnCleanup(fixture.project.id, fixture.session.id, starting.id, starting.revision), /terminal turn/i);
+		const running = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, starting.id, starting.revision, fixture.session.revision + 1, { state: 'running' });
+		const failed = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, starting.id, running.turn.revision, running.session.revision, {
+			state: 'failed', exitSignal: 'SIGTERM', errorSummary: 'Stop cleanup was not verified.', cleanupVerified: false,
+		});
+		const foreignProject = fixture.database.createProject('Unrelated project');
+		assert.throws(() => fixture.database.agentSessionTurns.confirmTurnCleanup(foreignProject.id, fixture.session.id, failed.turn.id, failed.turn.revision), /does not belong/i);
+		assert.throws(() => fixture.database.agentSessionTurns.confirmTurnCleanup(fixture.project.id, fixture.session.id, failed.turn.id, failed.turn.revision - 1), /revision is stale/i);
+		const confirmed = fixture.database.agentSessionTurns.confirmTurnCleanup(fixture.project.id, fixture.session.id, failed.turn.id, failed.turn.revision);
+		assert.equal(confirmed.state, failed.turn.state);
+		assert.equal(confirmed.cleanupVerified, true);
+		assert.equal(confirmed.revision, failed.turn.revision + 1);
+		assert.equal(confirmed.finishedAt, failed.turn.finishedAt);
+		assert.equal(confirmed.snapshotSha256, failed.turn.snapshotSha256);
+		assert.equal(confirmed.errorSummary, failed.turn.errorSummary);
+		assert.equal(confirmed.exitSignal, failed.turn.exitSignal);
+		assert.deepEqual(fixture.database.agentSessions.getSession(fixture.project.id, fixture.session.id), failed.session);
+		assert.deepEqual(fixture.database.agentSessionTurns.confirmTurnCleanup(fixture.project.id, fixture.session.id, confirmed.id, confirmed.revision), confirmed);
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
 test('turn creation enforces session and project ownership, snapshot allowlist, and canonical folder identity', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-turn-owner-'));
 	const fixture = createFixture(directory);
