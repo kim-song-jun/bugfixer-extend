@@ -12,6 +12,7 @@ import { WorkspaceKnowledgeStore } from './workspaceKnowledgeStore.js';
 import { validateDeclarativePackage } from './connectors/declarativePackage.js';
 import type { WorkspaceE2eStep } from '../common/workspaceE2eProtocol.js';
 import type { WorkspaceTaskInstructionPromotionDTO } from '../common/workspaceKnowledgeProtocol.js';
+import { AgentSessionStore } from './agentSessions/agentSessionStore.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -299,7 +300,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 21;
+const schemaVersion = 22;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -309,9 +310,11 @@ const providerEventTypes = new Set([
 export class WorkspaceDatabase {
 	private closed = false;
 	readonly knowledge: WorkspaceKnowledgeStore;
+	readonly agentSessions: AgentSessionStore;
 
 	private constructor(private readonly db: DatabaseSync) {
 		this.knowledge = new WorkspaceKnowledgeStore(db, () => this.assertOpen());
+		this.agentSessions = new AgentSessionStore(db, () => this.assertOpen());
 	}
 
 	static open(path: string): WorkspaceDatabase {
@@ -359,6 +362,7 @@ export class WorkspaceDatabase {
 				if (version < 19) { WorkspaceDatabase.migrateV19(db); }
 				if (version < 20) { WorkspaceDatabase.migrateV20(db); }
 				if (version < 21) { WorkspaceDatabase.migrateV21(db); }
+				if (version < 22) { WorkspaceDatabase.migrateV22(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -754,6 +758,94 @@ export class WorkspaceDatabase {
 				OR (control_version IS 1 AND control_nonce IS NOT NULL AND length(control_nonce) = 64 AND control_nonce NOT GLOB '*[^0-9a-f]*')
 			);
 			PRAGMA user_version = 21;
+		`);
+	}
+
+	private static migrateV22(db: DatabaseSync): void {
+		db.exec(`
+			CREATE TABLE agent_sessions (
+				id TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+				binding_id TEXT NOT NULL,
+				task_id TEXT,
+				parent_session_id TEXT,
+				name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+				provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+				model TEXT NOT NULL CHECK (length(trim(model)) BETWEEN 1 AND 200),
+				profile_ref TEXT CHECK (profile_ref IS NULL OR length(trim(profile_ref)) <= 512),
+				workspace_mode TEXT NOT NULL CHECK (workspace_mode IN ('gitWorktree', 'sharedFolder')),
+				state TEXT NOT NULL CHECK (state IN ('created', 'starting', 'running', 'waitingForInput', 'waitingForApproval', 'idle', 'stopping', 'stopped', 'interrupted', 'failed')),
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				UNIQUE (id, project_id),
+				FOREIGN KEY (binding_id, project_id) REFERENCES folder_bindings(id, project_id) ON DELETE RESTRICT,
+				FOREIGN KEY (task_id, project_id) REFERENCES tasks(id, project_id) ON DELETE RESTRICT,
+				FOREIGN KEY (parent_session_id, project_id) REFERENCES agent_sessions(id, project_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE INDEX agent_sessions_project_created ON agent_sessions(project_id, created_at, id);
+			CREATE INDEX agent_sessions_parent ON agent_sessions(parent_session_id, created_at, id);
+			CREATE TRIGGER agent_session_task_owner_insert BEFORE INSERT ON agent_sessions WHEN NEW.task_id IS NOT NULL
+			BEGIN
+				SELECT CASE WHEN NOT EXISTS (
+					SELECT 1 FROM tasks task WHERE task.id = NEW.task_id AND task.project_id = NEW.project_id AND task.binding_id = NEW.binding_id
+				) THEN RAISE(ABORT, 'agent session task must match project and binding ownership') END;
+			END;
+			CREATE TRIGGER agent_session_task_owner_update BEFORE UPDATE OF project_id, binding_id, task_id ON agent_sessions WHEN NEW.task_id IS NOT NULL
+			BEGIN
+				SELECT CASE WHEN NOT EXISTS (
+					SELECT 1 FROM tasks task WHERE task.id = NEW.task_id AND task.project_id = NEW.project_id AND task.binding_id = NEW.binding_id
+				) THEN RAISE(ABORT, 'agent session task must match project and binding ownership') END;
+			END;
+			CREATE TRIGGER agent_session_parent_owner_insert BEFORE INSERT ON agent_sessions WHEN NEW.parent_session_id IS NOT NULL
+			BEGIN
+				SELECT CASE WHEN NOT EXISTS (
+					SELECT 1 FROM agent_sessions parent WHERE parent.id = NEW.parent_session_id
+					AND parent.project_id = NEW.project_id AND parent.binding_id = NEW.binding_id
+					AND parent.task_id IS NEW.task_id
+				) THEN RAISE(ABORT, 'agent session parent must match project, binding, and task ownership') END;
+			END;
+			CREATE TRIGGER agent_session_parent_owner_update BEFORE UPDATE OF project_id, binding_id, task_id, parent_session_id ON agent_sessions WHEN NEW.parent_session_id IS NOT NULL
+			BEGIN
+				SELECT CASE WHEN NOT EXISTS (
+					SELECT 1 FROM agent_sessions parent WHERE parent.id = NEW.parent_session_id
+					AND parent.project_id = NEW.project_id AND parent.binding_id = NEW.binding_id
+					AND parent.task_id IS NEW.task_id
+				) THEN RAISE(ABORT, 'agent session parent must match project, binding, and task ownership') END;
+			END;
+
+			CREATE TABLE agent_session_messages (
+				id TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+				sender_session_id TEXT NOT NULL,
+				recipient_session_id TEXT NOT NULL,
+				sequence INTEGER NOT NULL CHECK (sequence > 0),
+				idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+				body TEXT NOT NULL CHECK (length(body) <= 16384 AND length(CAST(body AS BLOB)) <= 65536),
+				created_at TEXT NOT NULL,
+				read_at TEXT,
+				UNIQUE (project_id, sender_session_id, idempotency_key),
+				UNIQUE (project_id, recipient_session_id, sequence),
+				UNIQUE (id, project_id),
+				FOREIGN KEY (sender_session_id, project_id) REFERENCES agent_sessions(id, project_id) ON DELETE RESTRICT,
+				FOREIGN KEY (recipient_session_id, project_id) REFERENCES agent_sessions(id, project_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE INDEX agent_session_messages_inbox ON agent_session_messages(project_id, recipient_session_id, sequence);
+
+			CREATE TABLE agent_session_notifications (
+				id TEXT PRIMARY KEY NOT NULL,
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+				session_id TEXT NOT NULL,
+				sequence INTEGER NOT NULL CHECK (sequence > 0),
+				kind TEXT NOT NULL CHECK (kind = 'message'),
+				message_id TEXT NOT NULL UNIQUE REFERENCES agent_session_messages(id) ON DELETE RESTRICT,
+				created_at TEXT NOT NULL,
+				read_at TEXT,
+				UNIQUE (project_id, sequence),
+				FOREIGN KEY (session_id, project_id) REFERENCES agent_sessions(id, project_id) ON DELETE RESTRICT
+			) STRICT;
+			CREATE INDEX agent_session_notifications_page ON agent_session_notifications(project_id, sequence);
+			PRAGMA user_version = 22;
 		`);
 	}
 
