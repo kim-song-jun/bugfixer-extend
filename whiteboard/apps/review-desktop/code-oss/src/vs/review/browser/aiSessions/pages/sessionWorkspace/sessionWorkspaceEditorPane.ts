@@ -29,7 +29,8 @@ import { Emitter } from '../../../../../base/common/event.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../../workbench/common/contributions.js';
 import { ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
-import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, SessionNotificationDTO, SessionPageOptions, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDashboardDTO, WorkspaceDashboardTaskItemDTO } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
@@ -37,6 +38,8 @@ import { restoreSessionSelection, persistSessionSelection } from '../../features
 import { renderSessionList } from '../../widgets/sessionList/index.js';
 import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
 import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
+import { createSessionNotifications, type SessionNotificationsActions, type SessionNotificationsController } from '../../widgets/sessionNotifications/index.js';
+import { createSessionMessages, type SessionMessagesActions, type SessionMessagesController } from '../../widgets/sessionMessages/index.js';
 import type { AgentSessionViewTab } from '../../features/sessionViewTabs/index.js';
 import { SessionTerminalController } from '../../shared/sessionTerminal/index.js';
 import { AgentSessionWorkspaceEditorInput } from './sessionWorkspaceEditorInput.js';
@@ -59,6 +62,11 @@ interface CreateDraft {
 
 const SESSION_STORAGE_TAB = 'devfast.aiSessions.view';
 const SESSION_STORAGE_LOG_TURN = 'devfast.aiSessions.logTurn';
+
+interface PendingNotificationMessage {
+	readonly sessionId: string;
+	readonly messageId: string;
+}
 
 export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	static readonly ID = AgentSessionWorkspaceEditorInput.EDITOR_ID;
@@ -94,6 +102,12 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private logsWidgetMount: HTMLElement | undefined;
 	private sessionLogs: SessionLogsController | undefined;
 	private sessionLogsContextKey: string | undefined;
+	private sessionMessagesPanel: HTMLElement | undefined;
+	private sessionMessagesMount: HTMLElement | undefined;
+	private sessionMessages: SessionMessagesController | undefined;
+	private notificationsMount: HTMLElement | undefined;
+	private sessionNotifications: SessionNotificationsController | undefined;
+	private pendingNotificationMessage: PendingNotificationMessage | undefined;
 
 	constructor(group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -108,6 +122,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.terminalService = terminalService;
 		this._register(toDisposable(() => this.terminalController?.dispose()));
 		this._register(toDisposable(() => this.sessionLogs?.dispose()));
+		this._register(toDisposable(() => this.sessionMessages?.dispose()));
+		this._register(toDisposable(() => this.sessionNotifications?.dispose()));
 	}
 
 	protected createEditor(parent: HTMLElement): void {
@@ -121,7 +137,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	protected override setEditorVisible(visible: boolean): void {
 		this.editorVisible = visible;
-		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); }
+		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionNotifications?.setVisible(false); }
 		else this.render();
 		this.updateLifecyclePolling();
 	}
@@ -136,7 +152,12 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (this.projectId !== input.projectId) {
 			this.terminalController?.dispose();
 			this.sessionLogs?.invalidateContext();
+			this.sessionMessages?.setVisible(false);
+			this.sessionNotifications?.setVisible(false);
 			this.projectId = input.projectId;
+			this.dashboard = undefined;
+			this.sessions = [];
+			this.pendingNotificationMessage = undefined;
 			this.sessionPermissionModes.clear();
 			this.createPermissionMode = 'read-only';
 			this.sessionListScrollTop = 0;
@@ -156,7 +177,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private loadTabPreference(): void {
 		const tab = localStorage.getItem(`${SESSION_STORAGE_TAB}.${this.projectId}`);
-		if (tab === 'terminal' || tab === 'changes' || tab === 'logs') this.activeTab = tab;
+		if (tab === 'terminal' || tab === 'changes' || tab === 'logs' || tab === 'messages') this.activeTab = tab;
 	}
 
 	private async load(): Promise<void> {
@@ -197,9 +218,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private selectSession(sessionId: string): void {
 		if (sessionId === this.selectedSessionId || !this.projectId) return;
+		if (this.pendingNotificationMessage?.sessionId !== sessionId) { this.pendingNotificationMessage = undefined; }
 		if (this.previewSessionId !== sessionId) { this.preview = undefined; this.previewSessionId = undefined; }
 		this.terminalController?.hide();
 		this.sessionLogs?.invalidateContext();
+		this.sessionMessages?.setVisible(false);
 		this.selectedSessionId = sessionId;
 		persistSessionSelection(this.projectId, sessionId);
 		this.notice = undefined;
@@ -410,6 +433,92 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return panel;
 	}
 
+	private getMessagesPanel(): HTMLElement {
+		if (this.sessionMessagesPanel) { return this.sessionMessagesPanel; }
+		const panel = document.createElement('div');
+		panel.className = 'ai-session__messages-panel';
+		const mount = document.createElement('div');
+		mount.className = 'ai-session__messages-mount';
+		panel.appendChild(mount);
+		this.sessionMessagesPanel = panel;
+		this.sessionMessagesMount = mount;
+		return panel;
+	}
+
+	private updateMessagesPanel(sessionId: string): HTMLElement {
+		const panel = this.getMessagesPanel();
+		const mount = this.sessionMessagesMount!;
+		const projectId = this.projectId!;
+		const loadPage: SessionMessagesActions['loadPage'] = (afterSequence, limit) => ipcRenderer.invoke(
+			WORKSPACE_AGENT_SESSIONS_CHANNEL,
+			'listMessages',
+			{ projectId, sessionId, afterSequence, limit },
+		) as Promise<WorkspaceAgentSessionMailboxPage>;
+		const loadMessage: SessionMessagesActions['loadMessage'] = messageId => {
+			const request: WorkspaceAgentSessionMailboxItemRequest = { projectId, sessionId, messageId };
+			return ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getMessage', request) as Promise<WorkspaceAgentSessionMailboxMessage | null>;
+		};
+		const actions: SessionMessagesActions = { loadPage, loadMessage, sessions: this.sessions };
+		const targetMessageId = this.pendingNotificationMessage?.sessionId === sessionId ? this.pendingNotificationMessage.messageId : undefined;
+		if (!this.sessionMessages) {
+			this.sessionMessages = createSessionMessages(mount, projectId, sessionId, actions, targetMessageId);
+		} else {
+			this.sessionMessages.setContext(projectId, sessionId, actions, targetMessageId);
+		}
+		this.sessionMessages.setVisible(this.editorVisible && this.activeTab === 'messages');
+		return panel;
+	}
+
+	private updateNotificationsMount(): HTMLElement {
+		if (!this.notificationsMount) {
+			this.notificationsMount = document.createElement('div');
+			this.notificationsMount.className = 'ai-session__notifications-mount';
+		}
+		const projectId = this.projectId!;
+		const actions: SessionNotificationsActions = {
+			loadStatus: () => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'notificationStatus', { projectId }) as Promise<WorkspaceAgentSessionNotificationStatus>,
+			loadPage: (options: SessionPageOptions) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listNotifications', {
+				projectId,
+				afterSequence: options.afterSequence,
+				limit: options.limit,
+			}) as Promise<readonly SessionNotificationDTO[]>,
+			markRead: notificationId => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'markNotificationRead', { projectId, notificationId }) as Promise<void>,
+			onOpen: notification => this.openNotification(notification),
+		};
+		if (!this.sessionNotifications) {
+			this.sessionNotifications = createSessionNotifications(this.notificationsMount, projectId, this.sessions, actions);
+		} else {
+			this.sessionNotifications.setContext(projectId, this.sessions, actions);
+		}
+		this.sessionNotifications.setVisible(this.editorVisible && !!this.dashboard);
+		return this.notificationsMount;
+	}
+
+	private openNotification(notification: SessionNotificationDTO): void {
+		if (!this.projectId || notification.projectId !== this.projectId) { this.showError('현재 프로젝트의 알림이 아닙니다.'); return; }
+		const recipient = this.sessions.find(session => session.id === notification.sessionId);
+		if (!recipient) { this.showError(`받는 세션을 찾을 수 없습니다. 세션 ID ${notification.sessionId}`); return; }
+
+		this.terminalController?.hide();
+		this.sessionLogs?.invalidateContext();
+		this.sessionMessages?.setVisible(false);
+		if (this.previewSessionId !== recipient.id) { this.preview = undefined; this.previewSessionId = undefined; }
+		this.creating = false;
+		this.selectedSessionId = recipient.id;
+		persistSessionSelection(this.projectId, recipient.id);
+		this.pendingNotificationMessage = { sessionId: recipient.id, messageId: notification.messageId };
+		this.activeTab = 'messages';
+		localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, 'messages');
+		this.notice = undefined;
+		this.error = undefined;
+		this.render();
+		requestAnimationFrame(() => this.root?.querySelector<HTMLElement>('#ai-session-tab-messages')?.focus({ preventScroll: true }));
+		this.sessionMessages?.revealMessage(notification.messageId);
+		void this.loadTurns(recipient.id).then(() => {
+			if (this.projectId === notification.projectId && this.selectedSessionId === recipient.id) { this.render(); }
+		}).catch(error => this.showError(this.errorMessage(error, '세션 메시지를 불러오지 못했습니다.')));
+	}
+
 	private async exportLoadedTranscript(text: string, fileName: string, isCurrent: () => boolean): Promise<boolean> {
 		if (!isCurrent()) { return false; }
 		const defaultPath = await this.fileDialogService.defaultFilePath();
@@ -448,11 +557,27 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.sessionListScrollTop = this.root.querySelector<HTMLElement>('.ai-session__list')?.scrollTop ?? this.sessionListScrollTop;
 		const activeElement = document.activeElement;
 		const focusedLogsElement = activeElement instanceof HTMLElement && this.logsPanel?.contains(activeElement) ? activeElement : undefined;
+		const focusedMessagesElement = activeElement instanceof HTMLElement && this.sessionMessagesPanel?.contains(activeElement) ? activeElement : undefined;
+		const focusedNotificationsElement = activeElement instanceof HTMLElement && this.notificationsMount?.contains(activeElement) ? activeElement : undefined;
 		let logsShouldBeVisible = false;
+		let messagesShouldBeVisible = false;
 		this.root.replaceChildren();
-		if (!this.projectId) { this.sessionLogs?.setVisible(false); return; }
+		if (!this.projectId) {
+			this.sessionLogs?.setVisible(false);
+			this.sessionMessages?.setVisible(false);
+			this.sessionNotifications?.setVisible(false);
+			return;
+		}
 		this.root.setAttribute('aria-busy', String(this.loading || this.operation));
 		const shell = document.createElement('div'); shell.className = 'ai-session__shell';
+		const projectHeader = document.createElement('header');
+		projectHeader.className = 'ai-session__project-header';
+		const projectName = document.createElement('strong');
+		projectName.className = 'ai-session__project-name';
+		projectName.textContent = this.dashboard?.project.name ?? '프로젝트';
+		projectHeader.appendChild(projectName);
+		if (this.dashboard) { projectHeader.appendChild(this.updateNotificationsMount()); }
+		shell.appendChild(projectHeader);
 		const main = document.createElement('main'); main.className = 'ai-session__main';
 		if (this.loading && !this.dashboard) {
 			const loading = document.createElement('p'); loading.className = 'ai-session__state'; loading.setAttribute('role', 'status'); loading.textContent = 'AI 세션을 불러오는 중입니다.'; main.appendChild(loading);
@@ -486,11 +611,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 					const workspace = this.workspacePreparations.get(session.id);
 					if (session.workspaceMode === 'gitWorktree' && workspace) { this.renderWorkspacePreparation(main, workspace); }
 					logsShouldBeVisible = this.editorVisible && this.activeTab === 'logs' && !!this.turns.get(session.id)?.length;
+					messagesShouldBeVisible = this.editorVisible && this.activeTab === 'messages';
 					const logsPanel = this.updateLogsPanel(session.id);
+					const messagesPanel = this.updateMessagesPanel(session.id);
 					const rendered = renderSessionDetail(main, session, turn, this.activeTab, {
 						onStart: () => void this.prepareLaunch(session.id),
 						onStop: () => void this.stopTurn(), onTab: tab => this.setTab(tab),
-					}, taskNames.get(session.taskId ?? ''), logsPanel);
+					}, taskNames.get(session.taskId ?? ''), logsPanel, messagesPanel);
 					if (this.activeTab === 'terminal') this.renderTerminal(rendered.terminal, session, turn);
 					if (this.preview && this.previewSessionId === session.id) {
 						this.renderPreview(main, this.preview);
@@ -514,7 +641,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const sessionList = this.root.querySelector<HTMLElement>('.ai-session__list');
 		if (sessionList) sessionList.scrollTop = this.sessionListScrollTop;
 		if (focusedLogsElement?.isConnected) { focusedLogsElement.focus({ preventScroll: true }); }
+		if (focusedMessagesElement?.isConnected) { focusedMessagesElement.focus({ preventScroll: true }); }
+		if (focusedNotificationsElement?.isConnected) { focusedNotificationsElement.focus({ preventScroll: true }); }
 		if (!logsShouldBeVisible) { this.sessionLogs?.setVisible(false); }
+		if (!messagesShouldBeVisible) { this.sessionMessages?.setVisible(false); }
+		if (this.dashboard) { this.sessionNotifications?.setVisible(this.editorVisible); }
 		this.updateLifecyclePolling();
 	}
 

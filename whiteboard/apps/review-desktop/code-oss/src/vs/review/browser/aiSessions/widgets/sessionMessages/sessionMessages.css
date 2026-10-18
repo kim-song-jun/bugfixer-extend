@@ -1,0 +1,25 @@
+.ai-session-messages { min-width: 0; }
+.ai-session-messages__heading { padding: 12px 0 10px; border-bottom: 1px solid var(--ai-line); }
+.ai-session-messages__heading h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.ai-session-messages__description { margin: 4px 0 0; color: var(--ai-muted); }
+.ai-session-messages__status, .ai-session-messages__error { margin: 10px 0; color: var(--ai-muted); }
+.ai-session-messages__error { color: var(--vscode-errorForeground, #c3283b); }
+.ai-session-messages__toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--ai-line); }
+.ai-session-messages__button { min-height: 34px; padding: 5px 9px; border: 1px solid var(--ai-line); border-radius: 3px; color: var(--ai-foreground); background: transparent; font: inherit; cursor: pointer; }
+.ai-session-messages__button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground); }
+.ai-session-messages__button:focus-visible, .ai-session-messages__message:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-messages__button:disabled { opacity: .55; cursor: default; }
+.ai-session-messages__list { margin: 0; padding: 0; list-style: none; }
+.ai-session-messages__item { padding: 12px 0 14px; border-bottom: 1px solid var(--ai-line); }
+.ai-session-messages__message { display: block; width: 100%; padding: 0; color: var(--ai-foreground); background: transparent; font: inherit; text-align: left; }
+.ai-session-messages__message[aria-current="true"] { box-shadow: inset 3px 0 var(--vscode-focusBorder); }
+.ai-session-messages__meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; color: var(--ai-muted); font-size: 11px; }
+.ai-session-messages__sender { color: var(--ai-foreground); font-size: 13px; font-weight: 650; }
+.ai-session-messages__body { margin: 7px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; font: 13px/1.6 var(--vscode-font-family, sans-serif); }
+.ai-session-messages__read-state { display: inline-block; margin-top: 7px; color: var(--ai-muted); font-size: 11px; }
+.ai-session-messages__read-state--read { color: var(--vscode-descriptionForeground); }
+.ai-session-messages__empty { margin: 14px 0; padding: 12px 0; border-block: 1px solid var(--ai-line); color: var(--ai-muted); }
+.ai-session-messages__highlight { background: color-mix(in srgb, var(--vscode-focusBorder) 11%, transparent); }
+@media (max-width: 760px) {
+	.ai-session-messages__button { flex: 1 1 auto; }
+}

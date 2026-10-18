@@ -8,7 +8,7 @@ export interface SessionDetailActions {
 	readonly onTab: (tab: AgentSessionViewTab) => void;
 }
 
-export function renderSessionDetail(parent: HTMLElement, session: AgentSessionDTO, turn: AgentSessionTurnDTO | undefined, tab: AgentSessionViewTab, actions: SessionDetailActions, taskName?: string, logsPanel?: HTMLElement): { terminal: HTMLElement } {
+export function renderSessionDetail(parent: HTMLElement, session: AgentSessionDTO, turn: AgentSessionTurnDTO | undefined, tab: AgentSessionViewTab, actions: SessionDetailActions, taskName?: string, logsPanel?: HTMLElement, messagesPanel?: HTMLElement): { terminal: HTMLElement } {
 	parent.replaceChildren();
 	parent.className = 'ai-session__detail';
 	const header = document.createElement('header'); header.className = 'ai-session__detail-header';
@@ -37,6 +37,8 @@ export function renderSessionDetail(parent: HTMLElement, session: AgentSessionDT
 	}
 	if (tab === 'logs' && logsPanel) {
 		panel.appendChild(logsPanel);
+	} else if (tab === 'messages' && messagesPanel) {
+		panel.appendChild(messagesPanel);
 	} else {
 		const unavailable = document.createElement('div'); unavailable.className = 'ai-session__unavailable'; unavailable.setAttribute('role', 'status');
 		unavailable.textContent = '변경 내역 연결은 아직 준비되지 않았습니다. 현재 세션의 파일 변경을 조회하는 데이터 연결이 필요합니다.';

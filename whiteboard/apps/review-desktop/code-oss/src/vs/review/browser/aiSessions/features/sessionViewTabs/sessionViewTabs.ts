@@ -1,6 +1,6 @@
-export type AgentSessionViewTab = 'terminal' | 'changes' | 'logs';
+export type AgentSessionViewTab = 'terminal' | 'changes' | 'logs' | 'messages';
 
-const labels: Readonly<Record<AgentSessionViewTab, string>> = { terminal: '터미널', changes: '변경 내역', logs: '로그' };
+const labels: Readonly<Record<AgentSessionViewTab, string>> = { terminal: '터미널', changes: '변경 내역', logs: '로그', messages: '메시지' };
 
 export function createSessionViewTabs(selected: AgentSessionViewTab, onSelect: (tab: AgentSessionViewTab) => void): HTMLElement {
 	const nav = document.createElement('div');
@@ -20,7 +20,9 @@ export function createSessionViewTabs(selected: AgentSessionViewTab, onSelect: (
 		button.addEventListener('keydown', event => {
 			if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
 			event.preventDefault();
-			const next = (Object.keys(labels) as AgentSessionViewTab[])[((Object.keys(labels) as AgentSessionViewTab[]).indexOf(tab) + (event.key === 'ArrowRight' ? 1 : 2)) % 3];
+			const tabs = Object.keys(labels) as AgentSessionViewTab[];
+			const movement = event.key === 'ArrowRight' ? 1 : -1;
+			const next = tabs[(tabs.indexOf(tab) + movement + tabs.length) % tabs.length];
 			onSelect(next);
 			nav.querySelector<HTMLButtonElement>(`#ai-session-tab-${next}`)?.focus();
 		});
