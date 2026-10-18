@@ -8,13 +8,17 @@
 (function () {
 
 	const { ipcRenderer, webFrame, contextBridge, webUtils } = require('electron');
+	const allowedApplicationIpcChannels = new Set([
+		'workspaceAgentSessions',
+		'workspaceAgentSessions/output',
+	]);
 
 	type ISandboxConfiguration = import('../common/sandboxTypes.js').ISandboxConfiguration;
 
 	//#region Utilities
 
 	function validateIPC(channel: string): true | never {
-		if (!channel?.startsWith('vscode:')) {
+		if (!channel?.startsWith('vscode:') && !allowedApplicationIpcChannels.has(channel)) {
 			throw new Error(`Unsupported event IPC channel '${channel}'`);
 		}
 

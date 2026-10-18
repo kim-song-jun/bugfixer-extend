@@ -330,9 +330,19 @@ try {
   assert.ok(Buffer.byteLength(page.chunks.map(chunk => chunk.text).join('')) <= 4096);
   assert.ok(page.chunks.every((chunk, index) => index === 0 || chunk.sequence > page.chunks[index - 1].sequence));
   reattached.dispose();
-  await host.write(a, 'quit\n');
-  await until(() => host.getSnapshot(a).state === 'exited', 'out-of-band provider exit');
-  assert.equal(host.getSnapshot(a).providerExitCode, 0);
+  let providerExit;
+  const exitObserver = host.watchExit(a, snapshot => {
+    if (snapshot.state === 'exited') providerExit = snapshot;
+  });
+
+  try {
+    await host.write(a, 'quit\n');
+    await until(() => providerExit, 'out-of-band provider exit');
+    assert.equal(providerExit.providerExitCode, 0);
+  } finally {
+    exitObserver.dispose();
+  }
+
   assert.equal((await host.stop(a)).cleanupVerified, true);
   assert.ok(retained(host, a).endsWith('FINAL_WITHOUT_NEWLINE'), 'Verified exit must flush final sanitized output');
   assert.equal((await host.stop(b)).cleanupVerified, true);
