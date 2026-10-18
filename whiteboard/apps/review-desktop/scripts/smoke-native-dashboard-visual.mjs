@@ -75,6 +75,8 @@ const MAX_STARTUP_TARGETS = 256;
 
 const REDACTED_STARTUP_BODY = '[redacted CDP response body]';
 
+const MAX_STARTUP_SCREENSHOT_BYTES = 8 * 1024 * 1024;
+
 const LOG_FILE_NAMES = /^(?:main|renderer(?:\d+)?|sharedprocess|ptyhost|exthost|window)\.log$/;
 
 function appendBoundedRecord(destination, record, dropKey) {
@@ -381,6 +383,7 @@ async function readOwnedProcessTree(rootPid) {
   if (!Number.isInteger(rootPid) || rootPid < 1) return { status: 'root-pid-unavailable', processes: [], truncated: false };
 
   try {
+
     const { stdout } = await execFileAsync('/bin/ps', ['-Ao', 'pid=,ppid=,pgid=,comm='], {
       encoding: 'utf8',
       maxBuffer: 128 * 1024,
@@ -469,6 +472,47 @@ async function captureStartupFailureDiagnostics(port, userData, child, stdout, s
     stdout: { observedBytes: stdout.observedBytes(), retainedBytes: stdout.retainedBytes(), tail: sanitizeStartupText(stdout.text().slice(-2048)) },
     stderr: { observedBytes: stderr.observedBytes(), retainedBytes: stderr.retainedBytes(), tail: sanitizeStartupText(stderr.text().slice(-2048)) },
   }, 'startupFailures');
+}
+
+async function captureStartupFailureScreenshot(child) {
+  const relativePath = `startup-timeout-${child.pid ?? 'unknown'}.png`;
+
+  if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'darwin') {
+    return { relativePath, status: 'skipped', bytes: 0, reason: 'ci-macos-only' };
+  }
+
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { relativePath, status: 'skipped', bytes: 0, reason: 'app-exited' };
+  }
+
+  const screenshotPath = path.join(output, relativePath);
+
+  try {
+    await execFileAsync('/usr/sbin/screencapture', ['-x', '-m', screenshotPath], {
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024,
+      timeout: 2_000,
+    });
+
+    const screenshotStat = await stat(screenshotPath);
+
+    if (!screenshotStat.isFile()) {
+      return { relativePath, status: 'failed', bytes: 0, reason: 'capture-output-missing' };
+    }
+
+    if (screenshotStat.size > MAX_STARTUP_SCREENSHOT_BYTES) {
+      await rm(screenshotPath, { force: true });
+
+      return { relativePath, status: 'discarded', bytes: 0, reason: 'size-limit-exceeded' };
+    }
+
+    return { relativePath, status: 'captured', bytes: screenshotStat.size, reason: null };
+  } catch {
+    try { await rm(screenshotPath, { force: true }); }
+    catch { return { relativePath, status: 'failed', bytes: 0, reason: 'capture-cleanup-failed' }; }
+
+    return { relativePath, status: 'failed', bytes: 0, reason: 'capture-failed' };
+  }
 }
 
 function recordNativeLifecycle(capture, event, details = {}) {
@@ -1050,6 +1094,15 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
     return { child, exited, browser, page, port, targetId: target.id, stdout, stderr, owned, consoleCaptures };
   } catch (error) {
     const cleanupFailures = [];
+    const startupScreenshot = await captureStartupFailureScreenshot(child);
+
+    appendBoundedRecord(diagnostics.startupFailures, {
+      pid: child.pid ?? null,
+      port,
+      capturedAt: new Date().toISOString(),
+      status: 'startup-screenshot',
+      screenshot: startupScreenshot,
+    }, 'startupFailures');
 
     if (!browser) {
       try { await captureStartupFailureDiagnostics(port, userData, child, stdout, stderr, owned); }
