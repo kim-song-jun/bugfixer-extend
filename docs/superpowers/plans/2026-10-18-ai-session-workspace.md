@@ -118,6 +118,14 @@
 - [ ] Test stale approvals, injected out-of-scope file, commit/push/PR partial failures and idempotent retry receipts against controlled Git/HTTP fixtures in CI.
 - [ ] Actual GitHub draft PR proof uses an explicitly authorized disposable repository and identity; no fixture claim substitutes for it.
 
+#### Task 7a: Durable observation metadata foundation
+
+- [ ] Add a main-only `AgentSessionChangeEvidenceStore`, wired through schema v26, with append-only per-turn versions and canonical fingerprints. Derive project/session/turn snapshot ownership from existing durable turns; reject mismatched source-folder identity.
+- [ ] Store bounded file observations (relative path, kind, size, content/link hashes), capture coverage and explicit `observed`/`unverified` state. Preserve `unknown`/`mixed` attribution and missing-evidence reasons; temporal file changes do not establish AI authorship. Do not add a definitive AI-author value.
+- [ ] Make exact latest retries idempotent by fingerprint with an expected-version precondition, preserve A→B→A as three observations, reject stale appends, and bound version reads with a cursor. Validate paths, duplicate entries, byte/count limits and revision identifiers before insertion.
+- [ ] Prove actual SQLite reopen, wrong-scope rejection, immutable history, actual filesystem hash changes, truncation/unverified semantics and frozen-v25 migration preservation in CI. No local tests or builds.
+- [ ] Keep metadata storage separate from the subsequent bounded before/after-content collector, per-hunk diff, reasons/checks, merge approval and PR publication. Hashes alone cannot reconstruct historical hunks. This foundation does not complete Task 7.
+
 ### Task 8: First-use onboarding and full acceptance audit
 
 **Files:** Onboarding page/features and settings reentry, CLI capability discovery service, acceptance documents and packaged CI journeys.

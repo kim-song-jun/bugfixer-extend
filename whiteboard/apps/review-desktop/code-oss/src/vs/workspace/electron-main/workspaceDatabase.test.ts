@@ -5,12 +5,14 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
+import type { AgentSessionTurnSnapshot } from '../common/workspaceAgentSessionProtocol.js';
+import type { AgentWorkflowPlanInput } from '../common/workspaceAgentWorkflowProtocol.js';
 
 import {
 	ReviewCommandConflictError,
@@ -66,6 +68,100 @@ test('projects, bindings, tasks, review links and project view persist across da
 			reopened.close();
 		}
 	});
+});
+
+test('v25 database upgrades to v26 without changing existing tasks, turns, transcripts, or workflows', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-v26-migration-'));
+	const sourcePath = join(directory, 'source.db');
+	const path = join(directory, 'frozen-v25.db');
+	const folder = join(directory, 'project');
+	mkdirSync(folder);
+	let database = WorkspaceDatabase.open(sourcePath);
+	try {
+		const project = database.createProject('Migration preservation');
+		const binding = database.createFolderBinding({ projectId: project.id, path: folder });
+		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Retain task' });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: task.id, name: 'Retain turn', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const canonicalFolder = realpathSync(folder);
+		const identity = statSync(canonicalFolder, { bigint: true });
+		const snapshot: AgentSessionTurnSnapshot = {
+			schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: task.id,
+			provider: session.provider, model: session.model, profileRef: null, cwd: canonicalFolder,
+			folderIdentity: { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() },
+			managedWorktreeOwnerId: null, permissionPolicy: { mode: 'read-only', approval: 'on-request' }, convention: null, references: [],
+		};
+		let turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
+		database.agentSessionTranscripts.appendSanitizedTerminalChunk({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'preserved output' });
+		const identified = database.agentSessionTurns.recordProviderConversationId(project.id, session.id, turn.id, turn.revision, '00000000-0000-4000-8000-000000000031');
+		let currentSession = database.agentSessions.getSession(project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, identified.revision, currentSession.revision, { state: 'running' });
+		currentSession = running.session;
+		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
+		const plan: AgentWorkflowPlanInput = {
+			projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
+			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: 'codex', model: 'gpt-5-codex', taskId: task.id, bindingId: binding.id, referenceIds: [], permissionPolicy: { mode: 'read-only', approval: 'on-request' }, dependsOn: [] }],
+		};
+		const workflow = database.agentWorkflows.createWorkflow(project.id, { ...plan, idempotencyKey: 'preserve-workflow' });
+		const approved = database.agentWorkflows.recordTrustedUiApproval(project.id, workflow.id, 1, database.agentWorkflows.getPlan(project.id, workflow.id)!.fingerprint, 'migration-approval');
+		assert.ok(approved.id);
+		const ready = database.agentWorkflows.getWorkflow(project.id, workflow.id)!;
+		const run = database.agentWorkflows.startWorkflow(project.id, workflow.id, ready.revision, 'migration-start');
+		database.close();
+
+		// Compose the frozen v24 schema and pinned v25 migration DDL, then seed it with rows produced by the public stores.
+		const frozenV24 = readFileSync(new URL('./agentSessions/fixtures/schema-v24.sql', import.meta.url), 'utf8');
+		const frozenV25Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v25.sql', import.meta.url), 'utf8');
+		const v25 = new DatabaseSync(path);
+		try {
+			v25.exec('PRAGMA foreign_keys = ON;');
+			v25.exec(`${frozenV24}\n${frozenV25Delta}`);
+			const turnOwnerTrigger = v25.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
+			if (typeof turnOwnerTrigger !== 'string') { throw new Error('Frozen v25 fixture omitted the session turn ownership trigger.'); }
+			// The source rows have already passed the public store's snapshot guard. Temporarily remove only its insert-time guard while copying the later session revision, then restore its exact frozen SQL before migration.
+			v25.exec('DROP TRIGGER agent_session_turn_owner_insert;');
+			try {
+				const source = new DatabaseSync(sourcePath);
+				try {
+					const tables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
+					for (const table of tables) {
+						const columns = source.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
+						const rows = source.prepare(`SELECT * FROM ${table}`).all();
+						if (!rows.length) { continue; }
+						const quotedColumns = columns.map(column => `\"${column}\"`).join(', ');
+						const insert = v25.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
+						for (const row of rows) { insert.run(...columns.map(column => Reflect.get(row, column))); }
+					}
+				} finally { source.close(); }
+			} finally { v25.exec(turnOwnerTrigger); }
+		} finally { v25.close(); }
+
+		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
+		const snapshotRows = (connection: DatabaseSync) => Object.fromEntries(relevantTables.map(table => {
+			const columns = connection.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
+			const rows = connection.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
+			return [table, rows.map(row => columns.map(column => Reflect.get(row, column)))];
+		}));
+		const beforeMigration = new DatabaseSync(path);
+		const beforeRows = snapshotRows(beforeMigration);
+		assert.equal(Number(beforeMigration.prepare('PRAGMA user_version').get()?.user_version), 25);
+		beforeMigration.close();
+
+		database = WorkspaceDatabase.open(path);
+		const afterMigration = new DatabaseSync(path);
+		try { assert.deepEqual(snapshotRows(afterMigration), beforeRows); }
+		finally { afterMigration.close(); }
+		assert.equal(database.getTask(task.id)?.title, 'Retain task');
+		assert.equal(database.agentSessionTurns.getTurn(project.id, session.id, turn.id)?.id, turn.id);
+		assert.equal(database.agentSessionTranscripts.readPage(project.id, session.id, turn.id).entries[0]?.text, 'preserved output');
+		assert.equal(database.agentWorkflows.getWorkflow(project.id, workflow.id)?.id, workflow.id);
+		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
+		const migratedSchema = new DatabaseSync(path);
+		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 26); }
+		finally { migratedSchema.close(); }
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test('v17 databases upgrade with project and task data intact and null recent-open time', () => {
