@@ -22,7 +22,7 @@ await mkdir(output, { recursive: true });
 
 const root = await mkdtemp('/tmp/wb-native-ui-');
 
-const diagnostics = { apps: [], console: [], canceledThemeLoads: [], pageErrors: [], failedRequests: [], themes: [] };
+const diagnostics = { apps: [], console: [], canceledThemeLoads: [], readinessMarks: [], pageErrors: [], failedRequests: [], themes: [] };
 
 class FatalWaitError extends Error {}
 
@@ -110,9 +110,9 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
       watchedPages.add(page);
       page.on('console', message => {
-        if (message.type() !== 'error') return;
-
         const entry = `PID ${child.pid}: ${message.text()}`;
+
+        if (message.type() !== 'error') return;
 
         if (/review-(?:light|dark)\.json/.test(entry) && /\(Canceled: Canceled\)/.test(entry)) diagnostics.canceledThemeLoads.push(entry);
         else diagnostics.console.push(entry);
@@ -131,7 +131,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
       for (const page of context.pages()) watchPage(page);
     }
 
-    const selector = descriptor ? '.project-sidebar' : '.project-home__intro h1';
+    const selector = descriptor ? '.project-dashboard #project-dashboard-title' : '.project-home__intro h1';
 
     const page = await waitFor(async () => {
       for (const candidate of browser.contexts().flatMap(context => context.pages())) {
@@ -213,6 +213,24 @@ async function closeApp(session) {
   }
 }
 
+async function waitForExtensionReadiness(session, phase) {
+  const requiredMarks = ['code/didLoadExtensions', 'code/didInitializeLocalExtensionHost'];
+  const marks = await waitFor(
+    () => session.page.evaluate(names => {
+      const entries = performance.getEntriesByType('mark');
+      if (!names.every(name => entries.some(entry => entry.name === name))) return undefined;
+      return names.map(name => {
+        const entry = entries.find(candidate => candidate.name === name);
+        return { name: entry.name, startTime: entry.startTime };
+      });
+    }, requiredMarks),
+    `${phase} extension scan and local host handshake`,
+    90_000,
+  );
+
+  diagnostics.readinessMarks.push({ pid: session.child.pid, phase, marks });
+}
+
 try {
 
   const product = JSON.parse(await readFile(path.join(appPath, 'Contents/Resources/app/product.json'), 'utf8'));
@@ -264,6 +282,10 @@ try {
 
       await projectHomeHeading.waitFor({ timeout: 90_000 });
 
+      await dismissStartupInvitations(session.page);
+
+      await waitForExtensionReadiness(session, `onboarding-${tag}`);
+
       assert.equal(await projectHomeHeading.innerText(), '어떤 프로젝트를 열까요?', 'Fresh profile must show the Korean project picker');
 
       await verifyTheme(session.page, tag === 'dark', `onboarding-${tag}`);
@@ -275,8 +297,6 @@ try {
       await capturePage(session.page, onboardingShot);
 
       screenshots.push(onboardingShot);
-
-      await dismissStartupInvitations(session.page);
     } catch (error) {
 
       await captureFailure(session.page, path.join(output, `onboarding-${tag}-failure.png`), diagnostics);
@@ -316,9 +336,21 @@ try {
 
       const page = session.page;
 
+      await waitForExtensionReadiness(session, `dashboard-${tag}`);
+
       await page.setViewportSize({ width: 1440, height: 900 });
 
       await page.waitForFunction(() => window.innerWidth === 1440);
+
+      await page.locator('.project-dashboard').waitFor();
+
+      await page.getByRole('heading', { name: fixture.projectName, exact: true }).waitFor();
+
+      const navigationButton = page.getByRole('button', { name: '프로젝트 메뉴', exact: true });
+
+      await navigationButton.waitFor({ state: 'visible', timeout: 90_000 });
+
+      await navigationButton.click();
 
       const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
 
@@ -359,6 +391,10 @@ try {
         await page.setViewportSize({ width: 760, height: 820 });
 
         await page.waitForFunction(() => window.innerWidth === 760);
+
+        await navigationButton.waitFor({ state: 'visible' });
+
+        await sidebar.waitFor({ state: 'hidden' });
 
         const narrow = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
 

@@ -8,6 +8,7 @@ import { encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { CancellationError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { mark } from '../../../../base/common/performance.js';
 import * as objects from '../../../../base/common/objects.js';
 import * as platform from '../../../../base/common/platform.js';
 import { removeDangerousEnvVariables } from '../../../../base/common/processes.js';
@@ -377,6 +378,7 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 		// Initialize extension host process with hand shakes
 		const protocol = await this._establishProtocol(this._extensionHostProcess, opts);
 		await this._performHandshake(protocol);
+		mark('code/didInitializeLocalExtensionHost');
 		clearTimeout(startupTimeoutHandle);
 		return protocol;
 	}
