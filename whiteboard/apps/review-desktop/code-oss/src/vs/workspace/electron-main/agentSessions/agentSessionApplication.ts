@@ -13,6 +13,7 @@ import { createAgentSessionCommand } from './agentSessionCommands.js';
 import { AgentSessionMcpBridge, AGENT_SESSION_MCP_GATEWAY_MODULE, AGENT_SESSION_MCP_TOKEN_ENV } from './agentSessionMcpBridge.js';
 import { AgentSessionPtyRuntimeFactory } from './agentSessionPtyRuntime.js';
 import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
+import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
@@ -53,6 +54,7 @@ export class AgentSessionApplication {
 			guardianNodeExecutable: this.runtimePaths().standaloneNode,
 			guardianScriptPath: this.runtimePaths().guardian,
 			prepareLaunch: (snapshot, turnId, signal) => this.prepareLaunch(snapshot, turnId, signal),
+			createJournal: (snapshot, turnId, knownSecrets) => new AgentSessionJournal(database.agentSessionTranscripts, snapshot, turnId, knownSecrets),
 		}));
 		this.service.recoverStartup();
 		this.recoveryReady = true;

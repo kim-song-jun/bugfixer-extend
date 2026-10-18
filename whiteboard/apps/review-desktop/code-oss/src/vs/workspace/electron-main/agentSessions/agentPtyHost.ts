@@ -75,6 +75,8 @@ export interface AgentPtySnapshot {
 	readonly providerExitSignal?: string;
 	readonly latestSequence: number;
 	readonly outputSanitizerFailed: boolean;
+	/** True when sanitized output could not be committed to the durable transcript before publishing. */
+	readonly transcriptPersistenceFailed?: boolean;
 	readonly failedOutputListeners: number;
 	readonly failedExitListeners: number;
 	readonly accessRevocationFailed: boolean;
@@ -96,6 +98,8 @@ export interface AgentPtyHostOptions {
 	readonly createSanitizer: () => AgentPtyOutputSanitizer;
 	/** Synchronously revokes launch-scoped access before any owned process stop or signal. */
 	readonly revokeAccess: () => void;
+	/** Synchronously persists already-sanitized output before any ring-buffer or listener publication. */
+	readonly persistOutput?: (text: string, gap: boolean) => void;
 	/** Trusted standalone Node executable used only for the guardian process. */
 	readonly guardianNodeExecutable: string;
 	/** Packaged path to agentPtyGuardian.mjs. */
@@ -165,6 +169,7 @@ interface OwnedPty {
 	outputFinalized: boolean;
 	outputDrainGapAdded: boolean;
 	outputSanitizerFailed: boolean;
+	transcriptPersistenceFailed: boolean;
 	failedOutputListeners: number;
 	failedExitListeners: number;
 	accessRevoked: boolean;
@@ -245,6 +250,7 @@ export class AgentPtyHost {
 			outputFinalized: false,
 			outputDrainGapAdded: false,
 			outputSanitizerFailed: false,
+			transcriptPersistenceFailed: false,
 			failedOutputListeners: 0,
 			failedExitListeners: 0,
 			accessRevoked: false,
@@ -662,6 +668,14 @@ export class AgentPtyHost {
 	}
 
 	private appendOutput(record: OwnedPty, text: string, gap: boolean): void {
+		if (record.transcriptPersistenceFailed) { return; }
+		try {
+			this.options.persistOutput?.(gap ? '' : text, gap);
+		} catch {
+			record.transcriptPersistenceFailed = true;
+			void this.stop(record.handle);
+			return;
+		}
 		const bytes = gap ? 0 : Buffer.byteLength(text, 'utf8');
 		const chunk: RetainedChunk = { sequence: ++record.sequence, text: gap ? '' : text, gap, bytes };
 		record.output.push(chunk);
@@ -744,6 +758,7 @@ function snapshot(record: OwnedPty): AgentPtySnapshot {
 		...(record.providerExitSignal !== undefined ? { providerExitSignal: record.providerExitSignal } : {}),
 		latestSequence: record.sequence,
 		outputSanitizerFailed: record.outputSanitizerFailed,
+		...(record.transcriptPersistenceFailed ? { transcriptPersistenceFailed: true } : {}),
 		failedOutputListeners: record.failedOutputListeners,
 		failedExitListeners: record.failedExitListeners,
 		accessRevocationFailed: record.accessRevocationFailed,

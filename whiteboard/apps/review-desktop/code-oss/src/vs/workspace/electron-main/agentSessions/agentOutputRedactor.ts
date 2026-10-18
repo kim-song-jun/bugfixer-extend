@@ -151,6 +151,17 @@ class StreamingTerminalControlParser {
 
 /** Create one sanitizer per output stream; do not share it across sessions. */
 export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOptions = {}): AgentPtyOutputSanitizer {
+	return createSanitizer(options, false);
+}
+
+/** Complete records cannot continue a trusted-secret prefix in a later chunk. */
+export function sanitizeCompleteAgentText(text: string, options: AgentOutputRedactorOptions = {}): string {
+	if (typeof text !== 'string') { throw new TypeError('Complete agent text must be a string.'); }
+	const sanitizer = createSanitizer(options, true);
+	return sanitizer.push(text) + sanitizer.flush();
+}
+
+function createSanitizer(options: AgentOutputRedactorOptions, completeValue: boolean): AgentPtyOutputSanitizer {
 	if (options.maxPendingCodeUnits !== undefined && (!Number.isFinite(options.maxPendingCodeUnits) || !Number.isInteger(options.maxPendingCodeUnits))) {
 		throw new RangeError('maxPendingCodeUnits must be a finite integer.');
 	}
@@ -289,7 +300,7 @@ export function createAgentPtyOutputSanitizer(options: AgentOutputRedactorOption
 			const remainder = pending;
 			pending = '';
 			if (activeMask) { activeMask = undefined; return controlGap ? REDACTION : ''; }
-			const candidate = findOpenSensitiveTail(remainder, knownSecretTrie);
+			const candidate = findOpenSensitiveTail(remainder, knownSecretTrie, !completeValue);
 			if (candidate) {
 				return (controlGap ? REDACTION : '') + sanitize(remainder.slice(0, candidate.start)) + REDACTION;
 			}
@@ -460,7 +471,7 @@ function stepSecretTrie(root: SecretTrieNode, text: string): SecretTrieNode {
 
 type OpenSensitiveTail = { start: number; valueStart: number; kind: 'field' | 'token' | 'pem'; quote?: string; pemFooter?: string; releasePrefix?: boolean };
 
-function findOpenSensitiveTail(raw: string, knownSecretTrie: SecretTrieNode): OpenSensitiveTail | undefined {
+function findOpenSensitiveTail(raw: string, knownSecretTrie: SecretTrieNode, holdKnownSecretPrefix = true): OpenSensitiveTail | undefined {
 	const { text, rawOffsets } = normalizeTerminalText(raw);
 	const label = /\b(authorization\s*:\s*(?:bearer|basic)\s+|(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|secret|credential)\s*[=:]\s*)(["']?)/gi;
 	let match: RegExpExecArray | null;
@@ -503,7 +514,7 @@ function findOpenSensitiveTail(raw: string, knownSecretTrie: SecretTrieNode): Op
 		}
 	}
 	const secretState = stepSecretTrie(knownSecretTrie, text);
-	if (secretState.depth && text.length >= secretState.depth) {
+	if (holdKnownSecretPrefix && secretState.depth && text.length >= secretState.depth) {
 		const start = text.length - secretState.depth;
 		consider({ start, valueStart: start, kind: 'token' });
 	}

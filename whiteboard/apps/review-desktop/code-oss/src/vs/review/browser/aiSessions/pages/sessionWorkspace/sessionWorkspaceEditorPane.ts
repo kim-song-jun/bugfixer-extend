@@ -1,7 +1,12 @@
 import { $, type Dimension } from '../../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { Disposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+import { URI } from '../../../../../base/common/uri.js';
 import { ipcRenderer } from '../../../../../base/parts/sandbox/electron-browser/globals.js';
+import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.js';
+import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
@@ -24,13 +29,14 @@ import { Emitter } from '../../../../../base/common/event.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../../workbench/common/contributions.js';
 import { ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
-import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTurnDTO, CreateAgentSessionInput, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDashboardDTO, WorkspaceDashboardTaskItemDTO } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { restoreSessionSelection, persistSessionSelection } from '../../features/sessionSelection/index.js';
 import { renderSessionList } from '../../widgets/sessionList/index.js';
 import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
+import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
 import type { AgentSessionViewTab } from '../../features/sessionViewTabs/index.js';
 import { SessionTerminalController } from '../../shared/sessionTerminal/index.js';
 import { AgentSessionWorkspaceEditorInput } from './sessionWorkspaceEditorInput.js';
@@ -52,6 +58,7 @@ interface CreateDraft {
 }
 
 const SESSION_STORAGE_TAB = 'devfast.aiSessions.view';
+const SESSION_STORAGE_LOG_TURN = 'devfast.aiSessions.logTurn';
 
 export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	static readonly ID = AgentSessionWorkspaceEditorInput.EDITOR_ID;
@@ -79,16 +86,28 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private sessionListScrollTop = 0;
 	private terminalController: SessionTerminalController | undefined;
 	private readonly terminalService: ITerminalService;
+	private logsPanel: HTMLElement | undefined;
+	private logsTurnSelect: HTMLSelectElement | undefined;
+	private logsTurnSelectSessionId: string | undefined;
+	private logsTurnSelectOptionsKey = '';
+	private logsLoadingMessage: HTMLElement | undefined;
+	private logsWidgetMount: HTMLElement | undefined;
+	private sessionLogs: SessionLogsController | undefined;
+	private sessionLogsContextKey: string | undefined;
 
 	constructor(group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
 		@ITerminalService terminalService: ITerminalService,
+		@IClipboardService private readonly clipboardService: IClipboardService,
+		@IFileDialogService private readonly fileDialogService: IFileDialogService,
+		@IFileService private readonly fileService: IFileService,
 		@INativeWorkbenchEnvironmentService private readonly environment: INativeWorkbenchEnvironmentService) {
 		super(AgentSessionWorkspaceEditorPane.ID, group, telemetryService, themeService, storageService);
 		this.terminalService = terminalService;
 		this._register(toDisposable(() => this.terminalController?.dispose()));
+		this._register(toDisposable(() => this.sessionLogs?.dispose()));
 	}
 
 	protected createEditor(parent: HTMLElement): void {
@@ -102,7 +121,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	protected override setEditorVisible(visible: boolean): void {
 		this.editorVisible = visible;
-		if (!visible) this.terminalController?.hide();
+		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); }
 		else this.render();
 		this.updateLifecyclePolling();
 	}
@@ -116,6 +135,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		}
 		if (this.projectId !== input.projectId) {
 			this.terminalController?.dispose();
+			this.sessionLogs?.invalidateContext();
 			this.projectId = input.projectId;
 			this.sessionPermissionModes.clear();
 			this.createPermissionMode = 'read-only';
@@ -179,6 +199,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (sessionId === this.selectedSessionId || !this.projectId) return;
 		if (this.previewSessionId !== sessionId) { this.preview = undefined; this.previewSessionId = undefined; }
 		this.terminalController?.hide();
+		this.sessionLogs?.invalidateContext();
 		this.selectedSessionId = sessionId;
 		persistSessionSelection(this.projectId, sessionId);
 		this.notice = undefined;
@@ -290,6 +311,121 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private latestTurn(sessionId: string): AgentSessionTurnDTO | undefined { return this.turns.get(sessionId)?.at(-1); }
 
+	private getLogsPanel(): HTMLElement {
+		if (this.logsPanel) { return this.logsPanel; }
+		const panel = document.createElement('div');
+		panel.className = 'ai-session__logs-panel';
+		const selectorLabel = document.createElement('label');
+		selectorLabel.className = 'ai-session__logs-turn-label';
+		selectorLabel.textContent = '실행 기록';
+		const selector = document.createElement('select');
+		selector.setAttribute('aria-label', '로그를 볼 실행 선택');
+		selector.addEventListener('change', () => {
+			const sessionId = this.logsTurnSelectSessionId;
+			const turnId = selector.value;
+			if (!sessionId || !this.projectId || !turnId) { return; }
+			localStorage.setItem(this.logsTurnStorageKey(sessionId), turnId);
+			this.updateLogsPanel(sessionId);
+		});
+		selectorLabel.appendChild(selector);
+		const empty = document.createElement('p');
+		empty.className = 'ai-session__logs-empty';
+		empty.setAttribute('role', 'status');
+		const mount = document.createElement('div');
+		mount.className = 'ai-session__logs-mount';
+		panel.append(selectorLabel, empty, mount);
+		this.logsPanel = panel;
+		this.logsTurnSelect = selector;
+		this.logsLoadingMessage = empty;
+		this.logsWidgetMount = mount;
+		return panel;
+	}
+
+	private logsTurnStorageKey(sessionId: string): string { return `${SESSION_STORAGE_LOG_TURN}.${this.projectId}.${sessionId}`; }
+
+	private selectedLogsTurn(sessionId: string, turns: readonly AgentSessionTurnDTO[]): AgentSessionTurnDTO | undefined {
+		if (!turns.length) { return undefined; }
+		const savedTurnId = localStorage.getItem(this.logsTurnStorageKey(sessionId));
+		return turns.find(turn => turn.id === savedTurnId) ?? turns.at(-1);
+	}
+
+	private updateLogsPanel(sessionId: string): HTMLElement {
+		const panel = this.getLogsPanel();
+		const selector = this.logsTurnSelect!;
+		const empty = this.logsLoadingMessage!;
+		const mount = this.logsWidgetMount!;
+		const turns = this.turns.get(sessionId);
+		this.logsTurnSelectSessionId = sessionId;
+		if (!turns) {
+			selector.hidden = true;
+			empty.hidden = false;
+			empty.textContent = '실행 목록을 불러오는 중입니다.';
+			mount.hidden = true;
+			this.sessionLogs?.setVisible(false);
+			return panel;
+		}
+		if (turns.length === 0) {
+			selector.hidden = true;
+			empty.hidden = false;
+			empty.textContent = '이 세션에는 아직 실행 기록이 없습니다.';
+			mount.hidden = true;
+			this.sessionLogs?.setVisible(false);
+			return panel;
+		}
+		const selectedTurn = this.selectedLogsTurn(sessionId, turns)!;
+		const optionsKey = `${sessionId}:${turns.map(turn => turn.id).join(',')}`;
+		if (this.logsTurnSelectOptionsKey !== optionsKey) {
+			this.logsTurnSelectOptionsKey = optionsKey;
+			selector.replaceChildren();
+			for (const turn of [...turns].reverse()) {
+				const option = document.createElement('option');
+				option.value = turn.id;
+				option.textContent = `실행 ${turn.ordinal} · ${turn.state} · ${new Date(turn.createdAt).toLocaleString('ko-KR')}`;
+				selector.appendChild(option);
+			}
+		}
+		selector.value = selectedTurn.id;
+		selector.hidden = turns.length < 2;
+		empty.hidden = true;
+		mount.hidden = false;
+		const context: SessionLogsContext = { projectId: this.projectId!, sessionId, turnId: selectedTurn.id };
+		const contextKey = JSON.stringify([context.projectId, context.sessionId, context.turnId]);
+		const loadPage: SessionLogsPageLoader = (options: AgentSessionTranscriptPageOptions) => ipcRenderer.invoke(
+			WORKSPACE_AGENT_SESSIONS_CHANNEL,
+			'readTranscript',
+			{ ...context, options },
+		) as Promise<AgentSessionTranscriptPageDTO>;
+		if (!this.sessionLogs) {
+			this.sessionLogsContextKey = contextKey;
+			this.sessionLogs = createSessionLogs(mount, context, {
+				loadPage,
+				copyText: text => this.clipboardService.writeText(text),
+				exportText: (text, fileName, isCurrent) => this.exportLoadedTranscript(text, fileName, isCurrent),
+			});
+		} else if (this.sessionLogsContextKey !== contextKey) {
+			this.sessionLogsContextKey = contextKey;
+			this.sessionLogs.setContext(context, loadPage);
+		}
+		this.sessionLogs.setVisible(this.editorVisible && this.activeTab === 'logs');
+		return panel;
+	}
+
+	private async exportLoadedTranscript(text: string, fileName: string, isCurrent: () => boolean): Promise<boolean> {
+		if (!isCurrent()) { return false; }
+		const defaultPath = await this.fileDialogService.defaultFilePath();
+		if (!isCurrent()) { return false; }
+		const defaultUri = URI.joinPath(defaultPath, fileName);
+		const target = await this.fileDialogService.showSaveDialog({
+			title: '불러온 세션 로그 저장',
+			defaultUri,
+			filters: [{ name: '텍스트 파일', extensions: ['txt'] }],
+		});
+		if (!target) { return false; }
+		if (!isCurrent()) { return false; }
+		await this.fileService.writeFile(target, VSBuffer.fromString(text));
+		return true;
+	}
+
 	private setTab(tab: AgentSessionViewTab): void {
 		if (!this.projectId || tab === this.activeTab) return;
 		this.activeTab = tab;
@@ -310,8 +446,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private render(): void {
 		if (!this.root) return;
 		this.sessionListScrollTop = this.root.querySelector<HTMLElement>('.ai-session__list')?.scrollTop ?? this.sessionListScrollTop;
+		const activeElement = document.activeElement;
+		const focusedLogsElement = activeElement instanceof HTMLElement && this.logsPanel?.contains(activeElement) ? activeElement : undefined;
+		let logsShouldBeVisible = false;
 		this.root.replaceChildren();
-		if (!this.projectId) return;
+		if (!this.projectId) { this.sessionLogs?.setVisible(false); return; }
 		this.root.setAttribute('aria-busy', String(this.loading || this.operation));
 		const shell = document.createElement('div'); shell.className = 'ai-session__shell';
 		const main = document.createElement('main'); main.className = 'ai-session__main';
@@ -346,10 +485,12 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 					const turn = this.latestTurn(session.id);
 					const workspace = this.workspacePreparations.get(session.id);
 					if (session.workspaceMode === 'gitWorktree' && workspace) { this.renderWorkspacePreparation(main, workspace); }
+					logsShouldBeVisible = this.editorVisible && this.activeTab === 'logs' && !!this.turns.get(session.id)?.length;
+					const logsPanel = this.updateLogsPanel(session.id);
 					const rendered = renderSessionDetail(main, session, turn, this.activeTab, {
 						onStart: () => void this.prepareLaunch(session.id),
 						onStop: () => void this.stopTurn(), onTab: tab => this.setTab(tab),
-					}, taskNames.get(session.taskId ?? ''));
+					}, taskNames.get(session.taskId ?? ''), logsPanel);
 					if (this.activeTab === 'terminal') this.renderTerminal(rendered.terminal, session, turn);
 					if (this.preview && this.previewSessionId === session.id) {
 						this.renderPreview(main, this.preview);
@@ -372,6 +513,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		}
 		const sessionList = this.root.querySelector<HTMLElement>('.ai-session__list');
 		if (sessionList) sessionList.scrollTop = this.sessionListScrollTop;
+		if (focusedLogsElement?.isConnected) { focusedLogsElement.focus({ preventScroll: true }); }
+		if (!logsShouldBeVisible) { this.sessionLogs?.setVisible(false); }
 		this.updateLifecyclePolling();
 	}
 

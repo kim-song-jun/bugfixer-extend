@@ -12,6 +12,7 @@ import { AGENT_CLI_COMMAND_SPEC_VERSION } from './agentCliCapabilities.js';
 import type { AgentSessionCommandSpec } from './agentSessionCommands.js';
 import { AgentSessionRuntimeStartError, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessionService.js';
 import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
+import type { AgentSessionJournal } from './agentSessionJournal.js';
 
 export interface PreparedAgentSessionPtyLaunch {
 	readonly command: AgentSessionCommandSpec;
@@ -33,9 +34,11 @@ export type AgentSessionPrepareLaunch = (
 	signal: AbortSignal,
 ) => Promise<PreparedAgentSessionPtyLaunch>;
 
-export interface AgentSessionPtyRuntimeOptions extends Omit<AgentPtyHostOptions, 'createSanitizer' | 'revokeAccess'> {
+export interface AgentSessionPtyRuntimeOptions extends Omit<AgentPtyHostOptions, 'createSanitizer' | 'revokeAccess' | 'persistOutput'> {
 	/** Trusted app adapter; it resolves the selected profile and uses the versioned command builder. */
 	readonly prepareLaunch: AgentSessionPrepareLaunch;
+	/** Production app supplies its durable transcript journal factory for every persisted turn. */
+	readonly createJournal?: (snapshot: AgentSessionTurnSnapshot, turnId: string, knownSecrets: readonly string[]) => AgentSessionJournal;
 }
 
 interface RuntimeRecord {
@@ -46,6 +49,9 @@ interface RuntimeRecord {
 	hostHandle?: AgentPtyHandle;
 	accessRevoked: boolean;
 	privateConfigReleased: boolean;
+	journal?: AgentSessionJournal;
+	transcriptPersistenceFailed: boolean;
+	stopEventRecorded: boolean;
 }
 
 /** Per-turn bridge from trusted launch preparation to one real PTY host and its opaque capability. */
@@ -80,13 +86,33 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 		}
 
 		const handle = Object.freeze({}) as AgentSessionRuntimeHandle;
-		const record: RuntimeRecord = { prepared, revokeAccess: prepared.revokeAccess, releasePrivateConfig: prepared.releasePrivateConfig, accessRevoked: false, privateConfigReleased: false };
+		const record: RuntimeRecord = { prepared, revokeAccess: prepared.revokeAccess, releasePrivateConfig: prepared.releasePrivateConfig, accessRevoked: false, privateConfigReleased: false, transcriptPersistenceFailed: false, stopEventRecorded: false };
 		this.records.set(handle, record);
+		try {
+			record.journal = this.options.createJournal?.(snapshot, turnId, prepared.knownSecrets);
+			record.journal?.appendEvent('info', 'host', 'session.turn-starting');
+		} catch {
+			record.transcriptPersistenceFailed = true;
+			const revoked = this.tryRevokePreparedAccess(record);
+			if (revoked) {
+				try { await record.releasePrivateConfig?.(); record.privateConfigReleased = true; }
+				catch { record.privateConfigReleased = false; }
+			}
+			if (revoked && record.privateConfigReleased) {
+				this.records.delete(handle);
+				throw new AgentSessionRuntimeStartError('The session transcript could not be initialized.', true, undefined, undefined, undefined, true);
+			}
+			throw new AgentSessionRuntimeStartError('The session transcript could not be initialized and launch resource cleanup is unverified.', false, undefined, undefined, handle, true);
+		}
 
 		try {
 			record.host = new AgentPtyHost({
 				guardianNodeExecutable: this.options.guardianNodeExecutable,
 				guardianScriptPath: this.options.guardianScriptPath,
+				persistOutput: (text, gap) => {
+					if (!record.journal) { return; }
+					if (gap) { record.journal.appendGap(); } else { record.journal.appendTerminal(text); }
+				},
 				...(this.options.startTimeoutMs !== undefined ? { startTimeoutMs: this.options.startTimeoutMs } : {}),
 				...(this.options.stopVerifyMs !== undefined ? { stopVerifyMs: this.options.stopVerifyMs } : {}),
 				...(this.options.maxOutputBytes !== undefined ? { maxOutputBytes: this.options.maxOutputBytes } : {}),
@@ -99,8 +125,11 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 			validatePreparedLaunch(snapshot, prepared);
 			if (signal.aborted) { throw new Error('The session launch was cancelled before PTY creation.'); }
 			record.hostHandle = await record.host.start(prepared.launch, signal);
+			try { record.journal?.appendEvent('info', 'provider', 'session.provider-started'); }
+			catch { record.transcriptPersistenceFailed = true; throw new Error('Session transcript persistence failed after provider startup.'); }
 			return handle;
 		} catch (error) {
+			if (record.hostHandle && record.host?.getSnapshot(record.hostHandle).transcriptPersistenceFailed) { record.transcriptPersistenceFailed = true; }
 			const startError = error instanceof AgentPtyStartError ? error : undefined;
 			if (startError?.recoveryHandle) { record.hostHandle = startError.recoveryHandle; }
 			let cleanupVerified = false;
@@ -125,21 +154,29 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 				startError?.providerExitCode,
 				startError?.providerExitSignal,
 				cleanupVerified ? undefined : handle,
+				record.transcriptPersistenceFailed,
 			);
 		}
 	}
 
 	watchExit(handle: AgentSessionRuntimeHandle, listener: (snapshot: AgentPtySnapshot) => void): IDisposable {
 		const record = this.requireHostRecord(handle);
-		return record.host.watchExit(record.hostHandle!, listener);
+		return record.host.watchExit(record.hostHandle!, snapshot => {
+			if (snapshot.state === 'exited' || snapshot.state === 'stopped') {
+				try { record.journal?.appendEvent('info', 'provider', 'session.provider-exited'); }
+				catch { record.transcriptPersistenceFailed = true; }
+			}
+			listener(record.transcriptPersistenceFailed ? { ...snapshot, transcriptPersistenceFailed: true } : snapshot);
+		});
 	}
 
 	getSnapshot(handle: AgentSessionRuntimeHandle): AgentPtySnapshot {
 		const record = this.requireRecord(handle);
 		if (!record.host || !record.hostHandle) {
-			return { state: 'cleanupUnverified', latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: !record.accessRevoked };
+			return { state: 'cleanupUnverified', latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: !record.accessRevoked, ...(record.transcriptPersistenceFailed ? { transcriptPersistenceFailed: true } : {}) };
 		}
-		return record.host.getSnapshot(record.hostHandle);
+		const snapshot = record.host.getSnapshot(record.hostHandle);
+		return record.transcriptPersistenceFailed && !snapshot.transcriptPersistenceFailed ? { ...snapshot, transcriptPersistenceFailed: true } : snapshot;
 	}
 
 	write(handle: AgentSessionRuntimeHandle, text: string): Promise<void> {
@@ -166,6 +203,10 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 		if (record.hostHandle && record.host) {
 			try { hostResult = await record.host.stop(record.hostHandle); }
 			catch { return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Owned PTY cleanup could not be verified.' }; }
+		}
+		if (!record.stopEventRecorded) {
+			try { record.journal?.appendEvent('info', 'host', 'session.turn-stopped'); record.stopEventRecorded = true; }
+			catch { record.transcriptPersistenceFailed = true; }
 		}
 		if (!hostResult.cleanupVerified) { return hostResult; }
 		if (!record.privateConfigReleased) {

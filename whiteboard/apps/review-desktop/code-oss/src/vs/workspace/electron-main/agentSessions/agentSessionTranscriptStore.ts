@@ -14,7 +14,7 @@ import type {
 	AgentSessionTranscriptReference,
 	AppendAgentSessionTranscriptChunkInput,
 } from '../../common/workspaceAgentSessionProtocol.js';
-import { createAgentPtyOutputSanitizer } from './agentOutputRedactor.js';
+import { sanitizeCompleteAgentText } from './agentOutputRedactor.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_ENTRY_BYTES = 256 * 1024;
@@ -89,8 +89,7 @@ export class AgentSessionTranscriptStore {
 		if (typeof input.text !== 'string' || Buffer.byteLength(input.text, 'utf8') > MAX_LOG_INPUT_BYTES) { throw new Error('Structured transcript text exceeds 1 MiB.'); }
 		const knownSecrets = input.trustedKnownSecrets ?? [];
 		if (!Array.isArray(knownSecrets) || knownSecrets.some(secret => typeof secret !== 'string')) { throw new TypeError('Trusted log secrets must be strings.'); }
-		const sanitizer = createAgentPtyOutputSanitizer({ knownSecrets });
-		const sanitizedText = sanitizer.push(input.text) + sanitizer.flush();
+		const sanitizedText = sanitizeCompleteAgentText(input.text, { knownSecrets });
 		const references = this.validateReferences(input.references ?? []);
 		return this.append(input.projectId, input.sessionId, input.turnId, input.sequence, 'log', sanitizedText, input.severity, input.source, references);
 	}
@@ -144,6 +143,13 @@ export class AgentSessionTranscriptStore {
 			if (endSequence > observed) { gaps.push({ afterSequence: observed, throughSequence: endSequence }); }
 		}
 		return { entries, nextSequence, highestSequence, firstRetainedSequence, gaps, hasMore };
+	}
+
+	/** O(1) journal cursor lookup used by the trusted main-process append coordinator. */
+	highestSequence(projectId: string, sessionId: string, turnId: string): number {
+		this.assertOpen();
+		this.validateOwnership(projectId, sessionId, turnId);
+		return Number(this.cursor(projectId, sessionId, turnId)?.highest_sequence ?? 0);
 	}
 
 	private append(projectId: string, sessionId: string, turnId: string, sequence: number, kind: 'terminal' | 'log', text: string,

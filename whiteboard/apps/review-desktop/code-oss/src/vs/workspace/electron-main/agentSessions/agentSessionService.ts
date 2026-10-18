@@ -99,6 +99,7 @@ interface LiveTurn {
 	launchFailureCleanupVerified: boolean;
 	launchFailureExitCode?: number | null;
 	launchFailureExitSignal?: string | null;
+	transcriptPersistenceFailed: boolean;
 	lifecycleFailure?: unknown;
 }
 
@@ -211,6 +212,7 @@ export class AgentSessionService {
 				launchFailed: false,
 				spawnAttempted: false,
 				launchFailureCleanupVerified: true,
+				transcriptPersistenceFailed: false,
 			};
 			this.turns.set(turn.id, live);
 			this.pendingStartReservations--;
@@ -382,6 +384,7 @@ export class AgentSessionService {
 			if (error instanceof AgentSessionRuntimeStartError) {
 				live.launchFailureExitCode = error.exitCode;
 				live.launchFailureExitSignal = error.exitSignal;
+				live.transcriptPersistenceFailed ||= error.transcriptPersistenceFailed;
 			}
 		} finally {
 			live.launchPending = false;
@@ -398,7 +401,7 @@ export class AgentSessionService {
 				state: 'failed',
 				exitCode: live.launchFailureExitCode,
 				exitSignal: live.launchFailureExitSignal,
-				errorSummary: 'The provider could not be started by the trusted session runtime.',
+				errorSummary: live.transcriptPersistenceFailed ? 'The durable session transcript could not be written; terminal output was withheld.' : 'The provider could not be started by the trusted session runtime.',
 				cleanupVerified,
 			}).turn;
 		}
@@ -409,10 +412,14 @@ export class AgentSessionService {
 		if (live.stopRequested || isTerminal(this.requireTurn(live).turn.state)) { return this.requireTurn(live).turn; }
 		live.stopRequested = true;
 		const cleanupVerified = await this.stopAndReleaseRuntime(live);
+		live.transcriptPersistenceFailed ||= snapshot.transcriptPersistenceFailed === true;
 		const current = this.requireTurn(live).turn;
 		if (!isTerminal(current.state)) {
-			live.turn = this.transition(live, cleanupVerified ? {
+			live.turn = this.transition(live, cleanupVerified && !live.transcriptPersistenceFailed ? {
 				state: 'exited', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null, cleanupVerified: true,
+			} : cleanupVerified ? {
+				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
+				errorSummary: 'The durable session transcript could not be written; terminal output was withheld.', cleanupVerified: true,
 			} : {
 				state: 'failed', exitCode: snapshot.providerExitCode ?? null, exitSignal: snapshot.providerExitSignal ?? null,
 				errorSummary: 'Provider exit was observed, but owned PTY cleanup could not be verified.', cleanupVerified: false,
@@ -440,7 +447,9 @@ export class AgentSessionService {
 		if (live.runtime) { cleanupVerified = await this.stopAndReleaseRuntime(live); }
 		else if (live.launchFailed) { cleanupVerified = live.launchFailureCleanupVerified; }
 		if (cleanupVerified) {
-			live.turn = this.transition(live, { state: 'exited', cleanupVerified: true }).turn;
+			live.turn = this.transition(live, live.transcriptPersistenceFailed ? {
+				state: 'failed', errorSummary: 'The durable session transcript could not be written; terminal output was withheld.', cleanupVerified: true,
+			} : { state: 'exited', cleanupVerified: true }).turn;
 			this.releaseWorkspace(live);
 		} else {
 			live.turn = this.transition(live, {
@@ -456,6 +465,7 @@ export class AgentSessionService {
 		try { stopResult = await this.runtimeFactory.stop(live.runtime); }
 		catch (error) { live.lifecycleFailure = error; return false; }
 		if (!stopResult.cleanupVerified) { return false; }
+		live.transcriptPersistenceFailed ||= this.runtimeFactory.getSnapshot(live.runtime).transcriptPersistenceFailed === true;
 		// Runtime stop flushes its final output before active attachments are disposed.
 		await Promise.all([...live.pendingAttachments]);
 		for (const [id, attachment] of live.attachments) {
@@ -559,6 +569,7 @@ export class AgentSessionRuntimeStartError extends Error {
 		readonly exitCode?: number | null,
 		readonly exitSignal?: string | null,
 		readonly recoveryHandle?: AgentSessionRuntimeHandle,
+		readonly transcriptPersistenceFailed = false,
 	) {
 		super(message);
 		this.name = 'AgentSessionRuntimeStartError';

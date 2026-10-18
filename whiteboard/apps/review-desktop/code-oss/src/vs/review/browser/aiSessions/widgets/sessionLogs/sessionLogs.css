@@ -1,0 +1,31 @@
+.ai-session-logs { min-width: 0; color: var(--ai-foreground); font: inherit; }
+.ai-session-logs__heading { padding: 14px 0 10px; border-bottom: 1px solid var(--ai-line); }
+.ai-session-logs__heading h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.ai-session-logs__distinction { margin: 4px 0 0; color: var(--ai-muted); }
+.ai-session-logs__toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--ai-line); }
+.ai-session-logs__filter, .ai-session-logs__search { display: flex; min-width: 110px; flex-direction: column; gap: 3px; color: var(--ai-muted); font-size: 11px; }
+.ai-session-logs__search { flex: 1; min-width: 160px; }
+.ai-session-logs__filter select, .ai-session-logs__search input { box-sizing: border-box; width: 100%; min-height: 34px; padding: 5px 8px; border: 1px solid var(--vscode-input-border, var(--ai-line)); border-radius: 3px; color: var(--vscode-input-foreground, var(--ai-foreground)); background: var(--vscode-input-background, var(--ai-surface)); font: inherit; }
+.ai-session-logs__button { min-height: 34px; padding: 5px 9px; border: 1px solid var(--ai-line); border-radius: 3px; color: var(--ai-foreground); background: transparent; font: inherit; cursor: pointer; }
+.ai-session-logs__button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground); }
+.ai-session-logs__button:focus-visible, .ai-session-logs__filter select:focus-visible, .ai-session-logs__search input:focus-visible, .ai-session-logs__viewport:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-logs__button:disabled { opacity: .55; cursor: default; }
+.ai-session-logs__status, .ai-session-logs__error { margin: 10px 0; color: var(--ai-muted); }
+.ai-session-logs__error { color: var(--vscode-errorForeground, #c3283b); }
+.ai-session-logs__viewport { max-height: min(68vh, 760px); min-height: 260px; overflow: auto; overscroll-behavior: contain; }
+.ai-session-logs__entries { margin: 0; padding: 0; list-style: none; }
+.ai-session-logs__entry { padding: 10px 0 12px; border-bottom: 1px solid var(--ai-line); }
+.ai-session-logs__entry-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; color: var(--ai-muted); font-size: 11px; }
+.ai-session-logs__entry-meta strong { color: var(--ai-foreground); font-size: 12px; font-weight: 650; }
+.ai-session-logs__entry--terminal .ai-session-logs__entry-meta strong { color: var(--vscode-terminal-ansiBlue, var(--ai-foreground)); }
+.ai-session-logs__entry-text { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; font: 12px/1.55 var(--vscode-editor-font-family, ui-monospace, monospace); }
+.ai-session-logs__severity--warning { color: var(--vscode-editorWarning-foreground); }
+.ai-session-logs__severity--error { color: var(--vscode-errorForeground, #c3283b); }
+.ai-session-logs__gap { padding: 9px 0; border-block: 1px dashed var(--ai-line); color: var(--vscode-editorWarning-foreground); font-size: 12px; }
+@media (max-width: 760px) {
+	.ai-session-logs__toolbar { align-items: stretch; }
+	.ai-session-logs__filter { flex: 1 1 130px; }
+	.ai-session-logs__search { flex: 1 1 100%; }
+	.ai-session-logs__button { flex: 1 1 auto; }
+	.ai-session-logs__viewport { max-height: 62vh; min-height: 220px; }
+}

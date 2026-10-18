@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { constants, existsSync, writeFileSync } from 'node:fs';
+import { constants, existsSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -44,6 +44,8 @@ const { runBoundedAgentCliProcess } = await import(pathToFileURL(path.join(sessi
 const { createAgentPtyOutputSanitizer } = await import(pathToFileURL(path.join(sessionModules, 'agentOutputRedactor.js')).href);
 
 const { AgentSessionPtyRuntimeFactory } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionPtyRuntime.js')).href);
+
+const { AgentSessionJournal } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionJournal.js')).href);
 
 const { AgentSessionPreparationError } = await import(pathToFileURL(path.join(sessionModules, 'agentSessionPreparationError.js')).href);
 
@@ -116,13 +118,14 @@ process.once('SIGINT', requestAbort);
 
 process.once('SIGTERM', requestAbort);
 
-function createHost(createSanitizer = () => createAgentPtyOutputSanitizer({ knownSecrets: [secret] })) {
+function createHost(createSanitizer = () => createAgentPtyOutputSanitizer({ knownSecrets: [secret] }), persistOutput) {
   const host = new AgentPtyHost({
     guardianNodeExecutable: nodeExecutable,
     guardianScriptPath,
     createSanitizer,
     // The direct host contracts use a disposable fixture with no launch-scoped access.
     revokeAccess: () => {},
+    ...(persistOutput ? { persistOutput } : {}),
     maxOutputBytes: 4096,
     maxOutputChunks: 16,
   });
@@ -359,6 +362,48 @@ try {
 
   const serviceDatabase = WorkspaceDatabase.open(path.join(root, 'agent-session-workspace.db'));
 
+  const failedTranscriptDatabasePath = path.join(root, 'transcript-failure.db');
+  const failedTranscriptProjectPath = path.join(root, 'transcript-failure-project');
+  await mkdir(failedTranscriptProjectPath);
+  let failedTranscriptDatabase = WorkspaceDatabase.open(failedTranscriptDatabasePath);
+  const failedTranscriptProject = failedTranscriptDatabase.createProject('Transcript failure fixture');
+  const failedTranscriptBinding = failedTranscriptDatabase.createFolderBinding({ projectId: failedTranscriptProject.id, path: failedTranscriptProjectPath });
+  const failedTranscriptSession = failedTranscriptDatabase.agentSessions.createSession({
+    projectId: failedTranscriptProject.id, bindingId: failedTranscriptBinding.id, name: 'Fail closed', provider: 'codex', model: 'fixture', workspaceMode: 'sharedFolder',
+  });
+  const failedTranscriptRoot = realpathSync(failedTranscriptProjectPath);
+  const failedTranscriptStat = statSync(failedTranscriptRoot, { bigint: true });
+  const failedTranscriptSnapshot = {
+    schemaVersion: 1, projectId: failedTranscriptProject.id, sessionId: failedTranscriptSession.id,
+    sessionRevision: failedTranscriptSession.revision, bindingId: failedTranscriptBinding.id, taskId: null,
+    provider: failedTranscriptSession.provider, model: failedTranscriptSession.model, profileRef: null, cwd: failedTranscriptRoot,
+    folderIdentity: { canonicalPath: failedTranscriptRoot, dev: failedTranscriptStat.dev.toString(), ino: failedTranscriptStat.ino.toString() },
+    managedWorktreeOwnerId: null, permissionPolicy: { mode: 'mutating', approval: 'on-request' }, convention: null, references: [],
+  };
+  const failedTranscriptTurn = failedTranscriptDatabase.agentSessionTurns.createTurn({
+    projectId: failedTranscriptProject.id, sessionId: failedTranscriptSession.id,
+    expectedSessionRevision: failedTranscriptSession.revision, snapshot: failedTranscriptSnapshot,
+  });
+  const failedTranscriptJournal = new AgentSessionJournal(failedTranscriptDatabase.agentSessionTranscripts, failedTranscriptSnapshot, failedTranscriptTurn.id, [secret]);
+  const failedTranscriptHost = createHost(undefined, (text, gap) => gap ? failedTranscriptJournal.appendGap() : failedTranscriptJournal.appendTerminal(text));
+  const failedTranscriptHandle = await launchFixture(failedTranscriptHost, 'transcript-storage-failure');
+  const failureCursorBeforeClose = failedTranscriptDatabase.agentSessionTranscripts.highestSequence(failedTranscriptProject.id, failedTranscriptSession.id, failedTranscriptTurn.id);
+  const withheldOutput = [];
+  const failedTranscriptAttachment = await failedTranscriptHost.attach(failedTranscriptHandle, chunk => withheldOutput.push(chunk.text));
+  failedTranscriptDatabase.close();
+  await failedTranscriptHost.write(failedTranscriptHandle, 'echo:must-not-publish\n');
+  await until(() => failedTranscriptHost.getSnapshot(failedTranscriptHandle).transcriptPersistenceFailed, 'durable output failure blocks publication');
+  assert.equal((await failedTranscriptHost.stop(failedTranscriptHandle)).cleanupVerified, true, 'Transcript write failure must still clean the exact owned PTY.');
+  assert.equal(withheldOutput.length, 0, 'Unpersisted terminal output must not reach attached renderers.');
+  failedTranscriptAttachment.dispose();
+  await failedTranscriptHost.release(failedTranscriptHandle);
+  failedTranscriptDatabase = WorkspaceDatabase.open(failedTranscriptDatabasePath);
+  const failedTranscriptPage = failedTranscriptDatabase.agentSessionTranscripts.readPage(failedTranscriptProject.id, failedTranscriptSession.id, failedTranscriptTurn.id);
+  assert.ok(failedTranscriptPage.entries.some(entry => entry.kind === 'terminal' && entry.text.includes('READY')));
+  assert.equal(failedTranscriptPage.highestSequence, failureCursorBeforeClose, 'Failed SQLite writes must not advance the durable transcript cursor.');
+  failedTranscriptDatabase.close();
+  receipt.checks.push('real SQLite transcript failure withholds uncommitted output while verified PTY cleanup succeeds');
+
   ownedServiceDatabase = serviceDatabase;
   const gitRoot = path.join(root, 'agent-session-git');
   const profileRoot = path.join(root, 'agent-session-profile');
@@ -389,6 +434,7 @@ try {
   const runtimeFactory = new AgentSessionPtyRuntimeFactory({
     guardianNodeExecutable: nodeExecutable,
     guardianScriptPath,
+    createJournal: (snapshot, turnId, knownSecrets) => new AgentSessionJournal(serviceDatabase.agentSessionTranscripts, snapshot, turnId, knownSecrets),
     prepareLaunch: async (snapshot, turnId, signal) => {
       const mode = launchModes.get(snapshot.sessionId) ?? 'normal';
 
@@ -543,9 +589,18 @@ try {
   const naturalSession = await createSession('Service natural exit');
   const naturalPreview = await previewSession(naturalSession);
   const naturalTurn = await service.start({ projectId: project.id, sessionId: naturalSession.id, ticketId: naturalPreview.ticketId });
+  const beforeAttachmentPage = serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id);
+  assert.ok(beforeAttachmentPage.entries.some(entry => entry.kind === 'terminal' && entry.text.includes('READY')),
+    'The first PTY output must be durable before any renderer attaches.');
   await recordOwnedIdentity(naturalTurn.id, 'service-natural');
   const firstOutput = [];
   const firstAttachment = await service.attach(project.id, naturalSession.id, naturalTurn.id, chunk => firstOutput.push(chunk.text));
+  await service.write(project.id, naturalSession.id, naturalTurn.id, 'secret\n');
+  await until(() => serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id).entries
+    .some(entry => entry.kind === 'terminal' && entry.text.includes('***')), 'cross-chunk secret redaction persisted');
+  const redactedTranscript = serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id).entries;
+  assert.ok(!redactedTranscript.some(entry => entry.text.includes(secret)), 'Known secrets must be redacted before durable publication.');
+  assert.ok(!redactedTranscript.some(entry => entry.text === 'secret\n'), 'PTY input must never be stored in the transcript.');
 
   const boundedServiceAttachments = [];
 
@@ -574,10 +629,39 @@ try {
   }, 'service natural exit and verified cleanup');
 
   assert.ok(finalOutput.join('').endsWith('FINAL_WITHOUT_NEWLINE'), 'Active service attachment must receive the final output without a newline');
+  const finalTranscript = serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id).entries;
+  assert.ok(finalTranscript.some(entry => entry.kind === 'terminal' && entry.text.endsWith('FINAL_WITHOUT_NEWLINE')),
+    'The final sanitizer flush must be durable before the provider turn is finalized.');
   assert.equal(resourceEvents.get(naturalTurn.id).join(','), 'access-revoked,private-config-released');
   assert.equal(naturalTerminal.state, 'exited');
   assert.throws(() => service.read(project.id, naturalSession.id, naturalTurn.id, finalAttachment.attachmentId, 0), /not owned/i);
   receipt.checks.push('real SQLite/Git workspace resolver and service natural-exit lifecycle', 'scoped attach, duplex output, detach, and final no-newline delivery');
+
+  const persistenceFailureSession = await createSession('SQLite transcript insertion failure');
+  const persistenceFailurePreview = await previewSession(persistenceFailureSession);
+  const persistenceFailureTurn = await service.start({ projectId: project.id, sessionId: persistenceFailureSession.id, ticketId: persistenceFailurePreview.ticketId });
+  await recordOwnedIdentity(persistenceFailureTurn.id, 'service-transcript-failure');
+  const sqlite = Reflect.get(serviceDatabase, 'db');
+  const terminalEntriesBeforeFailure = serviceDatabase.agentSessionTranscripts.readPage(project.id, persistenceFailureSession.id, persistenceFailureTurn.id).entries
+    .filter(entry => entry.kind === 'terminal').length;
+  sqlite.exec(`CREATE TRIGGER fail_selected_transcript_entry BEFORE INSERT ON agent_session_transcript_entries
+    WHEN NEW.turn_id = '${persistenceFailureTurn.id}' AND NEW.kind = 'terminal'
+    BEGIN SELECT RAISE(ABORT, 'fixture transcript write rejection'); END;`);
+  const failedOutput = [];
+  const persistenceFailureAttachment = await service.attach(project.id, persistenceFailureSession.id, persistenceFailureTurn.id, chunk => failedOutput.push(chunk.text));
+  await service.write(project.id, persistenceFailureSession.id, persistenceFailureTurn.id, 'echo:must-not-publish\n');
+  const persistenceFailedTurn = await until(() => {
+    const current = serviceDatabase.agentSessionTurns.getTurn(project.id, persistenceFailureSession.id, persistenceFailureTurn.id);
+
+    return current?.state === 'failed' && current.cleanupVerified ? current : false;
+  }, 'SQLite transcript failure summary with verified process cleanup');
+  assert.match(persistenceFailedTurn.errorSummary, /transcript could not be written/i);
+  assert.ok(!failedOutput.join('').includes('must-not-publish'));
+  assert.equal(serviceDatabase.agentSessionTranscripts.readPage(project.id, persistenceFailureSession.id, persistenceFailureTurn.id).entries
+    .filter(entry => entry.kind === 'terminal').length, terminalEntriesBeforeFailure, 'The scoped trigger must reject the next terminal write regardless of its chunk contents.');
+  service.detach(project.id, persistenceFailureSession.id, persistenceFailureTurn.id, persistenceFailureAttachment.attachmentId);
+  sqlite.exec('DROP TRIGGER fail_selected_transcript_entry;');
+  receipt.checks.push('SQLite insert rejection becomes a durable failed turn while renderer output is withheld and PTY cleanup remains verified');
 
   const stoppedSession = await createSession('Service explicit stop');
   const stoppedPreview = await previewSession(stoppedSession, 'verify-revoke');

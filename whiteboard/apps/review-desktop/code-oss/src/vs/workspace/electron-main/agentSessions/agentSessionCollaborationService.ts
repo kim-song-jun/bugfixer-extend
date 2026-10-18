@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
-import { createAgentPtyOutputSanitizer } from './agentOutputRedactor.js';
+import { createAgentPtyOutputSanitizer, sanitizeCompleteAgentText } from './agentOutputRedactor.js';
 
 const MAX_WAIT_MS = 30_000;
 const MAX_WAITERS = 64;
@@ -212,8 +212,7 @@ export class AgentSessionCollaborationService {
 
 	private sanitize(record: GrantRecord, value: string): { text: string; redacted: boolean } {
 		if (typeof value !== 'string') { throw new Error('Mailbox text must be a string.'); }
-		const sanitizer = createAgentPtyOutputSanitizer({ knownSecrets: record.knownSecrets });
-		const text = sanitizer.push(value) + sanitizer.flush();
+		const text = sanitizeCompleteAgentText(value, { knownSecrets: record.knownSecrets });
 		return { text, redacted: text !== value };
 	}
 

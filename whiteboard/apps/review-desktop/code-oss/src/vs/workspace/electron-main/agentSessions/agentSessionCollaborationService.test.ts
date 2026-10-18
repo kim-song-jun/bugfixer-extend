@@ -128,6 +128,30 @@ test('revocation cancels a durable mailbox wait and a terminal turn cannot retai
 	}
 });
 
+test('complete mailbox records preserve a harmless secret prefix while masking and rejecting full secrets', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-complete-record-'));
+	const fixture = createFixture(directory);
+	try {
+		const sender = createSession(fixture, 'codex');
+		const receiver = createSession(fixture, 'claude');
+		const turn = createTurn(fixture, sender);
+		const collaboration = new AgentSessionCollaborationService(fixture.database);
+		const secret = '6scoped-bridge-fixture';
+		const grant = authorize(collaboration, fixture, sender, turn, [secret]);
+		const input = { recipientSessionId: receiver.id, idempotencyKey: 'large-page-6', body: 'ordinary text ending 6' };
+		const sent = collaboration.sendMessage(grant, input);
+		assert.equal(sent.body, input.body);
+		assert.equal(collaboration.sendMessage(grant, input).id, sent.id);
+		const masked = collaboration.sendMessage(grant, { recipientSessionId: receiver.id, idempotencyKey: 'full-secret-body', body: secret });
+		assert.equal(masked.body, '***');
+		assert.throws(() => collaboration.sendMessage(grant, { recipientSessionId: receiver.id, idempotencyKey: secret, body: 'must not persist' }), /key contains a trusted secret/i);
+		assert.deepEqual(fixture.database.agentSessions.listInbox(fixture.project.id, receiver.id, { limit: 10 }).map(message => message.body), [input.body, '***']);
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
 test('mailbox survives database restart while launch capabilities remain process-local', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-collaboration-reopen-'));
 	const databasePath = join(directory, 'workspace.db');
