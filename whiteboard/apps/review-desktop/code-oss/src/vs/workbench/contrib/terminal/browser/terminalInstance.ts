@@ -464,7 +464,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this._terminalAltBufferActiveContextKey = TerminalContextKeys.altBufferActive.bindTo(scopedContextKeyService);
 		this._terminalShellIntegrationEnabledContextKey = TerminalContextKeys.terminalShellIntegrationEnabled.bindTo(scopedContextKeyService);
 
-		this._logService.trace(`terminalInstance#ctor (instanceId: ${this.instanceId})`, this._shellLaunchConfig);
+		this._logService.trace(`terminalInstance#ctor (instanceId: ${this.instanceId})`);
 		this._register(this.capabilities.onDidAddCapability(e => this._logService.debug('terminalInstance added capability', e.id)));
 		this._register(this.capabilities.onDidRemoveCapability(e => this._logService.debug('terminalInstance removed capability', e.id)));
 
@@ -1388,7 +1388,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		}
 
 		// Send it to the process
-		this._logService.debug('sending data (vscode)', text);
+		this._logService.debug('sending data (vscode)', { characters: text.length });
 		await this._processManager.write(text);
 		this._onDidInputData.fire(text);
 		this._onDidSendText.fire(text);
