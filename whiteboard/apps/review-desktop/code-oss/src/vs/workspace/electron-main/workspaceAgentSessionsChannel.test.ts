@@ -124,7 +124,7 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 			config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } },
 			openedWorkspace: { id: 'workspace-id', configPath: URI.parse(descriptorUri) },
 		} as unknown as ICodeWindow;
-		const sender = { id: 31, isDestroyed: () => false } as WebContents;
+		const sender = Object.assign(new EventEmitter(), { id: 31, isDestroyed: () => false }) as unknown as WebContents;
 		const forgedSender = { id: 32, isDestroyed: () => false } as WebContents;
 		const windows = {
 			getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined,
