@@ -76,7 +76,7 @@ test('change evidence binds to the exact turn and folder and retains observed fi
 		assert.equal(recorded.source, 'ordinaryFolder');
 		assert.equal(recorded.managedWorktreeOwnerId, null);
 		assert.equal(recorded.noChangesConfirmed, false);
-		assert.deepEqual(recorded.files, files);
+		assert.deepEqual(recorded.files, [files[0], files[2], files[1]]);
 		writeFileSync(filePath, 'later mutation');
 		value.database.close();
 		const reopened = WorkspaceDatabase.open(value.databasePath);

@@ -50,6 +50,14 @@ jobs:
           ps -eo comm= | awk '/node/ {node++} /chrome|chromium|firefox/ {browser++} END {print "node=" node+0, "browser=" browser+0}'
       - name: Test persistence, mailboxes and managed Git worktrees
         run: pnpm --filter @dev.fast/review-desktop test:agent-sessions
+      - name: Test frozen v25 change-evidence migration
+        run: >-
+          pnpm --filter @dev.fast/review-desktop exec
+          env TSX_TSCONFIG_PATH=tsconfig.test.json
+          node --import ./scripts/test-code-oss-preload.mjs --import tsx
+          --test --test-concurrency=1
+          --test-name-pattern="v25 database upgrades to v26"
+          code-oss/src/vs/workspace/electron-main/workspaceDatabase.test.ts
       - name: Install pinned public CLIs for help-only discovery
         timeout-minutes: 3
         run: |
