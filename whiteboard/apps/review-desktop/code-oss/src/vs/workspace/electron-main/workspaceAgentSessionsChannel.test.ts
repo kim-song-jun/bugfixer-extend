@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import test from 'node:test';
