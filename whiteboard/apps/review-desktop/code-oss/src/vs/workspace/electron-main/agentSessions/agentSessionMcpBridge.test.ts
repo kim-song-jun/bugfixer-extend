@@ -265,7 +265,7 @@ test('real MCP SDK exposes only scoped workflow status and cancel for its own se
 test('near-limit SQLite workflow returns a bounded durable cancellation receipt when full MCP status exceeds the frame', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-large-workflow-'));
 	const fixture = createFixture(directory);
-	const model = 'm'.repeat(100);
+	const model = 'm';
 	const sessions = Array.from({ length: 64 }, (_, index) => fixture.database.agentSessions.createSession({
 		projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
 		name: `Workflow node ${index.toString().padStart(2, '0')}`, provider: 'codex', model, workspaceMode: 'sharedFolder',
@@ -281,6 +281,9 @@ test('near-limit SQLite workflow returns a bounded durable cancellation receipt 
 		})),
 		idempotencyKey: randomUUID(),
 	});
+	const savedPlan = fixture.database.agentWorkflows.getPlan(fixture.project.id, workflow.id)!;
+	const savedPlanBytes = Buffer.byteLength(JSON.stringify(savedPlan), 'utf8');
+	assert.ok(savedPlanBytes > 50_000 && savedPlanBytes <= 65_536, 'the actual persisted plan must be near the store limit without exceeding it');
 	const turn = createTurn(fixture, sessions[0], READ_ONLY);
 	const collaboration = new AgentSessionCollaborationService(fixture.database, {
 		cancel: (projectId, workflowId, revision, key) => fixture.database.agentWorkflows.requestWorkflowCancellation(projectId, workflowId, revision, key),
