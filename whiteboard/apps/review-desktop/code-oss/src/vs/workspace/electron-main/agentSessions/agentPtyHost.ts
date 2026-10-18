@@ -8,6 +8,7 @@ import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { clearTimeout, setTimeout } from 'node:timers';
 import * as pty from 'node-pty';
 import type { IDisposable } from '../../../base/common/lifecycle.js';
 
