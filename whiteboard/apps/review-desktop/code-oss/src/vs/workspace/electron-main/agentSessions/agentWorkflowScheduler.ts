@@ -277,6 +277,7 @@ export class AgentWorkflowScheduler {
 
 	private handleLaunchFailure(operation: LaunchOperation): void {
 		const { active, nodeId, sessionId, turnId } = operation;
+		if (operation.abortController.signal.aborted) { return; }
 		this.setHostError(active, 'launchFailed');
 		this.recordEvent(active, 'launchFailed', nodeId, this.database.agentWorkflows.getRun(active.projectId, active.workflowId, active.runId)?.nodes.find(value => value.nodeId === nodeId)?.revision ?? 1);
 		const turn = this.database.agentSessionTurns.getTurn(active.projectId, sessionId, turnId);
@@ -322,7 +323,7 @@ export class AgentWorkflowScheduler {
 	}
 
 	private transitionToRecoveryRequired(active: ActiveRun, node: AgentWorkflowNodeExecutionDTO): void {
-		this.setHostError(active, 'recoveryRequired');
+		if (this.getHostError(active.projectId, active.workflowId, active.runId) === null) { this.setHostError(active, 'recoveryRequired'); }
 		this.recordEvent(active, 'recoveryRequired', node.nodeId, node.revision);
 		if (node.state === 'recoveryRequired') { return; }
 		const run = this.database.agentWorkflows.getRun(active.projectId, active.workflowId, active.runId);

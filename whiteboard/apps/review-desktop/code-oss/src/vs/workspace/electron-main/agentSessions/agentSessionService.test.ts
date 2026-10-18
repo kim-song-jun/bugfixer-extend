@@ -216,8 +216,10 @@ test('an approved workflow reservation launches its exact reserved durable turn 
 		assert.deepEqual(runtime.starts(), [reservation.turnId]);
 		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id).map(value => value.id), [reservation.turnId]);
 		const stoppedWorkflowTurn = await service.stop(fixture.project.id, session.id, turn.id);
-		assert.equal(stoppedWorkflowTurn.state, 'interrupted');
+		assert.equal(stoppedWorkflowTurn.state, 'exited');
 		assert.equal(stoppedWorkflowTurn.cleanupVerified, true);
+		assert.equal(stoppedWorkflowTurn.exitCode, null, 'An explicit stop does not claim successful provider execution.');
+		assert.equal(fixture.database.agentSessions.getSession(fixture.project.id, session.id)?.state, 'stopped');
 		assert.equal(fixture.database.agentSessionTurns.getTurn(fixture.project.id, session.id, turn.id)?.state, stoppedWorkflowTurn.state);
 		const manualSession = fixture.database.agentSessions.createSession({
 			projectId: fixture.project.id, bindingId: fixture.sharedBinding.id, name: 'Manual ticket session',
