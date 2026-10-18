@@ -2039,7 +2039,9 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
   const name = `CI 변경 evidence fixture ${tag}`;
   const folderPath = path.join(projectFolder, `ci-change-evidence-${tag}`);
   await mkdir(folderPath, { recursive: true });
+
   const binding = database.createFolderBinding({ projectId: fixture.projectId, path: folderPath });
+
   const session = database.agentSessions.createSession({
     projectId: fixture.projectId,
     bindingId: binding.id,
@@ -2049,9 +2051,12 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
     profileRef: 'ci-change-evidence-fixture-only',
     workspaceMode: 'sharedFolder',
   });
+
   const folder = await statFolder(folderPath);
+
   const scope = { projectId: fixture.projectId, sessionId: session.id };
   const currentSession = database.agentSessions.getSession(fixture.projectId, session.id);
+
   const turnSnapshot = {
     schemaVersion: 1,
     projectId: fixture.projectId,
@@ -2069,29 +2074,37 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
     convention: null,
     references: [],
   };
+
   const turn = database.agentSessionTurns.createTurn({
     projectId: fixture.projectId,
     sessionId: session.id,
     expectedSessionRevision: currentSession.revision,
     snapshot: turnSnapshot,
   });
+
   const turnScope = { ...scope, turnId: turn.id };
 
   await writeFile(path.join(folderPath, 'edited.txt'), `before ${tag}\n`, 'utf8');
   await writeFile(path.join(folderPath, 'deleted.txt'), `remove ${tag}\n`, 'utf8');
   await writeFile(path.join(folderPath, 'binary.dat'), Buffer.from([0, 1, 2, 255]));
+
   const before = await readChangeEvidenceSnapshot(folderPath, folder);
+
   database.agentSessionContents.recordBaseline({ scope: turnScope, snapshot: before, revision: null });
 
   const startingSession = database.agentSessions.getSession(fixture.projectId, session.id);
+
   const running = database.agentSessionTurns.transitionTurn(
     fixture.projectId, session.id, turn.id, turn.revision, startingSession.revision, { state: 'running' },
   );
+
   await writeFile(path.join(folderPath, 'edited.txt'), `after ${tag}\n`, 'utf8');
   await rm(path.join(folderPath, 'deleted.txt'));
   await writeFile(path.join(folderPath, 'created-empty.txt'), '', 'utf8');
   await writeFile(path.join(folderPath, 'binary.dat'), Buffer.from([0, 9, 8, 255]));
+
   const after = await readChangeEvidenceSnapshot(folderPath, folder);
+
   const final = database.agentSessionContents.recordAfter({
     scope: turnScope,
     snapshot: after,
@@ -2099,10 +2112,12 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
     revision: null,
     cleanupVerified: true,
   });
+
   const exited = database.agentSessionTurns.transitionTurn(
     fixture.projectId, session.id, turn.id, running.turn.revision, running.session.revision,
     { state: 'exited', exitCode: 0, cleanupVerified: true },
   );
+
   assert.equal(exited.turn.state, 'exited');
 
   const retainedEdit = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'edited.txt' });
@@ -2111,13 +2126,16 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
   assert.equal(retainedEdit.before.file.content, `before ${tag}\n`);
   assert.equal(retainedEdit.after.file.content, `after ${tag}\n`);
   await writeFile(path.join(folderPath, 'edited.txt'), `later filesystem value ${tag}\n`, 'utf8');
+
   const reopenedEdit = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'edited.txt' });
   assert.equal(reopenedEdit?.after.state, 'text');
   assert.equal(reopenedEdit.after.file.content, `after ${tag}\n`, 'The persisted diff must not reread the changed fixture folder');
+
   const retainedEmptyFile = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'created-empty.txt' });
   assert.equal(retainedEmptyFile?.before.state, 'absent');
   assert.equal(retainedEmptyFile?.after.state, 'text');
   assert.equal(retainedEmptyFile.after.file.content, '', 'A created zero-byte file must remain distinguishable from unavailable content');
+
   const retainedDeletedFile = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'deleted.txt' });
   assert.equal(retainedDeletedFile?.before.state, 'text');
   assert.equal(retainedDeletedFile.before.file.content, `remove ${tag}\n`);
@@ -2147,6 +2165,7 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag) {
 
 async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
   const names = (await Array.fromAsync(await opendir(folderPath), entry => entry.name)).sort(compareCodeUnits);
+
   const entries = [];
   let fileBytes = 0;
   let retainedTextBytes = 0;
@@ -2156,6 +2175,7 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
   for (const name of names) {
     const filePath = path.join(folderPath, name);
     const bytes = await readFile(filePath);
+
     const info = await stat(filePath);
     assert.ok(info.isFile(), 'The evidence fixture contains only regular files');
     fileBytes += bytes.byteLength;
@@ -2547,6 +2567,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   await page.waitForFunction(() => window.innerWidth === 1440);
   const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
   if (!(await sidebar.isVisible())) { await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click(); }
+
   await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
   const workspace = page.locator('.ai-session-workspace');
   const fixtureRow = workspace.locator('.ai-session__session-row').filter({ hasText: evidenceFixture.name });
@@ -2566,6 +2587,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   for (const filePath of evidenceFixture.changedPaths) {
     await changes.locator('.ai-session-changes__file').filter({ hasText: filePath }).waitFor();
   }
+
   await changes.locator('.ai-session-changes__file').filter({ hasText: 'created-empty.txt' }).getByText('추가됨', { exact: true }).waitFor();
   await changes.locator('.ai-session-changes__file').filter({ hasText: 'deleted.txt' }).getByText('삭제됨', { exact: true }).waitFor();
 
@@ -2587,6 +2609,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
 
   await page.setViewportSize({ width: 760, height: 820 });
   await page.waitForFunction(() => window.innerWidth === 760);
+
   const narrowLayout = await workspace.evaluate(element => ({
     overflow: document.documentElement.scrollWidth > window.innerWidth,
     actionReachable: [...element.querySelectorAll('button')].filter(button => button.offsetParent !== null).every(button => {
@@ -2594,6 +2617,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
       return rect.left >= 0 && rect.right <= window.innerWidth + 1;
     }),
   }));
+
   assert.equal(narrowLayout.overflow, false, 'The narrow retained-change view must not overflow horizontally');
   assert.equal(narrowLayout.actionReachable, true, 'Visible change actions must remain within the narrow viewport');
   const narrowScreenshot = path.join(output, `ai-session-changes-${tag}-760.png`);
