@@ -224,7 +224,11 @@ test('only a consumed trusted reservation links the exact approved turn; ordinar
 		assert.notEqual(reservation.turnId, priorOrdinaryTurn.turn.id);
 		const ordinaryAfterReservation = createRunningSessionTurn(database, project.id, binding.id, task.id, session.id, fixtureRoot);
 		assert.notEqual(ordinaryAfterReservation.turn.id, reservation.turnId);
-		assert.throws(() => database.agentWorkflows.transitionNode(project.id, workflow.id, run.id, 'implement', 2, 'running', ordinaryAfterReservation.turn.id), /launch reservation/i);
+		assert.throws(() => database.agentWorkflows.transitionNode(project.id, workflow.id, run.id, 'implement', 2, 'running', ordinaryAfterReservation.turn.id), /exact turn bound by its launch transaction/i);
+		const stillReserved = database.agentWorkflows.getRun(project.id, workflow.id, run.id)!.nodes[0];
+		assert.equal(stillReserved.state, 'launching');
+		assert.equal(stillReserved.revision, 2);
+		assert.equal(stillReserved.sessionTurnId, null);
 		assert.throws(() => createRunningSessionTurn(database, project.id, binding.id, task.id, session.id, fixtureRoot, { reservationId: reservation.reservationId }), /authorization|revision/i);
 	});
 });

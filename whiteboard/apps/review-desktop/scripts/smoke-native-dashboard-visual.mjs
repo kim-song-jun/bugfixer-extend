@@ -1005,6 +1005,8 @@ try {
 
   const { ProjectWorkspaceService } = await import(pathToFileURL(path.join(outRoot, 'projectWorkspaceService.js')).href);
 
+  const { AgentSessionCollaborationService } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionCollaborationService.js')).href);
+
   const screenshots = [];
 
   const viewports = [];
@@ -1279,6 +1281,70 @@ try {
       verifiedHistoryDatabase.close();
     }
 
+    const mailboxFixtureDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const seededMailbox = await seedMailboxNotificationHistory(mailboxFixtureDatabase, fixture, projectFolder, tag, AgentSessionCollaborationService);
+
+      fixture.mailbox = seededMailbox.receipt;
+    } finally {
+      mailboxFixtureDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `mailbox-notifications-${tag}`);
+
+      await verifyAiSessionMailbox(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `ai-session-mailbox-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const verifiedMailboxDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const messages = verifiedMailboxDatabase.agentSessions.listInbox(fixture.projectId, fixture.mailbox.recipientSessionId, { limit: 100 });
+
+      const notifications = verifiedMailboxDatabase.agentSessions.listNotifications(fixture.projectId, { limit: 100 });
+
+      const notificationStatus = verifiedMailboxDatabase.agentSessions.notificationStatus(fixture.projectId);
+
+      const targetMessage = messages.find(message => message.id === fixture.mailbox.targetMessageId);
+
+      const targetNotification = notifications.find(notification => notification.id === fixture.mailbox.targetNotificationId);
+
+      const senderSession = verifiedMailboxDatabase.agentSessions.getSession(fixture.projectId, fixture.mailbox.senderSessionId);
+
+      const recipientSession = verifiedMailboxDatabase.agentSessions.getSession(fixture.projectId, fixture.mailbox.recipientSessionId);
+
+      assert.equal(messages.length, fixture.mailbox.messageCount, 'The mailbox fixture must persist through the packaged-app journey');
+
+      assert.ok(senderSession && recipientSession, 'Both CI mailbox sessions must persist through the packaged-app journey');
+
+      assert.ok(messages.every(message => !message.body.includes(mailboxFixtureSecret(tag))), 'The production sanitization boundary must mask the known mailbox secret before persistence');
+
+      assert.ok(messages.every(message => message.readAt === null), 'Human UI navigation must not acknowledge any mailbox message for the AI');
+
+      assert.ok(targetMessage, 'The notification target message must remain in the recipient mailbox');
+
+      assert.equal(targetMessage.readAt, null, 'Opening a human mailbox view must not acknowledge the message for the AI');
+
+      assert.ok(targetNotification?.readAt, 'Opening the notification must mark only that notification as read');
+
+      assert.deepEqual(notifications.filter(notification => notification.readAt).map(notification => notification.id), [fixture.mailbox.targetNotificationId], 'Only the clicked notification may be marked read');
+
+      assert.equal(notificationStatus.unreadCount, fixture.mailbox.messageCount - 1, 'Only the opened notification must leave the project unread count');
+
+      assert.equal(notificationStatus.latestSequence, fixture.mailbox.messageCount, 'The project notification high-water mark must remain persisted');
+    } finally {
+      verifiedMailboxDatabase.close();
+    }
+
     await writeFile(path.join(output, `fixture-${tag}.json`), JSON.stringify(fixture, null, 2));
   }
 
@@ -1506,6 +1572,184 @@ async function seedTranscriptHistory(database, fixture, projectFolder, tag) {
   };
 }
 
+function mailboxFixtureSecret(tag) {
+  return `WB_CI_MAILBOX_SECRET_${tag.toUpperCase()}_DO_NOT_PERSIST`;
+}
+
+function mailboxFixtureLiteralMarkup() {
+  return '<b data-ci-injection="mailbox-fixture">literal text</b> & "quoted" \\';
+}
+
+function mailboxFixtureBody(tag, sequence, secret) {
+  const prefix = `CI mailbox ${tag} message ${sequence} ${mailboxFixtureLiteralMarkup()} `;
+
+  const isTarget = sequence === 60;
+
+  const secretPart = isTarget ? secret : '';
+
+  const desiredLength = isTarget ? 16_384 : 9_400;
+
+  const fillLength = desiredLength - prefix.length - secretPart.length;
+
+  assert.ok(fillLength >= 0, 'Mailbox fixture text must fit the SQLite message limit');
+
+  return `${prefix}${secretPart}${'x'.repeat(fillLength)}`;
+}
+
+async function seedMailboxNotificationHistory(database, fixture, projectFolder, tag, CollaborationService) {
+  const senderName = `CI mailbox fixture sender ${tag}`;
+
+  const recipientName = `CI mailbox fixture recipient ${tag}`;
+
+  const model = 'ci-fixture-not-executed';
+
+  const secret = mailboxFixtureSecret(tag);
+
+  const folderIdentity = await statFolder(projectFolder);
+
+  const sender = database.agentSessions.createSession({
+    projectId: fixture.projectId,
+    bindingId: fixture.bindingId,
+    taskId: fixture.taskId,
+    name: senderName,
+    provider: 'codex',
+    model,
+    profileRef: 'ci-mailbox-fixture-only',
+    workspaceMode: 'sharedFolder',
+  });
+
+  const recipient = database.agentSessions.createSession({
+    projectId: fixture.projectId,
+    bindingId: fixture.bindingId,
+    taskId: fixture.taskId,
+    name: recipientName,
+    provider: 'claude',
+    model,
+    profileRef: 'ci-mailbox-fixture-only',
+    workspaceMode: 'sharedFolder',
+  });
+
+  const permissionPolicy = { mode: 'read-only', approval: 'never' };
+
+  const snapshot = {
+    schemaVersion: 1,
+    projectId: fixture.projectId,
+    sessionId: sender.id,
+    sessionRevision: sender.revision,
+    bindingId: fixture.bindingId,
+    taskId: fixture.taskId,
+    provider: sender.provider,
+    model,
+    profileRef: sender.profileRef,
+    cwd: folderIdentity.canonicalPath,
+    folderIdentity,
+    managedWorktreeOwnerId: null,
+    permissionPolicy,
+    convention: null,
+    references: [],
+  };
+
+  const turn = database.agentSessionTurns.createTurn({
+    projectId: fixture.projectId,
+    sessionId: sender.id,
+    expectedSessionRevision: sender.revision,
+    snapshot,
+  });
+
+  const running = database.agentSessionTurns.transitionTurn(
+    fixture.projectId, sender.id, turn.id, turn.revision, sender.revision, { state: 'running' },
+  );
+
+  const collaboration = new CollaborationService(database);
+
+  const grant = collaboration.authorizeTurn({
+    projectId: fixture.projectId,
+    sessionId: sender.id,
+    turnId: turn.id,
+    permissionPolicy,
+    knownSecrets: [secret],
+  });
+
+  const messageIds = [];
+
+  try {
+    for (let sequence = 1; sequence <= 60; sequence++) {
+      const message = collaboration.sendMessage(grant, {
+        recipientSessionId: recipient.id,
+        idempotencyKey: `ci-mailbox-${tag}-${sequence}`,
+        body: mailboxFixtureBody(tag, sequence, secret),
+      });
+
+      messageIds.push(message.id);
+    }
+  } finally {
+    try {
+      database.agentSessionTurns.transitionTurn(
+        fixture.projectId, sender.id, turn.id, running.turn.revision, running.session.revision,
+        { state: 'exited', exitCode: 0, cleanupVerified: true },
+      );
+    } finally {
+      collaboration.revoke(grant);
+    }
+  }
+
+  const targetMessageId = messageIds.at(-1);
+
+  const targetNotification = database.agentSessions.listNotifications(fixture.projectId, { limit: 100 })
+    .find(notification => notification.messageId === targetMessageId);
+
+  const firstPageMessages = database.agentSessions.listInbox(fixture.projectId, recipient.id, { limit: 50 });
+
+  const firstPageResponseBytes = Buffer.byteLength(JSON.stringify({
+    messages: firstPageMessages.map(message => ({
+      id: message.id,
+      senderSessionId: message.senderSessionId,
+      recipientSessionId: message.recipientSessionId,
+      sequence: message.sequence,
+      body: message.body,
+      createdAt: message.createdAt,
+      readAt: message.readAt,
+    })),
+    nextCursor: 50,
+    hasMore: true,
+  }), 'utf8');
+
+  assert.ok(targetMessageId, 'The mailbox fixture must create a target message');
+
+  assert.ok(targetNotification, 'The mailbox fixture must create an associated notification');
+
+  assert.ok(firstPageResponseBytes > 450 * 1024 && firstPageResponseBytes < 512 * 1024, 'The first mailbox page must exercise near-limit byte pagination while staying inside the response budget');
+
+  return {
+    receipt: {
+      fixtureOnly: true,
+      mailboxUiFixture: true,
+      providerExecuted: false,
+      ptyExecuted: false,
+      source: 'Isolated CI-profile WorkspaceDatabase via AgentSessionCollaborationService and AgentSessionStore APIs',
+      proofLimit: 'Synthetic SQLite mailbox records for packaged UI verification; not evidence of provider execution, real agent work, or PTY output.',
+      projectId: fixture.projectId,
+      senderSessionId: sender.id,
+      senderName,
+      recipientSessionId: recipient.id,
+      recipientName,
+      model,
+      messageCount: messageIds.length,
+      messageIds,
+      targetMessageId,
+      targetNotificationId: targetNotification.id,
+      pageSize: 50,
+      oldTargetOutsideFirstMessagePage: true,
+      targetBodyLength: mailboxFixtureBody(tag, 60, secret).length,
+      ordinaryBodyLength: mailboxFixtureBody(tag, 1, secret).length,
+      firstPageResponseBytes,
+      secretMaskedBeforeDisk: true,
+      markReadSemantics: 'The UI journey acknowledges the notification only; target message readAt must remain null.',
+      clipboardAndFileExport: 'Not exercised by this native smoke.',
+    },
+  };
+}
+
 async function statFolder(folderPath) {
   const [stats, canonicalPath] = await Promise.all([stat(folderPath, { bigint: true }), realpath(folderPath)]);
 
@@ -1676,6 +1920,159 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   await capturePage(page, narrowShot);
   screenshots.push(narrowShot);
   viewports.push({ theme: tag, state: 'ai-session-logs-narrow-760', width: 760, height: 820, screenshot: narrowShot, layout });
+}
+
+async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
+
+  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
+  if (!(await sidebar.isVisible())) {
+    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+  }
+
+  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+
+  const workspace = page.locator('.ai-session-workspace');
+
+  const notifications = workspace.locator('.ai-session__notifications-mount');
+
+  const trigger = notifications.getByRole('button', { name: '알림, 전체 읽지 않은 60개', exact: true });
+
+  const popover = notifications.locator('.ai-session-notifications__popover');
+
+  await trigger.waitFor({ state: 'visible' });
+
+  assert.equal(await popover.isVisible(), false, 'The exact project unread badge must be available while the alert popover is closed');
+
+  await verifyTheme(page, tag === 'dark', `mailbox-${tag}`);
+
+  const badgeShot = path.join(output, `ai-session-mailbox-${tag}-closed-badge.png`);
+
+  await capturePage(page, badgeShot);
+  screenshots.push(badgeShot);
+  viewports.push({ theme: tag, state: 'ai-session-mailbox-unread-badge', width: 1440, height: 900, screenshot: badgeShot });
+
+  await trigger.click();
+  await popover.waitFor({ state: 'visible' });
+
+  const notificationList = popover.locator('.ai-session-notifications__list');
+
+  const loadedUnreadStatus = popover.locator('.ai-session-notifications__status');
+
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-notifications__item').length === 50);
+
+  assert.ok((await loadedUnreadStatus.innerText()).includes('불러온 목록에서 50개'), 'The first notification page must report its bounded unread count separately');
+
+  const showLatest = notifications.getByRole('button', { name: '새 알림 보기', exact: true });
+
+  await showLatest.waitFor({ state: 'visible' });
+  await showLatest.click();
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-notifications__item').length === 1);
+
+  const targetNotification = notificationList.locator(`[data-notification-id="${fixture.mailbox.targetNotificationId}"]`);
+
+  await targetNotification.waitFor({ state: 'visible' });
+
+  assert.equal(fixture.mailbox.messageIds.slice(0, fixture.mailbox.pageSize).includes(fixture.mailbox.targetMessageId), false, 'The exact notification target must be older than the first mailbox page');
+
+  assert.ok((await targetNotification.innerText()).includes(fixture.mailbox.recipientName), 'The latest notification must name the actual recipient session');
+
+  await targetNotification.click();
+
+  const messageTab = workspace.getByRole('tab', { name: '메시지', exact: true });
+
+  await messageTab.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => document.querySelector('#ai-session-tab-messages')?.getAttribute('aria-selected') === 'true');
+  await workspace.getByRole('heading', { name: fixture.mailbox.recipientName, exact: true }).waitFor();
+
+  const messagePanel = workspace.locator('.ai-session__messages-panel');
+
+  const targetMessage = messagePanel.locator(`[data-message-id="${fixture.mailbox.targetMessageId}"]`);
+
+  const targetBody = targetMessage.locator('.ai-session-messages__body');
+
+  await targetMessage.waitFor({ state: 'visible' });
+  await page.waitForFunction(messageId => document.querySelector(`[data-message-id="${messageId}"]`)?.getAttribute('aria-current') === 'true', fixture.mailbox.targetMessageId);
+
+  const bodyText = await targetBody.textContent();
+
+  assert.ok(bodyText?.startsWith(`CI mailbox ${tag} message 60 ${mailboxFixtureLiteralMarkup()}`), 'The exact old message body must display escaped text literally');
+
+  assert.ok(bodyText?.includes('***'), 'The trusted fixture token must be masked by the production send path');
+
+  assert.equal(bodyText?.includes(mailboxFixtureSecret(tag)), false, 'The rendered mailbox must not reveal the trusted fixture token');
+
+  assert.ok((bodyText?.length ?? 0) > 15_000, 'The exact-target request must display the long body beyond the first mailbox page');
+
+  assert.equal(await targetBody.locator('[data-ci-injection="mailbox-fixture"]').count(), 0, 'Markup-looking message content must remain text instead of becoming DOM');
+
+  assert.ok((await targetMessage.locator('.ai-session-messages__meta').innerText()).includes(fixture.mailbox.senderSessionId), 'The sender metadata must expose the complete session ID');
+
+  assert.ok((await targetMessage.locator('.ai-session-messages__read-state').innerText()).includes('우편함에 보관됨'), 'Opening a notification must leave the AI message unread');
+
+  await page.getByRole('button', { name: '알림, 전체 읽지 않은 59개', exact: true }).waitFor({ state: 'visible' });
+
+  const desktopShot = path.join(output, `ai-session-mailbox-${tag}-exact-message.png`);
+
+  await capturePage(page, desktopShot);
+  screenshots.push(desktopShot);
+  viewports.push({ theme: tag, state: 'ai-session-mailbox-exact-message', width: 1440, height: 900, screenshot: desktopShot });
+
+  const firstMessagePage = messagePanel.getByRole('button', { name: '처음 메시지 다시 읽기', exact: true });
+
+  const nextMessagePage = messagePanel.getByRole('button', { name: '다음 메시지 불러오기', exact: true });
+
+  const messages = messagePanel.locator('.ai-session-messages__message');
+
+  await firstMessagePage.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-messages__message').length === 50);
+
+  assert.deepEqual(await messages.evaluateAll(elements => elements.map(element => element.dataset.messageId)), fixture.mailbox.messageIds.slice(0, 50), 'The mailbox first-page action must return the bounded first 50 messages');
+
+  await nextMessagePage.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-messages__message').length === 60);
+
+  assert.deepEqual(await messages.evaluateAll(elements => elements.map(element => element.dataset.messageId)), fixture.mailbox.messageIds, 'The next-page action must load retained mailbox history without duplicate records');
+
+  await firstMessagePage.focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-messages__message').length === 50);
+  await firstMessagePage.focus();
+  await page.waitForTimeout(4_000);
+
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), '처음 메시지 다시 읽기', 'Visible mailbox refresh must not steal focus after notification navigation');
+
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  await firstMessagePage.scrollIntoViewIfNeeded();
+
+  const narrowLayout = await workspace.evaluate(element => ({
+    overflow: element.scrollWidth > element.clientWidth + 1,
+    firstHistoryActionReachable: (() => {
+      const bounds = element.querySelector('.ai-session-messages__button:first-child')?.getBoundingClientRect();
+
+      return !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1;
+    })(),
+  }));
+
+  assert.equal(narrowLayout.overflow, false, `The mailbox must not overflow horizontally at ${tag}/760`);
+
+  assert.equal(narrowLayout.firstHistoryActionReachable, true, `The mailbox history action must remain reachable at ${tag}/760`);
+
+  const narrowBodies = await messagePanel.locator('.ai-session-messages__body').allTextContents();
+
+  assert.ok(narrowBodies.every(body => !body.includes(mailboxFixtureSecret(tag))), 'Narrow rendered mailbox content must remain masked');
+
+  const narrowShot = path.join(output, `ai-session-mailbox-${tag}-narrow-760.png`);
+
+  await capturePage(page, narrowShot);
+  screenshots.push(narrowShot);
+  viewports.push({ theme: tag, state: 'ai-session-mailbox-narrow-760', width: 760, height: 820, screenshot: narrowShot, layout: narrowLayout });
 }
 
 async function dismissStartupInvitations(page) {
