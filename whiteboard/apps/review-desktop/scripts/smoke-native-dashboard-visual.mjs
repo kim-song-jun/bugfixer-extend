@@ -22,9 +22,132 @@ await mkdir(output, { recursive: true });
 
 const root = await mkdtemp('/tmp/wb-native-ui-');
 
-const diagnostics = { apps: [], console: [], canceledThemeLoads: [], readinessMarks: [], pageErrors: [], failedRequests: [], themes: [] };
+const diagnostics = { apps: [], console: [], consoleRecords: [], consoleCorrelations: [], canceledThemeLoads: [], teardownCancellations: [], readinessMarks: [], pageErrors: [], failedRequests: [], themes: [] };
 
 class FatalWaitError extends Error {}
+
+function renderCDPConsoleArgument(argument) {
+  if (argument.type === 'undefined') return 'undefined';
+  if (Object.hasOwn(argument, 'value')) return String(argument.value);
+  if (argument.unserializableValue) return String(argument.unserializableValue);
+  if (argument.description === 'Object' && argument.preview) {
+    return `{${argument.preview.properties.map(({ name, value }) => `${name}: ${value}`).join(', ')}}`;
+  }
+  if (argument.subtype === 'array' && argument.preview) return undefined;
+  return argument.description;
+}
+
+function isCanceledExtensionScan(entry) {
+  return /\(Canceled: Canceled\)/.test(entry)
+    && (/Error scanning user extensions:/.test(entry)
+      || /Contents\/Resources\/app\/extensions\/[^/]+\/package\.json/.test(entry));
+}
+
+function isCanceledThemeLoad(entry) {
+  return /review-(?:light|dark)\.json/.test(entry) && /\(Canceled: Canceled\)/.test(entry);
+}
+
+function finalizeConsoleCaptures(captures, owned, cleanOwnedShutdown) {
+  const pageErrorsByText = new Map();
+  const cdpErrorsByText = new Map();
+  const pageEvents = captures.flatMap(capture => capture.pageConsoleErrors);
+  const cdpEvents = captures.flatMap(capture => capture.cdpConsoleErrors);
+  for (const event of pageEvents) {
+    const key = JSON.stringify([event.pid, event.renderedMessage]);
+    if (!pageErrorsByText.has(key)) pageErrorsByText.set(key, []);
+    pageErrorsByText.get(key).push(event);
+  }
+  for (const event of cdpEvents) {
+    if (event.renderedMessage === null) continue;
+    const key = JSON.stringify([event.pid, event.renderedMessage]);
+    if (!cdpErrorsByText.has(key)) cdpErrorsByText.set(key, []);
+    cdpErrorsByText.get(key).push(event);
+  }
+
+  const correlatedCDPEvents = new Set();
+  for (const [key, matchingPageEvents] of pageErrorsByText) {
+    const [pid, renderedMessage] = JSON.parse(key);
+    const matchingCDPEvents = cdpErrorsByText.get(key) ?? [];
+    const isOneToOne = matchingPageEvents.length === 1 && matchingCDPEvents.length === 1
+      && matchingPageEvents[0].targetIndex === matchingCDPEvents[0].targetIndex;
+
+    if (!isOneToOne) {
+      for (const event of matchingPageEvents) {
+        if (isCanceledThemeLoad(event.entry)) diagnostics.canceledThemeLoads.push(event);
+        else diagnostics.console.push(event.entry);
+      }
+      diagnostics.consoleCorrelations.push({
+        pid,
+        renderedMessage,
+        status: matchingCDPEvents.length ? 'ambiguous-counts-or-targets' : 'no-exact-cdp-match',
+        pageRecordIds: matchingPageEvents.map(event => event.recordId),
+        pageTargetIndexes: matchingPageEvents.map(event => event.targetIndex),
+        cdpRecordIds: matchingCDPEvents.map(event => event.recordId),
+        cdpTargetIndexes: matchingCDPEvents.map(event => event.targetIndex),
+      });
+      continue;
+    }
+
+    const pageEvent = matchingPageEvents[0];
+    const cdpEvent = matchingCDPEvents[0];
+    correlatedCDPEvents.add(cdpEvent);
+    const isCanceledCandidate = isCanceledExtensionScan(pageEvent.entry);
+    const originatedDuringShutdown = Number.isFinite(cdpEvent.originTimestampEpochMilliseconds)
+      && Number.isFinite(owned.shutdownStartEpochMilliseconds)
+      && cdpEvent.originTimestampEpochMilliseconds >= owned.shutdownStartEpochMilliseconds;
+    const isTeardownCancellation = isCanceledCandidate && originatedDuringShutdown && cleanOwnedShutdown;
+
+    diagnostics.consoleCorrelations.push({
+      pid,
+      targetIndex: pageEvent.targetIndex,
+      renderedMessage,
+      pageRecordId: pageEvent.recordId,
+      cdpRecordId: cdpEvent.recordId,
+      cdpOriginTimestampEpochMilliseconds: cdpEvent.originTimestampEpochMilliseconds,
+      shutdownStartEpochMilliseconds: owned.shutdownStartEpochMilliseconds ?? null,
+      cleanOwnedShutdown,
+      decision: isCanceledThemeLoad(pageEvent.entry)
+        ? 'known-theme-cancellation'
+        : isTeardownCancellation ? 'teardown-cancellation' : 'fatal-console-error',
+      status: 'exact-one-to-one',
+    });
+
+    if (isCanceledThemeLoad(pageEvent.entry)) {
+      diagnostics.canceledThemeLoads.push(pageEvent);
+    } else if (isTeardownCancellation) {
+      diagnostics.teardownCancellations.push({
+        ...pageEvent,
+        cdpRecordId: cdpEvent.recordId,
+        cdpOriginTimestampEpochMilliseconds: cdpEvent.originTimestampEpochMilliseconds,
+        shutdownStartedAt: owned.shutdownStartedAt,
+        termSentAt: owned.termSentAt ?? null,
+        exitObservedAt: owned.exitObservedAt,
+        exit: owned.exit,
+        portClosedAt: owned.portClosedAt,
+      });
+    } else {
+      diagnostics.console.push(pageEvent.entry);
+    }
+  }
+
+  for (const event of cdpEvents) {
+    if (correlatedCDPEvents.has(event)) continue;
+    diagnostics.console.push(event.entry);
+    diagnostics.consoleCorrelations.push({
+      pid: event.pid,
+      targetIndex: event.targetIndex,
+      renderedMessage: event.renderedMessage,
+      cdpRecordId: event.recordId,
+      cdpOriginTimestampEpochMilliseconds: event.originTimestampEpochMilliseconds,
+      status: event.renderedMessage === null ? 'unrenderable-cdp-message' : 'unmatched-cdp-error',
+    });
+  }
+
+  diagnostics.consoleRecords.push(
+    ...pageEvents.map(event => ({ source: 'playwright-console', ...event })),
+    ...cdpEvents.map(event => ({ source: 'cdp-runtime', ...event })),
+  );
+}
 
 async function reservePort() {
   const server = net.createServer();
@@ -76,11 +199,14 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
   let spawnError;
   child.once('error', error => { spawnError = error; });
-  const owned = { pid: child.pid, ppid: process.pid, command: executable, args, port, userData, startedAt: new Date().toISOString() };
+  const owned = { pid: child.pid, ppid: process.pid, command: executable, args, port, userData, startedAt: new Date().toISOString(), consoleCaptureBoundaries: [] };
   diagnostics.apps.push(owned);
   const stderr = [];
   child.stderr.on('data', chunk => stderr.push(chunk.toString()));
-  const exited = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  const exited = new Promise(resolve => child.once('close', (code, signal) => {
+    owned.exitObservedAt = new Date().toISOString();
+    resolve({ code, signal });
+  }));
 
   let browser;
 
@@ -102,20 +228,55 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
 
-    const watchedPages = new WeakSet();
+    const watchedPages = new WeakMap();
+    const consoleCaptures = [];
 
     const watchPage = page => {
 
-      if (watchedPages.has(page)) return;
+      if (watchedPages.has(page)) return watchedPages.get(page);
 
-      watchedPages.add(page);
+      const capture = {
+        targetIndex: consoleCaptures.length,
+        pageConsoleErrors: [],
+        cdpConsoleErrors: [],
+      };
+      consoleCaptures.push(capture);
+
+      const capturePromise = (async () => {
+        capture.cdp = await page.context().newCDPSession(page);
+        capture.cdp.on('Runtime.consoleAPICalled', event => {
+          if (event.type !== 'error') return;
+
+          const previews = event.args.map(renderCDPConsoleArgument);
+          const renderedMessage = previews.every(value => value !== undefined) ? previews.join(' ') : null;
+          const message = renderedMessage ?? event.args.map(arg => arg.description ?? String(arg.value ?? '')).join(' ');
+          const entry = `PID ${child.pid}: ${message}`;
+          capture.cdpConsoleErrors.push({
+            recordId: capture.cdpConsoleErrors.length,
+            pid: child.pid,
+            entry,
+            renderedMessage,
+            originTimestampEpochMilliseconds: event.timestamp ?? null,
+            originClock: 'CDP Runtime.Timestamp epoch milliseconds',
+            targetIndex: capture.targetIndex,
+          });
+        });
+        await capture.cdp.send('Runtime.enable');
+      })();
+      watchedPages.set(page, capturePromise);
       page.on('console', message => {
-        const entry = `PID ${child.pid}: ${message.text()}`;
-
         if (message.type() !== 'error') return;
 
-        if (/review-(?:light|dark)\.json/.test(entry) && /\(Canceled: Canceled\)/.test(entry)) diagnostics.canceledThemeLoads.push(entry);
-        else diagnostics.console.push(entry);
+        const renderedMessage = message.text();
+        const entry = `PID ${child.pid}: ${renderedMessage}`;
+        capture.pageConsoleErrors.push({
+          recordId: capture.pageConsoleErrors.length,
+          pid: child.pid,
+          entry,
+          renderedMessage,
+          targetIndex: capture.targetIndex,
+          worker: Boolean(message.worker()),
+        });
       });
       page.on('pageerror', error => diagnostics.pageErrors.push(error.stack ?? error.message));
       page.on('requestfailed', request => {
@@ -123,12 +284,16 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
         if (failure !== 'net::ERR_ABORTED') diagnostics.failedRequests.push(`${request.url()} — ${failure}`);
       });
+
+      return capturePromise;
     };
 
     for (const context of browser.contexts()) {
-      context.on('page', watchPage);
+      context.on('page', page => {
+        void watchPage(page).catch(error => diagnostics.pageErrors.push(`Unable to capture renderer console origin timestamps: ${error.stack ?? error.message}`));
+      });
 
-      for (const page of context.pages()) watchPage(page);
+      for (const page of context.pages()) await watchPage(page);
     }
 
     const selector = descriptor ? '.project-dashboard #project-dashboard-title' : '.project-home__intro h1';
@@ -143,32 +308,47 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
       return undefined;
     }, `the packaged renderer with ${selector}`, 90_000);
 
-    watchPage(page);
+    await watchPage(page);
 
-    return { child, exited, browser, page, port, targetId: target.id, stderr, owned };
+    return { child, exited, browser, page, port, targetId: target.id, stderr, owned, consoleCaptures };
   } catch (error) {
     try {
 
       if (browser) await browser.close();
     } finally {
-      await stopOwned(child, exited, port);
+      await stopOwned(child, exited, port, owned);
     }
 
     throw error;
   }
 }
 
-async function stopOwned(child, exited, port) {
+function beginOwnedShutdown(owned) {
+  if (owned.shutdownStartedAt) return;
+  owned.shutdownStartedAt = new Date().toISOString();
+  owned.shutdownStartEpochMilliseconds = Date.now();
+  owned.shutdownStartMonotonicNs = process.hrtime.bigint().toString();
+}
+
+async function stopOwned(child, exited, port, owned) {
+
+  beginOwnedShutdown(owned);
 
   if (child.pid && (child.exitCode === null && child.signalCode === null || !(await isPortClosed(port)))) {
-    try { process.kill(-child.pid, 'SIGTERM'); }
+    try {
+      process.kill(-child.pid, 'SIGTERM');
+      owned.termSentAt = new Date().toISOString();
+    }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
   }
 
   let closed = await exitedWithin(exited, 5_000);
 
   if (child.pid && (!closed || !(await isPortClosed(port)))) {
-    try { process.kill(-child.pid, 'SIGKILL'); }
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      owned.killSentAt = new Date().toISOString();
+    }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
 
     closed = await exitedWithin(exited, 5_000);
@@ -203,13 +383,26 @@ async function isPortClosed(port) {
 async function closeApp(session) {
   try {
 
+    beginOwnedShutdown(session.owned);
+    for (const capture of session.consoleCaptures) {
+      if (!capture.cdp) continue;
+      session.owned.consoleCaptureBoundaries.push({
+        targetIndex: capture.targetIndex,
+        shutdownStartEpochMilliseconds: session.owned.shutdownStartEpochMilliseconds,
+        clock: 'CDP Runtime.Timestamp epoch milliseconds / host Date.now epoch milliseconds',
+      });
+    }
     await session.browser.close();
   } finally {
-    await stopOwned(session.child, session.exited, session.port);
+    await stopOwned(session.child, session.exited, session.port, session.owned);
     await waitFor(() => isPortClosed(session.port), `owned CDP port ${session.port} to close`, 10_000);
     session.owned.closedAt = new Date().toISOString();
     session.owned.exit = await session.exited;
     session.owned.portClosed = true;
+    session.owned.portClosedAt = session.owned.closedAt;
+    const cleanOwnedShutdown = session.owned.exit.code === 0 && session.owned.exit.signal === null && session.owned.portClosed;
+
+    finalizeConsoleCaptures(session.consoleCaptures, session.owned, cleanOwnedShutdown);
   }
 }
 
