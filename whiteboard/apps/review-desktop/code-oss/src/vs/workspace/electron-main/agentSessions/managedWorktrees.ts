@@ -825,7 +825,7 @@ export class ManagedWorktreeService {
 				else { input.push(Buffer.from(`${entry.mode} ${entry.oid}\t${file.path}\0`, 'utf8')); }
 			}
 			if (!input.length) { return snapshot.bytes; }
-			await this.runGit(lease.worktreePath, ['update-index', '--index-info', '-z'], { env: { GIT_INDEX_FILE: privateIndex }, input: Buffer.concat(input) });
+			await this.runGit(lease.worktreePath, ['update-index', '-z', '--index-info'], { env: { GIT_INDEX_FILE: privateIndex }, input: Buffer.concat(input) });
 			const allEntriesAfter = await this.indexEntries(lease.worktreePath, privateIndex, []);
 			if (!this.unrelatedIndexEntriesMatch(allEntriesBefore, allEntriesAfter, new Set(binding.selectedPaths))) {
 				throw new Error('Private index reconciliation changed an unrelated staged entry.');
@@ -983,7 +983,7 @@ export class ManagedWorktreeService {
 					entries.push(Buffer.from(`${file.after.mode} ${blobOid}\t${file.path}\0`, 'utf8'));
 				}
 			}
-			await this.runGit(lease.worktreePath, ['update-index', '--index-info', '-z'], { env: indexEnv, input: Buffer.concat(entries) });
+			await this.runGit(lease.worktreePath, ['update-index', '-z', '--index-info'], { env: indexEnv, input: Buffer.concat(entries) });
 			const treeOid = (await this.runGit(lease.worktreePath, ['write-tree'], { env: indexEnv })).stdout.toString('utf8').trim();
 			if (!OBJECT_ID_PATTERN.test(treeOid)) { throw new Error('Git returned an invalid proposed tree ID.'); }
 			const changed = await this.runGit(lease.worktreePath, ['diff', '--cached', '--name-only', '-z', '--no-renames', sourceHead, '--'], { env: indexEnv });

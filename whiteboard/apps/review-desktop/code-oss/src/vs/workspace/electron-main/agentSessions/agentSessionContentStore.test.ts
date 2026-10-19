@@ -52,8 +52,8 @@ test('SQLite retains v1 snapshots unchanged and exposes v2 binary bytes only thr
 			entryCount: 3, fileBytes: Buffer.byteLength(legacyText) + raw.byteLength + oversizedSize, retainedTextBytes: Buffer.byteLength(legacyText), retainedBinaryBytes: raw.byteLength, contentReadCount: 2,
 			entries: [
 				{ path: 'legacy.txt', kind: 'file' as const, size: Buffer.byteLength(legacyText), sha256: legacyHash, executable: false, content: legacyText },
-				{ path: 'tool.bin', kind: 'file' as const, size: raw.byteLength, sha256: rawHash, executable: true, contentUnavailableReason: 'binary' as const, rawBytesBase64: raw.toString('base64') },
 				{ path: 'oversized.bin', kind: 'file' as const, size: oversizedSize, sha256: oversizedHash, executable: false, contentUnavailableReason: 'fileTooLarge' as const },
+				{ path: 'tool.bin', kind: 'file' as const, size: raw.byteLength, sha256: rawHash, executable: true, contentUnavailableReason: 'binary' as const, rawBytesBase64: raw.toString('base64') },
 			],
 		};
 		const final = database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 0, revision: null, cleanupVerified: true });

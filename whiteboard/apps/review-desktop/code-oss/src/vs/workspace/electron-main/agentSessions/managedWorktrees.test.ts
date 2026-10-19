@@ -193,7 +193,7 @@ test('a merge failure before Git mutation reconciles as not applied', async () =
 });
 
 test('a non-conflict commit-signing failure after merge preparation remains pending for recovery', async () => {
-	await fixture(async (_root, repository, service) => {
+	await fixture(async (root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
 		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });

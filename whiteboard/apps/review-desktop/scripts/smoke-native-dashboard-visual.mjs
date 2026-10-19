@@ -2287,6 +2287,7 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
   const entries = [];
   let fileBytes = 0;
   let retainedTextBytes = 0;
+  let retainedBinaryBytes = 0;
   let contentReadCount = 0;
   let hasUnavailableContent = false;
 
@@ -2302,6 +2303,7 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
 
     if (bytes.includes(0)) {
       entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, executable: Boolean(info.mode & 0o111), rawBytesBase64: bytes.toString('base64'), contentUnavailableReason: 'binary' });
+      retainedBinaryBytes += bytes.byteLength;
       hasUnavailableContent = true;
     } else {
       const content = bytes.toString('utf8');
@@ -2319,6 +2321,7 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
     entryCount: entries.length,
     fileBytes,
     retainedTextBytes,
+    retainedBinaryBytes,
     contentReadCount,
     entries,
   };

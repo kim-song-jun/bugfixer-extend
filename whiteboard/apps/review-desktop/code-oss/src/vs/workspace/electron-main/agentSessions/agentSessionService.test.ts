@@ -262,7 +262,7 @@ test('idle mutation lease rejects active and cleanup-unverified turns but does n
 	try {
 		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
 		const turn = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
-		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id }), /active turn/u);
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id }), /idle session/u);
 		const otherSession = service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.gitSession.id });
 		otherSession.release();
 		const terminal = await service.stop(fixture.project.id, fixture.sharedSession.id, turn.id);

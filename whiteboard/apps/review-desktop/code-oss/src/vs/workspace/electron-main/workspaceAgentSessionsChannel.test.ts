@@ -363,7 +363,7 @@ test('commit approval IPC requires the exact scoped proposal and native confirma
 			const bytes = Buffer.from(value, 'utf8');
 			return {
 				schemaVersion: 2 as const, folderIdentity, capturedAt, inventoryCoverage: 'complete' as const, contentCoverage: 'complete' as const,
-				entryCount: 1, fileBytes: bytes.byteLength, retainedTextBytes: bytes.byteLength, contentReadCount: 1,
+				entryCount: 1, fileBytes: bytes.byteLength, retainedTextBytes: bytes.byteLength, retainedBinaryBytes: 0, contentReadCount: 1,
 				entries: [{ path: 'src/change.ts', kind: 'file' as const, size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), content: value, executable: false }],
 			};
 		};

@@ -34,6 +34,7 @@ function snapshot(folderIdentity: AgentSessionTurnSnapshot['folderIdentity'], co
 	return {
 		schemaVersion, folderIdentity, capturedAt, inventoryCoverage: 'complete', contentCoverage: 'complete',
 		entryCount: 1, fileBytes: bytes.byteLength, retainedTextBytes: bytes.byteLength, contentReadCount: 1,
+		...(schemaVersion === 2 ? { retainedBinaryBytes: 0 } : {}),
 		entries: [{ path: 'src/change.ts', kind: 'file', size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), content: contents, ...(schemaVersion === 2 ? { executable: false } : {}) }],
 	};
 }
