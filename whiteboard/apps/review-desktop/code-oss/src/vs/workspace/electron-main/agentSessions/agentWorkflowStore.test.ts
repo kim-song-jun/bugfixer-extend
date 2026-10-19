@@ -98,7 +98,7 @@ test('finite workflow plan, approval receipt and ready run persist across SQLite
 		rmSync(directory, { recursive: true, force: true });
 	}
 });
-test('frozen schema v24 migration retains project, task and session rows through schema v31', () => {
+test('frozen schema v24 migration retains project, task and session rows through schema v32', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-workflow-v24-'));
 	const path = join(directory, 'workspace.db');
 	const projectId = randomUUID();
@@ -122,7 +122,7 @@ test('frozen schema v24 migration retains project, task and session rows through
 		assert.equal(database.getProject(projectId)?.name, 'Preserved v24');
 		assert.equal(database.getTask(taskId)?.title, 'Implement finite workflow');
 		assert.equal(database.agentSessions.getSession(projectId, sessionId)?.id, sessionId);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 31);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 32);
 		assert.ok(database.agentWorkflows.getWorkflow(projectId, randomUUID()) === undefined);
 	} finally {
 		database.close();

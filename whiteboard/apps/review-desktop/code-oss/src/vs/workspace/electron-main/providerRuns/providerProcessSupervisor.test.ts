@@ -44,11 +44,11 @@ test('streams parsed lines and succeeds only after a provider terminal event and
 	const handle = await new ProviderProcessSupervisor().run(
 		request,
 		spec(
-			`process.stdout.write(JSON.stringify({type:'progress',metadata:{count:1}})+'\\n'); process.stdout.write(JSON.stringify({type:'done',terminalState:'succeeded'})+'\\n');`,
-			(line) => {
+			`process.stdout.write(JSON.stringify({type:'progress',metadata:{count:1}})+'\\n'); process.stderr.write(JSON.stringify({type:'stderr-progress',metadata:{count:2}})+'\\n'); process.stdout.write(JSON.stringify({type:'done',terminalState:'succeeded'})+'\\n');`,
+			(line, stream) => {
 				const parsed = JSON.parse(line) as { type: string; metadata?: Record<string, number>; terminalState?: 'succeeded' };
 				return {
-					event: { type: parsed.type, metadata: parsed.metadata },
+					event: { type: parsed.type, metadata: { ...parsed.metadata, stream } },
 					terminalState: parsed.terminalState,
 				};
 			},
@@ -61,9 +61,14 @@ test('streams parsed lines and succeeds only after a provider terminal event and
 	);
 	const result = await handle.result;
 	assert.equal(result.state, 'succeeded', JSON.stringify(result));
-	assert.equal(events.length, 2);
-	assert.equal(events[0].attemptId, request.attemptId);
-	assert.equal(events[0].metadata?.count, 1);
+	assert.equal(events.length, 3);
+	assert.ok(events.every(event => event.attemptId === request.attemptId));
+	const stdoutEvent = events.find(event => event.type === 'progress');
+	assert.equal(stdoutEvent?.metadata?.count, 1);
+	assert.equal(stdoutEvent?.metadata?.stream, 'stdout');
+	const stderrEvent = events.find(event => event.type === 'stderr-progress');
+	assert.equal(stderrEvent?.metadata?.count, 2);
+	assert.equal(stderrEvent?.metadata?.stream, 'stderr');
 });
 
 test('abort while durable process ownership is being recorded prevents GO and provider execution', async () => {

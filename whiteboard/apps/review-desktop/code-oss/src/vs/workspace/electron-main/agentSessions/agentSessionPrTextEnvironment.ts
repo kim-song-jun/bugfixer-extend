@@ -107,14 +107,14 @@ export function createAgentSessionPrTextResolver(options: AgentSessionPrTextEnvi
 /** Removes only the recorded socket and an empty, private runner directory. */
 export function removePrTextControlDirectoryIfPresent(socketPath: string): void {
 	const directory = validatePrTextControlPath(socketPath);
-	removePrTextControlSocketIfPresent(socketPath, directory);
+	removeSocketIfPresent(socketPath, directory);
 	try { rmdirSync(directory); }
 	catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; } }
 }
 
 /** Removes the exact recorded socket after the supervisor has proved its process group is gone. */
 export function removePrTextControlSocketIfPresent(socketPath: string): void {
-	removePrTextControlSocketIfPresent(socketPath, validatePrTextControlPath(socketPath));
+	removeSocketIfPresent(socketPath, validatePrTextControlPath(socketPath));
 }
 
 function validatePrTextControlPath(socketPath: string): string {
@@ -139,7 +139,7 @@ function validatePrTextControlPath(socketPath: string): string {
 	}
 }
 
-function removePrTextControlSocketIfPresent(socketPath: string, directory: string): void {
+function removeSocketIfPresent(socketPath: string, directory: string): void {
 	try {
 		const socketInfo = lstatSync(socketPath);
 		const uid = process.getuid!();

@@ -69,12 +69,14 @@ test('real MCP PR text tools bind later-turn authorship, idempotency, Unicode pa
 	try {
 		const session = createSession(fixture);
 		const target = createTurn(fixture, session);
-		const firstRunning = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, target.id, target.revision, session.revision, { state: 'running' });
-		const firstEnded = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, target.id, firstRunning.turn.revision, firstRunning.session.revision,
+		const targetSession = fixture.database.agentSessions.getSession(fixture.project.id, session.id)!;
+		const firstRunning = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, target.id, target.revision, targetSession.revision, { state: 'running' });
+		fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, target.id, firstRunning.turn.revision, firstRunning.session.revision,
 			{ state: 'exited', exitCode: 0, cleanupVerified: true });
 		const idleSession = fixture.database.agentSessions.getSession(fixture.project.id, session.id)!;
 		const laterStarting = createTurn(fixture, idleSession);
-		const laterRunning = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, laterStarting.id, laterStarting.revision, firstEnded.session.revision + 1, { state: 'running' });
+		const laterSession = fixture.database.agentSessions.getSession(fixture.project.id, session.id)!;
+		const laterRunning = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, session.id, laterStarting.id, laterStarting.revision, laterSession.revision, { state: 'running' });
 		const otherSession = createSession(fixture);
 		const otherTurn = createTurn(fixture, otherSession);
 		const bridge = new AgentSessionMcpBridge(new AgentSessionCollaborationService(fixture.database), undefined, fixture.database);

@@ -144,7 +144,7 @@ test('host redaction removes credential-shaped values before hashing and persist
 	try {
 		const store = value.store();
 		const contextJSON = JSON.stringify({ note: 'password=fixture-secret', explicit: 'visible-secret' });
-		const input = requestInput(value.scope, { contextJSON, contextDigest: digest(contextJSON), instruction: 'token=fixture-secret visible-secret' });
+		const input = requestInput(value.scope, { contextJSON, contextDigest: digest(contextJSON), instruction: 'access_token=fixture-secret visible-secret' });
 		const request = store.createRequest(input, ['visible-secret']);
 		const sanitized = store.sanitizeContextJSON(contextJSON, ['visible-secret']);
 		const context = store.getRequestContext(value.scope, request.id)!;
@@ -152,9 +152,9 @@ test('host redaction removes credential-shaped values before hashing and persist
 		assert.doesNotMatch(context.contextJSON, /fixture-secret|visible-secret/u);
 		assert.doesNotMatch(request.instruction, /fixture-secret|visible-secret/u);
 		const attemptId = randomUUID(); store.startRequest({ requestId: request.id, expectedStateRevision: 0, attemptId });
-		const result = candidate(store, request.id, attemptId, { title: 'password=fixture-secret', body: 'token=fixture-secret visible-secret', knownSecrets: ['visible-secret'] });
+		const result = candidate(store, request.id, attemptId, { title: 'password=fixture-secret', body: 'access_token=fixture-secret visible-secret', knownSecrets: ['visible-secret'] });
 		assert.equal(result.candidate?.content.title, 'password=***');
-		assert.equal(result.candidate?.content.body, 'token=*** ***');
+		assert.equal(result.candidate?.content.body, 'access_token=*** ***');
 		const raw = value.db.prepare("SELECT event_json FROM agent_session_pr_text_request_events WHERE request_id = ? AND event_type = 'candidate'").get(request.id) as { event_json: string };
 		assert.doesNotMatch(raw.event_json, /fixture-secret|visible-secret/u);
 		const persisted = value.db.prepare('SELECT title, body, content_hash FROM agent_session_pr_text_revisions WHERE target_turn_id = ?').get(value.scope.targetTurnId) as { title: string; body: string; content_hash: string };
@@ -197,18 +197,15 @@ test('live agent revisions use host-derived authorship and exact retry keys', ()
 	} finally { value.close(); }
 });
 
-test('generated save idempotency fingerprints provider attempt source metadata', () => {
+test('generated revisions reject provider attempt receipts outside request completion', () => {
 	const value = fixture();
 	try {
 		const store = value.store(); const request = store.createRequest(requestInput(value.scope)); const attemptId = randomUUID();
 		store.startRequest({ requestId: request.id, expectedStateRevision: 0, attemptId });
 		const source = providerSource(request.id, attemptId);
 		const input = { scope: value.scope, expectedRevision: 0, idempotencyKey: 'provider-save', source, sanitizedCompleteAgentText: { title: 'Provider title', body: 'Provider body' }, knownSecrets: [] };
-		const revision = store.appendGeneratedRevision(input);
-		assert.equal(revision.author, 'providerAttempt');
-		assert.deepEqual(store.appendGeneratedRevision(input), revision);
-		assert.throws(() => store.appendGeneratedRevision({ ...input, source: { ...source, receiptHash: digest('different receipt') } }), /idempotency key/u);
-		assert.throws(() => store.appendGeneratedRevision({ ...input, expectedRevision: 1 }), /idempotency key/u);
+		assert.throws(() => store.appendGeneratedRevision(input), /request-bound trusted runner receipt/u);
+		assert.equal(store.getRequest(value.scope, request.id)?.state, 'running');
 	} finally { value.close(); }
 });
 

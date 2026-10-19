@@ -25,7 +25,9 @@ const GROUP_CHECK_INTERVAL_MS = 25;
 // Keep this shell as the process-group leader until the supervisor has reaped
 // the whole group. Reaping the leader first would make a later numeric-PGID
 // signal unsafe because the kernel may already have reused that identifier.
-const LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; "$@" 4>&- <&0 & provider_pid=$!; wait "$provider_pid"; provider_status=$?; printf "%s\\n" "$provider_status" >&4 || exit 125; while :; do sleep 1; done';
+// Run the provider in the foreground: an asynchronous command in noninteractive
+// sh can detach stdin. Keep shell diagnostics off the provider JSONL stream.
+const LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&- 2>/dev/null; "$@" 4>&- 2>&5 <&0; provider_status=$?; printf "%s\\n" "$provider_status" >&4 || exit 125; while :; do sleep 1; done';
 const CONTROLLED_LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; node_executable=$1; helper_script=$2; socket_path=$3; attempt_id=$4; owner_lifetime=$5; shift 5; if [ "$owner_lifetime" = "1" ]; then "$node_executable" "$helper_script" "$socket_path" "$attempt_id" "$$" --owner-lifetime "$@"; else "$node_executable" "$helper_script" "$socket_path" "$attempt_id" "$$" "$@"; fi; helper_status=$?; kill -TERM -$$ 2>/dev/null; kill -KILL -$$ 2>/dev/null; exit "$helper_status"';
 
 /** Windows process-tree ownership is not implemented, so provider execution is unavailable there. */
@@ -156,7 +158,7 @@ async function launch(
 			shell: false,
 			windowsHide: true,
 			detached: process.platform !== 'win32',
-			stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...(recoveryControl ? ['pipe' as const] : []), ...(request.ownerLifetime ? ['pipe' as const] : [])],
+			stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...(request.ownerLifetime ? ['pipe' as const] : [])],
 		});
 	} catch {
 		return rejectedHandle(request, 'Provider process could not be started.');
@@ -294,7 +296,13 @@ async function launch(
 	};
 
 	if (child.stdout) attachLines(child.stdout, 'stdout');
-	if (child.stderr) attachLines(child.stderr, 'stderr');
+	if (recoveryControl) {
+		if (child.stderr) attachLines(child.stderr, 'stderr');
+	} else {
+		const providerStderr = child.stdio[5] as NodeJS.ReadableStream | null;
+		if (providerStderr) attachLines(providerStderr, 'stderr');
+		child.stderr?.resume();
+	}
 	child.once('exit', () => {
 		guardianExited = true;
 		// A descendant can inherit stdout/stderr and keep Node's `close` event
