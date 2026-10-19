@@ -223,6 +223,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.root = $('.ai-session-workspace');
 		this.root.tabIndex = -1;
 		parent.appendChild(this.root);
+		const clearInstructionFocus = () => { this.instructionFocusSessionId = undefined; };
+		document.addEventListener('pointerdown', clearInstructionFocus, true);
+		document.addEventListener('keydown', clearInstructionFocus, true);
+		this._register(toDisposable(() => {
+			document.removeEventListener('pointerdown', clearInstructionFocus, true);
+			document.removeEventListener('keydown', clearInstructionFocus, true);
+		}));
 		this.resizeListener = () => this.terminalController?.layout();
 		window.addEventListener('resize', this.resizeListener);
 		this._register(toDisposable(() => { if (this.resizeListener) window.removeEventListener('resize', this.resizeListener); }));
@@ -230,7 +237,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	protected override setEditorVisible(visible: boolean): void {
 		this.editorVisible = visible;
-		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionChangesController?.setVisible(false); this.sessionNotifications?.setVisible(false); this.sessionOnboarding?.setVisible(false); }
+		if (!visible) { this.instructionFocusSessionId = undefined; this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionChangesController?.setVisible(false); this.sessionNotifications?.setVisible(false); this.sessionOnboarding?.setVisible(false); }
 		else this.render();
 		this.updateLifecyclePolling();
 	}
@@ -270,6 +277,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.createPermissionMode = 'read-only';
 			this.sessionListScrollTop = 0;
 			this.creating = false;
+			this.instructionFocusSessionId = undefined;
 			this.preview = undefined;
 			this.previewSessionId = undefined;
 			this.error = undefined;
@@ -334,6 +342,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private selectSession(sessionId: string): void {
 		if (!this.projectId || !this.sessions.some(session => session.id === sessionId) || sessionId === this.selectedSessionId && !this.creating) return;
+		const projectId = this.projectId;
 		this.creating = false;
 		this.instructionFocusSessionId = undefined;
 		const seen = new Set<string>();
@@ -354,6 +363,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.notice = undefined;
 		this.render();
 		requestAnimationFrame(() => {
+			if (this.projectId !== projectId || this.selectedSessionId !== sessionId) { return; }
+			const selectedTurn = this.latestTurn(sessionId);
+			if ((this.instructionFocusSessionId === sessionId && this.activeTab === 'terminal')
+				|| (selectedTurn && this.activeTab === 'terminal' && this.terminalController?.hasFocus(sessionId, selectedTurn.id))) { return; }
 			const row = this.root?.querySelector<HTMLElement>('.ai-session__session-row[aria-current="true"]');
 			const selected = row && row.getClientRects().length > 0
 				? row
@@ -1225,12 +1238,21 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private setTab(tab: AgentSessionViewTab): void {
 		if (!this.projectId || tab === this.activeTab) return;
+		const projectId = this.projectId;
+		const sessionId = this.selectedSessionId;
+		if (tab !== 'terminal') { this.instructionFocusSessionId = undefined; }
 		this.notificationNavigationGeneration++;
 		this.activeTab = tab;
 		localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, tab);
 		if (tab !== 'terminal') this.terminalController?.hide();
 		this.render();
-		requestAnimationFrame(() => this.root?.querySelector<HTMLElement>(`#ai-session-tab-${tab}`)?.focus({ preventScroll: true }));
+		requestAnimationFrame(() => {
+			if (this.projectId !== projectId || this.selectedSessionId !== sessionId || this.activeTab !== tab
+				|| this.instructionFocusSessionId === sessionId && tab === 'terminal') { return; }
+			const currentTurn = sessionId ? this.latestTurn(sessionId) : undefined;
+			if (tab === 'terminal' && sessionId && currentTurn && this.terminalController?.hasFocus(sessionId, currentTurn.id)) { return; }
+			this.root?.querySelector<HTMLElement>(`#ai-session-tab-${tab}`)?.focus({ preventScroll: true });
+		});
 	}
 
 	private showError(message: string): void { this.error = message; this.render(); }
@@ -1257,6 +1279,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const focusedMessagesElement = activeElement instanceof HTMLElement && this.sessionMessagesPanel?.contains(activeElement) ? activeElement : undefined;
 		const focusedWorkflowElement = activeElement instanceof HTMLElement && this.sessionWorkflowPanel?.contains(activeElement) ? activeElement : undefined;
 		const focusedNotificationsElement = activeElement instanceof HTMLElement && this.notificationsMount?.contains(activeElement) ? activeElement : undefined;
+		const focusedTurn = this.selectedSessionId ? this.latestTurn(this.selectedSessionId) : undefined;
+		const restoreTerminalFocus = !!(this.editorVisible && this.projectId && this.selectedSessionId && this.activeTab === 'terminal'
+			&& focusedTurn && this.terminalController?.hasFocus(this.selectedSessionId, focusedTurn.id));
+		const terminalFocusIdentity = restoreTerminalFocus && focusedTurn && this.selectedSessionId
+			? { projectId: this.projectId!, sessionId: this.selectedSessionId, turnId: focusedTurn.id } : undefined;
 		let logsShouldBeVisible = false;
 		let messagesShouldBeVisible = false;
 		let workflowShouldBeVisible = false;
@@ -1349,7 +1376,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 						onStop: () => void this.stopTurn(), onTab: tab => this.setTab(tab),
 					}, taskNames.get(session.taskId ?? ''), logsPanel, messagesPanel, workflowPanel);
 					if (this.activeTab === 'changes') { main.querySelector<HTMLElement>('.ai-session__panel')?.replaceChildren(changesPanel); }
-					if (this.activeTab === 'terminal') this.renderTerminal(rendered.terminal, session, turn);
+					if (this.activeTab === 'terminal') this.renderTerminal(rendered.terminal, session, turn, terminalFocusIdentity?.projectId === session.projectId
+						&& terminalFocusIdentity.sessionId === session.id && terminalFocusIdentity.turnId === turn?.id);
 					if (this.preview && this.previewSessionId === session.id) {
 						this.renderPreview(main, this.preview);
 						const preview = main.querySelector('.ai-session__preview');
@@ -1388,7 +1416,9 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (focusedMessagesElement?.isConnected) { focusedMessagesElement.focus({ preventScroll: true }); }
 		if (focusedWorkflowElement?.isConnected) { focusedWorkflowElement.focus({ preventScroll: true }); }
 		if (focusedNotificationsElement?.isConnected) { focusedNotificationsElement.focus({ preventScroll: true }); }
-		if (focusedSessionControl?.value) {
+		const terminalInstructionFocusPending = this.editorVisible && this.activeTab === 'terminal'
+			&& !!this.selectedSessionId && this.instructionFocusSessionId === this.selectedSessionId;
+		if (focusedSessionControl?.value && !terminalInstructionFocusPending) {
 			const attribute = { sessionSelect: 'data-session-select', sessionAction: 'data-session-action', sessionToggle: 'data-session-toggle' }[focusedSessionControl.key];
 			this.root.querySelector<HTMLElement>(`[${attribute}="${CSS.escape(focusedSessionControl.value)}"]`)?.focus({ preventScroll: true });
 		}
@@ -1458,16 +1488,17 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return (this.dashboard?.tasks ?? []).filter(task => !task.archivedAt && !task.trashedAt && !task.deletionPendingAt && task.state !== 'done');
 	}
 
-	private renderTerminal(container: HTMLElement, session: AgentSessionDTO, turn: AgentSessionTurnDTO | undefined): void {
+	private renderTerminal(container: HTMLElement, session: AgentSessionDTO, turn: AgentSessionTurnDTO | undefined, restoreActualFocus = false): void {
 		if (!this.editorVisible) return;
 		const terminalController = this.terminalController;
 		const show = (turn: AgentSessionTurnDTO): void => {
-			if (!terminalController) { return; }
+			if (!terminalController || turn.projectId !== this.projectId || turn.sessionId !== session.id) { return; }
 			void terminalController.show(container, session.id, turn).then(() => {
-				requestAnimationFrame(() => {
-					if (this.editorVisible && this.selectedSessionId === session.id && this.activeTab === 'terminal' && this.instructionFocusSessionId === session.id
-						&& terminalController.focus(session.id, turn.id)) { this.instructionFocusSessionId = undefined; }
-				});
+				if (!this.editorVisible || this.projectId !== turn.projectId || this.selectedSessionId !== session.id || this.activeTab !== 'terminal') { return; }
+				const activeElement = document.activeElement;
+				const mayRestoreFocus = activeElement === document.body || activeElement === document.documentElement || activeElement === this.root;
+				if (restoreActualFocus && mayRestoreFocus && terminalController.focus(session.id, turn.id)) { return; }
+				if (this.instructionFocusSessionId === session.id && mayRestoreFocus && terminalController.focus(session.id, turn.id)) { this.instructionFocusSessionId = undefined; }
 			}).catch(error => this.showError(this.errorMessage(error, '세션 터미널에 연결하지 못했습니다.')));
 		};
 		if (turn && terminalController?.hasTerminal(session.id, turn.id)) {

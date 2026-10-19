@@ -30,6 +30,9 @@ export class SessionTerminalController extends Disposable {
 	constructor(private readonly projectId: string, private readonly terminalService: ITerminalService, private readonly onError: (message: string) => void) { super(); }
 
 	async show(container: HTMLElement, sessionId: string, turn: AgentSessionTurnDTO): Promise<void> {
+		if (turn.projectId !== this.projectId || turn.sessionId !== sessionId || !turn.id) {
+			throw new Error('The terminal turn does not match its project and session.');
+		}
 		const key = `${sessionId}:${turn.id}`;
 		const generation = ++this.viewGeneration;
 		this.detachCurrent();
@@ -113,12 +116,21 @@ export class SessionTerminalController extends Disposable {
 
 	hasTerminal(sessionId: string, turnId: string): boolean { return this.records.has(`${sessionId}:${turnId}`); }
 
+	hasFocus(sessionId: string, turnId: string): boolean {
+		const key = `${sessionId}:${turnId}`;
+		const record = this.records.get(key);
+		const textarea = record?.instance.domElement.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
+		return !this.disposed && this.attachedKey === key && !!textarea && document.activeElement === textarea;
+	}
+
 	focus(sessionId: string, turnId: string): boolean {
 		const key = `${sessionId}:${turnId}`;
 		const record = this.records.get(key);
 		if (this.disposed || this.attachedKey !== key || !record) { return false; }
+		const textarea = record.instance.domElement.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
+		if (!textarea) { return false; }
 		record.instance.focus(true);
-		return true;
+		return document.activeElement === textarea;
 	}
 
 	finish(sessionId: string, turnId: string, exitCode: number | undefined): void {

@@ -1625,6 +1625,7 @@ try {
       assert.equal(aiSession.model, fixture.aiSession.model);
       assert.equal(aiSession.state, 'created', 'Preparing a session must not launch a provider');
       assert.equal(persistedDatabase.agentSessionTurns.listTurns(fixture.projectId, aiSession.id).length, 0, 'Visual QA must not create a paid provider turn');
+      fixture.aiSession.id = aiSession.id;
       fixture.controlRequest = await seedSessionControlRequest(persistedDatabase, fixture, projectFolder, aiSession);
     } finally {
       persistedDatabase.close();
@@ -2687,6 +2688,8 @@ async function verifySessionControlRequest(page, fixture, tag, screenshots, view
   assert.ok((await preview.innerText()).includes('CLI 승인 요청 없음'), 'The request preview must show its supported read-only CLI policy independently of app approval');
   assert.equal(await workspace.locator('#ai-session-preview-start').innerText(), 'macOS 확인 창에서 승인', 'A reviewed request must still require the native human approval step');
   assert.equal(await preview.locator('button').count(), 2, 'Review preview exposes only approval and cancellation; it does not launch automatically');
+
+  await workspace.locator('#ai-session-preview-start').scrollIntoViewIfNeeded();
 
   const previewScreenshot = path.join(output, `ai-session-control-request-preview-${tag}-1440.png`);
   await capturePage(page, previewScreenshot);
@@ -4642,7 +4645,7 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   await turnSelector.selectOption(fixture.logHistory.turnIds[0]);
   await logs.getByText(`CI fixture terminal ${tag} run 1 entry 1`, { exact: true }).waitFor();
 
-  const originalSessionRow = workspace.locator('.ai-session__session-row').filter({ hasText: fixture.aiSession.name });
+  const originalSessionRow = workspace.locator(`button[data-session-select="${fixture.aiSession.id}"]`);
   await originalSessionRow.click();
   await workspace.getByRole('heading', { name: fixture.aiSession.name, exact: true }).waitFor();
 

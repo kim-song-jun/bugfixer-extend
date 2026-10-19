@@ -707,8 +707,18 @@ try {
   await waitTerminalText(page, `READY pid=${second.fixturePid}`, 'session B reopen');
   assert.equal((await readTerminalText(page)).match(/READY pid=/g)?.length, 1, 'Reopening B must not create another fixture process.');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_A_CONCURRENT'), false, 'Session B must not receive session A input.');
-  await waitFor(() => page.locator('.ai-session__terminal .xterm-helper-textarea').evaluate(element => document.activeElement === element),
-    'individual instruction action focuses only the selected actual terminal');
+  await waitFor(async () => {
+    const focus = await page.locator('.ai-session__terminal .xterm-helper-textarea').evaluate(element => {
+      const active = document.activeElement;
+
+      return { matched: active === element, targetConnected: element.isConnected,
+        activeTag: active?.tagName, activeId: active?.id, activeClass: String(active?.className ?? '') };
+    });
+
+    second.instructionFocusObservation = focus;
+
+    return focus.matched;
+  }, 'individual instruction action focuses only the selected actual terminal');
   await page.keyboard.type('FIXTURE_TAG_B_CONCURRENT\n');
   await waitTerminalText(page, 'ECHO FIXTURE_TAG_B_CONCURRENT', 'session B concurrent input');
   second.inputTagsObserved.push('FIXTURE_TAG_B_CONCURRENT');
