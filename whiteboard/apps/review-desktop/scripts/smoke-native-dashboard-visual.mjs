@@ -2476,9 +2476,36 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
 
   const selectedScreenshot = path.join(output, `ai-sessions-${tag}-selected-desktop.png`);
 
+  const measureLayout = () => workspace.evaluate(element => {
+    const bounds = target => {
+      const rect = target?.getBoundingClientRect();
+
+      return rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
+    };
+
+    const main = element.querySelector('.ai-session__main');
+    const mainStyle = main ? getComputedStyle(main) : null;
+    const nameInput = element.querySelector('.ai-session__create-form [name="name"]');
+
+    return {
+      scrollTop: element.scrollTop,
+      projectHeader: bounds(element.querySelector('.ai-session__project-header')),
+      compactToolbar: bounds(element.querySelector('.ai-session__narrow-toolbar')),
+      main: main ? { ...bounds(main), paddingLeft: mainStyle.paddingLeft, boxSizing: mainStyle.boxSizing } : null,
+      heading: bounds(element.querySelector('.ai-session__detail-copy h1, .ai-session__create h1')),
+      nameInput: bounds(nameInput),
+      nameInputFocused: !!nameInput && document.activeElement === nameInput,
+      horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+    };
+  });
+
+  const selectedLayout = await measureLayout();
   await capturePage(page, selectedScreenshot);
   screenshots.push(selectedScreenshot);
-  viewports.push({ theme: tag, state: 'ai-session-preview', width: 1440, height: 900, screenshot: selectedScreenshot });
+  viewports.push({ theme: tag, state: 'ai-session-preview', width: 1440, height: 900, screenshot: selectedScreenshot, layout: selectedLayout });
+  assert.ok(Number.parseFloat(selectedLayout.main?.paddingLeft ?? '0') >= 16, `The desktop session main must retain its horizontal inset at ${tag}`);
+  assert.ok(selectedLayout.heading && selectedLayout.main && selectedLayout.heading.left >= selectedLayout.main.left + Number.parseFloat(selectedLayout.main.paddingLeft) - 1,
+    `The desktop session heading must respect the main inset at ${tag}`);
   await page.setViewportSize({ width: 760, height: 820 });
 
   const compact = workspace.locator('.ai-session__narrow-toolbar');
@@ -2491,6 +2518,11 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
   await page.keyboard.press('Enter');
   await workspace.getByRole('heading', { name: '새 AI 세션', exact: true }).waitFor();
   await page.waitForFunction(() => document.activeElement?.getAttribute('name') === 'name');
+  const createStartLayout = await measureLayout();
+  assert.equal(createStartLayout.scrollTop, 0, 'Opening the create form must reset the workspace scroll position');
+  assert.equal(createStartLayout.nameInputFocused, true, 'The new session name field must receive focus');
+  assert.ok(createStartLayout.projectHeader && createStartLayout.nameInput && createStartLayout.nameInput.top >= createStartLayout.projectHeader.bottom,
+    'The focused create field must remain below the sticky project header');
 
   const scrollBounds = await workspace.evaluate(element => {
     element.scrollTop = element.scrollHeight;
@@ -2504,12 +2536,20 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
 
   assert.equal(scrollBounds.overflow, false, 'The narrow AI session workspace must not overflow horizontally');
   assert.ok(Number.isFinite(scrollBounds.actionBottom) && scrollBounds.actionBottom <= scrollBounds.viewportBottom + 1, 'The final create action must remain reachable at scroll end');
+  await workspace.evaluate(element => { element.scrollTop = 0; });
+  const narrowLayout = await measureLayout();
+  assert.equal(narrowLayout.scrollTop, 0, 'The narrow create screenshot must begin at the workspace top');
+  assert.ok(narrowLayout.projectHeader && narrowLayout.compactToolbar && narrowLayout.compactToolbar.top >= narrowLayout.projectHeader.bottom,
+    'The narrow session selector must remain below the sticky project header');
+  assert.ok(narrowLayout.nameInput && narrowLayout.projectHeader && narrowLayout.nameInput.top >= narrowLayout.projectHeader.bottom,
+    'The narrow create field must remain below the sticky project header');
+  assert.equal(narrowLayout.horizontalOverflow, false, 'The narrow create layout must not overflow horizontally');
 
   const narrowScreenshot = path.join(output, `ai-sessions-${tag}-create-narrow-760.png`);
 
   await capturePage(page, narrowScreenshot);
   screenshots.push(narrowScreenshot);
-  viewports.push({ theme: tag, state: 'ai-session-create-narrow', width: 760, height: 820, screenshot: narrowScreenshot, scrollBounds });
+  viewports.push({ theme: tag, state: 'ai-session-create-narrow', width: 760, height: 820, screenshot: narrowScreenshot, layout: narrowLayout, scrollBounds });
   await workspace.locator('.ai-session__create-form').getByRole('button', { name: '취소', exact: true }).click();
   await workspace.getByRole('tab', { name: '터미널', exact: true }).focus();
   await page.keyboard.press('ArrowRight');

@@ -10,7 +10,7 @@ export interface SessionDetailActions {
 
 export function renderSessionDetail(parent: HTMLElement, session: AgentSessionDTO, turn: AgentSessionTurnDTO | undefined, tab: AgentSessionViewTab, actions: SessionDetailActions, taskName?: string, logsPanel?: HTMLElement, messagesPanel?: HTMLElement, workflowPanel?: HTMLElement): { terminal: HTMLElement } {
 	parent.replaceChildren();
-	parent.className = 'ai-session__detail';
+	parent.classList.add('ai-session__detail');
 	const header = document.createElement('header'); header.className = 'ai-session__detail-header';
 	const copy = document.createElement('div'); copy.className = 'ai-session__detail-copy';
 	const title = document.createElement('h1'); title.textContent = session.name;
