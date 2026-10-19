@@ -425,18 +425,18 @@ test('commit approval IPC requires the exact scoped proposal and native confirma
 		assert.equal(applyCalls, 0);
 
 		accept = true;
-		gate = deferred();
+		const navigationGate = gate = deferred();
 		const pendingApproval = channel.call(sender, 'approveCommitProposal', proposalInput);
-		await gate.entered;
+		await navigationGate.reached;
 		openedWorkspace.configPath = URI.parse(foreignUri);
-		gate.resolve();
+		navigationGate.resolve();
 		await assert.rejects(pendingApproval, /project window changed/u);
 		openedWorkspace.configPath = URI.parse(descriptorUri);
 		assert.equal(database.agentSessionIntegrations.getProposal(proposal.id)!.approval, null);
 
-		gate = deferred();
+		const staleGate = gate = deferred();
 		const staleApproval = channel.call(sender, 'approveCommitProposal', proposalInput);
-		await gate.entered;
+		await staleGate.reached;
 		const newerProposal = database.agentSessionIntegrations.createProposal({
 			...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, sourceHead,
 			proposedGitTreeHash: 'd'.repeat(40), diffFingerprint: 'e'.repeat(64), commitMessage: 'New exact proposal',
@@ -444,7 +444,7 @@ test('commit approval IPC requires the exact scoped proposal and native confirma
 			paths: [{ path: 'src/change.ts', explanationTargets: [{ path: 'src/change.ts', hunkId: null, revision: explanation.revision }] }],
 			expectedLatestRevision: proposal.revision,
 		});
-		gate.resolve();
+		staleGate.resolve();
 		await assert.rejects(staleApproval, /newer commit proposal/u);
 		assert.equal(database.agentSessionIntegrations.getProposal(proposal.id)!.approval, null);
 		const newerInput = { ...scope, proposalId: newerProposal.id, expectedRevision: newerProposal.revision, expectedFingerprint: newerProposal.fingerprint };
