@@ -2152,6 +2152,7 @@ try {
       const readNotificationIds = new Set(notifications.filter(notification => notification.readAt).map(notification => notification.id));
 
       const historicalProposalNotifications = fixture.historicalProposalAlerts.notificationIds;
+
       const expectedReadIds = new Set([...fixture.mailbox.initialReadIds, fixture.mailbox.completionNotificationId, fixture.mailbox.targetNotificationId,
         ...Object.values(historicalProposalNotifications)]);
 
@@ -3681,6 +3682,7 @@ function seedHistoricalProposalAlertFixtures(database, fixture) {
   assert.ok(oldCommit, 'The historical integration target must be a persisted proposal');
   const commitPage = database.agentSessionIntegrations.listProposals(oldCommit.projectId, oldCommit.sessionId, oldCommit.turnId, { limit: 2 });
   assert.equal(commitPage.proposals.at(-1)?.id, oldCommit.id, 'The original commit proposal must be the current same-turn tip before adding its sibling');
+
   const newerCommit = database.agentSessionIntegrations.createProposal({
     projectId: oldCommit.projectId,
     sessionId: oldCommit.sessionId,
@@ -3737,6 +3739,7 @@ function seedHistoricalProposalAlertFixtures(database, fixture) {
 
   assert.ok(currentPublicationTextHead && oldPublication.textRevision && currentPublicationTextHead.revision >= oldPublication.textRevision.revision,
     'The historical publication sibling must append after the durable current PR-text head while preserving its original pin');
+
   const publicationTextRevision = database.agentSessionPrTexts.appendGeneratedRevision({
     scope: publicationTextScope,
     expectedRevision: currentPublicationTextHead.revision,
@@ -3745,7 +3748,9 @@ function seedHistoricalProposalAlertFixtures(database, fixture) {
     sanitizedCompleteAgentText: { title: siblingTitle, body: siblingBody },
     knownSecrets: [],
   });
+
   const siblingTextPin = { scope: publicationTextScope, revision: publicationTextRevision.revision, contentHash: publicationTextRevision.content.contentHash };
+
   const newerPublication = database.agentSessionPublications.createProposal({
     projectId: oldPublication.projectId,
     sessionId: oldPublication.sessionId,
@@ -3791,11 +3796,13 @@ function seedHistoricalProposalAlertFixtures(database, fixture) {
 
   const notifications = listAllProjectNotifications(database, fixture.projectId);
   const notificationFor = (kind, id) => notifications.find(item => item.target.kind === kind && item.target.id === id);
+
   const targets = {
     integration: { kind: 'integrationProposal', id: oldCommit.id, turnId: oldCommit.turnId },
     merge: { kind: 'mergeProposal', id: oldMerge.id, turnId: oldMerge.turnId },
     publication: { kind: 'publicationProposal', id: oldPublication.id, turnId: oldPublication.turnId },
   };
+
   const notificationIds = {
     integration: notificationFor(targets.integration.kind, targets.integration.id)?.id,
     merge: notificationFor(targets.merge.kind, targets.merge.id)?.id,
@@ -5014,9 +5021,11 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
     await page.waitForFunction(turnId => document.querySelector('.ai-session__changes-panel select[aria-label="변경을 확인할 실행 기록"]')?.value === turnId, destination.turnId);
 
     const changes = workspace.locator('.ai-session__changes-panel .ai-session-changes');
+
     const exactSelector = kind === 'integration' ? `[data-focus-key="proposal:${target.id}"][aria-pressed="true"]`
       : kind === 'merge' ? `[data-focus-key="merge-proposal:${target.id}"][aria-pressed="true"]`
         : `[data-focus-key="publication-proposal:${target.id}"][aria-pressed="true"]`;
+
     const exactProposal = changes.locator(exactSelector);
 
     await exactProposal.waitFor({ state: 'visible' });
@@ -5028,6 +5037,7 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
     if (kind === 'merge') {
       await changes.locator(`[data-focus-key="proposal:${historicalAlerts.parentIds.mergeCommit}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
     }
+
     if (kind === 'publication') {
       await changes.locator(`[data-focus-key="merge-proposal:${historicalAlerts.parentIds.publicationMerge}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
       await changes.locator(`[data-focus-key="proposal:${historicalAlerts.parentIds.publicationCommit}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
