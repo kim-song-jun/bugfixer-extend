@@ -3240,10 +3240,13 @@ async function seedReviewedPublication(database, fixture) {
   const baseCommit = merge.targetHead;
   const generationDirectory = path.resolve(fixture.reviewedCommit.managedRoot, intent.generationPath);
   assert.equal(await realpath(generationDirectory), generationDirectory, 'Publication diff reads only the canonical owned merge generation');
+
   const gitBuffer = async (...args) => {
     const { stdout } = await execFileAsync('git', ['-C', generationDirectory, ...args], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 });
+
     return Buffer.from(stdout);
   };
+
   const diffBytes = await gitBuffer('diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-color', baseCommit, sourceCommit, '--');
   const diffText = diffBytes.toString('utf8');
   assert.equal(Buffer.from(diffText, 'utf8').equals(diffBytes), true, 'The locally computed full diff must be canonical UTF-8');
@@ -3253,13 +3256,21 @@ async function seedReviewedPublication(database, fixture) {
   assert.equal(nameFields.pop(), '', 'The local diff path list must be NUL terminated');
   const pathStatuses = { A: 'added', M: 'modified', D: 'deleted', T: 'modified' };
   const paths = [];
+
   for (let index = 0; index < nameFields.length; index += 2) {
     const status = nameFields[index];
     const filePath = nameFields[index + 1];
     assert.ok(pathStatuses[status] && filePath, 'Publication diff path metadata must be complete and supported');
-    paths.push({ path: filePath, status: pathStatuses[status], previousPath: null, explanationReferences: [], checkReferences: [],
-      unknowns: ['CI fixture에는 파일별 검토 근거와 검사 결과가 연결되지 않았습니다.'] });
+    paths.push({
+      path: filePath,
+      status: pathStatuses[status],
+      previousPath: null,
+      explanationReferences: [],
+      checkReferences: [],
+      unknowns: ['CI fixture에는 파일별 검토 근거와 검사 결과가 연결되지 않았습니다.'],
+    });
   }
+
   assert.ok(paths.length > 0, 'A publication review fixture must show the actual merged Git changes');
 
   const remoteName = 'origin';
@@ -3267,6 +3278,7 @@ async function seedReviewedPublication(database, fixture) {
   const baseRef = 'refs/heads/main';
   const title = '[CI 전용] 로컬 병합 결과 검토 (외부 게시 없음)';
   const body = '격리된 CI SQLite의 표시용 fixture입니다. GitHub 계정 조회, 네트워크 게시, 사람의 네이티브 승인은 수행하지 않았습니다.';
+
   const proposal = database.agentSessionPublications.createProposal({
     projectId: merge.projectId, sessionId: merge.sessionId, turnId: merge.turnId, sourceMergeId: merge.id,
     remoteName, baseRef, accountRef, title, body, expectedRevision: 0,
@@ -3279,8 +3291,10 @@ async function seedReviewedPublication(database, fixture) {
     base: { ref: baseRef, oid: baseCommit },
     diff: { baseCommit, headCommit: sourceCommit, text: diffText, fingerprint: createHash('sha256').update(diffBytes).digest('hex'), paths },
   });
+
   database.agentSessionPublications.recordTrustedHumanApproval(proposal.id, proposal.revision, proposal.fingerprint);
   let operation = database.agentSessionPublications.startOperation(proposal.id, proposal.fingerprint);
+
   operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
   operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'branchObserved', oid: sourceCommit, outcome: 'created', errorCode: 'none' });
   operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'pullRequestWriteStarted', headOid: sourceCommit });
@@ -3290,9 +3304,11 @@ async function seedReviewedPublication(database, fixture) {
   operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, {
     type: 'recoveryRequired', reason: 'uncertainWrite', pullRequestId: null, branchOid: sourceCommit,
   });
+
   assert.equal(operation.state, 'recoveryRequired');
 
   const originalGit = async (...args) => (await execFileAsync('git', ['-C', fixture.reviewedCommit.repository, ...args])).stdout.trim();
+
   assert.equal(await originalGit('rev-parse', 'HEAD'), fixture.reviewedCommit.sourceHead, 'Publication preview must not move the original checkout HEAD');
   assert.equal(await originalGit('rev-parse', `refs/heads/bugfixer/session/${fixture.reviewedCommit.sessionId}`), fixture.reviewedCommit.resultingHead,
     'Publication preview must preserve the already committed session ref');
@@ -3303,12 +3319,30 @@ async function seedReviewedPublication(database, fixture) {
   assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.laterUnselected,
     'Publication diff preparation must preserve unrelated post-commit working files');
 
-  return { fixtureOnly: true, providerExecuted: false, accountDiscoveryExecuted: false, networkWritesExecuted: false,
-    nativeHumanApprovalExercised: false, approvalSource: 'Synthetic isolated SQLite approval receipt; native approval dialog was not exercised.',
-    proposalId: proposal.id, proposalFingerprint: proposal.fingerprint, operationId: operation.id, operationRevision: operation.revision,
-    operationState: operation.state, accountRef, syntheticAccountId: proposal.account.stableId, syntheticRepositoryId: proposal.remote.repositoryId,
-    remoteName, baseRef, baseOid: baseCommit, resultCommit: sourceCommit, diffText, diffFingerprint: proposal.diff.fingerprint, changedPaths: paths.map(item => item.path),
-    partialPrState: 'Unknown PR-write outcome persisted for read-only recovery review; no provider request was issued.' };
+  return {
+    fixtureOnly: true,
+    providerExecuted: false,
+    accountDiscoveryExecuted: false,
+    networkWritesExecuted: false,
+    nativeHumanApprovalExercised: false,
+    approvalSource: 'Synthetic isolated SQLite approval receipt; native approval dialog was not exercised.',
+    proposalId: proposal.id,
+    proposalFingerprint: proposal.fingerprint,
+    operationId: operation.id,
+    operationRevision: operation.revision,
+    operationState: operation.state,
+    accountRef,
+    syntheticAccountId: proposal.account.stableId,
+    syntheticRepositoryId: proposal.remote.repositoryId,
+    remoteName,
+    baseRef,
+    baseOid: baseCommit,
+    resultCommit: sourceCommit,
+    diffText,
+    diffFingerprint: proposal.diff.fingerprint,
+    changedPaths: paths.map(item => item.path),
+    partialPrState: 'Unknown PR-write outcome persisted for read-only recovery review; no provider request was issued.',
+  };
 }
 
 async function verifyPublicationReview(page, fixture, tag, screenshots, viewports) {
@@ -3329,6 +3363,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
   await paths.waitFor();
   assert.ok((await paths.innerText()).includes('확인되지 않음:'), 'The proposal must disclose that file-specific evidence was not supplied');
   const fullDiff = publication.getByLabel('고정된 전체 base부터 결과까지 diff', { exact: true });
+
   assert.equal(await fullDiff.textContent(), receipt.diffText, 'The renderer must retain the exact complete locally computed Git diff');
 
   const operation = publication.getByRole('list', { name: '초안 PR 게시 단계 기록', exact: true });
@@ -3337,6 +3372,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
   assert.ok(operationText.includes('PR 결과 관찰') && operationText.includes('networkUncertain') && operationText.includes(receipt.resultCommit),
     'The read-only persisted timeline must show the exact uncertain PR observation and branch head');
   assert.ok(operationText.includes('복구 필요'), 'The persisted operation must render as recovery-required');
+
   assert.equal(await publication.getByRole('link', { name: 'GitHub PR 열기', exact: true }).count(), 0, 'An unknown PR ID must not produce an external URL');
 
   const selectedProposal = publication.locator('.ai-session-publication__history button[aria-pressed="true"]');
@@ -3345,9 +3381,14 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
   await selectedProposal.press('Tab');
   const keyboardFocus = await publication.evaluate(element => {
     const active = document.activeElement;
-    return { inside: !!active && element.contains(active), visible: !!active && active.matches(':focus-visible'),
-      label: active?.getAttribute('aria-label') ?? active?.textContent?.trim() ?? '' };
+
+    return {
+      inside: !!active && element.contains(active),
+      visible: !!active && active.matches(':focus-visible'),
+      label: active?.getAttribute('aria-label') ?? active?.textContent?.trim() ?? '',
+    };
   });
+
   assert.equal(keyboardFocus.inside, true, 'Keyboard Tab from proposal history must retain focus within the review region');
   assert.equal(keyboardFocus.visible, true, 'The review action following proposal history must show keyboard focus');
 
@@ -3358,6 +3399,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
   const focusScreenshot = path.join(output, `ai-session-publication-${tag}-1440-keyboard-focus.png`);
   await capturePage(page, focusScreenshot);
   screenshots.push(focusScreenshot);
+
   viewports.push({ theme: tag, state: 'publication-review-keyboard-focus-1440', width: 1440, height: 760,
     screenshot: focusScreenshot, focus: keyboardFocus, fixtureOnly: true, providerExecuted: false,
     accountDiscoveryExecuted: false, networkWritesExecuted: false, nativeHumanApprovalExercised: false });
@@ -3368,6 +3410,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
       { expectedWidth: width, expectedHeight: height });
     await verifyTheme(page, tag === 'dark', `publication-${tag}-${width}`);
     await publication.evaluate(element => element.scrollIntoView({ block: 'end' }));
+
     const layout = await publication.evaluate(element => {
       const bounds = element.getBoundingClientRect();
       const timeline = element.querySelector('.ai-session-publication__events');
@@ -3375,20 +3418,30 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
       const changes = element.closest('.ai-session-changes');
       const statusBar = document.querySelector('.part.statusbar')?.getBoundingClientRect();
       const visibleBottom = statusBar && statusBar.height > 0 ? Math.min(window.innerHeight, statusBar.top) : window.innerHeight;
-      return { horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+
+      return {
+        horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
         changesHorizontalOverflow: !!changes && changes.scrollWidth > changes.clientWidth + 1,
         timelineReachable: !!timelineBounds && timelineBounds.width > 0 && timelineBounds.bottom <= visibleBottom + 1,
         sectionBottomReachable: bounds.width > 0 && bounds.bottom <= visibleBottom + 1,
-        sectionTop: bounds.top, sectionBottom: bounds.bottom };
+        sectionTop: bounds.top,
+        sectionBottom: bounds.bottom,
+      };
     });
+
     assert.equal(layout.horizontalOverflow, false, `Publication review must not overflow horizontally at ${tag}/${width}`);
     assert.equal(layout.changesHorizontalOverflow, false, `The containing review panel must not overflow horizontally at ${tag}/${width}`);
     assert.equal(layout.timelineReachable, true, `The persisted operation timeline must be reachable at ${tag}/${width}`);
     assert.equal(layout.sectionBottomReachable, true, `The publication section must scroll to its end at ${tag}/${width}`);
-    if (!scrollToEnd) { await fullDiff.scrollIntoViewIfNeeded(); }
+
+    if (!scrollToEnd) {
+      await fullDiff.scrollIntoViewIfNeeded();
+    }
+
     const screenshot = path.join(output, `ai-session-publication-${tag}-${suffix}.png`);
     await capturePage(page, screenshot);
     screenshots.push(screenshot);
+
     viewports.push({ theme: tag, state: `publication-readonly-recovery-${suffix}`, width, height, screenshot, layout,
       screenshotContent: scrollToEnd ? 'persisted-operation-receipt-at-scroll-end' : 'pinned-proposal-and-full-diff',
       fixtureOnly: true, providerExecuted: false, accountDiscoveryExecuted: false, networkWritesExecuted: false, nativeHumanApprovalExercised: false });

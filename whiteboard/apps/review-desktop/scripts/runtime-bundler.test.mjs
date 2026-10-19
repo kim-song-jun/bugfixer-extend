@@ -14,12 +14,12 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  PR_REF_GUARD,
   RUNTIME_CLI_ENTRY,
   assertNoRuntimeBundler,
   assertPackagedArtifacts,
   assertRuntimeClosure,
   assertRuntimeContents,
-  PR_REF_GUARD,
   requiredPackagedArtifacts,
   runtimeRootForPackagedRoot,
   stageDiffrBinary,
@@ -130,11 +130,15 @@ test("final package verification requires the CLI and rechecks archives outside 
   const cli = path.join(runtime, RUNTIME_CLI_ENTRY);
 
   try {
-    if (process.platform !== "win32") await stagePrRefGuard(runtime);
+    if (process.platform !== "win32") {
+      await stagePrRefGuard(runtime);
+    }
 
     for (const artifact of requiredPackagedArtifacts(packaged)) {
       if (artifact === cli) continue;
-      if (artifact === path.join(runtime, PR_REF_GUARD)) continue;
+      if (artifact === path.join(runtime, PR_REF_GUARD)) {
+        continue;
+      }
       await mkdir(path.dirname(artifact), { recursive: true });
 
       if (artifact === path.join(runtime, "node_modules")) {

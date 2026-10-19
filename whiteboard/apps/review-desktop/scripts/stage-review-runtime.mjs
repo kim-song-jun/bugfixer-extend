@@ -484,6 +484,7 @@ export async function verifyPrRefGuardHelper(runtimeRoot) {
   ) {
     throw new Error("The staged PR reference guard is not a canonical executable file.");
   }
+
   return helperPath;
 }
 
