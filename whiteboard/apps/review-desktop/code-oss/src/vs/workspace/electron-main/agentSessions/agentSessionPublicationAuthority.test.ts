@@ -51,8 +51,8 @@ test('publication authority exports actual signed merge closure, holds cross-pro
 		database.agentSessionIntegrations.recordTrustedHumanApproval(commit.id, commit.revision);
 		const commitReceipt = { operationId: randomUUID(), sourceHead: base, proposedGitTreeHash: commit.proposedGitTreeHash, diffFingerprint: commit.diffFingerprint,
 			candidateHead: sourceHead, resultingHead: null, changedPaths: [], failureCode: null };
-		const commitApplying = database.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 0, state: 'applying', action: 'commit', receipt: commitReceipt });
-		database.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 1, state: 'succeeded', action: 'commit', receipt: { ...commitReceipt, resultingHead: sourceHead, changedPaths: ['src/change.ts'] }, retryOfOutcomeId: commitApplying.id });
+		database.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 0, state: 'applying', action: 'commit', receipt: commitReceipt });
+		database.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 1, state: 'succeeded', action: 'commit', receipt: { ...commitReceipt, resultingHead: sourceHead, changedPaths: ['src/change.ts'] } });
 		await worktrees.ensureIntegrationTarget({ ownerId: oldMerge.integrationOwnerId, sessionOwnerId: session.ownerId });
 		const preview = await worktrees.previewMerge({ integrationOwnerId: oldMerge.integrationOwnerId, sessionOwnerId: session.ownerId });
 		const proposal = database.agentSessionMerges.createProposal({ ...scope, commitProposalId: commit.id, commitProposalRevision: commit.revision, commitProposalFingerprint: commit.fingerprint,

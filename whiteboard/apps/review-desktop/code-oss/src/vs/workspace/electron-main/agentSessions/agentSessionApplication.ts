@@ -19,6 +19,7 @@ import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
 import { AgentSessionCommitApplication } from './agentSessionCommitApplication.js';
 import { AgentSessionMergeApplication } from './agentSessionMergeApplication.js';
+import { AgentSessionPublicationApplication } from './agentSessionPublicationApplication.js';
 import { AgentSessionContentCaptureCleanupError, captureAgentSessionContentSnapshot, type AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
 import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
@@ -45,6 +46,7 @@ export class AgentSessionApplication {
 	readonly service: AgentSessionService;
 	readonly commitApplication: AgentSessionCommitApplication;
 	readonly mergeApplication: AgentSessionMergeApplication;
+	readonly publicationApplication: AgentSessionPublicationApplication;
 	readonly workflowScheduler: AgentWorkflowScheduler;
 	private recoveryReady = false;
 	private readonly worktrees: ManagedWorktreeService;
@@ -88,6 +90,7 @@ export class AgentSessionApplication {
 		database.agentSessionContents.reconcileInterruptedCaptures();
 		this.commitApplication = new AgentSessionCommitApplication(database, this.worktrees, this.workspaceResolver, this.service);
 		this.mergeApplication = new AgentSessionMergeApplication(database, this.worktrees, database.agentSessionMerges, this.workspaceResolver, this.service);
+		this.publicationApplication = new AgentSessionPublicationApplication(database, this.worktrees, worktreeProfileDirectory, this.resourcesPath);
 		workflowScheduler = this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}
@@ -133,6 +136,7 @@ export class AgentSessionApplication {
 	}
 
 	async shutdown(): Promise<void> {
+		await this.publicationApplication.shutdown();
 		this.workflowScheduler.stopScheduling();
 		this.workflowScheduler.requestShutdownCancellation();
 		const receipts = await this.service.shutdown();

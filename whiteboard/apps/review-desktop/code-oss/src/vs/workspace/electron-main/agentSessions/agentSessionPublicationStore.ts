@@ -223,6 +223,19 @@ export class AgentSessionPublicationStore {
 		return this.operationFromRow(this.requireOperationRow(operationId));
 	}
 
+	getOperationForProposal(proposalId: string): AgentSessionPublicationOperationDTO | undefined {
+		this.assertUuid(proposalId, 'publication proposal ID');
+		const proposal = this.getProposal(proposalId);
+		if (!proposal) { return undefined; }
+		const row = this.operationRow(proposalId);
+		if (!row) { return undefined; }
+		const operation = this.operationFromRow(row);
+		if (operation.proposalId !== proposal.id || operation.proposalFingerprint !== proposal.fingerprint) {
+			throw this.error('invalidPersistedData', 'Persisted publication operation does not match its exact proposal.');
+		}
+		return operation;
+	}
+
 	private validateNextEvent(proposal: AgentSessionPublicationProposalDTO, prior: readonly AgentSessionPublicationEvent[], next: AgentSessionPublicationEvent): void {
 		const last = prior.at(-1)?.type;
 		const isRecovery = prior.some(event => event.type === 'recoveryRequired');

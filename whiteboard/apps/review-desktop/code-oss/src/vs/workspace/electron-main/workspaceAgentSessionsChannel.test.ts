@@ -20,13 +20,15 @@ import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificatio
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO } from '../common/workspaceAgentWorkflowProtocol.js';
 import type { AgentSessionIntegrationProposalDTO } from '../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionMergeProposalDTO } from '../common/workspaceAgentMergeProtocol.js';
+import type { AgentSessionPublicationOperationDTO, AgentSessionPublicationProposalDTO, WorkspaceAgentPublicationAccountsDTO } from '../common/workspaceAgentPublicationProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './agentSessions/managedWorktrees.js';
 import { TaskFolderWriterLock } from './providerRuns/taskFolderWriterLock.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
-import { WorkspaceAgentSessionsChannel, type WorkspaceAgentCommitHost, type WorkspaceAgentMergeHost, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
+import { createMergedPublicationFixture } from './agentSessions/agentSessionPublicationFixture.testHelpers.js';
+import { WorkspaceAgentSessionsChannel, type WorkspaceAgentCommitHost, type WorkspaceAgentMergeHost, type WorkspaceAgentPublicationHost, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
 
 function deferred() {
 	let resolve!: () => void;
@@ -829,5 +831,198 @@ test('pending PTY attach is revoked on navigation, catches up output, and pendin
 		await service.shutdown();
 		database.close();
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('publication IPC binds approval and provider operations to persisted exact scope and current window', async () => {
+	const fixture = createMergedPublicationFixture();
+	let database = WorkspaceDatabase.open(fixture.sourcePath);
+	const { projectId, sessionId, turnId } = fixture.input;
+	const descriptorUri = URI.file(join(tmpdir(), `publication-${randomUUID()}.code-workspace`)).toString();
+	const foreignUri = URI.file(join(tmpdir(), `foreign-${randomUUID()}.code-workspace`)).toString();
+	const openedWorkspace = { id: 'publication-workspace', configPath: URI.parse(descriptorUri) };
+	const codeWindow = { config: { reviewWindowLaunch: { kind: 'project', projectId } }, openedWorkspace } as unknown as ICodeWindow;
+	const sender = Object.assign(new EventEmitter(), { id: 881, isDestroyed: () => false }) as unknown as WebContents;
+	const forgedSender = { id: 882, isDestroyed: () => false } as WebContents;
+	database.setProjectView({ projectId, descriptorUri, openAtQuit: false, selectedTaskId: null, dashboardPosition: null });
+	const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
+	let accountsResponse: WorkspaceAgentPublicationAccountsDTO = { available: true, accounts: [{ accountRef: 'gh-account-primary', host: 'github.com', login: 'reviewer', active: true, state: 'success' }], reason: null };
+	let forgePreparedResponse = false;
+	let accept = false;
+	let confirmationCalls = 0;
+	let publishCalls = 0;
+	let continueCalls = 0;
+	let reconcileCalls = 0;
+	let dialogGate: ReturnType<typeof deferred> | undefined;
+	let accountGate: ReturnType<typeof deferred> | undefined;
+	let writeGate: ReturnType<typeof deferred> | undefined;
+	const host: WorkspaceAgentPublicationHost = {
+		async listAccounts(scope, assertCurrent) {
+			assert.deepEqual(scope, { projectId, sessionId, turnId });
+			const gate = accountGate;
+			if (gate) { accountGate = undefined; gate.entered(); await gate.promise; }
+			assertCurrent();
+			return accountsResponse;
+		},
+		list(input) {
+			return database.agentSessionPublications.listProposals(input.projectId, input.sessionId, input.turnId, {
+				...(input.afterRevision === undefined ? {} : { afterRevision: input.afterRevision }),
+				...(input.limit === undefined ? {} : { limit: input.limit }),
+			});
+		},
+		async prepare(input, assertCurrent) {
+			assertCurrent();
+			const proposal = database.agentSessionPublications.createProposal({ ...fixture.input, ...input });
+			return forgePreparedResponse ? { ...proposal, projectId: randomUUID() } : proposal;
+		},
+		approve(input) {
+			database.agentSessionPublications.recordTrustedHumanApproval(input.proposalId, input.expectedRevision, input.expectedFingerprint);
+			return database.agentSessionPublications.getProposal(input.proposalId)!;
+		},
+		async publish(input, assertCurrent) {
+			assertCurrent();
+			publishCalls++;
+			const gate = writeGate;
+			if (gate) { writeGate = undefined; gate.entered(); await gate.promise; }
+			assertCurrent();
+			const proposal = database.agentSessionPublications.getProposal(input.proposalId)!;
+			const operation = database.agentSessionPublications.getOperationForProposal(input.proposalId) ?? database.agentSessionPublications.startOperation(input.proposalId, proposal.fingerprint);
+			return { proposal, operation };
+		},
+		async continue(input, assertCurrent) {
+			assertCurrent();
+			continueCalls++;
+			return { proposal: database.agentSessionPublications.getProposal(input.proposalId)!, operation: database.agentSessionPublications.readOperation(input.operationId) };
+		},
+		async reconcile(input, assertCurrent) {
+			assertCurrent();
+			const operation = database.agentSessionPublications.readOperation(input.operationId);
+			reconcileCalls++;
+			return { proposal: database.agentSessionPublications.getProposal(input.proposalId)!, operation };
+		},
+		readOperation(input) { return database.agentSessionPublications.getOperationForProposal(input.proposalId) ?? null; },
+		async confirmProposal(dialogSender) {
+			assert.equal(dialogSender, sender);
+			confirmationCalls++;
+			const gate = dialogGate;
+			if (gate) { dialogGate = undefined; gate.entered(); await gate.promise; }
+			return accept;
+		},
+	};
+	let channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, host);
+	const scope = { projectId, sessionId, turnId };
+	const prepareInput = { ...scope, sourceMergeId: fixture.sourceMergeId, remoteName: fixture.input.remoteName, baseRef: fixture.input.baseRef,
+		accountRef: fixture.input.accountRef, title: fixture.input.title, body: fixture.input.body, expectedRevision: 0 };
+	try {
+		assert.ok(database.getProject(projectId));
+		assert.ok(database.agentSessions.getSession(projectId, sessionId));
+		assert.deepEqual(await channel.call(sender, 'listPublicationAccounts', scope), accountsResponse);
+		await assert.rejects(channel.call(forgedSender, 'listPublicationAccounts', scope), /open project window/u);
+		await assert.rejects(channel.call(sender, 'listPublicationAccounts', { ...scope, projectId: randomUUID() }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'listPublicationAccounts', { ...scope, sessionId: randomUUID() }), /session does not belong/u);
+		await assert.rejects(channel.call(sender, 'listPublicationAccounts', { ...scope, turnId: randomUUID() }), /turn does not belong/u);
+		accountsResponse = { ...accountsResponse, token: 'must-not-cross-ipc' } as WorkspaceAgentPublicationAccountsDTO;
+		await assert.rejects(channel.call(sender, 'listPublicationAccounts', scope), /unknown fields/u);
+		accountsResponse = { available: true, accounts: [{ accountRef: 'gh-account-primary', host: 'github.com', login: 'reviewer', active: true, state: 'success' }], reason: null };
+
+		const proposal = await channel.call<AgentSessionPublicationProposalDTO>(sender, 'preparePublicationProposal', prepareInput);
+		assert.equal(proposal.projectId, projectId);
+		assert.equal(proposal.sessionId, sessionId);
+		assert.equal(proposal.turnId, turnId);
+		const proposalPage = await channel.call<{ proposals: readonly AgentSessionPublicationProposalDTO[] }>(sender, 'listPublicationProposals', scope);
+		assert.deepEqual(proposalPage.proposals, [proposal]);
+		await assert.rejects(channel.call(sender, 'preparePublicationProposal', { ...prepareInput, actor: 'human' }), /unknown fields/u);
+		forgePreparedResponse = true;
+		await assert.rejects(channel.call(sender, 'preparePublicationProposal', prepareInput), /outside the exact requested scope/u);
+		forgePreparedResponse = false;
+		const proposalInput = { ...scope, proposalId: proposal.id, expectedRevision: proposal.revision, expectedFingerprint: proposal.fingerprint };
+		await assert.rejects(channel.call(sender, 'approvePublicationProposal', { ...proposalInput, approved: true }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'approvePublicationProposal', { ...proposalInput, projectId: randomUUID() }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'approvePublicationProposal', { ...proposalInput, expectedFingerprint: '0'.repeat(64) }), /changed/u);
+
+		accept = false;
+		const cancelled = await channel.call<{ approved: boolean; proposal: AgentSessionPublicationProposalDTO }>(sender, 'approvePublicationProposal', proposalInput);
+		assert.equal(cancelled.approved, false);
+		assert.equal(cancelled.proposal.approval, null);
+		assert.equal(publishCalls, 0, 'approval cancellation never publishes');
+
+		accept = true;
+		const pendingDialogGate = dialogGate = deferred();
+		const pendingNavigationApproval = channel.call(sender, 'approvePublicationProposal', proposalInput);
+		await pendingDialogGate.reached;
+		openedWorkspace.configPath = URI.parse(foreignUri);
+		pendingDialogGate.resolve();
+		await assert.rejects(pendingNavigationApproval, /project window changed/u);
+		openedWorkspace.configPath = URI.parse(descriptorUri);
+		assert.equal(database.agentSessionPublications.getProposal(proposal.id)!.approval, null);
+
+		const staleDialogGate = dialogGate = deferred();
+		const pendingStaleApproval = channel.call(sender, 'approvePublicationProposal', proposalInput);
+		await staleDialogGate.reached;
+		const newerInput = { ...prepareInput, expectedRevision: proposal.revision, title: `${prepareInput.title} revised` };
+		const newer = await channel.call<AgentSessionPublicationProposalDTO>(sender, 'preparePublicationProposal', newerInput);
+		staleDialogGate.resolve();
+		await assert.rejects(pendingStaleApproval, /newer publication proposal/u);
+		assert.equal(database.agentSessionPublications.getProposal(proposal.id)!.approval, null);
+
+		const newerMutation = { ...scope, proposalId: newer.id, expectedRevision: newer.revision, expectedFingerprint: newer.fingerprint };
+		const approved = await channel.call<{ approved: boolean; proposal: AgentSessionPublicationProposalDTO }>(sender, 'approvePublicationProposal', newerMutation);
+		assert.equal(approved.approved, true);
+		assert.equal(approved.proposal.approval?.actor, 'human');
+		const confirmationCount = confirmationCalls;
+		assert.equal((await channel.call<{ approved: boolean }>(sender, 'approvePublicationProposal', newerMutation)).approved, true);
+		assert.equal(confirmationCalls, confirmationCount, 'an exact approved retry does not create new authority or reopen the dialog');
+		assert.equal(publishCalls, 0, 'approval remains separate from publication');
+
+		let operation = database.agentSessionPublications.startOperation(newer.id, newer.fingerprint);
+		operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
+		operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'branchObserved', oid: newer.resultCommit, outcome: 'created', errorCode: 'none' });
+		operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'pullRequestWriteStarted', headOid: newer.resultCommit });
+		const pullRequestUrl = `https://${newer.remote.host}/${newer.remote.owner}/${newer.remote.repository}/pull/42`;
+		operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'pullRequestObserved', id: '42', url: pullRequestUrl,
+			repositoryId: newer.remote.repositoryId, headRef: newer.publicationRef, headOid: newer.resultCommit, baseRef: newer.baseRef, baseOid: newer.baseOid,
+			title: newer.title, body: newer.body, draft: true, outcome: 'created', errorCode: 'none' });
+		operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'published', pullRequestId: '42', url: pullRequestUrl,
+			branchOid: newer.resultCommit, headOid: newer.resultCommit, baseRef: newer.baseRef, title: newer.title, body: newer.body, draft: true });
+		database.close();
+		database = WorkspaceDatabase.open(fixture.sourcePath);
+		channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, host);
+		const recoveryInput = { ...newerMutation, operationId: operation.id };
+		const continued = await channel.call<{ proposal: AgentSessionPublicationProposalDTO; operation: AgentSessionPublicationOperationDTO }>(sender, 'continuePublicationOperation', recoveryInput);
+		assert.equal(continued.operation.id, operation.id);
+		assert.equal(continueCalls, 1);
+		const reconciled = await channel.call<{ proposal: AgentSessionPublicationProposalDTO; operation: AgentSessionPublicationOperationDTO }>(sender, 'reconcilePublicationOperation', recoveryInput);
+		assert.equal(reconciled.operation.id, operation.id);
+		assert.equal(reconcileCalls, 1);
+		const lookedUpOperation = await channel.call<AgentSessionPublicationOperationDTO>(sender, 'getPublicationOperation', newerMutation);
+		assert.equal(lookedUpOperation.id, operation.id);
+		assert.equal(lookedUpOperation.state, 'published');
+		const persistedReceipt = lookedUpOperation.events.at(-1)?.event;
+		assert.equal(persistedReceipt?.type, 'published');
+		assert.equal(persistedReceipt?.type === 'published' ? persistedReceipt.pullRequestId : null, '42');
+		assert.equal(publishCalls, 0, 'read-only reconciliation never invokes publication');
+
+		const published = await channel.call<{ proposal: AgentSessionPublicationProposalDTO; operation: AgentSessionPublicationOperationDTO }>(sender, 'publishApprovedProposal', newerMutation);
+		assert.equal(published.operation.id, operation.id);
+		const publishedReceipt = published.operation.events.at(-1)?.event;
+		assert.equal(publishedReceipt?.type === 'published' ? publishedReceipt.pullRequestId : null, '42');
+		const pendingWriteGate = writeGate = deferred();
+		const pendingPublish = channel.call<{ proposal: AgentSessionPublicationProposalDTO; operation: AgentSessionPublicationOperationDTO }>(sender, 'publishApprovedProposal', newerMutation);
+		await pendingWriteGate.reached;
+		openedWorkspace.configPath = URI.parse(foreignUri);
+		pendingWriteGate.resolve();
+		await assert.rejects(pendingPublish, /project window changed/u);
+		openedWorkspace.configPath = URI.parse(descriptorUri);
+		assert.equal(publishCalls, 1, 'the host checks currentness before and after its asynchronous write boundary');
+
+		const pendingAccountGate = accountGate = deferred();
+		const pendingAccounts = channel.call(sender, 'listPublicationAccounts', scope);
+		await pendingAccountGate.reached;
+		openedWorkspace.configPath = URI.parse(foreignUri);
+		pendingAccountGate.resolve();
+		await assert.rejects(pendingAccounts, /project window changed/u);
+	} finally {
+		database.close();
+		fixture.dispose();
 	}
 });

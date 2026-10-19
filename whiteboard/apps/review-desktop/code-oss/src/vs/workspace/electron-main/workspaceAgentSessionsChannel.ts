@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { WebContents } from 'electron';
 import { isUUID } from '../../base/common/uuid.js';
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
@@ -31,6 +32,19 @@ import type {
 	WorkspaceAgentMergeProposalPageInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput,
 } from '../common/workspaceAgentMergeProtocol.js';
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT } from '../common/workspaceAgentMergeProtocol.js';
+import {
+	AGENT_SESSION_PUBLICATION_HISTORY_LIMIT,
+	type AgentSessionPublicationPrepareInput,
+	type AgentSessionPublicationPageDTO,
+	type AgentSessionPublicationOperationDTO,
+	type AgentSessionPublicationProposalDTO,
+	type WorkspaceAgentPublicationExecutionDTO,
+	type WorkspaceAgentPublicationAccountsDTO,
+	type WorkspaceAgentPublicationMutationInput,
+	type WorkspaceAgentPublicationPageInput,
+	type WorkspaceAgentPublicationRecoveryInput,
+	type WorkspaceAgentPublicationScope,
+} from '../common/workspaceAgentPublicationProtocol.js';
 import type { AgentSessionAttachResult, AgentSessionService } from './agentSessions/agentSessionService.js';
 import { computeAgentSessionChangeHunks } from './agentSessions/agentSessionChangeHunks.js';
 import type { AgentSessionExplanationTarget } from './agentSessions/agentSessionReviewStore.js';
@@ -105,6 +119,19 @@ export interface WorkspaceAgentMergeHost {
 	confirmProposal(sender: WebContents, proposal: AgentSessionMergeProposalDTO): Promise<boolean>;
 }
 
+/** Publication provider access is main-process only; renderer input can never grant approval. */
+export interface WorkspaceAgentPublicationHost {
+	listAccounts(scope: WorkspaceAgentPublicationScope, assertCurrent: () => void): Promise<WorkspaceAgentPublicationAccountsDTO>;
+	list(input: WorkspaceAgentPublicationPageInput): AgentSessionPublicationPageDTO | Promise<AgentSessionPublicationPageDTO>;
+	prepare(input: AgentSessionPublicationPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO>;
+	approve(input: WorkspaceAgentPublicationMutationInput): AgentSessionPublicationProposalDTO;
+	publish(input: WorkspaceAgentPublicationMutationInput, assertCurrent: () => void): Promise<WorkspaceAgentPublicationExecutionDTO>;
+	continue(input: WorkspaceAgentPublicationRecoveryInput, assertCurrent: () => void): Promise<WorkspaceAgentPublicationExecutionDTO>;
+	reconcile(input: WorkspaceAgentPublicationRecoveryInput, assertCurrent: () => void): Promise<WorkspaceAgentPublicationExecutionDTO>;
+	readOperation(input: WorkspaceAgentPublicationMutationInput): AgentSessionPublicationOperationDTO | null;
+	confirmProposal(sender: WebContents, proposal: AgentSessionPublicationProposalDTO): Promise<boolean>;
+}
+
 /** Project-scoped IPC for durable sessions and host-owned PTY capabilities. */
 export class WorkspaceAgentSessionsChannel {
 	private readonly attachments = new Map<string, ScopedAttachment>();
@@ -122,6 +149,7 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly workflowHost?: WorkspaceAgentWorkflowHost,
 		private readonly commitHost?: WorkspaceAgentCommitHost,
 		private readonly mergeHost?: WorkspaceAgentMergeHost,
+		private readonly publicationHost?: WorkspaceAgentPublicationHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -441,6 +469,110 @@ export class WorkspaceAgentSessionsChannel {
 					this.assertScopeCurrent(scope);
 					if (!this.sameMergeScope(proposal, request) || proposal.id !== request.proposalId || proposal.revision !== request.expectedRevision || proposal.fingerprint !== request.expectedFingerprint) { throw new Error('Merge recovery result does not match the exact approved proposal.'); }
 					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'listPublicationAccounts': {
+				const request = this.parsePublicationScope(arg, projectId);
+				this.requirePublicationScope(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const accounts = await this.requirePublicationHost().listAccounts(request, () => this.assertScopeCurrent(scope));
+					this.assertScopeCurrent(scope);
+					return this.validatePublicationAccounts(accounts) as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'listPublicationProposals': {
+				const request = this.parsePublicationPage(arg, projectId);
+				this.requirePublicationScope(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const page = await this.requirePublicationHost().list(request);
+					this.assertScopeCurrent(scope);
+					const authoritative = this.database.agentSessionPublications.listProposals(request.projectId, request.sessionId, request.turnId, {
+						...(request.afterRevision === undefined ? {} : { afterRevision: request.afterRevision }),
+						...(request.limit === undefined ? {} : { limit: request.limit }),
+					});
+					if (!isDeepStrictEqual(page, authoritative)) { throw new Error('Publication proposal page does not match authoritative persisted records.'); }
+					return authoritative as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'preparePublicationProposal': {
+				const request = this.parsePublicationPrepare(arg, projectId);
+				this.requirePublicationScope(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requirePublicationHost().prepare(request, () => this.assertScopeCurrent(scope));
+					this.assertScopeCurrent(scope);
+					return this.assertPublicationProposalResponse(proposal, request, { sourceMergeId: request.sourceMergeId }) as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'approvePublicationProposal': {
+				const request = this.parsePublicationMutation(arg, projectId);
+				this.requirePublicationScope(request);
+				const before = this.requirePublicationProposal(request);
+				if (before.approval?.proposalFingerprint === before.fingerprint) {
+					return { approved: true, proposal: before } as T;
+				}
+				this.assertPublicationProposalCurrent(before);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const confirmed = await this.requirePublicationHost().confirmProposal(sender, before);
+					this.assertScopeCurrent(scope);
+					const current = this.requirePublicationProposal(request);
+					if (current.id !== before.id || current.revision !== before.revision || current.fingerprint !== before.fingerprint) {
+						throw new Error('The publication proposal changed while its approval dialog was open.');
+					}
+					this.assertPublicationProposalCurrent(current);
+					if (!confirmed) { return { approved: false, proposal: current } as T; }
+					const returned = this.requirePublicationHost().approve(this.publicationMutationInput(request));
+					this.assertScopeCurrent(scope);
+					const approved = this.requirePublicationProposal(request);
+					if (approved.approval?.actor !== 'human' || approved.approval.proposalFingerprint !== approved.fingerprint) {
+						throw new Error('Publication approval did not persist trusted human authority for the exact proposal.');
+					}
+					this.assertPublicationProposalResponse(returned, request);
+					return { approved: true, proposal: approved } as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'publishApprovedProposal': {
+				const request = this.parsePublicationMutation(arg, projectId);
+				this.requirePublicationScope(request);
+				const before = this.requirePublicationProposal(request);
+				this.assertPublicationProposalCurrent(before);
+				if (before.approval?.proposalFingerprint !== before.fingerprint) { throw new Error('A trusted human approval for this exact publication proposal is required.'); }
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const result = await this.requirePublicationHost().publish(this.publicationMutationInput(request), () => this.assertScopeCurrent(scope));
+					this.assertScopeCurrent(scope);
+					return this.assertPublicationExecutionResponse(result, request) as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'getPublicationOperation': {
+				const request = this.parsePublicationMutation(arg, projectId);
+				this.requirePublicationScope(request);
+				this.requirePublicationProposal(request);
+				const operation = this.requirePublicationHost().readOperation(request);
+				if (operation === null) { return null as T; }
+				const proposal = this.requirePublicationProposal(request);
+				const authoritative = this.database.agentSessionPublications.readOperation(operation.id);
+				if (!isDeepStrictEqual(operation, authoritative) || operation.proposalId !== proposal.id || operation.proposalFingerprint !== proposal.fingerprint) {
+					throw new Error('Publication operation does not match authoritative persisted data for this exact proposal.');
+				}
+				return operation as T;
+			}
+			case 'continuePublicationOperation':
+			case 'reconcilePublicationOperation': {
+				const request = this.parsePublicationRecovery(arg, projectId);
+				this.requirePublicationScope(request);
+				this.requirePublicationProposal(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const host = this.requirePublicationHost();
+					const result = command === 'continuePublicationOperation'
+						? await host.continue(request, () => this.assertScopeCurrent(scope))
+						: await host.reconcile(request, () => this.assertScopeCurrent(scope));
+					this.assertScopeCurrent(scope);
+					return this.assertPublicationExecutionResponse(result, request) as T;
 				} finally { this.finishScopedOperation(scope); }
 			}
 			case 'listNotifications': {
@@ -878,6 +1010,136 @@ export class WorkspaceAgentSessionsChannel {
 
 	private mergeProposalInput(request: WorkspaceAgentMergeProposalMutationInput): WorkspaceAgentMergeProposalMutationInput {
 		return { projectId: request.projectId, sessionId: request.sessionId, turnId: request.turnId, proposalId: request.proposalId, expectedRevision: request.expectedRevision, expectedFingerprint: request.expectedFingerprint };
+	}
+
+	private requirePublicationHost(): WorkspaceAgentPublicationHost {
+		if (!this.publicationHost) { throw new Error('The publication host is unavailable.'); }
+		return this.publicationHost;
+	}
+
+	private requirePublicationScope(request: WorkspaceAgentPublicationScope): void {
+		this.requireSession(request.projectId, request.sessionId);
+		if (!this.database.agentSessionTurns.getTurn(request.projectId, request.sessionId, request.turnId)) { throw new Error('The turn does not belong to this project session.'); }
+	}
+
+	private requirePublicationProposal(request: WorkspaceAgentPublicationMutationInput): AgentSessionPublicationProposalDTO {
+		const proposal = this.database.agentSessionPublications.getProposal(request.proposalId);
+		if (!proposal || !this.samePublicationScope(proposal, request) || proposal.revision !== request.expectedRevision || proposal.fingerprint !== request.expectedFingerprint) {
+			throw new Error('Publication proposal is unavailable or changed; review its latest exact revision.');
+		}
+		return proposal;
+	}
+
+	private assertPublicationProposalCurrent(proposal: AgentSessionPublicationProposalDTO): void {
+		if (Date.parse(proposal.expiresAt) <= Date.now()) { throw new Error('Publication proposal approval has expired. Prepare and review a fresh proposal.'); }
+		const newer = this.database.agentSessionPublications.listProposals(proposal.projectId, proposal.sessionId, proposal.turnId, { afterRevision: proposal.revision, limit: 1 });
+		if (newer.proposals.length) { throw new Error('A newer publication proposal exists; review that exact revision instead.'); }
+	}
+
+	private samePublicationScope(proposal: Pick<AgentSessionPublicationProposalDTO, 'projectId' | 'sessionId' | 'turnId'>, request: WorkspaceAgentPublicationScope): boolean {
+		return proposal.projectId === request.projectId && proposal.sessionId === request.sessionId && proposal.turnId === request.turnId;
+	}
+
+	private publicationMutationInput(request: WorkspaceAgentPublicationMutationInput): WorkspaceAgentPublicationMutationInput {
+		return { projectId: request.projectId, sessionId: request.sessionId, turnId: request.turnId, proposalId: request.proposalId,
+			expectedRevision: request.expectedRevision, expectedFingerprint: request.expectedFingerprint };
+	}
+
+	private assertPublicationProposalResponse(
+		value: AgentSessionPublicationProposalDTO,
+		request: WorkspaceAgentPublicationScope & { readonly proposalId?: string; readonly expectedRevision?: number; readonly expectedFingerprint?: string },
+		expected: { readonly sourceMergeId?: string } = {},
+	): AgentSessionPublicationProposalDTO {
+		if (!value || typeof value !== 'object' || Array.isArray(value) || !isUUID(value.id)
+			|| !this.samePublicationScope(value, request)
+			|| (request.proposalId !== undefined && value.id !== request.proposalId)
+			|| (request.expectedRevision !== undefined && value.revision !== request.expectedRevision)
+			|| (request.expectedFingerprint !== undefined && value.fingerprint !== request.expectedFingerprint)
+			|| (expected.sourceMergeId !== undefined && value.sourceMergeId !== expected.sourceMergeId)) {
+			throw new Error('Publication host returned a proposal outside the exact requested scope and revision.');
+		}
+		const authoritative = this.database.agentSessionPublications.getProposal(value.id);
+		if (!authoritative || !isDeepStrictEqual(value, authoritative)) { throw new Error('Publication host returned data that does not match the authoritative persisted proposal.'); }
+		return authoritative;
+	}
+
+	private assertPublicationExecutionResponse(value: WorkspaceAgentPublicationExecutionDTO, request: WorkspaceAgentPublicationMutationInput): WorkspaceAgentPublicationExecutionDTO {
+		if (!value || typeof value !== 'object' || Array.isArray(value) || !value.operation || typeof value.operation !== 'object' || Array.isArray(value.operation)
+			|| !isUUID(value.operation.id) || value.operation.proposalId !== request.proposalId || value.operation.proposalFingerprint !== request.expectedFingerprint) {
+			throw new Error('Publication host returned an operation outside the exact requested proposal.');
+		}
+		const proposal = this.assertPublicationProposalResponse(value.proposal, request);
+		const operation = this.database.agentSessionPublications.readOperation(value.operation.id);
+		if (operation.proposalId !== proposal.id || operation.proposalFingerprint !== proposal.fingerprint || !isDeepStrictEqual(value.operation, operation)) {
+			throw new Error('Publication host returned an operation that does not match the authoritative persisted event chain.');
+		}
+		return { proposal, operation };
+	}
+
+	private validatePublicationAccounts(value: WorkspaceAgentPublicationAccountsDTO): WorkspaceAgentPublicationAccountsDTO {
+		this.assertExactKeys(value, ['available', 'accounts', 'reason'], [], 'publication accounts response');
+		if (typeof value.available !== 'boolean' || !Array.isArray(value.accounts) || value.accounts.length > 100
+			|| (value.reason !== null && (typeof value.reason !== 'string'
+				|| !/^GitHub 연결을 확인하지 못했습니다\. Git과 gh 로그인 상태를 확인해 주세요\. \((?:accountChanged|remoteChanged|baseChanged|permissionDenied|networkUncertain|providerFailed|invalidObservation|unavailable)\)$/u.test(value.reason)))) {
+			throw new Error('Publication account response contains invalid metadata.');
+		}
+		const seen = new Set<string>();
+		const accounts = value.accounts.map((account, index) => {
+			this.assertExactKeys(account, ['accountRef', 'host', 'login', 'active', 'state'], [], `publication account ${index + 1}`);
+			const accountRef = this.string(account.accountRef, 'publication account reference', 256);
+			const login = this.string(account.login, 'publication account login', 256);
+			if (!/^[A-Za-z0-9-]{1,39}$/u.test(login) || seen.has(accountRef) || account.host !== 'github.com' || typeof account.active !== 'boolean'
+				|| !['success', 'timeout', 'error'].includes(String(account.state))) {
+				throw new Error('Publication account response contains invalid or repeated account metadata.');
+			}
+			seen.add(accountRef);
+			return { accountRef, host: 'github.com' as const, login, active: account.active, state: account.state as 'success' | 'timeout' | 'error' };
+		});
+		if ((value.available && value.reason !== null) || (!value.available && (value.reason === null || accounts.length !== 0))) {
+			throw new Error('Publication account availability does not match its returned metadata.');
+		}
+		return { available: value.available, accounts, reason: value.reason };
+	}
+
+	private parsePublicationScope(value: unknown, authorizedProjectId: string): WorkspaceAgentPublicationScope {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId'], [], 'publication scope');
+		return { projectId: this.assertProjectAndReturn(raw.projectId, authorizedProjectId), sessionId: this.uuid(raw.sessionId, 'publication session ID'), turnId: this.uuid(raw.turnId, 'publication turn ID') };
+	}
+
+	private parsePublicationPage(value: unknown, authorizedProjectId: string): WorkspaceAgentPublicationPageInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId'], ['afterRevision', 'limit'], 'publication proposal page');
+		return { ...this.parsePublicationScope({ projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId }, authorizedProjectId),
+			...(raw.afterRevision === undefined ? {} : { afterRevision: this.integer(raw.afterRevision, 0, MAX_SEQUENCE, 'publication proposal cursor') }),
+			...(raw.limit === undefined ? {} : { limit: this.integer(raw.limit, 1, AGENT_SESSION_PUBLICATION_HISTORY_LIMIT, 'publication proposal page limit') }) };
+	}
+
+	private parsePublicationPrepare(value: unknown, authorizedProjectId: string): AgentSessionPublicationPrepareInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'sourceMergeId', 'remoteName', 'baseRef', 'accountRef', 'title', 'body', 'expectedRevision'], [], 'publication preparation');
+		if (typeof raw.body !== 'string' || Buffer.byteLength(raw.body, 'utf8') > 64 * 1024) { throw new Error('The publication body is invalid or exceeds its size limit.'); }
+		return { ...this.parsePublicationScope({ projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId }, authorizedProjectId),
+			sourceMergeId: this.uuid(raw.sourceMergeId, 'source merge proposal ID'), remoteName: this.string(raw.remoteName, 'publication remote name', 128),
+			baseRef: this.string(raw.baseRef, 'publication base ref', 1024), accountRef: this.string(raw.accountRef, 'publication account reference', 256),
+			title: this.string(raw.title, 'publication title', 256), body: raw.body,
+			expectedRevision: this.integer(raw.expectedRevision, 0, MAX_SEQUENCE, 'publication proposal revision') };
+	}
+
+	private parsePublicationMutation(value: unknown, authorizedProjectId: string): WorkspaceAgentPublicationMutationInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'proposalId', 'expectedRevision', 'expectedFingerprint'], [], 'publication proposal mutation');
+		return { ...this.parsePublicationScope({ projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId }, authorizedProjectId),
+			proposalId: this.uuid(raw.proposalId, 'publication proposal ID'), expectedRevision: this.integer(raw.expectedRevision, 1, MAX_SEQUENCE, 'publication proposal revision'),
+			expectedFingerprint: this.changeFingerprint(raw.expectedFingerprint) };
+	}
+
+	private parsePublicationRecovery(value: unknown, authorizedProjectId: string): WorkspaceAgentPublicationRecoveryInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'proposalId', 'expectedRevision', 'expectedFingerprint', 'operationId'], [], 'publication operation recovery');
+		return { ...this.parsePublicationMutation({ projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId,
+			proposalId: raw.proposalId, expectedRevision: raw.expectedRevision, expectedFingerprint: raw.expectedFingerprint }, authorizedProjectId),
+			operationId: this.uuid(raw.operationId, 'publication operation ID') };
 	}
 
 	private parseMergeProposalPage(value: unknown, authorizedProjectId: string): WorkspaceAgentMergeProposalPageInput {

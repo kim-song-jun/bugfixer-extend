@@ -8,6 +8,41 @@ export const AGENT_SESSION_PUBLICATION_HISTORY_LIMIT = 5;
 export const AGENT_SESSION_PUBLICATION_OPERATION_EVENT_LIMIT = 32;
 export const AGENT_SESSION_PUBLICATION_DIFF_MAX_BYTES = 4 * 1024 * 1024;
 
+export interface WorkspaceAgentPublicationScope {
+	readonly projectId: string;
+	readonly sessionId: string;
+	readonly turnId: string;
+}
+
+export interface WorkspaceAgentPublicationAccountDTO {
+	readonly accountRef: string;
+	readonly host: 'github.com';
+	readonly login: string;
+	readonly active: boolean;
+	readonly state: 'success' | 'timeout' | 'error';
+}
+
+export interface WorkspaceAgentPublicationAccountsDTO {
+	readonly available: boolean;
+	readonly accounts: readonly WorkspaceAgentPublicationAccountDTO[];
+	readonly reason: string | null;
+}
+
+export interface WorkspaceAgentPublicationPageInput extends WorkspaceAgentPublicationScope {
+	readonly afterRevision?: number;
+	readonly limit?: number;
+}
+
+export interface WorkspaceAgentPublicationMutationInput extends WorkspaceAgentPublicationScope {
+	readonly proposalId: string;
+	readonly expectedRevision: number;
+	readonly expectedFingerprint: string;
+}
+
+export interface WorkspaceAgentPublicationRecoveryInput extends WorkspaceAgentPublicationMutationInput {
+	readonly operationId: string;
+}
+
 export interface AgentSessionPublicationPrepareInput {
 	readonly projectId: string;
 	readonly sessionId: string;
@@ -155,6 +190,12 @@ export interface AgentSessionPublicationOperationDTO {
 	readonly revision: number;
 	readonly events: readonly AgentSessionPublicationEventRecord[];
 	readonly startedAt: string;
+}
+
+/** Exact persisted proposal and its operation receipt, returned after an external publication step. */
+export interface WorkspaceAgentPublicationExecutionDTO {
+	readonly proposal: AgentSessionPublicationProposalDTO;
+	readonly operation: AgentSessionPublicationOperationDTO;
 }
 
 export interface AgentSessionPublicationPageDTO {

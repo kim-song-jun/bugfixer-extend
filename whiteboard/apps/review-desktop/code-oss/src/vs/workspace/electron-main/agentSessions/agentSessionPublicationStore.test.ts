@@ -50,7 +50,7 @@ test('publication journal binds a real merged result, is idempotent, strict, bou
 			headRef: proposal.publicationRef, headOid: proposal.resultCommit, baseRef: proposal.baseRef, baseOid: proposal.baseOid, title: proposal.title, body: proposal.body,
 			draft: true, outcome: 'created', errorCode: 'none' }), /out of sequence or invalid/);
 		assert.throws(() => store.appendEvent(operation.id, 0, { type: 'published', pullRequestId: '17', url: 'https://github.com/acme/widget/pull/17', branchOid: proposal.resultCommit,
-			headOid: proposal.resultCommit, baseRef: proposal.baseRef, title: proposal.title, body: proposal.body, draft: true }), /requires a persisted pull request observation/);
+			headOid: proposal.resultCommit, baseRef: proposal.baseRef, title: proposal.title, body: proposal.body, draft: true }), { code: 'invalidStep' });
 		let current = store.appendEvent(operation.id, 0, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
 		assert.throws(() => store.appendEvent(operation.id, 0, { type: 'branchObserved', oid: proposal.resultCommit, outcome: 'created', errorCode: 'none' }), /already recorded with different content/);
 		current = store.appendEvent(operation.id, current.revision, { type: 'branchObserved', oid: proposal.resultCommit, outcome: 'created', errorCode: 'none' });
@@ -80,13 +80,18 @@ test('publication history retains at most five full proposals and never prunes a
 		database = WorkspaceDatabase.open(fixture.sourcePath);
 		const store = database.agentSessionPublications;
 		const ids: string[] = [];
-		for (let revision = 0; revision < 6; revision++) { ids.push(store.createProposal({ ...fixture.input, expectedRevision: revision, title: `Change ${revision}` }).id); }
+		for (let revision = 0; revision < 6; revision++) {
+			const proposal = store.createProposal({ ...fixture.input, expectedRevision: revision, title: `Change ${revision}` });
+			ids.push(proposal.id);
+			if (revision > 0) { store.recordTrustedHumanApproval(proposal.id, proposal.revision, proposal.fingerprint); }
+		}
 		const first = store.listProposals(fixture.input.projectId, fixture.input.sessionId, fixture.input.turnId);
 		assert.deepEqual(first.proposals.map(proposal => proposal.id), ids.slice(1));
 		assert.equal(first.hasMore, false);
-		for (const retained of first.proposals) { store.recordTrustedHumanApproval(retained.id, retained.revision, retained.fingerprint); }
-		assert.throws(() => store.createProposal({ ...fixture.input, expectedRevision: 6, title: 'Change 6' }), /history is full/);
 		const latest = first.proposals.at(-1)!;
+		const started = store.startOperation(latest.id, latest.fingerprint);
+		assert.throws(() => store.createProposal({ ...fixture.input, expectedRevision: 6, title: 'Change 6' }), /history is full/);
+		assert.deepEqual(store.readOperation(started.id), started);
 		assert.equal(store.getProposal(latest.id)?.approval?.proposalFingerprint, latest.fingerprint);
 	} finally { database?.close(); fixture.dispose(); }
 });
@@ -119,15 +124,15 @@ test('publication recovery preserves a partially created PR ID after a base SHA 
 		operation = store.appendEvent(operation.id, 8, { type: 'branchReobserved', oid: null, outcome: 'absent', errorCode: 'none' });
 		operation = store.appendEvent(operation.id, 9, { type: 'recoveryRequired', reason: 'uncertainWrite', pullRequestId: '23', branchOid: null });
 		assert.equal(operation.state, 'recoveryRequired');
-		assert.throws(() => store.appendEvent(operation.id, 10, { type: 'notPublished', reason: 'branchAbsent', pullRequestId: '23', branchOid: null }), /Not-published reason/);
+		assert.throws(() => store.appendEvent(operation.id, 10, { type: 'notPublished', reason: 'branchAbsent', pullRequestId: '23', branchOid: null }), { code: 'invalidStep' });
 		assert.equal(store.readOperation(operation.id).state, 'recoveryRequired');
 		operation = store.appendEvent(operation.id, 10, { type: 'branchReobserved', oid: null, outcome: 'absent', errorCode: 'none' });
 		operation = store.appendEvent(operation.id, 11, { type: 'pullRequestReobserved', id: '23', url: 'https://github.com/acme/widget/pull/23', repositoryId: proposal.remote.repositoryId,
 			headRef: proposal.publicationRef, headOid: proposal.resultCommit, baseRef: proposal.baseRef, baseOid: '9'.repeat(40), title: proposal.title, body: proposal.body,
 			draft: true, outcome: 'absent', errorCode: 'none' });
-		assert.throws(() => store.appendEvent(operation.id, 12, { type: 'notPublished', reason: 'branchAbsent', pullRequestId: '23', branchOid: null }), /Not-published reason/);
+		assert.throws(() => store.appendEvent(operation.id, 12, { type: 'notPublished', reason: 'branchAbsent', pullRequestId: '23', branchOid: null }), { code: 'invalidStep' });
 		assert.equal(store.readOperation(operation.id).state, 'recoveryRequired');
-		const recovery = operation.events.at(-1)?.event;
+		const recovery = operation.events.filter(record => record.event.type === 'recoveryRequired').at(-1)?.event;
 		assert.equal(recovery?.type === 'recoveryRequired' ? recovery.pullRequestId : null, '23');
 		store.createProposal({ ...fixture.input, expectedRevision: 1, title: 'Superseding reviewed draft' });
 		database.close(); database = WorkspaceDatabase.open(fixture.sourcePath); store = database.agentSessionPublications;

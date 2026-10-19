@@ -155,7 +155,7 @@ import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/work
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspaceProviderRunProtocol.js';
 import { TaskFolderWriterLock } from '../../workspace/electron-main/providerRuns/taskFolderWriterLock.js';
 import { AgentSessionApplication } from '../../workspace/electron-main/agentSessions/agentSessionApplication.js';
-import { WorkspaceAgentSessionsChannel, type WorkspaceAgentMergeHost } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
+import { WorkspaceAgentSessionsChannel, type WorkspaceAgentMergeHost, type WorkspaceAgentPublicationHost } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
 import { formatCommitDialogValue } from '../../workspace/electron-main/agentSessions/agentSessionCommitDialog.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../workspace/common/workspaceAgentSessionProtocol.js';
 import { WorkspaceKnowledgeChannel } from '../../workspace/electron-main/workspaceKnowledgeChannel.js';
@@ -1660,6 +1660,46 @@ export class CodeApplication extends Disposable {
 						return result.response === 1;
 					},
 				} satisfies WorkspaceAgentMergeHost,
+				{
+					listAccounts: (input, assertCurrent) => agentSessions.publicationApplication.listAccounts(input, assertCurrent),
+					list: input => agentSessions.publicationApplication.listProposals(input),
+					prepare: (input, assertCurrent) => agentSessions.publicationApplication.prepareProposal(input, assertCurrent),
+					approve: input => agentSessions.publicationApplication.approveProposal(input),
+					publish: (input, assertCurrent) => agentSessions.publicationApplication.publishApprovedProposal(input, assertCurrent),
+					continue: (input, assertCurrent) => agentSessions.publicationApplication.continueApprovedOperation(input, assertCurrent),
+					reconcile: (input, assertCurrent) => agentSessions.publicationApplication.reconcileOperation(input, assertCurrent),
+					readOperation: input => agentSessions.publicationApplication.readOperation(input),
+					confirmProposal: async (sender, proposal) => {
+						const window = BrowserWindow.fromWebContents(sender);
+						if (!window || window.isDestroyed() || sender.isDestroyed()) { throw new Error('프로젝트 창이 닫혀 PR 승인을 중단했습니다.'); }
+						const visibility = { public: '공개', private: '비공개', internal: '조직 내부' };
+						const paths = proposal.diff.paths.map(path => [
+							formatCommitDialogValue(path.path),
+							`설명 참조 ${path.explanationReferences.length}개 · 검증 참조 ${path.checkReferences.length}개 · 미확인 ${path.unknowns.length}개`,
+						].join('\n'));
+						const detail = [
+							'검토한 커밋을 새 원격 브랜치로 올리고 GitHub 초안 PR을 만듭니다. 전체 변경과 파일별 근거는 앱의 변경 탭에서 확인해 주세요.',
+							`계정: ${formatCommitDialogValue(proposal.account.login)} · ${formatCommitDialogValue(proposal.account.host)} · 사용자 ID ${formatCommitDialogValue(proposal.account.stableId)}`,
+							`저장소: ${formatCommitDialogValue(proposal.remote.owner)}/${formatCommitDialogValue(proposal.remote.repository)} · ${visibility[proposal.remote.visibility]} · 저장소 ID ${formatCommitDialogValue(proposal.remote.repositoryId)}`,
+							`원격: ${formatCommitDialogValue(proposal.remote.name)} · ${formatCommitDialogValue(proposal.remote.canonicalUrl)}`,
+							`대상 브랜치: ${formatCommitDialogValue(proposal.baseRef)}\n대상 커밋: ${proposal.baseOid}`,
+							`새 브랜치: ${formatCommitDialogValue(proposal.publicationRef)}\n올릴 커밋: ${proposal.resultCommit}`,
+							`제목: ${formatCommitDialogValue(proposal.title)}`,
+							`본문:\n${formatCommitDialogValue(proposal.body)}`,
+							`연결된 로컬 병합: ${proposal.sourceMergeId} · 버전 ${proposal.sourceMergeRevision}\n병합 지문: ${proposal.sourceMergeFingerprint}`,
+							`전체 변경 지문: ${proposal.diff.fingerprint}\n변경 경로 ${proposal.diff.paths.length}개:`, ...paths,
+							`검토안 버전 ${proposal.revision} · 만료 ${proposal.expiresAt}\n검토안 지문: ${proposal.fingerprint}`,
+						].join('\n\n');
+						if (Buffer.byteLength(detail, 'utf8') > 48 * 1024) { throw new Error('PR 승인 정보가 확인 창에 담기에는 너무 큽니다. 변경 범위를 나누어 다시 검토해 주세요.'); }
+						const result = await dialog.showMessageBox(window, {
+							type: 'question', title: 'GitHub 초안 PR 승인',
+							message: `${formatCommitDialogValue(proposal.remote.owner)}/${formatCommitDialogValue(proposal.remote.repository)}에 초안 PR을 만들까요?`, detail,
+							buttons: ['취소', 'PR 작성 승인'], cancelId: 0, defaultId: 0, noLink: true,
+						});
+						if (window.isDestroyed() || sender.isDestroyed()) { throw new Error('프로젝트 창이 닫혀 PR 승인을 마치지 못했습니다.'); }
+						return result.response === 1;
+					},
+				} satisfies WorkspaceAgentPublicationHost,
 			);
 			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {
 				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Agent session IPC is only available to the application main frame.'); }
