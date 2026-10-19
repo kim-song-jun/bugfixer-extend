@@ -113,7 +113,8 @@ export function SettingsPage({
             이 설정은 이 컴퓨터의 Whiteboard에 적용됩니다.
           </p>
 
-          {reopenSessionGuide || (nativeNotifications && settings.setNativeNotificationsEnabled) ? (
+          {reopenSessionGuide ||
+          (nativeNotifications && settings.setNativeNotificationsEnabled) ? (
             <Section label="AI 세션">
               {reopenSessionGuide ? (
                 <Row
@@ -135,9 +136,14 @@ export function SettingsPage({
               {nativeNotifications && settings.setNativeNotificationsEnabled ? (
                 <Row
                   label="운영체제 알림"
-                  description={nativeNotificationDescription(nativeNotifications)}
+                  description={nativeNotificationDescription(
+                    nativeNotifications,
+                  )}
                 >
-                  <label className="review-settings-toggle" aria-label="AI 세션 운영체제 알림">
+                  <label
+                    className="review-settings-toggle"
+                    aria-label="AI 세션 운영체제 알림"
+                  >
                     <input
                       type="checkbox"
                       aria-label="AI 세션 운영체제 알림"
@@ -147,7 +153,8 @@ export function SettingsPage({
                         const enabled = event.target.checked;
                         void run(
                           "native-notifications",
-                          () => settings.setNativeNotificationsEnabled!(enabled),
+                          () =>
+                            settings.setNativeNotificationsEnabled!(enabled),
                           setNativeNotifications,
                         );
                       }}
@@ -362,7 +369,9 @@ export function SettingsPage({
   );
 }
 
-function nativeNotificationDescription(status: ReviewNativeNotificationStatus): string {
+function nativeNotificationDescription(
+  status: ReviewNativeNotificationStatus,
+): string {
   if (status.availability === "unsupported") {
     return "이 환경은 운영체제 알림을 지원하지 않습니다. 기본 설정은 꺼져 있으며, 알림 권한 상태는 앱에서 확인할 수 없습니다.";
   }

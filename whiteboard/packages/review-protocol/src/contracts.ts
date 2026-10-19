@@ -507,7 +507,9 @@ export interface ReviewCanvasSettingsContent {
   setTelemetryEnabled(enabled: boolean): Promise<boolean>;
   /** Operating-system permission is not observable here; this reports only capability and observed delivery. */
   nativeNotifications?: ReviewNativeNotificationStatus;
-  setNativeNotificationsEnabled?(enabled: boolean): Promise<ReviewNativeNotificationStatus>;
+  setNativeNotificationsEnabled?(
+    enabled: boolean,
+  ): Promise<ReviewNativeNotificationStatus>;
   theme: ReviewThemeChoice;
   setTheme(choice: ReviewThemeChoice): Promise<ReviewThemeChoice>;
   keymap: ReviewKeymapChoice;
