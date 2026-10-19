@@ -11,11 +11,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 
 const [appArgument, outputArgument] = process.argv.slice(2);
+
 assert.ok(appArgument, 'Pass the assembled Whiteboard.app path');
+
 assert.ok(outputArgument, 'Pass the native session terminal evidence directory');
+
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'This smoke runs only in GitHub Actions.');
+
 assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted', 'This smoke requires an ephemeral GitHub-hosted runner.');
+
 assert.equal(process.platform, 'darwin', 'This smoke requires the packaged macOS app.');
+
 assert.equal(process.env.WHITEBOARD_NATIVE_SESSION_TERMINAL_FIXTURE, '1', 'The workflow must explicitly opt into the provider-free CLI fixture.');
 
 const authEnvironmentNames = [
@@ -24,16 +30,25 @@ const authEnvironmentNames = [
 ];
 
 const presentAuthEnvironmentNames = authEnvironmentNames.filter(name => Object.hasOwn(process.env, name));
+
 assert.deepEqual(presentAuthEnvironmentNames, [], `Provider credential environment keys must be absent: ${presentAuthEnvironmentNames.join(', ')}`);
 
 const appPath = path.resolve(appArgument);
+
 const output = path.resolve(outputArgument);
+
 const appRoot = fileURLToPath(new URL('../', import.meta.url));
+
 const fixturePath = path.join(appRoot, 'native/session-terminal-fixture/codex.mjs');
+
 const nativeOutputRoot = fileURLToPath(new URL('../code-oss/out/vs/workspace/electron-main/', import.meta.url));
+
 const profileHome = os.userInfo().homedir;
+
 const codexLink = path.join(profileHome, '.local/bin/codex');
+
 const codexProfile = path.join(profileHome, '.codex');
+
 const receipt = {
   schemaVersion: 1,
   fixtureOnly: true,
@@ -53,30 +68,47 @@ const receipt = {
 };
 
 let root;
+
 let database;
+
 let browser;
+
 let appChild;
+
 let appExit;
+
 let appExited = false;
+
 let appProcessIdentity;
+
 let appProcessIdentities = new Map();
+
 let appProcessTreeCaptured = false;
+
 let appExecutablePath;
+
 let fixtureLinkIdentity;
+
 let fixtureProfileIdentity;
+
 let fixtureLinkDirectoryIdentities = [];
+
 let appPort;
 
 async function waitFor(check, description, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
+
   while (Date.now() < deadline) {
     try {
       const result = await check();
+
       if (result) return result;
     } catch (error) { lastError = error; }
+
     await new Promise(resolve => setTimeout(resolve, 150));
   }
+
   throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError.message}` : ''}`);
 }
 
@@ -85,11 +117,14 @@ async function reservePort() {
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
   await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+
   return port;
 }
 
 async function absent(filePath) {
-  try { await lstat(filePath); return false; }
+  try { await lstat(filePath);
+
+ return false; }
   catch (error) { if (error?.code === 'ENOENT') return true; throw error; }
 }
 
@@ -97,26 +132,35 @@ function processInventory() {
   const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,command='], {
     encoding: 'utf8', timeout: 3_000, maxBuffer: 8 * 1024 * 1024,
   });
+
   const inventory = new Map();
+
   for (const line of output.split('\n')) {
     const fields = line.trim().split(/\s+/);
+
     if (fields.length < 9) continue;
     const pid = Number(fields[0]);
     const ppid = Number(fields[1]);
     const pgid = Number(fields[2]);
+
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isSafeInteger(pgid)) continue;
     inventory.set(pid, { pid, ppid, pgid, started: fields.slice(3, 8).join(' '), command: fields.slice(8).join(' ') });
   }
+
   return inventory;
 }
 
 function processAlive(pid) {
-  try { process.kill(pid, 0); return true; }
+  try { process.kill(pid, 0);
+
+ return true; }
   catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
 }
 
 function processGroupAlive(pgid) {
-  try { process.kill(-pgid, 0); return true; }
+  try { process.kill(-pgid, 0);
+
+ return true; }
   catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
 }
 
@@ -129,14 +173,18 @@ function lineageToRoot(inventory, pid, rootPid) {
   const lineage = [];
   const seen = new Set();
   let currentPid = pid;
+
   while (currentPid > 1 && !seen.has(currentPid)) {
     seen.add(currentPid);
     const current = inventory.get(currentPid);
+
     if (!current) return undefined;
     lineage.push(current);
+
     if (currentPid === rootPid) return lineage;
     currentPid = current.ppid;
   }
+
   return undefined;
 }
 
@@ -144,73 +192,98 @@ function captureAppProcessTree() {
   if (!appChild?.pid || appExited) return false;
   const inventory = processInventory();
   const rootIdentity = inventory.get(appChild.pid);
+
   if (!rootIdentity) throw new Error('The app PID disappeared before its final owned-process snapshot.');
+
   if (appExecutablePath && !rootIdentity.command.includes(appExecutablePath)) {
     throw new Error('The spawned app PID command does not match the exact packaged executable; refusing process ownership capture.');
   }
+
   if (appProcessIdentity && !sameProcessIdentity(appProcessIdentity, rootIdentity)) {
     throw new Error('The app PID no longer matches its captured process start, group, and command identity.');
   }
+
   appProcessIdentity ??= rootIdentity;
   const tree = [];
+
   for (const candidate of inventory.values()) {
     const lineage = lineageToRoot(inventory, candidate.pid, appChild.pid);
+
     if (lineage) tree.push(candidate);
   }
+
   const groupMembers = [...inventory.values()].filter(candidate => candidate.pgid === appChild.pid);
+
   for (const member of groupMembers) {
     if (!lineageToRoot(inventory, member.pid, appChild.pid)) {
       throw new Error(`App process group ${appChild.pid} contains an unowned member; teardown is unsafe.`);
     }
   }
+
   for (const candidate of tree) {
     const previous = appProcessIdentities.get(candidate.pid);
+
     if (previous && !sameProcessIdentity(previous, candidate)) {
       throw new Error(`App descendant PID ${candidate.pid} changed identity during the smoke.`);
     }
+
     appProcessIdentities.set(candidate.pid, candidate);
   }
+
   appProcessTreeCaptured = true;
+
   return true;
 }
 
 function captureFixtureIdentity(pid) {
   const inventory = processInventory();
   const identity = inventory.get(pid);
+
   if (!identity || (!identity.command.includes(fixturePath) && !identity.command.includes(codexLink))) {
     throw new Error(`READY PID ${pid} does not identify the executable CI fixture.`);
   }
+
   const linkIdentity = lstatSync(codexLink);
+
   if (!fixtureLinkIdentity || linkIdentity.dev !== fixtureLinkIdentity.dev || linkIdentity.ino !== fixtureLinkIdentity.ino
     || !linkIdentity.isSymbolicLink() || readlinkSync(codexLink) !== fixturePath) {
     throw new Error('The Codex CLI resolver link no longer matches the exclusively installed fixture; refusing process ownership capture.');
   }
+
   const lineage = lineageToRoot(inventory, pid, appChild.pid);
+
   if (!lineage || lineage[0].pid !== pid || lineage.at(-1).pid !== appChild.pid) {
     throw new Error(`Fixture PID ${pid} is not a descendant of the owned packaged app.`);
   }
+
   return { ...identity, originalLineage: lineage };
 }
 
 function verifyLiveIdentity(expected) {
   const alive = processAlive(expected.pid);
+
   if (!alive) return false;
   const inventory = processInventory();
   const current = inventory.get(expected.pid);
+
   if (!current) {
     if (!processAlive(expected.pid)) return false;
     throw new Error(`PID ${expected.pid} is live but absent from the process inventory; refusing to signal it.`);
   }
+
   if (!sameProcessIdentity(expected, current)) {
     throw new Error(`PID ${expected.pid} is live but its process start, group, or command identity changed; refusing to signal it.`);
   }
+
   if (expected.originalLineage) {
     const lineage = lineageToRoot(inventory, expected.pid, appChild.pid);
+
     if (!lineage || lineage.length !== expected.originalLineage.length
       || lineage.some((member, index) => !sameProcessIdentity(expected.originalLineage[index], member))) {
       throw new Error(`Fixture PID ${expected.pid} no longer has its captured app-owned process lineage; refusing to signal it.`);
     }
   }
+
   return true;
 }
 
@@ -221,6 +294,7 @@ async function portClosed(port) {
     socket.once('connect', () => { clearTimeout(timeout); socket.destroy(); resolve(false); });
     socket.once('error', error => {
       clearTimeout(timeout);
+
       if (error.code === 'ECONNREFUSED') resolve(true);
       else reject(error);
     });
@@ -230,53 +304,75 @@ async function portClosed(port) {
 async function terminateOwnedFixture(session) {
   const { fixturePid: pid } = session;
   const expected = session?.processIdentity;
+
   if (!expected) throw new Error(`Fixture PID ${pid} has no captured command/start/lineage identity; refusing cleanup signal.`);
+
   if (!(verifyLiveIdentity(expected))) return;
   receipt.cleanup.push({ kind: 'fixture-process-signal', pid, signal: 'SIGTERM' });
+
   try { process.kill(pid, 'SIGTERM'); }
   catch (error) { if (error?.code !== 'ESRCH') throw error; }
+
   const deadline = Date.now() + 5_000;
+
   while (Date.now() < deadline && verifyLiveIdentity(expected)) await new Promise(resolve => setTimeout(resolve, 100));
+
   if (verifyLiveIdentity(expected)) {
     verifyLiveIdentity(expected);
     receipt.cleanup.push({ kind: 'fixture-process-signal', pid, signal: 'SIGKILL' });
+
     try { process.kill(pid, 'SIGKILL'); }
     catch (error) { if (error?.code !== 'ESRCH') throw error; }
+
     await waitFor(() => !verifyLiveIdentity(expected), `owned fixture process ${pid} after SIGKILL`, 5_000);
   }
 }
 
 async function stopOwnedApp() {
   if (!appChild?.pid) return;
+
   if (!appProcessTreeCaptured) throw new Error('No complete owned app process tree was captured; refusing broad teardown.');
   const identities = [...appProcessIdentities.values()].sort((a, b) => Number(a.pid === appChild.pid) - Number(b.pid === appChild.pid));
+
   for (const expected of identities) {
     if (!verifyLiveIdentity(expected)) continue;
     receipt.cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal: 'SIGTERM' });
+
     try { process.kill(expected.pid, 'SIGTERM'); }
     catch (error) { if (error?.code !== 'ESRCH') throw error; }
   }
+
   const identitiesGone = async () => identities.every(expected => !verifyLiveIdentity(expected));
+
   const groupGone = () => {
     const inventory = processInventory();
+
     if ([...inventory.values()].some(candidate => candidate.pgid === appChild.pid)) return false;
+
     return !processGroupAlive(appChild.pid);
   };
+
   let graceful = false;
+
   try {
     await waitFor(async () => (await identitiesGone()) && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGTERM`, 12_000);
     graceful = true;
   } catch (gracefulError) {
     receipt.cleanup.push({ kind: 'app-graceful-shutdown-escalation', error: gracefulError.message });
+
     for (const expected of identities) {
       if (!verifyLiveIdentity(expected)) continue;
       receipt.cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal: 'SIGKILL' });
+
       try { process.kill(expected.pid, 'SIGKILL'); }
       catch (error) { if (error?.code !== 'ESRCH') throw error; }
     }
+
     await waitFor(async () => (await identitiesGone()) && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGKILL`, 5_000);
   }
+
   if (!appExited) await waitFor(() => appExited, `owned app leader ${appChild.pid} close event`, 5_000);
+
   return graceful;
 }
 
@@ -291,6 +387,7 @@ async function waitTerminalText(page, text, label, timeout = 20_000) {
 async function terminalInstance(page) {
   const wrapper = page.locator('.ai-session__terminal .terminal-wrapper');
   await wrapper.waitFor({ state: 'visible' });
+
   return wrapper.elementHandle();
 }
 
@@ -321,6 +418,7 @@ async function createAndStartSession(page, name, model) {
   session.id = database.agentSessions.listSessions(receipt.project.projectId).find(candidate => candidate.name === name)?.id;
   assert.ok(session.id, `The real workspace database must contain UI-created session ${name}.`);
   receipt.ownedProcesses.push({ kind: 'codex-fixture', pid, owner: 'owned app session terminal', observedAt: session.observedAt });
+
   return session;
 }
 
@@ -334,10 +432,12 @@ try {
   const linkDirectory = path.dirname(codexLink);
   const missingLinkDirectories = [];
   let parent = linkDirectory;
+
   while (await absent(parent)) {
     missingLinkDirectories.push(parent);
     parent = path.dirname(parent);
   }
+
   for (const directoryPath of missingLinkDirectories.reverse()) {
     try {
       await mkdir(directoryPath);
@@ -349,6 +449,7 @@ try {
       assert.ok((await lstat(directoryPath)).isDirectory(), `CLI resolver parent must be a directory: ${directoryPath}`);
     }
   }
+
   await mkdir(codexProfile, { mode: 0o700 });
   fixtureProfileIdentity = await lstat(codexProfile);
   await symlink(fixturePath, codexLink);
@@ -379,12 +480,14 @@ try {
   database = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
   const projectService = new ProjectWorkspaceService(database, userData);
   const project = projectService.createProject('CI terminal fixture project', projectFolder);
+
   const task = database.createTask({
     projectId: project.project.id,
     bindingId: project.binding.id,
     title: 'Read-only terminal transport fixture',
     description: 'Provider-free real app custom PTY transport test.',
   });
+
   assert.equal(project.view.descriptorUri, pathToFileURL(project.descriptorPath).toString(), 'The project workspace service must persist its own descriptor identity.');
   assert.equal(await realpath(project.descriptorPath), project.descriptorPath);
   receipt.project = { projectId: project.project.id, bindingId: project.binding.id, taskId: task.id, descriptorPath: project.descriptorPath };
@@ -394,11 +497,13 @@ try {
   appExecutablePath = executable;
   assert.ok((await lstat(executable)).isFile(), 'Packaged app executable must be present.');
   appPort = await reservePort();
+
   const args = [
     '--disable-telemetry', '--skip-welcome', '--log', 'trace',
     `--user-data-dir=${userData}`, `--extensions-dir=${extensions}`, `--remote-debugging-port=${appPort}`,
     project.descriptorPath,
   ];
+
   const appEnv = { ...process.env, DEV_REVIEW_HOME: reviewHome, DEV_REVIEW_IMPORT_FROM: 'none', ELECTRON_ENABLE_LOGGING: '1' };
   delete appEnv.ELECTRON_RUN_AS_NODE;
   delete appEnv.VSCODE_DEV;
@@ -411,7 +516,9 @@ try {
   await waitFor(async () => {
     if (appExited) throw new Error(`Packaged app exited before CDP was ready: ${JSON.stringify(await appExit)}`);
     const response = await fetch(`http://127.0.0.1:${appPort}/json/list`).catch(() => undefined);
+
     if (!response?.ok) return false;
+
     return (await response.json()).some(target => target.type === 'page' && target.webSocketDebuggerUrl);
   }, 'packaged app CDP target', 90_000);
   captureAppProcessTree();
@@ -422,6 +529,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await waitFor(() => page.evaluate(() => {
     const names = performance.getEntriesByType('mark').map(entry => entry.name);
+
     return names.includes('code/didLoadExtensions') && names.includes('code/didInitializeLocalExtensionHost');
   }), 'native extension host readiness', 90_000);
   const projectMenu = page.getByRole('button', { name: '프로젝트 메뉴', exact: true });
@@ -448,6 +556,7 @@ try {
   await page.setViewportSize({ width: 900, height: 700 });
   first.resizeDimensions = await waitFor(async () => {
     const sizes = [...(await readTerminalText(page)).matchAll(/SIZE cols=(\d+) rows=(\d+)/g)].map(match => `${match[1]}x${match[2]}`);
+
     return sizes.length >= 2 && new Set(sizes).size >= 2 ? [...new Set(sizes)] : false;
   }, 'real PTY resize event with changed terminal dimensions');
   first.resizeObserved = true;
@@ -537,20 +646,25 @@ try {
   process.exitCode = 1;
 } finally {
   const cleanupErrors = [];
+
   if (appChild?.pid && !appExited) {
     try { captureAppProcessTree(); }
     catch (error) { cleanupErrors.push(`Final owned app process snapshot: ${error.message}`); }
   }
+
   if (browser) {
     try { await browser.close(); }
     catch (error) { cleanupErrors.push(`CDP disconnect: ${error.message}`); }
   }
+
   try { await stopOwnedApp(); }
   catch (error) { cleanupErrors.push(`Owned app shutdown: ${error.message}`); }
+
   if (database) {
     try {
       const sessionRows = receipt.project ? database.agentSessions.listSessions(receipt.project.projectId) : [];
       receipt.finalSessions = sessionRows.map(session => ({ id: session.id, name: session.name, state: session.state }));
+
       if (receipt.project) {
         receipt.finalTurns = receipt.sessions.map(session => ({
           sessionId: session.id,
@@ -558,46 +672,57 @@ try {
             .map(turn => ({ id: turn.id, state: turn.state, cleanupVerified: turn.cleanupVerified, providerConversationId: turn.providerConversationId })),
         }));
       }
+
       database.close();
       database = undefined;
     } catch (error) { cleanupErrors.push(`Database close/readback: ${error.message}`); }
   }
+
   for (const session of receipt.sessions) {
     try {
       await terminateOwnedFixture(session);
       const alive = processAlive(session.fixturePid);
+
       if (alive) cleanupErrors.push(`Owned fixture process ${session.fixturePid} is still alive after app shutdown.`);
       else receipt.cleanup.push({ kind: 'fixture-process', pid: session.fixturePid, cleanupVerified: true });
     } catch (error) { cleanupErrors.push(`Fixture PID ${session.fixturePid} check: ${error.message}`); }
   }
+
   if (appChild?.pid) {
     try {
       if (processAlive(appChild.pid)) cleanupErrors.push(`Owned app process ${appChild.pid} is still alive.`);
       else receipt.cleanup.push({ kind: 'app-process', pid: appChild.pid, cleanupVerified: true, exit: appExited ? await appExit : null });
     } catch (error) { cleanupErrors.push(`App PID ${appChild.pid} check: ${error.message}`); }
   }
+
   if (appPort) {
     try {
       const closed = await waitFor(() => portClosed(appPort).then(value => value), `owned app port ${appPort} closure`, 5_000);
+
       if (closed) receipt.cleanup.push({ kind: 'app-port', port: appPort, cleanupVerified: true });
       else cleanupErrors.push(`Owned app port ${appPort} accepted a connection after shutdown.`);
     } catch (error) { cleanupErrors.push(`Owned app port ${appPort} check: ${error.message}`); }
   }
+
   const noAppWasSpawned = !appChild?.pid;
   let capturedTreeGone = noAppWasSpawned;
+
   if (!noAppWasSpawned) {
     try {
       const inventory = processInventory();
       capturedTreeGone = [...appProcessIdentities.values()].every(identity => !processAlive(identity.pid) && !inventory.has(identity.pid));
     } catch (error) { cleanupErrors.push(`Owned app process inventory check: ${error.message}`); }
   }
+
   let appProcessGroupGone = noAppWasSpawned;
+
   if (appChild?.pid) {
     try {
       const inventory = processInventory();
       appProcessGroupGone = ![...inventory.values()].some(candidate => candidate.pgid === appChild.pid) && !processGroupAlive(appChild.pid);
     } catch (error) { cleanupErrors.push(`Owned app process group ${appChild.pid} check: ${error.message}`); }
   }
+
   const ownedProcessesGone = !cleanupErrors.some(error => /still alive|shutdown|PID .* check|inventory check|process group .* check/i.test(error))
     && (noAppWasSpawned || appProcessTreeCaptured)
     && capturedTreeGone
@@ -605,6 +730,7 @@ try {
     && receipt.sessions.every(session => receipt.cleanup.some(item => item.kind === 'fixture-process' && item.pid === session.fixturePid && item.cleanupVerified))
     && (!appChild?.pid || receipt.cleanup.some(item => item.kind === 'app-process' && item.pid === appChild.pid && item.cleanupVerified))
     && (!appPort || receipt.cleanup.some(item => item.kind === 'app-port' && item.port === appPort && item.cleanupVerified));
+
   if (ownedProcessesGone && fixtureLinkIdentity) {
     try {
       const current = await lstat(codexLink);
@@ -616,6 +742,7 @@ try {
       receipt.cleanup.push({ kind: 'owned-cli-symlink', cleanupVerified: true });
     } catch (error) { cleanupErrors.push(`Owned CLI symlink cleanup: ${error.message}`); }
   }
+
   if (ownedProcessesGone && fixtureProfileIdentity) {
     try {
       const current = await lstat(codexProfile);
@@ -627,6 +754,7 @@ try {
       receipt.cleanup.push({ kind: 'owned-empty-profile-directory', cleanupVerified: true });
     } catch (error) { cleanupErrors.push(`Owned empty profile cleanup: ${error.message}`); }
   }
+
   if (ownedProcessesGone) {
     for (const identity of [...fixtureLinkDirectoryIdentities].reverse()) {
       try {
@@ -640,19 +768,23 @@ try {
       } catch (error) { cleanupErrors.push(`Owned CLI parent directory cleanup: ${error.message}`); }
     }
   }
+
   if (cleanupErrors.length) {
     receipt.cleanupErrors = cleanupErrors;
     receipt.failure ??= `Cleanup could not be verified: ${cleanupErrors.join(' | ')}`;
     process.exitCode = 1;
   }
+
   receipt.authEnvironmentKeysPresent = presentAuthEnvironmentNames;
   receipt.ownedProcessesGone = ownedProcessesGone;
   receipt.cleanupVerified = ownedProcessesGone && cleanupErrors.length === 0
     && receipt.cleanup.some(item => item.kind === 'owned-cli-symlink' && item.cleanupVerified)
     && receipt.cleanup.some(item => item.kind === 'owned-empty-profile-directory' && item.cleanupVerified);
   receipt.finalContract = { fixtureOnly: true, providerExecuted: false, authenticated: false, providerIdentityCaptured: false, providerConversationId: null, modelClaimed: false };
+
   try { await writeFile(path.join(output, 'session-terminal-receipt.json'), JSON.stringify(receipt, null, 2)); }
   catch (error) { process.stderr.write(`Failed to write terminal smoke receipt: ${error.message}\n`); process.exitCode = 1; }
+
   if (root && ownedProcessesGone) {
     try {
       assert.equal(await realpath(root), root);

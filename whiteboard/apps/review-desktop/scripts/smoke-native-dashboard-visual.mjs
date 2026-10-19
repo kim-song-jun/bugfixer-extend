@@ -2347,8 +2347,10 @@ async function verifyCompletedSessionOnboardingAfterRestart(page, fixture, tag, 
   const settings = page.locator('.review-home-content.review-settings-page');
 
   await settings.waitFor({ state: 'visible' });
+
   const nativeNotificationRow = settings.getByRole('region', { name: 'AI 세션', exact: true })
     .getByText('운영체제 알림', { exact: true }).locator('..');
+
   const nativeNotificationToggle = settings.getByRole('checkbox', { name: 'AI 세션 운영체제 알림', exact: true });
 
   await nativeNotificationToggle.waitFor({ state: 'visible' });
