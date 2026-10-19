@@ -294,23 +294,24 @@ export function createSessionPrText(): SessionPrTextController {
 		if (loadingError || actionError) { const error = document.createElement('p'); error.className = 'ai-session-pr-text__error'; error.setAttribute('role', 'alert'); error.textContent = loadingError || actionError; section.appendChild(error); }
 		const sourceInfo = head ? `저장된 최신 문구 v${head.revision} · ${authorLabel(head)}${head.source?.kind === 'providerAttempt' ? ` · ${head.source.provider} · ${head.source.model}` : ''}` : '저장된 PR 문구 없음';
 		append(section, 'ai-session-pr-text__head', sourceInfo);
-		const titleInput = document.createElement('input'); titleInput.type = 'text'; titleInput.maxLength = 200; titleInput.value = title; titleInput.placeholder = 'PR 제목'; titleInput.dataset.focusKey = 'pr-title'; titleInput.setAttribute('aria-label', 'PR 제목');
+		const hasEditableHead = draftReady && hasSavedHead();
+		const titleInput = document.createElement('input'); titleInput.type = 'text'; titleInput.maxLength = 200; titleInput.value = title; titleInput.readOnly = !hasEditableHead; titleInput.placeholder = 'PR 제목'; titleInput.dataset.focusKey = 'pr-title'; titleInput.setAttribute('aria-label', 'PR 제목');
 		titleInput.addEventListener('input', () => { title = titleInput.value; dirtyBuffer = true; editEpoch++; invalidatePreparedPreview(); actionError = ''; notifySelection(); update(); });
-		field(section, 'PR 제목', titleInput);
-		const bodyInput = document.createElement('textarea'); bodyInput.maxLength = 20000; bodyInput.value = body; bodyInput.placeholder = '변경 내용과 검토 지점을 설명합니다.'; bodyInput.dataset.focusKey = 'pr-body'; bodyInput.setAttribute('aria-label', 'PR 설명');
+		field(section, hasEditableHead ? 'PR 제목' : 'AI 초안 제목', titleInput);
+		const bodyInput = document.createElement('textarea'); bodyInput.maxLength = 20000; bodyInput.value = body; bodyInput.readOnly = !hasEditableHead; bodyInput.placeholder = '변경 내용과 검토 지점을 설명합니다.'; bodyInput.dataset.focusKey = 'pr-body'; bodyInput.setAttribute('aria-label', 'PR 설명');
 		bodyInput.addEventListener('input', () => { body = bodyInput.value; dirtyBuffer = true; editEpoch++; invalidatePreparedPreview(); actionError = ''; notifySelection(); update(); });
-		field(section, 'PR 설명', bodyInput);
-		const editState = document.createElement('p'); editState.className = 'ai-session-pr-text__note'; editState.textContent = dirtyBuffer ? '저장되지 않은 편집 내용이 있습니다.' : '저장된 최신 문구를 보고 있습니다.'; section.appendChild(editState);
+		field(section, hasEditableHead ? 'PR 설명' : 'AI 초안 설명', bodyInput);
+		const editState = document.createElement('p'); editState.className = 'ai-session-pr-text__note'; editState.textContent = dirtyBuffer ? '저장되지 않은 편집 내용이 있습니다.' : hasSavedHead() ? '저장된 최신 문구를 보고 있습니다.' : 'AI 초안을 만들 지시를 적어 주세요.'; section.appendChild(editState);
 		const bodyBytes = utf8ByteLength(body);
 		if (bodyBytes > AGENT_PR_TEXT_MAX_BODY_BYTES) { append(section, 'ai-session-pr-text__error', `PR 설명은 UTF-8 ${AGENT_PR_TEXT_MAX_BODY_BYTES}바이트 이하여야 합니다. 현재 ${bodyBytes}바이트입니다.`); }
 		const saveButton = button(busy ? '저장 중…' : '새 문구 버전 저장', 'save-pr-text');
 		saveButton.disabled = busy || !hasSavedHead() || !dirtyBuffer || !title.trim() || bodyBytes > AGENT_PR_TEXT_MAX_BODY_BYTES; saveButton.addEventListener('click', () => currentScope && currentActions && void save(currentScope, currentActions, generation)); section.appendChild(saveButton);
-		if (!hasSavedHead()) { append(section, 'ai-session-pr-text__note', '수동 저장은 AI가 만든 첫 문구가 저장된 뒤 사용할 수 있습니다.'); }
+		if (!hasSavedHead()) { append(section, 'ai-session-pr-text__note', 'AI가 첫 문구를 저장하면 제목과 설명을 직접 편집해 새 버전으로 저장할 수 있습니다.'); }
 
 		const ai = document.createElement('section'); ai.className = 'ai-session-pr-text__section'; ai.setAttribute('aria-label', 'AI 문구 작성 요청');
-		const aiTitle = document.createElement('h4'); aiTitle.textContent = 'AI에게 수정 요청'; ai.appendChild(aiTitle);
-		const chat = document.createElement('textarea'); chat.maxLength = 4000; chat.value = instruction; chat.dataset.focusKey = 'pr-chat'; chat.setAttribute('aria-label', 'AI 수정 지시'); chat.placeholder = '수정할 방향을 적어 주세요.';
-		chat.addEventListener('input', () => { instruction = chat.value; instructionEpoch++; if (preview?.request.state === 'preview') { status = '수정 지시가 바뀌어 미리보기를 폐기했습니다. 다시 준비해 주세요.'; } invalidatePreparedPreview(); update(); }); field(ai, '수정 지시', chat);
+		const aiTitle = document.createElement('h4'); aiTitle.textContent = hasSavedHead() ? 'AI에게 수정 요청' : 'AI 초안 작성'; ai.appendChild(aiTitle);
+		const chat = document.createElement('textarea'); chat.maxLength = 4000; chat.value = instruction; chat.dataset.focusKey = 'pr-chat'; chat.setAttribute('aria-label', 'AI 수정 지시'); chat.placeholder = hasSavedHead() ? '수정할 방향을 적어 주세요.' : '원하는 첫 PR 초안의 내용을 적어 주세요.';
+		chat.addEventListener('input', () => { instruction = chat.value; instructionEpoch++; if (preview?.request.state === 'preview') { status = '수정 지시가 바뀌어 미리보기를 폐기했습니다. 다시 준비해 주세요.'; } invalidatePreparedPreview(); update(); }); field(ai, hasSavedHead() ? '수정 지시' : '작성 지시', chat);
 		const previewButton = button(busy ? '요청 준비 중…' : 'AI 요청 미리보기', 'preview-pr-text'); previewButton.disabled = busy || !draftReady || !instruction.trim() || dirtyBuffer; previewButton.addEventListener('click', () => currentScope && currentActions && void runPreview(currentScope, currentActions, generation)); ai.appendChild(previewButton);
 		if (dirtyBuffer) { append(ai, 'ai-session-pr-text__note', '미저장된 제목 또는 설명이 있습니다. 저장한 뒤 AI 수정 요청을 준비할 수 있습니다.'); }
 		const displayedRequest = selectedRequestId ? (preview?.request.id === selectedRequestId ? preview.request : selectedRequest?.id === selectedRequestId ? selectedRequest : undefined) : (preview?.request ?? selectedRequest);

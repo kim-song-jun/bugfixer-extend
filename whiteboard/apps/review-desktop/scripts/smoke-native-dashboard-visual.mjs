@@ -4197,6 +4197,24 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
   await changes.getByText(`v${evidenceFixture.evidenceVersion} · ${evidenceFixture.fingerprint}`, { exact: true }).waitFor();
   assert.ok((await changes.innerText()).includes('작성자 알 수 없음'), 'The UI must state that before/after evidence does not establish authorship');
 
+  const prText = changesPanel.getByRole('region', { name: 'GitHub PR 제목과 설명', exact: true });
+  const prTitle = prText.getByRole('textbox', { name: 'PR 제목', exact: true });
+  const prBody = prText.getByRole('textbox', { name: 'PR 설명', exact: true });
+  const instruction = prText.getByRole('textbox', { name: 'AI 수정 지시', exact: true });
+  const preview = prText.getByRole('button', { name: 'AI 요청 미리보기', exact: true });
+  const manualSave = prText.getByRole('button', { name: '새 문구 버전 저장', exact: true });
+
+  await prText.getByText('저장된 PR 문구 없음', { exact: true }).waitFor();
+  await prText.getByRole('status').filter({ hasText: '저장된 PR 문구가 없습니다.' }).waitFor();
+  await preview.waitFor({ state: 'visible' });
+  assert.equal(await prTitle.isEditable(), false, 'An initial draft must keep the PR title read-only until a saved AI head exists');
+  assert.equal(await prBody.isEditable(), false, 'An initial draft must keep the PR description read-only until a saved AI head exists');
+  assert.equal(await instruction.isEditable(), true, 'The AI instruction must remain writable before the first saved head');
+  await instruction.focus();
+  assert.equal(await instruction.evaluate(element => document.activeElement === element), true, 'The AI instruction must accept keyboard focus');
+  assert.equal(await preview.isEnabled(), true, 'Preview must be available after the empty draft history finishes loading');
+  assert.equal(await manualSave.isDisabled(), true, 'Manual save must remain disabled until an AI-created head exists');
+
   for (const filePath of evidenceFixture.changedPaths) {
     await changes.locator('.ai-session-changes__file').filter({ hasText: filePath }).waitFor();
   }
