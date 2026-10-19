@@ -8,6 +8,8 @@ import { onUnexpectedError } from '../../../common/errors.js';
 import { Event } from '../../../common/event.js';
 import { VSCODE_AUTHORITY } from '../../../common/network.js';
 
+const allowedApplicationIpcChannels = new Set(['workspaceAgentSessions']);
+
 type ipcMainListener = (event: electron.IpcMainEvent, ...args: any[]) => void;
 
 class ValidatedIpcMain implements Event.NodeEventEmitter {
@@ -104,7 +106,7 @@ class ValidatedIpcMain implements Event.NodeEventEmitter {
 	}
 
 	private validateEvent(channel: string, event: electron.IpcMainEvent | electron.IpcMainInvokeEvent): boolean {
-		if (!channel?.startsWith('vscode:')) {
+		if (!channel?.startsWith('vscode:') && !allowedApplicationIpcChannels.has(channel)) {
 			onUnexpectedError(`Refused to handle ipcMain event for channel '${channel}' because the channel is unknown.`);
 			return false; // unexpected channel
 		}

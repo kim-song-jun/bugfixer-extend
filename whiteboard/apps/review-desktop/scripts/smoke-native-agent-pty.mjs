@@ -447,19 +447,14 @@ try {
   receipt.checks.push('real SQLite transcript failure withholds uncommitted output while verified PTY cleanup succeeds');
 
   ownedServiceDatabase = serviceDatabase;
-  const gitRoot = path.join(root, 'agent-session-git');
+  const serviceFolder = path.join(root, 'agent-session-folder');
   const profileRoot = path.join(root, 'agent-session-profile');
-  await mkdir(gitRoot);
+  await mkdir(serviceFolder);
   await mkdir(profileRoot);
-  execFileSync('git', ['-C', gitRoot, 'init', '-q', '-b', 'fixture'], { encoding: 'utf8' });
-  execFileSync('git', ['-C', gitRoot, 'config', 'user.name', 'Native Session Fixture'], { encoding: 'utf8' });
-  execFileSync('git', ['-C', gitRoot, 'config', 'user.email', 'native-session-fixture@example.invalid'], { encoding: 'utf8' });
-  await writeFile(path.join(gitRoot, 'README.md'), 'Native service fixture\n');
-  execFileSync('git', ['-C', gitRoot, 'add', 'README.md'], { encoding: 'utf8' });
-  execFileSync('git', ['-C', gitRoot, 'commit', '-qm', 'native service fixture'], { encoding: 'utf8' });
+  await writeFile(path.join(serviceFolder, 'README.md'), 'Native ordinary-folder service fixture\n');
 
   const project = serviceDatabase.createProject('Native PTY service fixture');
-  const binding = serviceDatabase.createFolderBinding({ projectId: project.id, path: gitRoot, vcsKind: 'git', vcsRoot: gitRoot });
+  const binding = serviceDatabase.createFolderBinding({ projectId: project.id, path: serviceFolder });
   serviceDatabase.enableOrdinaryFolderMutation(project.id, binding.id);
   const serviceWriterLock = new TaskFolderWriterLock();
   const worktrees = new ManagedWorktreeService(path.join(root, 'managed-worktrees'));
