@@ -94,6 +94,7 @@ function probeProcessGroup(pgid) {
     return { state: 'present' };
   } catch (error) {
     if (error.code === 'ESRCH') return { state: 'absent' };
+
     if (error.code === 'EPERM') return { state: 'unverifiable', error };
 
     throw error;
@@ -109,6 +110,7 @@ function processGroupSnapshot(pgid) {
       maxBuffer: 256 * 1024,
       stdio: ['ignore', 'pipe', 'ignore']
     });
+
     const members = output.split(/\r?\n/).flatMap(line => {
       const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/);
 
@@ -132,6 +134,7 @@ function processGroupSnapshot(pgid) {
 
 function describeProcessGroupSnapshot(snapshot) {
   if (snapshot.error) return `ps snapshot unavailable (${snapshot.error})`;
+
   if (snapshot.members.length === 0) return 'ps snapshot empty (not proof of process-group absence)';
 
   return snapshot.members.map(member => `pid=${member.pid} ppid=${member.ppid} pgid=${member.pgid} euid=${member.euid} state=${member.state} comm=${member.comm}`).join('; ');
@@ -150,6 +153,7 @@ async function waitForGroupGone(pgid, timeoutMs = 2500, priorEPERM) {
     probe = probeProcessGroup(pgid);
 
     if (probe.state === 'absent') return { state: 'absent', firstEPERM };
+
     if (probe.state === 'unverifiable' && !firstEPERM) firstEPERM = probe.error;
 
     if (Date.now() >= deadline) break;
@@ -159,6 +163,7 @@ async function waitForGroupGone(pgid, timeoutMs = 2500, priorEPERM) {
   probe = probeProcessGroup(pgid);
 
   if (probe.state === 'absent') return { state: 'absent', firstEPERM };
+
   if (probe.state === 'unverifiable' && !firstEPERM) firstEPERM = probe.error;
 
   return { state: probe.state, firstEPERM, snapshot: processGroupSnapshot(pgid) };
@@ -176,6 +181,7 @@ function verifyOwnedLiveGroup(child, snapshot) {
   const childMember = members.find(member => member.pid === child.pid && member.pgid === child.pid);
 
   if (!childMember || /^[ZX]/.test(childMember.state)) return 'spawned process-group leader is not verifiably live in its owned group';
+
   if (child.exitCode !== null || child.signalCode !== null) return 'spawned process-group leader has exited';
 
   const latestProbe = probeProcessGroup(child.pid);
@@ -195,6 +201,7 @@ function groupCleanupError(pgid, result, reason) {
   const permissionDetail = result.firstEPERM
     ? `; first EPERM: ${describePermissionError(result.firstEPERM)}`
     : '';
+
   const snapshotDetail = result.snapshot
     ? `; members: ${describeProcessGroupSnapshot(result.snapshot)}`
     : '';
