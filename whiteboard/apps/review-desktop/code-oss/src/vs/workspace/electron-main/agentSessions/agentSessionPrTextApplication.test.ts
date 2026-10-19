@@ -85,7 +85,7 @@ test('preview binds retained SQLite evidence, approved rationale and current PR 
 		assert.match(stored.contextJSON, /The user requested this change\./u);
 		assert.match(stored.contextJSON, /Initial AI title/u);
 		value.store().appendHumanRevision({ scope: value.scope, expectedRevision: 1, idempotencyKey: 'move-head', content: { title: 'Moved title', body: 'Moved body' } });
-		await assert.rejects(value.application.startPrTextRequest({ scope: value.scope, requestId: preview.request.id, expectedStateRevision: preview.request.stateRevision, expectedDigest: preview.digest }), /stale|changed|최신/u);
+		await assert.rejects(value.application.startPrTextRequest({ scope: value.scope, requestId: preview.request.id, expectedStateRevision: preview.request.stateRevision, expectedDigest: preview.digest }), /stale|changed|최신|바뀌었습니다/u);
 		assert.equal(value.store().getRequest(value.scope, preview.request.id)?.state, 'preview');
 	} finally { await value.application.shutdown(); value.dispose(); }
 });
@@ -136,7 +136,7 @@ test('unverified provider cleanup never stores a candidate and shutdown retains 
 		const running = await value.application.startPrTextRequest({ scope: value.scope, requestId: preview.request.id, expectedStateRevision: preview.request.stateRevision, expectedDigest: preview.digest });
 		await assert.rejects(value.application.shutdown(), /cleanup|verified|Owned process group/u);
 		const finished = value.store().getRequest(value.scope, running.id)!;
-		assert.equal(finished.state, 'cancelled');
+		assert.equal(finished.state, 'interrupted', 'Unverified cleanup cannot be reported as a successfully cancelled request.');
 		assert.equal(finished.candidate, undefined);
 	} finally { value.dispose(); }
 });

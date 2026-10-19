@@ -171,6 +171,26 @@ async function until(check, label, timeout = 15_000, ignoreAbort = false) {
   throw new Error(`Timed out: ${label}`);
 }
 
+function readCompleteTranscript(readPage) {
+  const entries = [];
+  let afterSequence = 0;
+  let highestSequence = 0;
+  let pageCount = 0;
+
+  while (pageCount < 400) {
+    const page = readPage({ afterSequence, limit: 50 });
+    pageCount++;
+    entries.push(...page.entries);
+    highestSequence = page.highestSequence;
+
+    if (!page.hasMore) return { entries, pageCount, highestSequence, nextSequence: page.nextSequence };
+    if (page.nextSequence <= afterSequence) throw new Error('Transcript pagination reported more entries without advancing its sequence cursor.');
+    afterSequence = page.nextSequence;
+  }
+
+  throw new Error('Transcript pagination exceeded the turn retention bound.');
+}
+
 function alive(pid) {
   try {
     process.kill(pid, 0);
@@ -736,7 +756,16 @@ try {
   }, 'service natural exit and verified cleanup');
 
   assert.ok(finalOutput.join('').endsWith('FINAL_WITHOUT_NEWLINE'), 'Active service attachment must receive the final output without a newline');
-  const finalTranscript = serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id).entries;
+  const finalTranscriptPage = readCompleteTranscript(options =>
+    serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id, options));
+  const finalTranscript = finalTranscriptPage.entries;
+  receipt.finalTranscript = {
+    pageCount: finalTranscriptPage.pageCount,
+    entryCount: finalTranscript.length,
+    highestSequence: finalTranscriptPage.highestSequence,
+    nextSequence: finalTranscriptPage.nextSequence,
+    finalChunkPresent: finalTranscript.some(entry => entry.kind === 'terminal' && entry.text.endsWith('FINAL_WITHOUT_NEWLINE')),
+  };
   assert.ok(finalTranscript.some(entry => entry.kind === 'terminal' && entry.text.endsWith('FINAL_WITHOUT_NEWLINE')),
     'The final sanitizer flush must be durable before the provider turn is finalized.');
   assert.equal(resourceEvents.get(naturalTurn.id).join(','), 'access-revoked,private-config-released');

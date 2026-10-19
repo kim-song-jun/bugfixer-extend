@@ -262,7 +262,7 @@ test('real MCP SDK pages scoped sessions and reads redacted retained transcript 
 	let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
 	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
 	try {
-		const secret = 'private-log-secret';
+		const secret = 'fixtureLogValue_M6R9K2';
 		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id, permissionPolicy: POLICY, knownSecrets: [secret] });
 		client = await openMcpClient(access);
 		const firstSessionPage = readSuccessfulToolPayload(await client.client.callTool({ name: 'sessions_list', arguments: { limit: 1 } }), 'sessions_list page one');
@@ -274,10 +274,11 @@ test('real MCP SDK pages scoped sessions and reads redacted retained transcript 
 
 		const longText = `${'😀'.repeat(995)}${secret}${'界'.repeat(1_120)}`;
 		fixture.database.agentSessionTranscripts.appendStructuredLog({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id,
-			sequence: 1, text: longText, severity: 'error', source: 'host', trustedKnownSecrets: [secret] });
+			sequence: 1, text: longText, severity: 'error', source: 'host' });
 		fixture.database.agentSessionTranscripts.appendStructuredLog({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id,
 			sequence: 2, text: 'filtered provider detail', severity: 'info', source: 'provider' });
-		const storedSafeText = fixture.database.agentSessionTranscripts.readPage(fixture.project.id, session.id, turn.id, { limit: 1 }).entries[0].text;
+		const storedText = fixture.database.agentSessionTranscripts.readPage(fixture.project.id, session.id, turn.id, { limit: 1 }).entries[0].text;
+		assert.equal(storedText, longText, 'The fixture value is learned by the read grant rather than capture-time redaction.');
 		let cursor: string | undefined;
 		let firstCursor: string | undefined;
 		let fragments = '';
@@ -291,11 +292,13 @@ test('real MCP SDK pages scoped sessions and reads redacted retained transcript 
 			const pageEntries = payload.entries as Array<{ textFragment: string; sequence: number }>;
 			assert.equal(pageEntries.length, 1);
 			assert.equal(pageEntries[0].sequence, 1);
+			assert.equal((payload.entries as Array<{ redactionApplied: boolean }>)[0].redactionApplied, true);
+			assert.ok([...pageEntries[0].textFragment].length <= 1_000);
 			fragments += pageEntries[0].textFragment;
 			cursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : undefined;
 			firstCursor ??= cursor;
 		}
-		assert.equal(fragments, storedSafeText);
+		assert.equal(fragments, `${'😀'.repeat(995)}***${'界'.repeat(1_120)}`);
 		assert.equal(fragments.includes(secret), false);
 		const crossSession = await client.client.callTool({ name: 'logs_read', arguments: { targetTurnId: otherTurn.id } });
 		assert.equal((crossSession as { isError?: boolean }).isError, true);

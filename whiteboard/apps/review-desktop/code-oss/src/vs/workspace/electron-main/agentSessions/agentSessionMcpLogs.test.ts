@@ -32,16 +32,18 @@ test('SQLite transcript reads redact before Unicode fragmentation and pin the co
 			folderIdentity: { canonicalPath: root, dev: stats.dev.toString(), ino: stats.ino.toString() }, managedWorktreeOwnerId: null,
 			permissionPolicy: POLICY, convention: null, references: [] };
 		const turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
-		const secret = 'private-secret-crossing-boundary';
+		const secret = 'fixtureGrantValue_J8Q4Z2';
 		const secretId = randomUUID();
 		const raw = `${'😀'.repeat(997)}${secret}${'漢'.repeat(30)}`;
 		database.agentSessionTranscripts.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id,
-			sequence: 1, text: raw, severity: 'error', source: 'host', references: [{ kind: 'task', id: secretId }], trustedKnownSecrets: [secret, secretId] });
+			sequence: 1, text: raw, severity: 'error', source: 'host', references: [{ kind: 'task', id: secretId }] });
 		database.agentSessionTranscripts.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id,
 			sequence: 4, text: 'second retained record', severity: 'info', source: 'provider' });
 		database.agentSessionTranscripts.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id,
 			sequence: 7, text: 'third retained record', severity: 'info', source: 'provider' });
-		const safeText = database.agentSessionTranscripts.readPage(project.id, session.id, turn.id, { limit: 1 }).entries[0].text;
+		const storedText = database.agentSessionTranscripts.readPage(project.id, session.id, turn.id, { limit: 1 }).entries[0].text;
+		assert.equal(storedText, raw, 'The fixture value becomes known only to the later read grant, so capture-time redaction cannot satisfy this test.');
+		const safeText = `${'😀'.repeat(997)}***${'漢'.repeat(30)}`;
 		let authorizationChecks = 0;
 		const readPage = (afterSequence: number, options: Parameters<typeof database.agentSessionTranscripts.readPage>[3]) => {
 			return database.agentSessionTranscripts.readPage(project.id, session.id, turn.id, { ...options, afterSequence });
