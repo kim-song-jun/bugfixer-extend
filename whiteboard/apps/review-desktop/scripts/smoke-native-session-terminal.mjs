@@ -64,6 +64,7 @@ const receipt = {
   processBaseline: { scriptPid: process.pid, scriptPpid: process.ppid, capturedAt: new Date().toISOString(), ownedChildrenBeforeLaunch: 0 },
   cleanup: [],
   cleanupVerified: false,
+  startupDiagnosticCodes: [],
   failure: null,
 };
 
@@ -95,6 +96,12 @@ let fixtureLinkDirectoryIdentities = [];
 
 let appPort;
 
+class FatalWaitError extends Error {}
+
+async function assertAppIsRunning() {
+  if (appExited) throw new FatalWaitError(`Packaged app exited before startup completed: ${JSON.stringify(await appExit)}; startup diagnostic codes: ${receipt.startupDiagnosticCodes.join(', ') || 'none observed'}`);
+}
+
 async function waitFor(check, description, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
@@ -104,7 +111,11 @@ async function waitFor(check, description, timeoutMs = 30_000) {
       const result = await check();
 
       if (result) return result;
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      if (error instanceof FatalWaitError) throw error;
+
+      lastError = error;
+    }
 
     await new Promise(resolve => setTimeout(resolve, 150));
   }
@@ -458,7 +469,8 @@ try {
   assert.equal(await readlink(codexLink), fixturePath);
   assert.equal(await realpath(codexLink), await realpath(fixturePath));
 
-  root = await mkdtemp(path.join(os.tmpdir(), 'wb-native-session-terminal-'));
+  // Keep the canonical user-data path short enough for macOS's Unix-domain IPC sockets.
+  root = await realpath(await mkdtemp('/tmp/wb-native-session-terminal-'));
   const userData = path.join(root, 'user-data');
   const extensions = path.join(root, 'extensions');
   const reviewHome = path.join(root, 'review-home');
@@ -508,13 +520,29 @@ try {
   delete appEnv.ELECTRON_RUN_AS_NODE;
   delete appEnv.VSCODE_DEV;
   delete appEnv.VSCODE_CLI;
-  appChild = spawn(executable, args, { env: appEnv, stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+  appChild = spawn(executable, args, { env: appEnv, stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+
+  let startupStderr = '';
+
+  appChild.stderr.setEncoding('utf8');
+  appChild.stderr.on('data', chunk => {
+    startupStderr = (startupStderr + chunk).slice(-8_192);
+
+    const codes = startupStderr.match(/\b(?:EADDRINUSE|EACCES|EPERM|ENOENT|ENAMETOOLONG|ERR_DLOPEN_FAILED|ERR_MODULE_NOT_FOUND)\b/g) ?? [];
+
+    receipt.startupDiagnosticCodes = [...new Set([...receipt.startupDiagnosticCodes, ...codes])];
+  });
   appChild.once('error', error => { receipt.failure ??= `Packaged app spawn failed: ${error.message}`; });
   appExit = new Promise(resolve => appChild.once('close', (code, signal) => { appExited = true; resolve({ code, signal }); }));
   receipt.ownedProcesses.push({ kind: 'packaged-app-process-group', pid: appChild.pid, ppid: process.pid, port: appPort, command: executable, args, startedAt: new Date().toISOString() });
-  await waitFor(() => captureAppProcessTree(), `owned packaged app root and process group ${appChild.pid} snapshot`, 10_000);
   await waitFor(async () => {
-    if (appExited) throw new Error(`Packaged app exited before CDP was ready: ${JSON.stringify(await appExit)}`);
+    await assertAppIsRunning();
+
+    return captureAppProcessTree();
+  }, `owned packaged app root and process group ${appChild.pid} snapshot`, 10_000);
+  await waitFor(async () => {
+    await assertAppIsRunning();
+
     const response = await fetch(`http://127.0.0.1:${appPort}/json/list`).catch(() => undefined);
 
     if (!response?.ok) return false;

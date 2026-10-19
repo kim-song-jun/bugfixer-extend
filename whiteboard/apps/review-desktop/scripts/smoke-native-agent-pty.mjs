@@ -220,7 +220,7 @@ const fixturePath = path.join(root, 'interactive-fixture.mjs');
 
 const fixtureSource = `
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 if (!process.stdin.isTTY || !process.stdout.isTTY) process.exit(31);
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');

@@ -1172,9 +1172,9 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (this.error) this.renderInlineMessage(main, this.error, true);
 		if (this.notice) this.renderInlineMessage(main, this.notice, false);
 		shell.appendChild(main); this.root.appendChild(shell);
+		if (this.createFormFocusPending || onboardingFinished) { this.root.scrollTop = 0; }
 		if (this.createFormFocusPending) {
 			this.createFormFocusPending = false;
-			this.root.scrollTop = 0;
 			this.root.querySelector<HTMLElement>('.ai-session__create-form [name="name"], .ai-session__create-empty')?.focus({ preventScroll: true });
 		}
 		const sessionList = this.root.querySelector<HTMLElement>('.ai-session__list');

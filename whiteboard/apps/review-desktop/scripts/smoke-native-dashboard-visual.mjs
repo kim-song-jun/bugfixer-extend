@@ -2324,11 +2324,24 @@ async function verifySessionOnboardingAfterRestart(page, fixture, tag, screensho
   await page.waitForFunction(() => window.innerWidth === 1440 && window.innerHeight === 900);
   await verifyTheme(page, tag === 'dark', `onboarding-${tag}-completed`);
 
+  const completedHeading = await workspace.getByRole('heading', { name: fixture.reviewedCommit.name, exact: true }).boundingBox();
+
+  const projectHeader = await workspace.locator('.ai-session__project-header').boundingBox();
+
+  const scrollTop = await workspace.evaluate(element => element.scrollTop);
+
+  assert.ok(completedHeading && projectHeader, 'The selected session title and project header must remain measurable after finishing the guide');
+  assert.equal(scrollTop, 0, 'Finishing the guide must restore the session workspace scroll position');
+
+  const headingGap = completedHeading.y - projectHeader.y - projectHeader.height;
+
+  assert.ok(headingGap >= 16, 'Finishing the guide must leave the selected session title below the fixed project header with visible spacing');
+
   const completedScreenshot = path.join(output, `ai-session-onboarding-completed-${tag}-1440.png`);
 
   await capturePage(page, completedScreenshot);
   screenshots.push(completedScreenshot);
-  viewports.push({ theme: tag, state: 'onboarding-explicitly-finished-task-still-in-progress', width: 1440, height: 900, screenshot: completedScreenshot });
+  viewports.push({ theme: tag, state: 'onboarding-explicitly-finished-task-still-in-progress', width: 1440, height: 900, screenshot: completedScreenshot, layout: { scrollTop, headingGap } });
   fixture.onboarding.completed = true;
   fixture.onboarding.actualSession = fixture.reviewedCommit.name;
   fixture.onboarding.actualTurn = fixture.reviewedCommit.turnId;
@@ -2414,16 +2427,30 @@ async function verifyCompletedSessionOnboardingAfterRestart(page, fixture, tag, 
 
 async function openSessionWorkspace(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
 
-  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+  const editorTab = page.getByRole('tab', { name: /^AI 세션(?:,|$)/ });
+  const tabCount = await editorTab.count();
 
-  if (!(await sidebar.isVisible())) {
-    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+  assert.ok(tabCount <= 1, 'Each project window must have at most one AI session editor tab');
+
+  if (tabCount === 1) {
+    await editorTab.click();
+  } else {
+    const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
+    if (!(await sidebar.isVisible())) {
+      await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+    }
+
+    await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
   }
 
-  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+  const workspace = page.locator('.ai-session-workspace');
 
-  return page.locator('.ai-session-workspace');
+  await workspace.waitFor({ state: 'visible' });
+
+  return workspace;
 }
 
 async function captureOnboardingViewport(page, guide, tag, state, screenshots, viewports) {
@@ -2460,18 +2487,7 @@ async function captureOnboardingViewport(page, guide, tag, state, screenshots, v
 }
 
 async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
-  await page.setViewportSize({ width: 1440, height: 900 });
-
-  const workspace = page.locator('.ai-session-workspace');
-  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
-
-  if (!(await workspace.isVisible())) {
-    if (!(await sidebar.isVisible())) {
-      await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
-    }
-
-    await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
-  }
+  const workspace = await openSessionWorkspace(page);
 
   await workspace.getByRole('heading', { name: '프로젝트 첫 AI 세션', exact: true }).waitFor();
 
@@ -3050,16 +3066,7 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
 }
 
 async function openReviewedCommitChanges(page, fixture, reviewedCommit = fixture.reviewedCommit) {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.waitForFunction(() => window.innerWidth === 1440);
-
-  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
-
-  if (!(await sidebar.isVisible())) { await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click(); }
-
-  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
-
-  const workspace = page.locator('.ai-session-workspace');
+  const workspace = await openSessionWorkspace(page);
 
   await workspace.locator('.ai-session__session-row').getByText(reviewedCommit.name, { exact: true }).click();
   await workspace.getByRole('heading', { name: reviewedCommit.name, exact: true }).waitFor();
@@ -4386,18 +4393,7 @@ async function statFolder(folderPath) {
 }
 
 async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, viewports) {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.waitForFunction(() => window.innerWidth === 1440);
-
-  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
-
-  if (!(await sidebar.isVisible())) {
-    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
-  }
-
-  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
-
-  const workspace = page.locator('.ai-session-workspace');
+  const workspace = await openSessionWorkspace(page);
   const fixtureRow = workspace.locator('.ai-session__session-row').filter({ hasText: fixture.logHistory.name });
 
   await fixtureRow.waitFor({ state: 'visible' });
@@ -4547,14 +4543,8 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
 
 async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, viewports) {
   const evidenceFixture = fixture.changeEvidence;
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.waitForFunction(() => window.innerWidth === 1440);
-  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
 
-  if (!(await sidebar.isVisible())) { await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click(); }
-
-  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
-  const workspace = page.locator('.ai-session-workspace');
+  const workspace = await openSessionWorkspace(page);
   const fixtureRow = workspace.locator('.ai-session__session-row').filter({ hasText: evidenceFixture.name });
   await fixtureRow.waitFor({ state: 'visible' });
   await fixtureRow.click();
@@ -4817,18 +4807,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
 }
 
 async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports) {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.waitForFunction(() => window.innerWidth === 1440);
-
-  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
-
-  if (!(await sidebar.isVisible())) {
-    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
-  }
-
-  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
-
-  const workspace = page.locator('.ai-session-workspace');
+  const workspace = await openSessionWorkspace(page);
 
   const notifications = workspace.locator('.ai-session__notifications-mount');
 
