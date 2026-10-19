@@ -503,7 +503,7 @@ export class WorkspaceAgentSessionsChannel {
 				try {
 					const proposal = await this.requirePublicationHost().prepare(request, () => this.assertScopeCurrent(scope));
 					this.assertScopeCurrent(scope);
-					return this.assertPublicationProposalResponse(proposal, request, { sourceMergeId: request.sourceMergeId }) as T;
+					return this.assertPublicationProposalResponse(proposal, { ...request, expectedRevision: request.expectedRevision + 1 }, { sourceMergeId: request.sourceMergeId }) as T;
 				} finally { this.finishScopedOperation(scope); }
 			}
 			case 'approvePublicationProposal': {

@@ -926,6 +926,8 @@ test('publication IPC binds approval and provider operations to persisted exact 
 		accountsResponse = { available: true, accounts: [{ accountRef: 'gh-account-primary', host: 'github.com', login: 'reviewer', active: true, state: 'success' }], reason: null };
 
 		const proposal = await channel.call<AgentSessionPublicationProposalDTO>(sender, 'preparePublicationProposal', prepareInput);
+		assert.equal(proposal.revision, prepareInput.expectedRevision + 1, 'Preparation returns the revision after the expected prior revision');
+		assert.deepEqual(await channel.call(sender, 'preparePublicationProposal', prepareInput), proposal, 'An exact prepare retry returns the same next revision');
 		assert.equal(proposal.projectId, projectId);
 		assert.equal(proposal.sessionId, sessionId);
 		assert.equal(proposal.turnId, turnId);
@@ -1006,6 +1008,7 @@ test('publication IPC binds approval and provider operations to persisted exact 
 		assert.equal(published.operation.id, operation.id);
 		const publishedReceipt = published.operation.events.at(-1)?.event;
 		assert.equal(publishedReceipt?.type === 'published' ? publishedReceipt.pullRequestId : null, '42');
+		const beforePendingPublish = publishCalls;
 		const pendingWriteGate = writeGate = deferred();
 		const pendingPublish = channel.call<{ proposal: AgentSessionPublicationProposalDTO; operation: AgentSessionPublicationOperationDTO }>(sender, 'publishApprovedProposal', newerMutation);
 		await pendingWriteGate.reached;
@@ -1013,7 +1016,7 @@ test('publication IPC binds approval and provider operations to persisted exact 
 		pendingWriteGate.resolve();
 		await assert.rejects(pendingPublish, /project window changed/u);
 		openedWorkspace.configPath = URI.parse(descriptorUri);
-		assert.equal(publishCalls, 1, 'the host checks currentness before and after its asynchronous write boundary');
+		assert.equal(publishCalls, beforePendingPublish + 1, 'the host checks currentness before and after its asynchronous write boundary');
 
 		const pendingAccountGate = accountGate = deferred();
 		const pendingAccounts = channel.call(sender, 'listPublicationAccounts', scope);

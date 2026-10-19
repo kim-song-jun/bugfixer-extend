@@ -107,12 +107,12 @@ test('publication authority exports actual signed merge closure, holds cross-pro
 		await authority.assertCurrentApproval(publication);
 		const exportedWhileHeld = await authority.exportSource(proposal.id, 'origin'); exportedWhileHeld.pack.fill(0);
 		assert.equal(existsSync(lockPath), true, 'Export reuses the already-held owner lease');
-		const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+		const child = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', `
 import { ManagedWorktreeService } from ${JSON.stringify(new URL('./managedWorktrees.js', import.meta.url).href)};
 const [profile, owner, path, sha256] = process.argv.slice(1);
 try { const lease = await new ManagedWorktreeService(profile).acquirePublicationLease(owner, {path, sha256}); await lease.release(); process.exitCode = 2; }
 catch (error) { if (!String(error).includes('live process')) throw error; process.stdout.write('blocked'); }
-`, profile, proposal.integrationOwnerId, executable.path, executable.sha256], { env: environment, timeout: 10_000, maxBuffer: 1024 * 1024 });
+`, profile, proposal.integrationOwnerId, executable.path, executable.sha256], { env: { ...environment, TSX_TSCONFIG_PATH: process.env.TSX_TSCONFIG_PATH }, timeout: 10_000, maxBuffer: 1024 * 1024 });
 		assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr.toString()); assert.equal(child.stdout.toString(), 'blocked');
 		await active.release(); active = undefined;
 		assert.deepEqual(snapshot(repository, git), before, 'Source refs, index, files, and HEAD remain unchanged');
