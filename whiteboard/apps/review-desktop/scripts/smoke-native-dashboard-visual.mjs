@@ -2611,6 +2611,7 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
   await mkdir(callerFolder, { recursive: true });
 
   const callerBinding = database.createFolderBinding({ projectId: fixture.projectId, path: callerFolder });
+
   const caller = database.agentSessions.createSession({
     projectId: fixture.projectId,
     bindingId: callerBinding.id,
