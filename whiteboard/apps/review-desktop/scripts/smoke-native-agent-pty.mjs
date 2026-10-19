@@ -184,6 +184,7 @@ function readCompleteTranscript(readPage) {
     highestSequence = page.highestSequence;
 
     if (!page.hasMore) return { entries, pageCount, highestSequence, nextSequence: page.nextSequence };
+
     if (page.nextSequence <= afterSequence) throw new Error('Transcript pagination reported more entries without advancing its sequence cursor.');
     afterSequence = page.nextSequence;
   }
@@ -756,9 +757,11 @@ try {
   }, 'service natural exit and verified cleanup');
 
   assert.ok(finalOutput.join('').endsWith('FINAL_WITHOUT_NEWLINE'), 'Active service attachment must receive the final output without a newline');
+
   const finalTranscriptPage = readCompleteTranscript(options =>
     serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id, options));
   const finalTranscript = finalTranscriptPage.entries;
+
   receipt.finalTranscript = {
     pageCount: finalTranscriptPage.pageCount,
     entryCount: finalTranscript.length,
