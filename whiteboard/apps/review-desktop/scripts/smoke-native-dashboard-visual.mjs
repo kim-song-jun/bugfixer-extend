@@ -2371,15 +2371,16 @@ async function captureOnboardingViewport(page, guide, tag, state, screenshots, v
 async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
   await page.setViewportSize({ width: 1440, height: 900 });
 
+  const workspace = page.locator('.ai-session-workspace');
   const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
 
-  if (!(await sidebar.isVisible())) {
-    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+  if (!(await workspace.isVisible())) {
+    if (!(await sidebar.isVisible())) {
+      await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+    }
+
+    await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
   }
-
-  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
-
-  const workspace = page.locator('.ai-session-workspace');
 
   await workspace.getByRole('heading', { name: '프로젝트 첫 AI 세션', exact: true }).waitFor();
 

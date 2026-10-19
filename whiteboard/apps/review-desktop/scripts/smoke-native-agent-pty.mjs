@@ -549,7 +549,17 @@ try {
       const fixtureMode = mode === 'immediate' ? 'immediate' : mode === 'verify-revoke' ? 'verify-revoke' : 'normal';
       const args = [fixturePath, identityFile, fixtureMode, revocationMarker, terminationEvidence];
       const environment = { CODEX_HOME: profileRoot };
-      const launch = { executable: nodeExecutable, args, cwd: snapshot.cwd, env: environment, cols: 80, rows: 24 };
+      const launchEnvironment = {
+        ...environment,
+        PATH: '/usr/bin:/bin',
+        HOME: os.homedir(),
+        TMPDIR: os.tmpdir(),
+        LANG: 'en_US.UTF-8',
+        LC_ALL: 'en_US.UTF-8',
+        USER: os.userInfo().username,
+        LOGNAME: os.userInfo().username,
+      };
+      const launch = { executable: nodeExecutable, args, cwd: snapshot.cwd, env: launchEnvironment, cols: 80, rows: 24 };
 
       return {
         command: {

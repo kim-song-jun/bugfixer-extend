@@ -106,8 +106,9 @@ async function resolveGitHttpsTransport(git: PublicationExecutable, privateRoot:
 	} catch {
 		throw new PublicationFailure('providerFailed');
 	}
-	if (!isAbsolute(execPath) || await realpath(execPath) !== execPath) { throw new PublicationFailure('providerFailed'); }
-	const helperPath = await realpath(join(execPath, 'git-remote-https'));
+	if (!isAbsolute(execPath)) { throw new PublicationFailure('providerFailed'); }
+	const canonicalExecPath = await realpath(execPath);
+	const helperPath = await realpath(join(canonicalExecPath, 'git-remote-https'));
 	await assertHostInstallation(helperPath, 'https');
 	return executableDescriptor(helperPath);
 }
