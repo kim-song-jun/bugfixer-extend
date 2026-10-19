@@ -24,6 +24,8 @@ import type { AgentSessionPublicationOperationDTO, AgentSessionPublicationPropos
 import type { WorkspaceAgentSetupInspectionDTO } from '../common/workspaceAgentSetupProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
+import { AgentSessionControlApplication } from './agentSessions/agentSessionControlApplication.js';
+import type { AgentSessionControlRequestDTO } from '../common/workspaceAgentSessionControlProtocol.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './agentSessions/managedWorktrees.js';
 import { TaskFolderWriterLock } from './providerRuns/taskFolderWriterLock.js';
@@ -168,6 +170,69 @@ function createRuntimeFixture(root: string, nodeExecutable: string, guardianScri
 		holdNextAttach() { const gate = deferred(); nextAttachGate = gate; return { entered: gate.reached, release: gate.resolve }; },
 	};
 }
+
+test('control request IPC reserves native approval and starts one exact real PTY only after confirmation', { skip: !nativePtyTestEnabled }, async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-control-native-pty-'));
+	const callerFolder = join(directory, 'caller'); const targetFolder = join(directory, 'target');
+	mkdirSync(callerFolder); mkdirSync(targetFolder);
+	const database = WorkspaceDatabase.open(join(directory, 'workspace.db'));
+	const descriptor = URI.file(join(directory, 'project.code-workspace')).toString();
+	const project = database.createProjectWorkspace('Native control', callerFolder, descriptor);
+	const binding = database.createFolderBinding({ projectId: project.project.id, path: targetFolder });
+	const caller = database.agentSessions.createSession({ projectId: project.project.id, bindingId: project.binding.id, name: 'Caller', provider: 'codex', model: 'fixture', workspaceMode: 'sharedFolder' });
+	const target = database.agentSessions.createSession({ projectId: project.project.id, bindingId: binding.id, name: 'Target', provider: 'claude', model: 'fixture', workspaceMode: 'sharedFolder' });
+	const runtime = createRuntimeFixture(directory, nativePtyNode!, nativePtyGuardian!);
+	const resolver = new AgentSessionWorkspaceResolver(database, new ManagedWorktreeService(join(directory, 'managed')), new TaskFolderWriterLock(), () => true);
+	const service = new AgentSessionService(database, resolver, runtime.runtimeFactory);
+	const controls = new AgentSessionControlApplication(database, service);
+	const sender = Object.assign(new EventEmitter(), { id: 184, isDestroyed: () => false, send() { } }) as unknown as WebContents;
+	const codeWindow = { config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } }, openedWorkspace: { id: 'control', configPath: URI.parse(descriptor) } } as unknown as ICodeWindow;
+	const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
+	let confirmed = false; let confirmations = 0;
+	const channel = new WorkspaceAgentSessionsChannel(database, windows, service,
+		undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, {
+			application: controls, stopStartedTurn: (projectId, sessionId, turnId) => service.stop(projectId, sessionId, turnId),
+			async confirmStart(dialogSender, request, preview) {
+				confirmations++;
+				assert.equal(dialogSender, sender); assert.equal(request.targetSessionId, target.id);
+				assert.equal(preview.snapshot.sessionId, target.id); assert.equal(preview.snapshot.cwd, realpathSync(targetFolder));
+				return confirmed;
+			},
+		});
+	try {
+		const policy = { mode: 'read-only' as const, approval: 'never' as const };
+		const callerPreview = await service.preview({ projectId: project.project.id, sessionId: caller.id, permissionPolicy: policy });
+		const callerTurn = await service.start({ projectId: project.project.id, sessionId: caller.id, ticketId: callerPreview.ticketId });
+		const request = database.agentSessionControlRequests.createStartRequest({
+			projectId: project.project.id, callerSessionId: caller.id, callerTurnId: callerTurn.id, targetSessionId: target.id,
+			expectedSessionRevision: target.revision, permissionPolicy: policy, reason: 'Human reviews the different target folder.', idempotencyKey: 'native-request',
+		});
+		const review = await channel.call<{ preview: { ticketId: string } }>(sender, 'previewControlStart', { projectId: project.project.id, requestId: request.id });
+		await assert.rejects(channel.call(sender, 'start', { projectId: project.project.id, sessionId: target.id, ticketId: review.preview.ticketId }), /전용 승인/u);
+		assert.equal(database.agentSessionTurns.listTurns(project.project.id, target.id).length, 0);
+		const input = { projectId: project.project.id, requestId: request.id, expectedRevision: request.revision, ticketId: review.preview.ticketId, idempotencyKey: 'human-native-approval' };
+		await assert.rejects(channel.call(sender, 'startControlRequest', { ...input, approved: true }), /Unexpected/u);
+		assert.equal(confirmations, 0);
+		const declined = await channel.call<AgentSessionControlRequestDTO>(sender, 'startControlRequest', input);
+		assert.equal(declined.state, 'pendingReview');
+		assert.equal(database.agentSessionTurns.listTurns(project.project.id, target.id).length, 0);
+		confirmed = true;
+		const started = await channel.call<AgentSessionControlRequestDTO>(sender, 'startControlRequest', input);
+		assert.equal(confirmations, 2); assert.equal(started.state, 'started'); assert.ok(started.resultTurnId);
+		const turn = database.agentSessionTurns.getTurn(project.project.id, target.id, started.resultTurnId)!;
+		assert.equal(turn.state, 'running'); assert.equal(turn.snapshot.cwd, realpathSync(targetFolder));
+		await runtime.emitOutput(1);
+		assert.equal(database.agentSessionTurns.listTurns(project.project.id, target.id).length, 1);
+		const stopped = await service.stop(project.project.id, target.id, turn.id);
+		assert.equal(stopped.cleanupVerified, true);
+	} finally {
+		const failures: unknown[] = [];
+		try { await controls.shutdown(); } catch (error) { failures.push(error); }
+		try { const receipts = await service.shutdown(); if (receipts.some(receipt => !receipt.cleanupVerified)) { failures.push(new Error('Native control fixture cleanup was not verified.')); } } catch (error) { failures.push(error); }
+		database.close(); rmSync(directory, { recursive: true, force: true });
+		if (failures.length) { throw new AggregateError(failures, 'Native control fixture did not release all owned resources.'); }
+	}
+});
 
 test('session IPC persists SQLite sessions and rejects project spoofing and untrusted senders', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'workspace-agent-session-channel-'));

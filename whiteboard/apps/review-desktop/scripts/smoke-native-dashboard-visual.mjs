@@ -1625,6 +1625,7 @@ try {
       assert.equal(aiSession.model, fixture.aiSession.model);
       assert.equal(aiSession.state, 'created', 'Preparing a session must not launch a provider');
       assert.equal(persistedDatabase.agentSessionTurns.listTurns(fixture.projectId, aiSession.id).length, 0, 'Visual QA must not create a paid provider turn');
+      fixture.controlRequest = await seedSessionControlRequest(persistedDatabase, fixture, projectFolder, aiSession);
     } finally {
       persistedDatabase.close();
     }
@@ -1673,6 +1674,8 @@ try {
 
       await verifySessionOnboardingAfterRestart(session.page, fixture, tag, screenshots, viewports);
 
+      await verifySessionControlRequest(session.page, fixture, tag, screenshots, viewports);
+
       await verifyAiSessionTranscriptLogs(session.page, fixture, tag, screenshots, viewports);
 
       await verifyAiSessionChangeEvidence(session.page, fixture, tag, screenshots, viewports);
@@ -1692,6 +1695,14 @@ try {
       const turns = verifiedHistoryDatabase.agentSessionTurns.listTurns(fixture.projectId, fixture.logHistory.sessionId);
 
       assert.deepEqual(turns.map(turn => turn.id), fixture.logHistory.turnIds, 'Both CI history turns must persist after the packaged-app journey');
+
+      const controlRequest = verifiedHistoryDatabase.agentSessionControlRequests.get(fixture.projectId, fixture.controlRequest.requestId);
+      assert.equal(controlRequest?.state, 'rejected', 'The native UI rejection must persist as a durable request outcome');
+      assert.equal(verifiedHistoryDatabase.agentSessionTurns.listTurns(fixture.projectId, fixture.controlRequest.targetSessionId).length, 0,
+        'Reviewing and rejecting a start request must not create a target provider turn');
+      const recoveredCallerTurn = verifiedHistoryDatabase.agentSessionTurns.getTurn(fixture.projectId, fixture.controlRequest.callerSessionId, fixture.controlRequest.callerTurnId);
+      assert.equal(recoveredCallerTurn?.state, 'interrupted', 'App startup must reconcile the provider-free active caller fixture before the pending request is reviewed');
+      assert.equal(recoveredCallerTurn?.cleanupVerified, false, 'Startup reconciliation must not claim cleanup for a provider process that was never launched');
 
       assert.equal(fixture.onboarding.completed, true, 'The explicit final guide action must be exercised before task-state verification');
       assert.equal(verifiedHistoryDatabase.getTask(fixture.taskId)?.state, 'inProgress', 'Finishing onboarding must not mark the actual project task complete');
@@ -2594,6 +2605,97 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
   return { name, model };
 }
 
+async function seedSessionControlRequest(database, fixture, projectFolder, targetSession) {
+  const caller = database.agentSessions.createSession({
+    projectId: fixture.projectId,
+    bindingId: fixture.bindingId,
+    taskId: fixture.taskId,
+    name: `CI 요청 호출자 ${targetSession.name}`,
+    provider: 'codex',
+    model: 'ci-control-fixture-not-executed',
+    profileRef: 'ci-control-fixture-only',
+    workspaceMode: 'sharedFolder',
+  });
+  const folder = await statFolder(projectFolder);
+  const current = database.agentSessions.getSession(fixture.projectId, caller.id);
+  const snapshot = {
+    schemaVersion: 1,
+    projectId: fixture.projectId,
+    sessionId: caller.id,
+    sessionRevision: current.revision,
+    bindingId: fixture.bindingId,
+    taskId: fixture.taskId,
+    provider: 'codex',
+    model: caller.model,
+    profileRef: caller.profileRef,
+    cwd: folder.canonicalPath,
+    folderIdentity: folder,
+    managedWorktreeOwnerId: null,
+    permissionPolicy: { mode: 'read-only', approval: 'never' },
+    convention: null,
+    references: [],
+  };
+  const turn = database.agentSessionTurns.createTurn({ projectId: fixture.projectId, sessionId: caller.id, expectedSessionRevision: current.revision, snapshot });
+  const starting = database.agentSessions.getSession(fixture.projectId, caller.id);
+  const running = database.agentSessionTurns.transitionTurn(fixture.projectId, caller.id, turn.id, turn.revision, starting.revision, { state: 'running' });
+  assert.equal(running.turn.state, 'running', 'The request caller fixture must be a real active persisted turn');
+
+  const target = database.agentSessions.getSession(fixture.projectId, targetSession.id);
+  assert.ok(target, 'The UI-created target session must exist before the request is inserted');
+  const request = database.agentSessionControlRequests.createStartRequest({
+    projectId: fixture.projectId,
+    callerSessionId: caller.id,
+    callerTurnId: turn.id,
+    targetSessionId: target.id,
+    expectedSessionRevision: target.revision,
+    permissionPolicy: { mode: 'read-only', approval: 'on-request' },
+    reason: 'CI fixture request for native review and rejection.',
+    idempotencyKey: `native-dashboard-control-${target.id}`,
+  });
+  assert.equal(request.state, 'pendingReview');
+  assert.equal(database.agentSessionTurns.listTurns(fixture.projectId, target.id).length, 0, 'Persisting a request must not create a target turn');
+  return { requestId: request.id, targetSessionId: target.id, callerSessionId: caller.id, callerTurnId: turn.id, callerName: caller.name };
+}
+
+async function verifySessionControlRequest(page, fixture, tag, screenshots, viewports) {
+  const workspace = await openSessionWorkspace(page);
+  const request = fixture.controlRequest;
+  const toggle = workspace.locator('[data-control-action="toggle"]');
+  await toggle.click();
+  const panel = workspace.locator('.ai-session-control');
+  await panel.getByRole('heading', { name: 'AI 제어 요청', exact: true }).waitFor();
+  const row = panel.locator(`[data-control-request="${request.requestId}"]`);
+  await row.waitFor();
+  assert.ok((await row.innerText()).includes('CI fixture request for native review and rejection.'), 'The pending request row must show its persisted reason');
+  await row.locator(`[data-control-action="${request.requestId}:preview"]`).click();
+
+  const preview = workspace.locator('.ai-session__preview');
+  await preview.waitFor();
+  await preview.getByRole('heading', { name: '실행 범위를 확인해 주세요', exact: true }).waitFor();
+  assert.ok((await preview.innerText()).includes(fixture.aiSession.model), 'The pending request preview must show the target session model');
+  assert.ok((await preview.innerText()).includes('필요할 때 직접 승인'), 'The request preview must show its requested approval policy');
+  assert.equal(await workspace.locator('#ai-session-preview-start').innerText(), 'macOS 확인 창에서 승인', 'A reviewed request must still require the native human approval step');
+  assert.equal(await preview.locator('button').count(), 2, 'Review preview exposes only approval and cancellation; it does not launch automatically');
+
+  const previewScreenshot = path.join(output, `ai-session-control-request-preview-${tag}-1440.png`);
+  await capturePage(page, previewScreenshot);
+  screenshots.push(previewScreenshot);
+  viewports.push({ theme: tag, state: 'control-request-preview-pending', width: 1440, height: 900, screenshot: previewScreenshot });
+
+  await row.locator(`[data-control-action="${request.requestId}:reject"]`).click();
+  await panel.getByText('검토를 기다리는 시작 요청이 없습니다.', { exact: true }).waitFor();
+  await panel.getByRole('button', { name: '모든 요청 기록', exact: true }).click();
+  const rejectedRow = panel.locator(`[data-control-request="${request.requestId}"]`);
+  await rejectedRow.getByText(/요청 거절/).waitFor();
+  assert.equal(await rejectedRow.getAttribute('data-control-target'), request.targetSessionId, 'The durable rejected row must remain bound to the exact target session');
+
+  const rejectedScreenshot = path.join(output, `ai-session-control-request-rejected-${tag}-1440.png`);
+  await capturePage(page, rejectedScreenshot);
+  screenshots.push(rejectedScreenshot);
+  viewports.push({ theme: tag, state: 'control-request-rejected', width: 1440, height: 900, screenshot: rejectedScreenshot });
+  await panel.getByRole('button', { name: '요청 닫기', exact: true }).click();
+}
+
 function transcriptFixtureSecret(tag) {
   return `WB_CI_TRANSCRIPT_SECRET_${tag.toUpperCase()}_DO_NOT_PERSIST`;
 }
@@ -3143,15 +3245,25 @@ async function verifyReviewedCommitApply(page, fixture, tag, screenshots, viewpo
   const layout = await changes.evaluate(element => {
     const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 커밋 적용');
     const bounds = action?.getBoundingClientRect();
+    const container = element.getBoundingClientRect();
+    const overflowingElements = [...element.querySelectorAll('*')].filter(child => child.getClientRects().length > 0).map(child => {
+      const rect = child.getBoundingClientRect();
+      const style = getComputedStyle(child);
+
+      return { tag: child.tagName, className: String(child.className), left: rect.left, right: rect.right, width: rect.width,
+        clientWidth: child.clientWidth, scrollWidth: child.scrollWidth, boxSizing: style.boxSizing, minWidth: style.minWidth, whiteSpace: style.whiteSpace };
+    }).filter(child => child.left < container.left - 1 || child.right > container.right + 1).slice(0, 20);
 
     return {
       overflow: element.scrollWidth > element.clientWidth + 1,
+      clientWidth: element.clientWidth, scrollWidth: element.scrollWidth, overflowingElements,
       actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
         && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
     };
   });
 
-  assert.equal(layout.overflow, false, `Commit review must not overflow horizontally at ${tag}/760`);
+  viewports.push({ theme: tag, state: 'commit-review-layout', width: 760, height: 820, layout });
+  assert.equal(layout.overflow, false, `Commit review must not overflow horizontally at ${tag}/760: ${JSON.stringify(layout)}`);
   assert.equal(layout.actionReachable, true, `The commit action must remain reachable at ${tag}/760`);
 
   const narrow = path.join(output, `ai-session-commit-applied-${tag}-760.png`);

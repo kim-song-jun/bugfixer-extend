@@ -47,6 +47,8 @@ function freezeNotificationTableAsV32(path: string, userVersion: 31 | 32): void 
 	const db = new DatabaseSync(path);
 	try {
 		db.exec(`PRAGMA foreign_keys = OFF;
+			DROP TABLE agent_session_control_request_events;
+			DROP TABLE agent_session_control_requests;
 			CREATE TEMP TABLE v32_notification_rows AS
 				SELECT id, project_id, session_id, sequence, target_id AS message_id, created_at, read_at
 				FROM agent_session_notifications WHERE target_kind = 'message';
@@ -304,7 +306,7 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
 		try {
-			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 33);
+			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 34);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_merge_artifacts'").get());
 			assert.equal(Number(migratedSchema.prepare('SELECT count(*) AS count FROM agent_session_merge_artifacts').get()?.count), version === 30 ? 5 : 0);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_publication_proposals'").get());
@@ -375,7 +377,7 @@ test('genuine v31 workspace schema upgrades through v32 and v33 while preserving
 		assert.deepEqual(database.agentSessions.listNotifications(fixture.input.projectId, { limit: 100 }).map(({ id, sequence, readAt }) => ({ id, sequence, readAt })), expectedMessageNotifications);
 		const v32 = new DatabaseSync(fixture.sourcePath);
 		try {
-			assert.equal(Number(v32.prepare('PRAGMA user_version').get()?.user_version), 33);
+			assert.equal(Number(v32.prepare('PRAGMA user_version').get()?.user_version), 34);
 			assert.ok(v32.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_pr_text_revisions'").get());
 		} finally { v32.close(); }
 	} finally {
@@ -443,7 +445,7 @@ test('frozen v32 source preserves PR text revisions, requests, process cleanup, 
 		assert.deepEqual(tableRows(fixture.sourcePath), beforeRows);
 		assert.deepEqual(database.agentSessions.listNotifications(projectId, { limit: 100 }).map(({ id, sequence, readAt }) => ({ id, sequence, readAt })), expectedMessageNotifications);
 		const migratedSchema = new DatabaseSync(fixture.sourcePath);
-		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 33); }
+		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 34); }
 		finally { migratedSchema.close(); }
 		database.close();
 		databaseOpen = false;

@@ -243,6 +243,7 @@ export type WorkspaceAgentSessionsCommand =
 	| 'inspectSetup' | 'listSessions' | 'createSession' | 'workspacePreparation' | 'prepareWorkspace' | 'listTurns' | 'preview' | 'start' | 'stop'
 	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect' | 'readTranscript' | 'listNotifications' | 'getNotification' | 'markNotificationRead' | 'notificationStatus'
 	| 'nativeNotificationStatus' | 'setNativeNotificationsEnabled' | 'acknowledgeNativeNotificationOpen' | 'listMessages' | 'getMessage'
+	| 'listControlRequests' | 'getControlRequest' | 'previewControlStart' | 'startControlRequest' | 'rejectControlRequest' | 'cancelControlRequest'
 	| 'listWorkflows' | 'getWorkflow' | 'createWorkflow' | 'reviseWorkflow' | 'approveWorkflow' | 'startWorkflow' | 'cancelWorkflow'
 	| 'getLatestChangeEvidence' | 'listChangeEvidence' | 'getChangeFile' | 'getChangeHunks'
 	| 'getLatestChangeExplanation' | 'listChangeExplanationRevisions' | 'recordHumanChangeExplanation'

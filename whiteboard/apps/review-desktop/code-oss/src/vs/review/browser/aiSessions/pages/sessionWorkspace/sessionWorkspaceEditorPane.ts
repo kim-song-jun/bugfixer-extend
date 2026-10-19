@@ -54,6 +54,8 @@ import type { WorkspaceDashboardDTO, WorkspaceDashboardTaskItemDTO } from '../..
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { restoreSessionSelection, persistSessionSelection } from '../../features/sessionSelection/index.js';
 import { renderSessionList } from '../../widgets/sessionList/index.js';
+import { renderSessionControlRequests } from '../../widgets/sessionControlRequests/index.js';
+import type { AgentSessionControlRequestDTO, WorkspaceAgentSessionControlPageDTO } from '../../../../../workspace/common/workspaceAgentSessionControlProtocol.js';
 import { assertPinnedSessionStopResponse, requestPinnedSessionStop } from '../../features/sessionControl/index.js';
 import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
 import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
@@ -143,6 +145,17 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private sessionListScrollTop = 0;
 	private readonly collapsedSessionIds = new Set<string>();
 	private instructionFocusSessionId: string | undefined;
+	private controlPanelOpen = false;
+	private controlHistory = false;
+	private controlPage: WorkspaceAgentSessionControlPageDTO | undefined;
+	private controlCursor: WorkspaceAgentSessionControlPageDTO['nextCursor'] = null;
+	private controlLoading = false;
+	private controlError: string | undefined;
+	private controlGeneration = 0;
+	private controlScopeGeneration = 0;
+	private controlHasPending = false;
+	private controlHostError: string | null = null;
+	private controlPreview: { readonly id: string; readonly revision: number; readonly idempotencyKey: string } | undefined;
 	private terminalController: SessionTerminalController | undefined;
 	private readonly terminalService: ITerminalService;
 	private logsPanel: HTMLElement | undefined;
@@ -231,6 +244,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			return;
 		}
 		if (this.projectId !== input.projectId) {
+			this.controlScopeGeneration++; this.operation = false;
+			this.controlGeneration++; this.controlPage = undefined; this.controlCursor = null; this.controlLoading = false;
+			this.controlPanelOpen = false; this.controlError = undefined; this.controlHasPending = false; this.controlPreview = undefined;
+			this.controlHostError = null;
+			this.collapsedSessionIds.clear();
 			this.setupInspectionGeneration++;
 			this.setupInspection = undefined;
 			this.setupInspectionLoading = false;
@@ -271,13 +289,19 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	}
 
 	private async load(): Promise<void> {
-		if (!this.projectId) return;
+		const projectId = this.projectId;
+		if (!projectId) return;
 		this.loading = true; this.error = undefined; this.render();
 		try {
-			const [dashboard, sessions] = await Promise.all([
-				ipcRenderer.invoke(WORKSPACE_DASHBOARD_CHANNEL, 'getDashboard', this.projectId) as Promise<WorkspaceDashboardDTO>,
-				ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId: this.projectId }) as Promise<readonly AgentSessionDTO[]>,
+			const [dashboard, sessions, pending] = await Promise.all([
+				ipcRenderer.invoke(WORKSPACE_DASHBOARD_CHANNEL, 'getDashboard', projectId) as Promise<WorkspaceDashboardDTO>,
+				ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId }) as Promise<readonly AgentSessionDTO[]>,
+				ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listControlRequests', { projectId, state: 'pendingReview', limit: 1 }) as Promise<WorkspaceAgentSessionControlPageDTO>,
 			]);
+			if (this.projectId !== projectId) { return; }
+			if (sessions.some(session => session.projectId !== projectId) || pending.requests.some(request => request.projectId !== projectId)) { throw new Error('다른 프로젝트의 세션 또는 요청을 받았습니다.'); }
+			this.controlHasPending = pending.requests.length > 0;
+			this.controlHostError = pending.hostError;
 			this.dashboard = dashboard;
 			this.sessions = sessions;
 			const available = new Set(sessions.map(session => session.id));
@@ -288,10 +312,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 				persistSessionSelection(this.projectId, this.selectedSessionId);
 				await Promise.all([this.loadTurns(this.selectedSessionId), this.loadWorkspacePreparation(this.selectedSessionId)]);
 			}
-			this.notice = undefined;
+			if (this.projectId === projectId) { this.notice = undefined; }
 		} catch (error) {
-			this.error = this.errorMessage(error, 'AI 세션을 불러오지 못했습니다.');
-		} finally { this.loading = false; this.render(); }
+			if (this.projectId === projectId) { this.error = this.errorMessage(error, 'AI 세션을 불러오지 못했습니다.'); }
+		} finally { if (this.projectId === projectId) { this.loading = false; this.render(); } }
 	}
 
 	private async loadTurns(sessionId: string, isCurrent: () => boolean = () => true): Promise<void> {
@@ -320,7 +344,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		}
 		this.notificationNavigationGeneration++;
 		if (this.pendingNotificationMessage?.sessionId !== sessionId) { this.pendingNotificationMessage = undefined; }
-		if (this.previewSessionId !== sessionId) { this.preview = undefined; this.previewSessionId = undefined; }
+		if (this.previewSessionId !== sessionId) { this.preview = undefined; this.previewSessionId = undefined; this.controlPreview = undefined; }
 		this.terminalController?.hide();
 		this.sessionLogs?.invalidateContext();
 		this.sessionMessages?.setVisible(false);
@@ -406,7 +430,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private async prepareLaunch(sessionId = this.selectedSessionId): Promise<void> {
 		if (!this.projectId || !sessionId || this.operation) return;
-		this.operation = true; this.error = undefined; this.preview = undefined; this.previewSessionId = undefined; this.render();
+		this.operation = true; this.error = undefined; this.preview = undefined; this.previewSessionId = undefined; this.controlPreview = undefined; this.render();
 		try {
 			await this.loadWorkspacePreparation(sessionId);
 			const workspace = this.workspacePreparations.get(sessionId);
@@ -441,6 +465,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private async startPreviewedTurn(): Promise<void> {
 		if (!this.projectId || !this.preview || !this.previewSessionId || this.operation) return;
+		if (this.controlPreview) { await this.startControlPreview(); return; }
 		const projectId = this.projectId;
 		const sessionId = this.previewSessionId;
 		const preview = this.preview;
@@ -457,6 +482,95 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 				: `실행 상태 · ${agentSessionTurnStateLabel[turn.state]}`;
 		} catch (error) { this.error = this.errorMessage(error, '세션 실행을 시작하지 못했습니다.'); }
 		finally { this.operation = false; this.render(); }
+	}
+
+	private async loadControlRequests(cursor: WorkspaceAgentSessionControlPageDTO['nextCursor'] = null): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId || this.controlLoading) { return; }
+		const generation = ++this.controlGeneration;
+		this.controlCursor = cursor; this.controlLoading = true; this.controlError = undefined; this.render();
+		try {
+			const page = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listControlRequests', {
+				projectId, limit: 20, ...(!this.controlHistory ? { state: 'pendingReview' } : {}),
+				...(cursor ? { afterCreatedAt: cursor.createdAt, afterId: cursor.id } : {}),
+			}) as WorkspaceAgentSessionControlPageDTO;
+			if (this.projectId !== projectId || generation !== this.controlGeneration) { return; }
+			if (page.requests.some(request => request.projectId !== projectId)) { throw new Error('다른 프로젝트의 요청 기록을 받았습니다.'); }
+			this.controlPage = page;
+			this.controlHostError = page.hostError;
+			if (!this.controlHistory && !cursor) { this.controlHasPending = page.requests.length > 0; }
+		} catch (error) {
+			if (this.projectId === projectId && generation === this.controlGeneration) { this.controlError = this.errorMessage(error, '요청 기록을 불러오지 못했습니다.'); }
+		} finally { if (this.projectId === projectId && generation === this.controlGeneration) { this.controlLoading = false; this.render(); } }
+	}
+
+	private async previewControlRequest(request: AgentSessionControlRequestDTO): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId || request.projectId !== projectId || this.operation) { return; }
+		const scopeGeneration = this.controlScopeGeneration;
+		const isCurrent = () => this.projectId === projectId && this.controlScopeGeneration === scopeGeneration;
+		this.selectSession(request.targetSessionId);
+		this.operation = true; this.error = undefined; this.preview = undefined; this.controlPreview = undefined; this.render();
+		try {
+			const result = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'previewControlStart', { projectId, requestId: request.id }) as { request: AgentSessionControlRequestDTO; preview: LaunchPreview };
+			if (!isCurrent() || this.selectedSessionId !== request.targetSessionId) { return; }
+			if (result.request.id !== request.id || result.request.projectId !== projectId || result.request.targetSessionId !== request.targetSessionId
+				|| result.preview.snapshot.projectId !== projectId || result.preview.snapshot.sessionId !== request.targetSessionId) { throw new Error('요청과 실행 미리보기의 대상이 일치하지 않습니다.'); }
+			this.preview = result.preview; this.previewSessionId = request.targetSessionId;
+			this.controlPreview = { id: request.id, revision: result.request.revision, idempotencyKey: generateUuid() };
+		} catch (error) { if (isCurrent()) { this.error = this.errorMessage(error, '요청의 실행 범위를 준비하지 못했습니다.'); } }
+		finally {
+			if (isCurrent()) {
+				this.operation = false; this.render();
+				requestAnimationFrame(() => {
+					if (isCurrent() && this.selectedSessionId === request.targetSessionId && this.controlPreview?.id === request.id) {
+						this.root?.querySelector<HTMLElement>('#ai-session-preview-start')?.focus({ preventScroll: true });
+					}
+				});
+			}
+		}
+	}
+
+	private async startControlPreview(): Promise<void> {
+		const projectId = this.projectId; const request = this.controlPreview; const preview = this.preview;
+		if (!projectId || !request || !preview || this.operation) { return; }
+		const scopeGeneration = this.controlScopeGeneration;
+		const isCurrent = () => this.projectId === projectId && this.controlScopeGeneration === scopeGeneration;
+		this.operation = true; this.error = undefined; this.render();
+		try {
+			const result = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'startControlRequest', {
+				projectId, requestId: request.id, expectedRevision: request.revision, ticketId: preview.ticketId, idempotencyKey: request.idempotencyKey,
+			}) as AgentSessionControlRequestDTO;
+			if (!isCurrent()) { return; }
+			if (result.id !== request.id || result.projectId !== projectId || result.targetSessionId !== preview.snapshot.sessionId) { throw new Error('실행 요청 응답의 대상이 일치하지 않습니다.'); }
+			if (result.state === 'pendingReview') { this.notice = '승인을 취소했습니다. 요청은 검토 대기에 남아 있습니다.'; return; }
+			this.preview = undefined; this.previewSessionId = undefined; this.controlPreview = undefined;
+			await this.loadTurns(result.targetSessionId);
+			if (!isCurrent()) { return; }
+			const sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId }) as readonly AgentSessionDTO[];
+			if (!isCurrent()) { return; }
+			if (sessions.some(session => session.projectId !== projectId)) { throw new Error('다른 프로젝트의 세션 목록을 받았습니다.'); }
+			this.sessions = sessions;
+			this.notice = result.state === 'started' ? '승인한 요청의 실행 시작을 기록했습니다. 현재 실행 상태는 터미널에서 확인해 주세요.' : '실행 요청의 처리 기록을 확인해 주세요.';
+			await this.loadControlRequests(this.controlCursor);
+		} catch (error) { if (isCurrent()) { this.error = this.errorMessage(error, '요청 실행 결과를 확인하지 못했습니다.'); } }
+		finally { if (isCurrent()) { this.operation = false; this.render(); } }
+	}
+
+	private async rejectControlRequest(request: AgentSessionControlRequestDTO): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId || request.projectId !== projectId || this.operation) { return; }
+		const scopeGeneration = this.controlScopeGeneration;
+		const isCurrent = () => this.projectId === projectId && this.controlScopeGeneration === scopeGeneration;
+		this.operation = true; this.error = undefined; this.render();
+		try {
+			const result = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'rejectControlRequest', { projectId, requestId: request.id, expectedRevision: request.revision, idempotencyKey: generateUuid() }) as AgentSessionControlRequestDTO;
+			if (!isCurrent()) { return; }
+			if (result.id !== request.id || result.projectId !== projectId || result.state !== 'rejected') { throw new Error('요청 거절 결과가 현재 요청과 일치하지 않습니다.'); }
+			if (this.controlPreview?.id === request.id) { this.preview = undefined; this.previewSessionId = undefined; this.controlPreview = undefined; }
+			await this.loadControlRequests(this.controlCursor);
+		} catch (error) { if (isCurrent()) { this.error = this.errorMessage(error, '요청 거절을 기록하지 못했습니다.'); } }
+		finally { if (isCurrent()) { this.operation = false; this.render(); } }
 	}
 
 	private async stopTurn(expectedSessionId?: string, expectedTurnId?: string): Promise<boolean> {
@@ -1131,6 +1245,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (!this.root) return;
 		this.sessionListScrollTop = this.root.querySelector<HTMLElement>('.ai-session__list')?.scrollTop ?? this.sessionListScrollTop;
 		const activeElement = document.activeElement;
+		const focusedControlAction = activeElement instanceof HTMLElement && this.root.contains(activeElement) ? activeElement.dataset.controlAction : undefined;
 		const focusedSessionControl = activeElement instanceof HTMLElement && this.root.contains(activeElement)
 			? (['sessionSelect', 'sessionAction', 'sessionToggle'] as const).map(key => ({ key, value: activeElement.dataset[key] })).find(control => control.value)
 			: undefined;
@@ -1166,6 +1281,15 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		projectHeader.appendChild(projectName);
 		if (this.dashboard) {
 			const headerActions = document.createElement('div'); headerActions.className = 'ai-session__project-header-actions';
+			const requests = document.createElement('button'); requests.type = 'button'; requests.className = 'ai-session__secondary ai-session__control-toggle';
+			requests.textContent = this.controlHasPending || this.controlHostError ? '실행 요청 · 확인 필요' : '실행 요청'; requests.dataset.controlAction = 'toggle';
+			requests.setAttribute('aria-expanded', String(this.controlPanelOpen));
+			requests.addEventListener('click', () => {
+				this.controlPanelOpen = !this.controlPanelOpen;
+				if (this.controlPanelOpen) { void this.loadControlRequests(); }
+				else { this.controlGeneration++; this.controlLoading = false; this.render(); }
+			});
+			headerActions.appendChild(requests);
 			headerActions.append(this.updateNotificationsMount(), this.createOnboardingToggle());
 			projectHeader.appendChild(headerActions);
 		}
@@ -1178,7 +1302,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		} else {
 			const tasks = this.availableTasks();
 			const taskNames = new Map(tasks.map(task => [task.id, task.title]));
-			const startCreating = () => { this.creating = true; this.onboardingCreateProvider = undefined; this.onboardingCreateTaskId = undefined; this.createFormFocusPending = true; this.createPermissionMode = 'read-only'; this.preview = undefined; this.render(); };
+			const startCreating = () => { this.creating = true; this.onboardingCreateProvider = undefined; this.onboardingCreateTaskId = undefined; this.createFormFocusPending = true; this.createPermissionMode = 'read-only'; this.preview = undefined; this.controlPreview = undefined; this.render(); };
 			const compactToolbar = document.createElement('div'); compactToolbar.className = 'ai-session__narrow-toolbar';
 			const selector = document.createElement('label'); selector.className = 'ai-session__narrow-selector'; selector.textContent = '세션 선택';
 			const select = document.createElement('select'); select.setAttribute('aria-label', '현재 세션 선택');
@@ -1238,8 +1362,19 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			}
 		}
 
+		if (this.controlPanelOpen && this.dashboard) {
+			const requests = document.createElement('section');
+			renderSessionControlRequests(requests, { page: this.controlPage, loading: this.controlLoading, error: this.controlError, history: this.controlHistory, sessions: this.sessions, busy: this.operation }, {
+				onPreview: request => void this.previewControlRequest(request), onReject: request => void this.rejectControlRequest(request),
+				onFilter: history => { this.controlHistory = history; this.controlPage = undefined; void this.loadControlRequests(); },
+				onFirst: () => void this.loadControlRequests(), onNext: () => { if (this.controlPage?.hasMore) { void this.loadControlRequests(this.controlPage.nextCursor); } },
+				onClose: () => { this.controlPanelOpen = false; this.controlGeneration++; this.controlLoading = false; this.render(); this.root?.querySelector<HTMLElement>('[data-control-action="toggle"]')?.focus({ preventScroll: true }); },
+			});
+			main.prepend(requests);
+		}
 		if (onboardingMount) { main.prepend(onboardingMount); }
 		if (this.error) this.renderInlineMessage(main, this.error, true);
+		if (this.controlHostError) { this.renderInlineMessage(main, '일부 AI 제어 결과를 저장하거나 정리 상태를 확인하지 못했습니다. 요청 기록과 현재 실행 상태를 확인해 주세요.', true); }
 		if (this.notice) this.renderInlineMessage(main, this.notice, false);
 		shell.appendChild(main); this.root.appendChild(shell);
 		if (this.createFormFocusPending || onboardingFinished) { this.root.scrollTop = 0; }
@@ -1257,6 +1392,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			const attribute = { sessionSelect: 'data-session-select', sessionAction: 'data-session-action', sessionToggle: 'data-session-toggle' }[focusedSessionControl.key];
 			this.root.querySelector<HTMLElement>(`[${attribute}="${CSS.escape(focusedSessionControl.value)}"]`)?.focus({ preventScroll: true });
 		}
+		if (focusedControlAction) { this.root.querySelector<HTMLElement>(`[data-control-action="${CSS.escape(focusedControlAction)}"]`)?.focus({ preventScroll: true }); }
 		if (focusedOnboardingKey) {
 			const matching = [...this.root.querySelectorAll<HTMLElement>('[data-onboarding-focus]')].find(element => element.dataset.onboardingFocus === focusedOnboardingKey && !element.hasAttribute('disabled'));
 			matching?.focus({ preventScroll: true });
@@ -1286,15 +1422,30 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		try {
 			const previousTurnState = this.latestTurn(sessionId)?.state;
 			const previousSessions = this.sessions;
+			const previousPending = this.controlHasPending;
+			const previousHostError = this.controlHostError;
+			const controlGeneration = this.controlGeneration;
 			await this.loadTurns(sessionId, isCurrent);
 			if (!isCurrent()) { return; }
-			const sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId }) as readonly AgentSessionDTO[];
+			const [sessions, pending, controls] = await Promise.all([
+				ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId }) as Promise<readonly AgentSessionDTO[]>,
+				ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listControlRequests', { projectId, state: 'pendingReview', limit: 1 }) as Promise<WorkspaceAgentSessionControlPageDTO>,
+				this.controlPanelOpen && !this.controlLoading ? ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listControlRequests', {
+					projectId, limit: 20, ...(!this.controlHistory ? { state: 'pendingReview' } : {}),
+					...(this.controlCursor ? { afterCreatedAt: this.controlCursor.createdAt, afterId: this.controlCursor.id } : {}),
+				}) as Promise<WorkspaceAgentSessionControlPageDTO> : Promise.resolve(undefined),
+			]);
 			if (!isCurrent()) { return; }
-			if (sessions.some(session => session.projectId !== projectId)) { throw new Error('다른 프로젝트의 세션 목록을 받았습니다.'); }
+			if (sessions.some(session => session.projectId !== projectId) || pending.requests.some(request => request.projectId !== projectId)
+				|| controls?.requests.some(request => request.projectId !== projectId)) { throw new Error('다른 프로젝트의 세션 또는 요청 목록을 받았습니다.'); }
 			this.sessions = sessions;
+			this.controlHasPending = pending.requests.length > 0;
+			this.controlHostError = pending.hostError;
+			const controlsChanged = !!controls && this.controlPanelOpen && !this.controlLoading && controlGeneration === this.controlGeneration && JSON.stringify(this.controlPage) !== JSON.stringify(controls);
+			if (controlsChanged) { this.controlPage = controls; }
 			const nextTurnState = this.latestTurn(sessionId)?.state;
 			const sessionsChanged = previousSessions.length !== sessions.length || sessions.some((session, index) => session.id !== previousSessions[index]?.id || session.revision !== previousSessions[index]?.revision);
-			if (previousTurnState !== nextTurnState || sessionsChanged) {
+			if (previousTurnState !== nextTurnState || sessionsChanged || previousPending !== this.controlHasPending || previousHostError !== this.controlHostError || controlsChanged) {
 				const completedTurn = this.latestTurn(sessionId);
 				if (completedTurn && ['exited', 'interrupted', 'failed'].includes(completedTurn.state)) this.terminalController?.finish(sessionId, completedTurn.id, completedTurn.exitCode ?? undefined);
 				this.render();
@@ -1429,7 +1580,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const list = document.createElement('dl'); list.className = 'ai-session__preview-list';
 		for (const [label, value] of [
 			['공급자와 모델', `${snapshot.provider === 'codex' ? 'Codex' : 'Claude'} · ${snapshot.model}`],
-			['작업 폴더', snapshot.cwd], ['권한', snapshot.permissionPolicy.mode === 'read-only' ? '파일 도구 읽기 전용' : '파일 수정 · 요청 시 승인'],
+			['CLI 승인 정책', { never: 'CLI 승인 요청 없음', 'on-request': '필요할 때 직접 승인', always: 'CLI에서 매번 승인' }[snapshot.permissionPolicy.approval]],
+			['작업 폴더', snapshot.cwd], ['권한', snapshot.permissionPolicy.mode === 'read-only' ? '파일 도구 읽기 전용' : '파일 도구 수정 허용'],
 			['규칙 스냅샷', snapshot.convention ? `연결됨 · ${snapshot.convention.sha256.slice(0, 12)}` : '연결 없음'],
 			['참고 자료', snapshot.references.length ? `${snapshot.references.length}개 연결됨` : '연결 없음'],
 			['계정 프로필', snapshot.profileRef ?? '기본 로컬 프로필'],
@@ -1446,7 +1598,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		}
 		const actions = document.createElement('div'); actions.className = 'ai-session__form-actions';
 		const start = document.createElement('button'); start.id = 'ai-session-preview-start'; start.type = 'button'; start.className = 'ai-session__primary'; start.disabled = this.operation; start.textContent = '확인하고 실행'; start.addEventListener('click', () => void this.startPreviewedTurn());
-		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.preview = undefined; this.previewSessionId = undefined; this.render(); });
+		if (this.controlPreview) { start.textContent = 'macOS 확인 창에서 승인'; }
+		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.preview = undefined; this.previewSessionId = undefined; this.controlPreview = undefined; this.render(); });
 		actions.append(start, cancel); section.append(title, list, note, mcpScope);
 		if (snapshot.provider === 'codex') { section.appendChild(identityNotice); }
 		section.appendChild(actions); parent.appendChild(section);
@@ -1485,6 +1638,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	override clearInput(): void {
 		this.notificationNavigationGeneration++;
+		this.controlScopeGeneration++; this.controlGeneration++; this.operation = false;
+		this.controlPreview = undefined; this.controlPage = undefined; this.controlLoading = false;
 		this.terminalController?.dispose(); this.terminalController = undefined;
 		if (this.lifecycleTimer) clearInterval(this.lifecycleTimer);
 		this.lifecycleTimer = undefined; this.projectId = undefined; this.dashboard = undefined; this.sessions = []; this.turns.clear(); this.workspacePreparations.clear(); this.selectedSessionId = undefined; this.preview = undefined; this.previewSessionId = undefined; this.creating = false; this.sessionPermissionModes.clear(); this.createPermissionMode = 'read-only'; this.error = undefined; this.notice = undefined;

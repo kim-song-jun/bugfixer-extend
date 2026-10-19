@@ -253,6 +253,25 @@ async function dispatch(
 	isActive: () => boolean,
 ): Promise<unknown> {
 	switch (method) {
+		case 'sessions.requestStart': {
+			assertAllowedKeys(params, ['targetSessionId', 'expectedSessionRevision', 'permissionMode', 'approval', 'reason', 'idempotencyKey']);
+			if (params.permissionMode !== 'read-only' && params.permissionMode !== 'mutating') { throw new Error('The requested permission mode is invalid.'); }
+			if (params.approval !== 'never' && params.approval !== 'on-request' && params.approval !== 'always') { throw new Error('The requested approval policy is invalid.'); }
+			return collaboration.requestStart(grant, {
+				targetSessionId: requiredUuid(params.targetSessionId, 'targetSessionId'), expectedSessionRevision: requiredInteger(params.expectedSessionRevision, 'expectedSessionRevision'),
+				permissionPolicy: { mode: params.permissionMode, approval: params.approval },
+				reason: requiredString(params.reason, 'reason'), idempotencyKey: requiredString(params.idempotencyKey, 'idempotencyKey'),
+			});
+		}
+		case 'sessions.stop':
+			assertAllowedKeys(params, ['targetSessionId', 'targetTurnId', 'idempotencyKey']);
+			return collaboration.requestStop(grant, {
+				targetSessionId: requiredUuid(params.targetSessionId, 'targetSessionId'), targetTurnId: requiredUuid(params.targetTurnId, 'targetTurnId'),
+				idempotencyKey: requiredString(params.idempotencyKey, 'idempotencyKey'),
+			});
+		case 'sessionRequests.get':
+			assertAllowedKeys(params, ['requestId']);
+			return collaboration.getOwnControlRequest(grant, requiredUuid(params.requestId, 'requestId'));
 		case 'sessions.list':
 			assertAllowedKeys(params, ['afterSessionId', 'limit']);
 			return collaboration.listSessionPage(grant, { afterSessionId: params.afterSessionId === undefined ? undefined : requiredUuid(params.afterSessionId, 'afterSessionId'), limit: optionalInteger(params.limit, 50) });

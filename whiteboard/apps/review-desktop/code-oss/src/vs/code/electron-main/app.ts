@@ -1616,6 +1616,7 @@ export class CodeApplication extends Disposable {
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
 			validatedIpcMain.handle(WORKSPACE_PROVIDER_RUNS_CHANNEL, (event, command: string, arg: unknown) => providerRuns.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_PROVIDER_RUNS_CHANNEL)));
+			const controlDatabase = this.workspaceDatabase;
 			const agentSessionsChannel = new WorkspaceAgentSessionsChannel(
 				this.workspaceDatabase, windowsMainService, agentSessions.service,
 				(projectId, sessionId) => agentSessions.prepareCreatedSession(projectId, sessionId),
@@ -1795,6 +1796,37 @@ export class CodeApplication extends Disposable {
 					acknowledgeOpened: (sender, projectId, notificationId, requestId) => {
 						const senderWindow = windowsMainService.getWindowByWebContents(sender);
 						return !!senderWindow && nativeNotificationOpens.acknowledge(senderWindow, projectId, notificationId, requestId);
+					},
+				},
+				{
+					application: agentSessions.controlApplication,
+					stopStartedTurn: (projectId, sessionId, turnId) => agentSessions.service.stop(projectId, sessionId, turnId),
+					confirmStart: async (sender, request, preview) => {
+						const window = BrowserWindow.fromWebContents(sender);
+						if (!window || window.isDestroyed() || sender.isDestroyed()) { throw new Error('프로젝트 창이 닫혀 실행 요청 승인을 중단했습니다.'); }
+						const target = controlDatabase.agentSessions.getSession(request.projectId, request.targetSessionId);
+						if (!target) { throw new Error('실행할 세션을 현재 프로젝트에서 찾을 수 없습니다.'); }
+						const snapshot = preview.snapshot;
+						const display = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ');
+						const approval = { never: 'CLI 승인 요청 없음', 'on-request': '필요할 때 직접 승인', always: 'CLI에서 매번 승인' };
+						const detail = [
+							'AI의 제안은 실행 권한이 아닙니다. 아래 범위를 승인하면 기존 CLI 계정으로 실행하며 사용량과 요금이 발생할 수 있습니다.',
+							`대상: ${display(target.name)} · ${target.id}\n공급자 / 모델: ${snapshot.provider} / ${display(snapshot.model)}`,
+							`프로필: ${display(snapshot.profileRef ?? '기본 로컬 프로필')}\n작업 폴더: ${display(snapshot.cwd)}`,
+							`파일 도구: ${snapshot.permissionPolicy.mode === 'mutating' ? '수정 허용' : '읽기 전용'}\n승인 정책: ${approval[snapshot.permissionPolicy.approval]}`,
+							'기존 프로필의 MCP 도구와 외부 서비스 접근 범위는 파일 도구 권한과 별도로 적용됩니다.',
+							`적용 규칙: ${snapshot.convention ? `${snapshot.convention.id} · 버전 ${snapshot.convention.version} · SHA-256 ${snapshot.convention.sha256}` : '연결 없음'}`,
+							`참고자료: ${snapshot.references.length}개\n${snapshot.references.map(reference => `${reference.id} · 버전 ${reference.version} · SHA-256 ${reference.sha256}`).join('\n')}`,
+							`요청 이유: ${display(request.reason ?? '')}\n요청 세션 / 실행: ${request.callerSessionId} / ${request.callerTurnId}`,
+							`요청 버전: ${request.revision}\n실행 세션 버전: ${snapshot.sessionRevision}\n미리보기 만료: ${preview.expiresAt}`,
+						].join('\n\n');
+						if (Buffer.byteLength(detail, 'utf8') > 48 * 1024) { throw new Error('실행 승인 정보가 확인 창에 담기에는 너무 큽니다. 요청 범위를 나누어 주세요.'); }
+						const result = await dialog.showMessageBox(window, {
+							type: 'question', title: 'AI 세션 시작 요청 승인', message: `${display(target.name)} 실행 요청을 승인할까요?`, detail,
+							buttons: ['취소', '요청 승인 및 실행'], cancelId: 0, defaultId: 0, noLink: true,
+						});
+						if (window.isDestroyed() || sender.isDestroyed()) { throw new Error('프로젝트 창이 닫혀 실행 승인을 마치지 못했습니다.'); }
+						return result.response === 1;
 					},
 				},
 			);

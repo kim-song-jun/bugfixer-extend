@@ -2,11 +2,11 @@
 
 ## 2026-10-20 continuation scope
 
-- [ ] Registered parent/child monitoring in the existing session list, per-node logs, explicit terminal instruction focus, same-ownership parent selection, and click-time exact-turn stop. Source and focused tests are being added; require exact-commit CI native tree/collapse/focus/child-only stop evidence before marking done.
-- [ ] `sessions.requestStart` B: durable requests, human native preview/approval, changed-input invalidation and idempotent approval/rejection/cancellation. A request cannot launch a provider.
-- [ ] `sessions.stop` B: own exact turn plus designated exact targets in the currently approved workflow, approval-version revalidation, durable receipt before self-revocation, distinguish acceptance from verified cleanup.
+- [ ] Registered parent/child monitoring in the existing session list, per-node logs, explicit terminal instruction focus, same-ownership parent selection, and click-time exact-turn stop. Source and 240 session UI checks passed on `e84cc1c`; native tree and collapse/expand reached both live PTYs. Correct the ambiguous harness row selector, then require complete focus/child-only stop evidence before marking done.
+- [ ] `sessions.requestStart` B: durable requests, human native preview/approval, changed-input invalidation and idempotent approval/rejection/cancellation. Source includes the v34 ledger, dedicated native confirmation route, generic-ticket bypass guard, bounded request history UI and real SQLite/native PTY contract tests. A request cannot launch a provider. Independent source review passed; exact-commit CI remains required.
+- [ ] `sessions.stop` B: own exact turn plus designated exact targets in the currently approved workflow, approval-version revalidation, durable receipt before self-revocation, distinguish acceptance from verified cleanup. Source and persistence-failure regression contracts are present and reviewed; runtime evidence remains pending.
 - [ ] Waiting transport A: real terminals and observed-stage notifications only; no inferred provider approval waiting/clear.
-- [ ] Resolve current native CI regressions: 760 px commit facts overflow and owned-app teardown identity refusal. Keep process identity, group/port absence and fixture isolation assertions intact.
+- [ ] Resolve current native CI regressions: 760 px commit-review overflow and ambiguous parent-name row locator. App/port/PTY teardown passed on `e84cc1c`; retain those identity and fixture-isolation checks. New border-box inputs and overflow geometry diagnostics still require CI proof.
 
 The scope choices above are user-confirmed. Artifact sharing scope remains a separate pending choice. Build/test/typecheck/lint/provider probes and native/browser verification execute in GitHub CI, with no local automated workload.
 

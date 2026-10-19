@@ -187,6 +187,87 @@ function readSuccessfulToolPayload(result: unknown, operation: string): Record<s
 	return payload as Record<string, unknown>;
 }
 
+test('MCP start proposals never launch and self-stop receipts survive capability revocation', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-control-'));
+	const fixture = createFixture(directory);
+	const caller = createSession(fixture, 'codex');
+	const target = createSession(fixture, 'claude');
+	const callerTurn = createTurn(fixture, caller, READ_ONLY);
+	const otherTurnSession = createSession(fixture, 'claude');
+	const otherTurn = createTurn(fixture, otherTurnSession, READ_ONLY);
+	const secret = 'fixture-control-reference-secret-314159265358979';
+	let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
+	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
+	const queued: string[] = [];
+	let stopFinished: Promise<{ readonly error: unknown } | undefined> = Promise.resolve(undefined);
+	const collaboration = new AgentSessionCollaborationService(fixture.database, undefined, {
+		queueStop(request) {
+			assert.equal(fixture.database.agentSessionControlRequests.get(fixture.project.id, request.id)?.state, 'stopAccepted');
+			queued.push(request.id);
+			stopFinished = new Promise<void>((resolve, reject) => setImmediate(() => {
+				try {
+					const exact = fixture.database.agentSessionControlRequests.validateAcceptedStop(fixture.project.id, request.id);
+					assert.equal(exact.targetTurnId, callerTurn.id);
+					const current = fixture.database.agentSessionTurns.getTurn(fixture.project.id, caller.id, callerTurn.id)!;
+					const session = fixture.database.agentSessions.getSession(fixture.project.id, caller.id)!;
+					const stopped = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, caller.id, current.id, current.revision, session.revision, { state: 'interrupted' });
+					fixture.database.agentSessionTurns.confirmTurnCleanup(fixture.project.id, caller.id, stopped.turn.id, stopped.turn.revision);
+					access!.revokeAccess();
+					fixture.database.agentSessionControlRequests.markStopResult(request.id);
+					resolve();
+				} catch (error) { reject(error); }
+			})).then(() => undefined, error => ({ error }));
+		},
+	});
+	const bridge = new AgentSessionMcpBridge(collaboration);
+	try {
+		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: caller.id, turnId: callerTurn.id, permissionPolicy: READ_ONLY, knownSecrets: [secret] });
+		client = await openMcpClient(access);
+		const tools = (await client.client.listTools()).tools;
+		for (const name of ['sessions_requestStart', 'sessions_stop', 'sessionRequests_get']) { assert.ok(tools.some(tool => tool.name === name)); }
+		const sessionPage = readSuccessfulToolPayload(await client.client.callTool({ name: 'sessions_list', arguments: {} }), 'sessions_list control context');
+		const rows = sessionPage.sessions as { id: string; callerTurnId: string | null; revision: number; parentSessionId: string | null }[];
+		assert.equal(rows.find(row => row.id === caller.id)?.callerTurnId, callerTurn.id);
+		assert.equal(rows.find(row => row.id === target.id)?.revision, target.revision);
+		assert.equal(rows.find(row => row.id === target.id)?.parentSessionId, null);
+		const proposal = { name: 'sessions_requestStart', arguments: {
+			targetSessionId: target.id, expectedSessionRevision: target.revision, permissionMode: 'mutating', approval: 'on-request',
+			reason: `Please inspect this reference ${secret}`, idempotencyKey: 'human-review-only',
+		} };
+		const first = readSuccessfulToolPayload(await client.client.callTool(proposal), 'sessions_requestStart');
+		const duplicate = readSuccessfulToolPayload(await client.client.callTool(proposal), 'duplicate sessions_requestStart');
+		assert.equal(first.id, duplicate.id);
+		assert.equal(first.state, 'pendingReview');
+		assert.equal(JSON.stringify(first).includes(secret), false);
+		assert.equal(fixture.database.agentSessionTurns.listTurns(fixture.project.id, target.id).length, 0);
+		assert.deepEqual(queued, []);
+		const saved = readSuccessfulToolPayload(await client.client.callTool({ name: 'sessionRequests_get', arguments: { requestId: first.id } }), 'sessionRequests_get');
+		assert.equal(saved.state, 'pendingReview');
+		const denied = await client.client.callTool({ name: 'sessions_stop', arguments: { targetSessionId: otherTurnSession.id, targetTurnId: otherTurn.id, idempotencyKey: 'unapproved-peer-stop' } });
+		assert.equal((denied as { isError?: boolean }).isError, true);
+		assert.deepEqual(queued, []);
+		const extraAuthority = await client.client.callTool({ name: 'sessions_stop', arguments: { targetSessionId: caller.id, targetTurnId: callerTurn.id, idempotencyKey: 'forged-stop', workflowAuthority: {} } });
+		assert.equal((extraAuthority as { isError?: boolean }).isError, true);
+		const outcome = await client.client.callTool({ name: 'sessions_stop', arguments: { targetSessionId: caller.id, targetTurnId: callerTurn.id, idempotencyKey: 'exact-self-stop' } })
+			.then(value => ({ value }), error => ({ error }));
+		if ('value' in outcome && !(outcome.value as { isError?: boolean }).isError) {
+			assert.equal(readSuccessfulToolPayload(outcome.value, 'sessions_stop').state, 'stopAccepted', 'An MCP response can acknowledge acceptance, never future cleanup.');
+		}
+		const stopError = await stopFinished;
+		if (stopError) { throw stopError.error; }
+		assert.equal(queued.length, 1);
+		const receipt = fixture.database.agentSessionControlRequests.get(fixture.project.id, queued[0]);
+		assert.equal(receipt?.state, 'stopCompleted');
+		assert.equal(receipt?.targetTurnState, 'interrupted');
+		assert.equal(fixture.database.agentSessionControlRequests.get(fixture.project.id, String(first.id))?.state, 'pendingReview');
+		assert.equal(fixture.database.agentSessionTurns.listTurns(fixture.project.id, target.id).length, 0);
+		await assertBridgeDenied(access.port, access.gatewayEnvironment[AGENT_SESSION_MCP_TOKEN_ENV]);
+	} finally {
+		try { await closeOwnedMcpResources(client ? [client] : [], access ? [access] : []); }
+		finally { fixture.database.close(); rmSync(directory, { recursive: true, force: true }); }
+	}
+});
+
 test('real MCP SDK client uses scoped loopback ports for all provider pairings and durable receipts', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-sdk-'));
 	const fixture = createFixture(directory);

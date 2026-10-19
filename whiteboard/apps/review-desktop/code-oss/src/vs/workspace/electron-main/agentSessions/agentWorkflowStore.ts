@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 // eslint-disable-next-line local/code-import-patterns
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionControlWorkflowAuthority } from '../../common/workspaceAgentSessionControlProtocol.js';
 import type {
 	AgentWorkflowApprovalReceipt, AgentWorkflowDTO, AgentWorkflowNodeExecutionDTO, AgentWorkflowNodePlan, AgentWorkflowPageDTO,
 	AgentWorkflowNodeState, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowReference, AgentWorkflowRole,
@@ -100,6 +101,32 @@ export class AgentWorkflowStore {
 		const selectedVersion = version ?? workflow.planVersion;
 		if (!Number.isSafeInteger(selectedVersion) || selectedVersion < 1) { throw new Error('The workflow plan version is invalid.'); }
 		return this.getPlanInternal(projectId, workflowId, selectedVersion);
+	}
+
+	/** Mint only the current human-approved run containing this exact caller turn. */
+	getSessionControlAuthority(projectId: string, sessionId: string, turnId: string): AgentSessionControlWorkflowAuthority | undefined {
+		this.assertOpen();
+		this.validateUuid(projectId, 'project ID');
+		this.validateUuid(sessionId, 'session ID');
+		this.validateUuid(turnId, 'turn ID');
+		const row = this.db.prepare(`SELECT node.workflow_id, node.run_id, run.plan_version, run.fingerprint, approval.id AS approval_id
+			FROM agent_workflow_run_nodes node
+			JOIN agent_workflow_runs run ON run.id = node.run_id AND run.workflow_id = node.workflow_id AND run.project_id = node.project_id
+			JOIN agent_workflows workflow ON workflow.id = run.workflow_id AND workflow.project_id = run.project_id AND workflow.plan_version = run.plan_version
+			JOIN agent_workflow_approvals approval ON approval.workflow_id = run.workflow_id AND approval.project_id = run.project_id
+				AND approval.plan_version = run.plan_version AND approval.fingerprint = run.fingerprint
+			JOIN agent_session_turns turn ON turn.id = node.session_turn_id AND turn.project_id = node.project_id AND turn.session_id = node.session_id
+			WHERE node.project_id = ? AND node.session_id = ? AND node.session_turn_id = ?
+				AND node.state IN ('launching', 'running', 'cancelRequested') AND run.state IN ('ready', 'running', 'cancelRequested')
+				AND workflow.state IN ('ready', 'running', 'cancelRequested') AND turn.state IN ('starting', 'running')`).get(projectId, sessionId, turnId);
+		if (!row) { return undefined; }
+		const plan = this.getPlanInternal(projectId, String(row.workflow_id), Number(row.plan_version));
+		if (!plan || plan.fingerprint !== row.fingerprint || !plan.nodes.some(node => node.sessionId === sessionId)) { return undefined; }
+		return Object.freeze({
+			workflowId: String(row.workflow_id), planVersion: Number(row.plan_version), fingerprint: String(row.fingerprint),
+			runId: String(row.run_id), approvalId: String(row.approval_id),
+			allowedSessionIds: Object.freeze([...new Set(plan.nodes.map(node => node.sessionId))].sort()),
+		});
 	}
 
 	getRun(projectId: string, workflowId: string, runId: string): AgentWorkflowRunDTO | undefined {

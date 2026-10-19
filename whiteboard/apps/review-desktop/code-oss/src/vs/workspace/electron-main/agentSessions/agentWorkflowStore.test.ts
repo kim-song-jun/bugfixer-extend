@@ -179,6 +179,46 @@ test('exact plan fingerprint approval, immutable revisions, stale CAS and bounde
 	});
 });
 
+test('session control captures the exact approved run and v34 receipts use production workflow and cleanup rows', () => {
+	withDatabase((database, fixtureRoot) => {
+		const { project, binding, task } = projectFixture(database, 'Exact stop authority', fixtureRoot);
+		const caller = createSession(database, project.id, binding.id, task.id, 'codex', 'sharedFolder');
+		const target = createSession(database, project.id, binding.id, task.id, 'claude', 'sharedFolder');
+		const callerPlan = plan(project.id, caller.id, binding.id, task.id);
+		const targetPlan = plan(project.id, target.id, binding.id, task.id);
+		const workflow = create(database, project.id, { ...callerPlan, maxConcurrentNodes: 2, maxTotalTurns: 2, nodes: [
+			{ ...callerPlan.nodes[0], nodeId: 'caller' }, { ...targetPlan.nodes[0], nodeId: 'target', provider: target.provider, model: target.model },
+		] });
+		assert.equal(database.agentWorkflows.getSessionControlAuthority(project.id, caller.id, randomUUID()), undefined);
+		const run = approveAndStart(database, project.id, workflow.id);
+		const callerReservation = database.agentWorkflows.reserveNodeTurnLaunch(project.id, workflow.id, run.id, 'caller', 1, caller.revision);
+		const callerTurn = createRunningSessionTurn(database, project.id, binding.id, task.id, caller.id, fixtureRoot, { reservationId: callerReservation.reservationId });
+		const authority = database.agentWorkflows.getSessionControlAuthority(project.id, caller.id, callerTurn.turn.id);
+		assert.ok(authority);
+		assert.equal(authority.runId, run.id);
+		assert.deepEqual(authority.allowedSessionIds, [caller.id, target.id].sort());
+		assert.equal(Object.isFrozen(authority), true);
+		assert.equal(Object.isFrozen(authority.allowedSessionIds), true);
+		const targetReservation = database.agentWorkflows.reserveNodeTurnLaunch(project.id, workflow.id, run.id, 'target', 1, target.revision);
+		const targetTurn = createRunningSessionTurn(database, project.id, binding.id, task.id, target.id, fixtureRoot, { reservationId: targetReservation.reservationId });
+		const request = database.agentSessionControlRequests.createStopRequest({
+			projectId: project.id, callerSessionId: caller.id, callerTurnId: callerTurn.turn.id,
+			targetSessionId: target.id, targetTurnId: targetTurn.turn.id, idempotencyKey: 'production-stop', workflowAuthority: authority,
+		});
+		assert.equal(request.state, 'stopAccepted');
+		assert.equal(database.agentSessionControlRequests.validateAcceptedStop(project.id, request.id).targetTurnId, targetTurn.turn.id);
+		assert.equal(database.agentSessionControlRequests.markStopResult(request.id).state, 'stopUnverified');
+		const exited = database.agentSessionTurns.transitionTurn(project.id, target.id, targetTurn.turn.id, targetTurn.turn.revision, targetTurn.session.revision, { state: 'exited', exitCode: 0 });
+		assert.equal(database.agentSessionControlRequests.markStopResult(request.id).state, 'stopUnverified');
+		database.agentSessionTurns.confirmTurnCleanup(project.id, target.id, exited.turn.id, exited.turn.revision);
+		const completed = database.agentSessionControlRequests.markStopResult(request.id);
+		assert.equal(completed.state, 'stopCompleted');
+		assert.equal(completed.targetTurnState, 'exited');
+		assert.equal(completed.targetTurnId, targetTurn.turn.id);
+		assert.equal(database.agentWorkflows.getSessionControlAuthority(project.id, caller.id, targetTurn.turn.id), undefined);
+	});
+});
+
 test('workflow cancellation waits for host cleanup and idempotent source events reject changed content', () => {
 	withDatabase((database, fixtureRoot) => {
 		const { project, binding, task } = projectFixture(database, 'Workflow cancellation', fixtureRoot);

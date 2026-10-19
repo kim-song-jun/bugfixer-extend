@@ -19,7 +19,7 @@
 .ai-session__shell { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); width: 100%; min-height: 100%; }
 .ai-session__project-header { position: sticky; z-index: 5; top: 0; display: flex; min-height: 52px; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 16px; box-sizing: border-box; padding: 7px 18px; border-bottom: 1px solid var(--ai-line); background: var(--ai-surface); }
 .ai-session__project-name { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.ai-session__project-header-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.ai-session__project-header-actions { display: flex; flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .ai-session__onboarding-mount[hidden] { display: none; }
 .ai-session__onboarding-toggle { white-space: nowrap; }
 .ai-session__notifications-mount { flex: none; }
@@ -92,6 +92,15 @@
 .ai-session__provider-identity-notice { padding-left: 10px; border-left: 2px solid var(--ai-accent); }
 .ai-session__message { margin: 12px 0 0; color: var(--ai-muted); }
 .ai-session__message--error { color: var(--vscode-errorForeground, #c3283b); }
+.ai-session-control { min-width: 0; margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid var(--ai-line); }
+.ai-session-control__heading, .ai-session-control__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ai-session-control__heading { justify-content: space-between; }
+.ai-session-control h2 { margin: 0; font-size: 18px; }
+.ai-session-control p { margin: 6px 0; color: var(--ai-muted); overflow-wrap: anywhere; }
+.ai-session-control p.ai-session__message--error { color: var(--vscode-errorForeground); }
+.ai-session-control__list { margin: 12px 0 0; padding: 0; list-style: none; }
+.ai-session-control__row { min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--ai-line); overflow-wrap: anywhere; }
+.ai-session-control__actions [aria-pressed="true"] { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .ai-session__narrow-toolbar { display: none; }
 .ai-session__narrow-selector { display: flex; min-width: 0; flex: 1; align-items: center; gap: 12px; }
 .ai-session__logs-panel { min-width: 0; }

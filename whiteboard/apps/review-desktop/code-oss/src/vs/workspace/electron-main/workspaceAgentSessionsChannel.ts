@@ -51,6 +51,7 @@ import type { AgentSessionExplanationTarget } from './agentSessions/agentSession
 import type { WorkspaceDatabase } from './workspaceDatabase.js';
 import type { WorkspaceAgentSetupInspectionDTO } from '../common/workspaceAgentSetupProtocol.js';
 import { dispatchWorkspaceAgentPrTextRequest, WORKSPACE_AGENT_PR_TEXT_COMMANDS, type WorkspaceAgentPrTextHost } from './workspaceAgentPrTextRequests.js';
+import { dispatchWorkspaceAgentControlRequest, WORKSPACE_AGENT_CONTROL_COMMANDS, type WorkspaceAgentControlHost } from './workspaceAgentControlRequests.js';
 
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_READ_CHUNKS = 500;
@@ -162,10 +163,18 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly setupInspection?: (projectId: string, provider: AgentSessionProvider, assertCurrent: () => void) => Promise<WorkspaceAgentSetupInspectionDTO>,
 		private readonly prTextHost?: WorkspaceAgentPrTextHost,
 		private readonly nativeNotificationHost?: WorkspaceAgentNativeNotificationHost,
+		private readonly controlHost?: WorkspaceAgentControlHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
 		const projectId = this.authorize(sender);
+		if (WORKSPACE_AGENT_CONTROL_COMMANDS.has(command)) {
+			if (!this.controlHost) { throw new Error('Session control request host is unavailable.'); }
+			const scope = this.beginScopedOperation(sender, projectId);
+			try {
+				return await dispatchWorkspaceAgentControlRequest(this.controlHost, this.database, sender, command, arg, projectId, () => this.assertScopeCurrent(scope)) as T;
+			} finally { this.finishScopedOperation(scope); }
+		}
 		if (WORKSPACE_AGENT_PR_TEXT_COMMANDS.has(command)) {
 			if (!this.prTextHost) { throw new Error('PR text host is unavailable.'); }
 			const scope = this.beginScopedOperation(sender, projectId);
@@ -701,6 +710,7 @@ export class WorkspaceAgentSessionsChannel {
 			case 'start': {
 				const request = this.parseStart(arg, projectId);
 				this.requireSession(projectId, request.sessionId);
+				if (this.controlHost?.application.isControlPreview(request.ticketId)) { throw new Error('AI 요청의 미리보기는 전용 승인 화면에서 확인해야 실행할 수 있습니다.'); }
 				const scope = this.beginScopedOperation(sender, projectId);
 				try {
 					const turn = await this.requireService().start(request);

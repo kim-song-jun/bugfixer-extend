@@ -667,8 +667,8 @@ try {
   second.inputTagsObserved.push('FIXTURE_TAG_B');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_A'), false, 'Session B cannot display the other terminal input tag.');
 
-  const sessionA = workspace.locator('.ai-session__session-row').filter({ hasText: first.name });
-  const sessionB = workspace.locator('.ai-session__session-row').filter({ hasText: second.name });
+  const sessionA = workspace.locator(`button[data-session-select="${first.id}"]`);
+  const sessionB = workspace.locator(`button[data-session-select="${second.id}"]`);
   const parentToggle = workspace.getByRole('button', { name: `${first.name} 하위 세션 접기`, exact: true });
   assert.equal(await workspace.getByRole('list', { name: `${first.name} 하위 세션`, exact: true }).locator('.ai-session__session-row').filter({ hasText: second.name }).count(), 1,
     'The second real session must appear inside its registered parent branch.');
@@ -677,6 +677,7 @@ try {
   assert.equal(processAlive(second.fixturePid), true, 'Collapsing a branch must not stop its child PTY.');
   await workspace.getByRole('button', { name: `${first.name} 하위 세션 펼치기`, exact: true }).click();
   await sessionB.waitFor({ state: 'visible' });
+  receipt.checks.push('real database parent link and tree collapse/expand retain both live PTY processes');
   await sessionA.click();
   await page.getByRole('tab', { name: '터미널', exact: true }).waitFor({ state: 'visible' });
   const firstReopenedInstance = await terminalInstance(page);
@@ -720,7 +721,7 @@ try {
   second.terminalInstanceRetained = true;
 
   for (const session of [second, first]) {
-    await workspace.locator('.ai-session__session-row').filter({ hasText: session.name }).click();
+    await workspace.locator(`button[data-session-select="${session.id}"]`).click();
     await waitTerminalText(page, `READY pid=${session.fixturePid}`, `${session.name} selected for UI stop`);
     const terminalText = await readTerminalText(page);
     assert.ok(terminalText.includes(`READY pid=${session.fixturePid}`));

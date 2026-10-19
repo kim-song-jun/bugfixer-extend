@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO, AgentSessionTranscriptPageOptions } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionControlRequestDTO, AgentSessionControlWorkflowAuthority } from '../../common/workspaceAgentSessionControlProtocol.js';
 import type { AgentWorkflowDTO, AgentWorkflowPlan } from '../../common/workspaceAgentWorkflowProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { createAgentPtyOutputSanitizer, sanitizeCompleteAgentText } from './agentOutputRedactor.js';
@@ -55,6 +56,11 @@ export interface AgentSessionWorkflowHost {
 	getHostError(projectId: string, workflowId: string, runId?: string): string | null;
 }
 
+export interface AgentSessionControlHost {
+	/** Queue only an already durable receipt; never await provider stop on the MCP socket. */
+	queueStop(request: AgentSessionControlRequestDTO): void;
+}
+
 export interface AgentSessionWorkflowPublicStatus {
 	readonly scope: { readonly bindingId: string; readonly taskId: string | null };
 	readonly workflow: { readonly id: string; readonly state: string; readonly revision: number; readonly planVersion: number; readonly updatedAt: string };
@@ -77,6 +83,7 @@ interface GrantRecord {
 	readonly turnId: string;
 	readonly permissionPolicy: AgentSessionPermissionPolicy;
 	readonly knownSecrets: readonly string[];
+	readonly workflowAuthority: AgentSessionControlWorkflowAuthority | undefined;
 	active: boolean;
 }
 
@@ -88,8 +95,9 @@ export class AgentSessionCollaborationService {
 	private activeWaiters = 0;
 
 	constructor(
-		private readonly database: Pick<WorkspaceDatabase, 'agentSessions' | 'agentSessionTurns' | 'agentWorkflows' | 'agentSessionTranscripts'>,
+		private readonly database: Pick<WorkspaceDatabase, 'agentSessions' | 'agentSessionTurns' | 'agentWorkflows' | 'agentSessionTranscripts' | 'agentSessionControlRequests'>,
 		private readonly workflowHost?: AgentSessionWorkflowHost,
+		private readonly controlHost?: AgentSessionControlHost,
 	) { }
 
 	/** The host calls this only for the turn whose trusted launch snapshot supplied this policy. */
@@ -114,6 +122,7 @@ export class AgentSessionCollaborationService {
 			turnId: input.turnId,
 			permissionPolicy: Object.freeze({ ...input.permissionPolicy }),
 			knownSecrets: Object.freeze([...new Set(input.knownSecrets.filter(Boolean))]),
+			workflowAuthority: this.database.agentWorkflows.getSessionControlAuthority(input.projectId, input.sessionId, input.turnId),
 			active: true,
 		});
 		this.grantSet.add(grant);
@@ -133,11 +142,64 @@ export class AgentSessionCollaborationService {
 		return this.listSessionPage(grant, { limit }).sessions;
 	}
 
+	requestStart(grant: AgentSessionCollaborationGrant, input: {
+		readonly targetSessionId: string; readonly expectedSessionRevision: number;
+		readonly permissionPolicy: AgentSessionPermissionPolicy; readonly reason: string; readonly idempotencyKey: string;
+	}): AgentSessionControlRequestDTO {
+		const record = this.requireGrant(grant);
+		if (!this.controlHost) { throw new Error('Human-reviewed session control is unavailable on this host.'); }
+		this.assertControlKey(record, input.idempotencyKey);
+		return this.database.agentSessionControlRequests.createStartRequest({
+			projectId: record.projectId, callerSessionId: record.sessionId, callerTurnId: record.turnId,
+			targetSessionId: input.targetSessionId, expectedSessionRevision: input.expectedSessionRevision,
+			permissionPolicy: input.permissionPolicy, reason: this.sanitize(record, input.reason).text, idempotencyKey: input.idempotencyKey,
+		});
+	}
+
+	requestStop(grant: AgentSessionCollaborationGrant, input: {
+		readonly targetSessionId: string; readonly targetTurnId: string; readonly idempotencyKey: string;
+	}): AgentSessionControlRequestDTO {
+		const record = this.requireGrant(grant);
+		if (!this.controlHost) { throw new Error('Session stop control is unavailable on this host.'); }
+		this.assertControlKey(record, input.idempotencyKey);
+		const ownTurn = input.targetSessionId === record.sessionId && input.targetTurnId === record.turnId;
+		if (!ownTurn && !record.workflowAuthority) { throw new Error('The target is outside this turn and its captured approved workflow.'); }
+		const request = this.database.agentSessionControlRequests.createStopRequest({
+			projectId: record.projectId, callerSessionId: record.sessionId, callerTurnId: record.turnId,
+			targetSessionId: input.targetSessionId, targetTurnId: input.targetTurnId, idempotencyKey: input.idempotencyKey,
+			...(!ownTurn ? { workflowAuthority: record.workflowAuthority } : {}),
+		});
+		if (request.state === 'stopAccepted') {
+			try { this.controlHost.queueStop(request); }
+			catch (error) {
+				this.database.agentSessionControlRequests.markStopResult(request.id, 'stopQueueUnavailable');
+				throw error;
+			}
+		}
+		return request;
+	}
+
+	getOwnControlRequest(grant: AgentSessionCollaborationGrant, requestId: string): AgentSessionControlRequestDTO {
+		const record = this.requireGrant(grant);
+		const request = this.database.agentSessionControlRequests.get(record.projectId, requestId);
+		if (!request || request.callerSessionId !== record.sessionId || request.callerTurnId !== record.turnId) { throw new Error('The control request does not belong to this exact caller turn.'); }
+		return request;
+	}
+
+	private assertControlKey(record: GrantRecord, key: string): void {
+		if (typeof key !== 'string' || !key.trim() || key.length > 128 || this.sanitize(record, key).redacted) { throw new Error('The control idempotency key is invalid or contains a trusted secret.'); }
+	}
+
 	listSessionPage(grant: AgentSessionCollaborationGrant, options: { readonly afterSessionId?: string; readonly limit?: number } = {}): { readonly sessions: readonly Record<string, string | number | null>[]; readonly nextCursor: string | null } {
 		const record = this.requireGrant(grant);
 		const limit = options.limit ?? 50;
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) { throw new Error('The session page limit must be between 1 and 100.'); }
 		const ordered = this.database.agentSessions.listSessions(record.projectId);
+		const authority = record.workflowAuthority;
+		const currentAuthority = authority ? this.database.agentWorkflows.getSessionControlAuthority(record.projectId, record.sessionId, record.turnId) : undefined;
+		const currentRun = authority && JSON.stringify(authority) === JSON.stringify(currentAuthority)
+			? this.database.agentWorkflows.getRun(record.projectId, authority.workflowId, authority.runId) : undefined;
+		const workflowTurns = new Map(currentRun?.nodes.map(node => [node.sessionId, node.sessionTurnId]));
 		let start = 0;
 		if (options.afterSessionId !== undefined) {
 			assertUuid(options.afterSessionId, 'session cursor');
@@ -153,6 +215,10 @@ export class AgentSessionCollaborationService {
 				provider: session.provider,
 				model: this.sanitize(record, session.model).text,
 				state: session.state,
+				revision: session.revision,
+				parentSessionId: session.parentSessionId,
+				callerTurnId: session.id === record.sessionId ? record.turnId : null,
+				workflowTurnId: authority?.allowedSessionIds.includes(session.id) ? workflowTurns.get(session.id) ?? null : null,
 				createdAt: session.createdAt,
 				updatedAt: session.updatedAt,
 			};

@@ -17,6 +17,7 @@ import { AgentSessionPreparationError } from './agentSessionPreparationError.js'
 import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
+import { AgentSessionControlApplication } from './agentSessionControlApplication.js';
 import { AgentSessionCommitApplication } from './agentSessionCommitApplication.js';
 import { AgentSessionMergeApplication } from './agentSessionMergeApplication.js';
 import { AgentSessionPublicationApplication } from './agentSessionPublicationApplication.js';
@@ -48,6 +49,7 @@ export class AgentSessionApplication {
 	private readonly providerIdentityReceiver: AgentProviderIdentityReceiver;
 	readonly workspaceResolver: AgentSessionWorkspaceResolver;
 	readonly service: AgentSessionService;
+	readonly controlApplication: AgentSessionControlApplication;
 	readonly commitApplication: AgentSessionCommitApplication;
 	readonly mergeApplication: AgentSessionMergeApplication;
 	readonly publicationApplication: AgentSessionPublicationApplication;
@@ -77,6 +79,11 @@ export class AgentSessionApplication {
 				return workflowScheduler.cancel(projectId, workflowId, expectedRevision, idempotencyKey);
 			},
 			getHostError: (projectId, workflowId, runId) => workflowScheduler?.getHostError(projectId, workflowId, runId) ?? null,
+		}, {
+			queueStop: request => {
+				if (!this.recoveryReady) { throw new Error('Session control is unavailable while the host is initializing.'); }
+				this.controlApplication.queueStop(request);
+			},
 		});
 		this.mcpBridge = new AgentSessionMcpBridge(this.collaboration, undefined, database);
 		this.providerIdentityReceiver = new AgentProviderIdentityReceiver(database);
@@ -96,6 +103,8 @@ export class AgentSessionApplication {
 			afterCleanup: (turn, context) => this.recordFinalContent(turn, context.cleanupVerified),
 		});
 		this.service.recoverStartup();
+		this.controlApplication = new AgentSessionControlApplication(database, this.service);
+		this.controlApplication.recoverStartup();
 		database.agentSessionContents.reconcileInterruptedCaptures();
 		this.commitApplication = new AgentSessionCommitApplication(database, this.worktrees, this.workspaceResolver, this.service);
 		this.mergeApplication = new AgentSessionMergeApplication(database, this.worktrees, database.agentSessionMerges, this.workspaceResolver, this.service);
@@ -202,6 +211,7 @@ export class AgentSessionApplication {
 		const independentDrains = await Promise.allSettled([
 			Promise.resolve().then(() => this.publicationApplication.shutdown()),
 			Promise.resolve().then(() => this.prTextApplication.shutdown()),
+			Promise.resolve().then(() => this.controlApplication.shutdown()),
 		]);
 		for (const result of independentDrains) { if (result.status === 'rejected') { failures.push(result.reason); } }
 		try { this.workflowScheduler.stopScheduling(); } catch (error) { failures.push(error); }

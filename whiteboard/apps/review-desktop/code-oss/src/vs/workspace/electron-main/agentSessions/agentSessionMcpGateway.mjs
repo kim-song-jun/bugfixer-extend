@@ -319,7 +319,56 @@ function writeJsonRpcError(id, code, message) { queueStdout(`${JSON.stringify({ 
 
 const TOOLS = [
 	{
-		name: 'sessions_list', description: 'List sessions in this launch project.',
+		name: 'sessions_requestStart', description: 'Save a proposed start for human review in the native app. This never launches a provider or grants permissions. The human must review the target, model, folder, rules, permissions and possible usage cost.',
+		inputSchema: { type: 'object', required: ['targetSessionId', 'expectedSessionRevision', 'permissionMode', 'approval', 'reason', 'idempotencyKey'], properties: {
+			targetSessionId: { type: 'string', format: 'uuid' }, expectedSessionRevision: { type: 'integer', minimum: 1 },
+			permissionMode: { type: 'string', enum: ['read-only', 'mutating'] }, approval: { type: 'string', enum: ['never', 'on-request', 'always'] },
+			reason: { type: 'string', minLength: 1, maxLength: 8192 }, idempotencyKey: { type: 'string', minLength: 1, maxLength: 128 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['targetSessionId', 'expectedSessionRevision', 'permissionMode', 'approval', 'reason', 'idempotencyKey'])) { return { error: 'Unexpected tool arguments.' }; }
+			const targetSessionId = stringField(args, 'targetSessionId', 64);
+			const revision = integerField(args, 'expectedSessionRevision', 1, Number.MAX_SAFE_INTEGER, undefined);
+			const reason = stringField(args, 'reason', 8192);
+			const key = stringField(args, 'idempotencyKey', 128);
+			const bad = [targetSessionId, revision, reason, key].find(field => field.error);
+			if (bad) { return bad; }
+			if (!UUID_RE.test(targetSessionId.value) || revision.value === undefined || !reason.value.trim() || !key.value.trim()) { return { error: 'A target UUID, exact session revision, reason and retry key are required.' }; }
+			if (!['read-only', 'mutating'].includes(args.permissionMode) || !['never', 'on-request', 'always'].includes(args.approval)) { return { error: 'Invalid proposed permission policy.' }; }
+			return { value: { targetSessionId: targetSessionId.value, expectedSessionRevision: revision.value, permissionMode: args.permissionMode, approval: args.approval, reason: reason.value, idempotencyKey: key.value } };
+		},
+		method: 'sessions.requestStart',
+	},
+	{
+		name: 'sessions_stop', description: 'Queue an exact-turn stop for this turn or a designated target in its captured current human-approved workflow. A durable accepted receipt is not verified cleanup; self-stop may close this MCP connection. Inspect the native app for the final result.',
+		inputSchema: { type: 'object', required: ['targetSessionId', 'targetTurnId', 'idempotencyKey'], properties: {
+			targetSessionId: { type: 'string', format: 'uuid' }, targetTurnId: { type: 'string', format: 'uuid' }, idempotencyKey: { type: 'string', minLength: 1, maxLength: 128 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['targetSessionId', 'targetTurnId', 'idempotencyKey'])) { return { error: 'Unexpected tool arguments.' }; }
+			const session = stringField(args, 'targetSessionId', 64);
+			const turn = stringField(args, 'targetTurnId', 64);
+			const key = stringField(args, 'idempotencyKey', 128);
+			const bad = [session, turn, key].find(field => field.error);
+			if (bad) { return bad; }
+			if (!UUID_RE.test(session.value) || !UUID_RE.test(turn.value) || !key.value.trim()) { return { error: 'Exact target session/turn UUIDs and a retry key are required.' }; }
+			return { value: { targetSessionId: session.value, targetTurnId: turn.value, idempotencyKey: key.value } };
+		},
+		method: 'sessions.stop',
+	},
+	{
+		name: 'sessionRequests_get', description: 'Read a durable control receipt created by this exact caller turn. Queued/accepted does not mean provider cleanup completed. Ended turns lose this capability.',
+		inputSchema: { type: 'object', required: ['requestId'], properties: { requestId: { type: 'string', format: 'uuid' } }, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['requestId'])) { return { error: 'Unexpected tool arguments.' }; }
+			const id = stringField(args, 'requestId', 64);
+			if (id.error) { return id; }
+			return UUID_RE.test(id.value) ? { value: { requestId: id.value } } : { error: 'requestId must be a UUID.' };
+		},
+		method: 'sessionRequests.get',
+	},
+	{
+		name: 'sessions_list', description: 'List sessions in this launch project, current revisions and registered parent links. callerTurnId identifies this caller; workflowTurnId identifies an exact turn in its current captured approved run. These IDs do not bypass stop validation.',
 		inputSchema: { type: 'object', properties: { afterSessionId: { type: 'string', format: 'uuid' }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, additionalProperties: false },
 		validate(args) {
 			if (!allowedFields(args, ['afterSessionId', 'limit'])) { return { error: 'Unexpected tool arguments.' }; }

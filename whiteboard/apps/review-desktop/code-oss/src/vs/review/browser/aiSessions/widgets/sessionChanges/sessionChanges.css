@@ -41,7 +41,7 @@
 .ai-session-changes__proposal-list .ai-session-changes__button[aria-pressed="true"] { border-color: var(--vscode-focusBorder); }
 .ai-session-changes__detail h3, .ai-session-changes__detail h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
 .ai-session-changes__field { display: flex; flex-direction: column; gap: 5px; color: var(--vscode-foreground); }
-.ai-session-changes__field select, .ai-session-changes__field textarea { width: 100%; min-width: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
+.ai-session-changes__field select, .ai-session-changes__field textarea { box-sizing: border-box; width: 100%; min-width: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
 .ai-session-changes__field select { min-height: 32px; padding: 4px 8px; }
 .ai-session-changes__field textarea { min-height: 72px; padding: 7px 8px; resize: vertical; }
 .ai-session-changes__field select:focus-visible, .ai-session-changes__field textarea:focus-visible, .ai-session-changes__citation input:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
@@ -60,7 +60,7 @@
 .ai-session-publication__status { color: var(--vscode-descriptionForeground); }
 .ai-session-publication__error, .ai-session-publication__warning { color: var(--vscode-errorForeground); }
 .ai-session-publication__field { display: flex; flex-direction: column; gap: 5px; color: var(--vscode-foreground); }
-.ai-session-publication__field select, .ai-session-publication__input { width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
+.ai-session-publication__field select, .ai-session-publication__input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
 .ai-session-publication__field textarea { min-height: 88px; resize: vertical; }
 .ai-session-publication__field select:focus-visible, .ai-session-publication__input:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .ai-session-publication__actions { display: flex; flex-wrap: wrap; gap: 8px; }
