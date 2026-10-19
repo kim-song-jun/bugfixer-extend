@@ -300,7 +300,20 @@ function createSanitizer(options: AgentOutputRedactorOptions, completeValue: boo
 			const remainder = pending;
 			pending = '';
 			if (activeMask) { activeMask = undefined; return controlGap ? REDACTION : ''; }
-			const candidate = findOpenSensitiveTail(remainder, knownSecretTrie, !completeValue);
+			let candidate = findOpenSensitiveTail(remainder, knownSecretTrie, !completeValue);
+			if (candidate) {
+				const projection = normalizeTerminalText(remainder);
+				const completeSensitiveRanges = findSensitiveRanges(projection.text, knownSecretTrie);
+				if (completeSensitiveRanges.some(([start, end]) => {
+					const rawStart = projection.rawOffsets[start];
+					const rawEnd = projection.rawEnds[end - 1];
+					return rawStart < candidate!.start && candidate!.start < rawEnd;
+				})) {
+					// Do not release the leading part of a complete secret when a
+					// different partial prefix overlaps it at the end of the stream.
+					candidate = undefined;
+				}
+			}
 			if (candidate) {
 				return (controlGap ? REDACTION : '') + sanitize(remainder.slice(0, candidate.start)) + REDACTION;
 			}

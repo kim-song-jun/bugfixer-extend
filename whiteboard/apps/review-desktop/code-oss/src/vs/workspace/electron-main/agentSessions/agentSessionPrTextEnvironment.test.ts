@@ -30,7 +30,7 @@ test('resolver binds sourceCwd to the selected completed turn and rejects change
 		const identity = statSync(canonicalSource, { bigint: true });
 		const snapshot: AgentSessionTurnSnapshot = {
 			schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: null,
-			provider: session.provider, model: 'historical-model', profileRef: 'historical-profile', cwd: canonicalSource,
+			provider: session.provider, model: session.model, profileRef: session.profileRef, cwd: canonicalSource,
 			folderIdentity: { canonicalPath: canonicalSource, dev: identity.dev.toString(), ino: identity.ino.toString() }, managedWorktreeOwnerId: null,
 			permissionPolicy: { mode: 'mutating', approval: 'on-request' }, convention: null, references: [],
 		};

@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createAgentPtyOutputSanitizer } from './agentOutputRedactor.js';
+import { createAgentPtyOutputSanitizer, sanitizeCompleteAgentText } from './agentOutputRedactor.js';
 
 function drain(sanitizer: ReturnType<typeof createAgentPtyOutputSanitizer>, chunks: readonly string[]): string {
 	return chunks.map(chunk => sanitizer.push(chunk)).join('') + sanitizer.flush();
@@ -17,6 +17,19 @@ test('masks a trusted secret split across stream chunks and repeated values', ()
 	assert.equal(sanitizer.push('ready\nsession-cap'), 'ready\n');
 	assert.equal(sanitizer.push('ability-123 and session-capability-123\n'), '*** and ***\n');
 	assert.equal(sanitizer.flush(), '');
+});
+
+test('redacts the full trusted secret after a labelled credential, including at stream flush', () => {
+	const input = 'access_token=fixture-secret visible-secret';
+	const expected = 'access_token=*** ***';
+	const options = { knownSecrets: ['visible-secret'] };
+	assert.equal(sanitizeCompleteAgentText(input, options), expected);
+
+	for (let split = 1; split < input.length; split++) {
+		const sanitizer = createAgentPtyOutputSanitizer(options);
+		const output = sanitizer.push(input.slice(0, split)) + sanitizer.push(input.slice(split)) + sanitizer.flush();
+		assert.equal(output, expected, `unexpected output at split ${split}`);
+	}
 });
 
 test('matches through SGR and Unicode chunk boundaries while preserving safe styling', () => {
