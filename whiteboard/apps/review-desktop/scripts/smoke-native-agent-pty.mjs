@@ -242,6 +242,7 @@ function fixtureProcessAlive(record) {
   }
 
   if (sameProcessBirth(current, record)) { return true; }
+
   if (processPidWasReused(current, record)) { return false; }
 
   throw new Error(`Live PID ${record.pid} no longer matches its captured process identity.`);
@@ -259,8 +260,8 @@ function fixtureIdentityRecords(identity) {
     assert.ok(record && Number.isSafeInteger(record.pid) && record.pid > 0, `The ${role} birth record must contain a valid PID.`);
     assert.ok(Number.isSafeInteger(record.ppid) && record.ppid > 0, `The ${role} birth record must contain a valid PPID.`);
     assert.ok(Number.isSafeInteger(record.pgid) && record.pgid > 0, `The ${role} birth record must contain a valid PGID.`);
-    assert.ok(typeof record.started === 'string' && record.started.length > 0, `The ${role} birth record must contain a start identity.`);
-    assert.ok(typeof record.command === 'string' && record.command.length > 0, `The ${role} birth record must contain a command identity.`);
+    assert.match(record.started, /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}$/, `The ${role} birth record must contain a process start timestamp.`);
+    assert.match(record.command, /^\S[^\r\n\u0000]*$/, `The ${role} birth record must contain a single-line command identity.`);
 
     return { role, ...record };
   });
