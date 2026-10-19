@@ -66,7 +66,7 @@ function freezeNotificationTableAsV32(path: string, userVersion: 31 | 32): void 
 
 function seedLegacyMessageNotifications(database: WorkspaceDatabase, projectId: string, sessionId: string): readonly { readonly id: string; readonly sequence: number; readonly readAt: string | null }[] {
 	const first = database.agentSessions.sendMessage(projectId, sessionId, { recipientSessionId: sessionId, idempotencyKey: 'frozen-v32-read', body: 'read legacy notification' });
-	const second = database.agentSessions.sendMessage(projectId, sessionId, { recipientSessionId: sessionId, idempotencyKey: 'frozen-v32-unread', body: 'unread legacy notification' });
+	database.agentSessions.sendMessage(projectId, sessionId, { recipientSessionId: sessionId, idempotencyKey: 'frozen-v32-unread', body: 'unread legacy notification' });
 	database.agentSessions.acknowledgeMessage(projectId, sessionId, first.id);
 	const notifications = database.agentSessions.listNotifications(projectId, { limit: 100 }).filter(item => item.target.kind === 'message');
 	const firstNotification = notifications.find(item => item.target.kind === 'message' && item.target.id === first.id)!;
