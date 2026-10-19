@@ -32,7 +32,7 @@ export interface BoundedAgentCliProcessResult {
 }
 
 export class AgentCliProcessError extends Error {
-	constructor(message: string, readonly cleanupVerified: boolean, readonly ownedProcessGroupId?: number) {
+	constructor(message: string, readonly cleanupVerified: boolean, readonly ownedProcessGroupId?: number, readonly exitCode?: number | null) {
 		super(message);
 		this.name = 'AgentCliProcessError';
 	}
@@ -166,7 +166,12 @@ async function runWithGuardian(
 		if (!completed) { throw new AgentCliProcessError('CLI probe guardian exited without a completion receipt.', true, guardian.pid); }
 		if (completed.bytes !== outputBytes) { throw new AgentCliProcessError('CLI capability output byte count did not match its completion receipt.', true, guardian.pid); }
 		if (completed.code !== 0) {
-			throw new AgentCliProcessError(`CLI capability probe exited with status ${completed.code ?? completed.signal ?? 'unknown'}.`, true, guardian.pid);
+			throw new AgentCliProcessError(
+				`CLI capability probe exited with status ${completed.code ?? completed.signal ?? 'unknown'}.`,
+				true,
+				guardian.pid,
+				completed.code !== null ? completed.code : undefined,
+			);
 		}
 		return { stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') };
 	};

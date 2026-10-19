@@ -21,6 +21,7 @@ import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPl
 import type { AgentSessionIntegrationProposalDTO } from '../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionMergeProposalDTO } from '../common/workspaceAgentMergeProtocol.js';
 import type { AgentSessionPublicationOperationDTO, AgentSessionPublicationProposalDTO, WorkspaceAgentPublicationAccountsDTO } from '../common/workspaceAgentPublicationProtocol.js';
+import type { WorkspaceAgentSetupInspectionDTO } from '../common/workspaceAgentSetupProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
@@ -832,6 +833,48 @@ test('pending PTY attach is revoked on navigation, catches up output, and pendin
 		database.close();
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test('setup inspection IPC rejects forged paths, providers and windows before probing and drops a navigated result', async () => {
+	const directory = realpathSync(mkdtempSync(join(tmpdir(), 'workspace-agent-setup-channel-')));
+	const database = WorkspaceDatabase.open(':memory:');
+	try {
+		const descriptorUri = URI.file(join(directory, 'project.code-workspace')).toString();
+		const { project } = database.createProjectWorkspace('Setup project', directory, descriptorUri);
+		const openedWorkspace = { id: 'setup-workspace', configPath: URI.parse(descriptorUri) };
+		const codeWindow = { config: { reviewWindowLaunch: { kind: 'project', projectId: project.id } }, openedWorkspace } as unknown as ICodeWindow;
+		const sender = Object.assign(new EventEmitter(), { id: 912, isDestroyed: () => false }) as unknown as WebContents;
+		const forgedSender = { id: 913, isDestroyed: () => false } as WebContents;
+		const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
+		const response: WorkspaceAgentSetupInspectionDTO = { projectId: project.id, provider: 'codex', checkedAt: new Date().toISOString(),
+			installation: { state: 'missing', executablePath: null, version: null, reason: null },
+			authentication: { state: 'signedOut', profileRef: 'local-default-codex', validForExecution: false, reason: null }, capabilities: null, cleanupVerified: true };
+		let hostCalls = 0;
+		let gate: ReturnType<typeof deferred> | undefined;
+		const channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+			async (projectId, provider, assertCurrent) => {
+				assert.equal(projectId, project.id); assert.equal(provider, 'codex'); assertCurrent(); hostCalls++;
+				if (gate) { const pending = gate; gate = undefined; pending.entered(); await pending.promise; }
+				assertCurrent();
+				return response;
+			});
+		const input = { projectId: project.id, provider: 'codex' };
+		await assert.rejects(channel.call(forgedSender, 'inspectSetup', input), /open project window/u);
+		await assert.rejects(channel.call(sender, 'inspectSetup', { ...input, projectId: randomUUID() }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'inspectSetup', { ...input, provider: 'agy' }), /only Codex or Claude/u);
+		await assert.rejects(channel.call(sender, 'inspectSetup', { ...input, executable: '/tmp/untrusted-cli' }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'inspectSetup', { ...input, environment: { HOME: '/tmp/foreign-profile' } }), /unknown fields/u);
+		assert.equal(hostCalls, 0, 'Untrusted inspection requests must never reach the native probe host');
+		assert.deepEqual(await channel.call(sender, 'inspectSetup', input), response);
+		assert.equal(database.agentSessions.listSessions(project.id).length, 0, 'Inspection must not create a session or start a paid turn');
+		const pendingGate = gate = deferred();
+		const pending = channel.call(sender, 'inspectSetup', input);
+		await pendingGate.reached;
+		openedWorkspace.configPath = URI.file(join(directory, 'foreign.code-workspace'));
+		pendingGate.resolve();
+		await assert.rejects(pending, /project window changed/u);
+		assert.equal(hostCalls, 2);
+	} finally { database.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('publication IPC binds approval and provider operations to persisted exact scope and current window', async () => {

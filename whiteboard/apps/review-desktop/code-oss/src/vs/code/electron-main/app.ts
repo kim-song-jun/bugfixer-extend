@@ -1700,6 +1700,7 @@ export class CodeApplication extends Disposable {
 						return result.response === 1;
 					},
 				} satisfies WorkspaceAgentPublicationHost,
+				(projectId, provider, assertCurrent) => agentSessions.inspectSetup(projectId, provider, assertCurrent),
 			);
 			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {
 				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Agent session IPC is only available to the application main frame.'); }

@@ -49,6 +49,7 @@ import type { AgentSessionAttachResult, AgentSessionService } from './agentSessi
 import { computeAgentSessionChangeHunks } from './agentSessions/agentSessionChangeHunks.js';
 import type { AgentSessionExplanationTarget } from './agentSessions/agentSessionReviewStore.js';
 import type { WorkspaceDatabase } from './workspaceDatabase.js';
+import type { WorkspaceAgentSetupInspectionDTO } from '../common/workspaceAgentSetupProtocol.js';
 
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_READ_CHUNKS = 500;
@@ -150,11 +151,28 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly commitHost?: WorkspaceAgentCommitHost,
 		private readonly mergeHost?: WorkspaceAgentMergeHost,
 		private readonly publicationHost?: WorkspaceAgentPublicationHost,
+		private readonly setupInspection?: (projectId: string, provider: AgentSessionProvider, assertCurrent: () => void) => Promise<WorkspaceAgentSetupInspectionDTO>,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
 		const projectId = this.authorize(sender);
 		switch (command) {
+			case 'inspectSetup': {
+				this.assertExactKeys(arg, ['projectId', 'provider'], [], 'setup inspection');
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				if (request.provider !== 'codex' && request.provider !== 'claude') { throw new Error('Setup inspection supports only Codex or Claude.'); }
+				if (!this.setupInspection) { throw new Error('Provider setup inspection is unavailable.'); }
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const result = await this.setupInspection(projectId, request.provider, () => this.assertScopeCurrent(scope));
+					this.assertScopeCurrent(scope);
+					if (!result || result.projectId !== projectId || result.provider !== request.provider || result.authentication.validForExecution !== false || !result.cleanupVerified) {
+						throw new Error('Setup inspection returned an invalid scope or unverified cleanup.');
+					}
+					return result as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
 			case 'listSessions': {
 				this.assertProjectRequest(arg, projectId);
 				return this.database.agentSessions.listSessions(projectId) as T;

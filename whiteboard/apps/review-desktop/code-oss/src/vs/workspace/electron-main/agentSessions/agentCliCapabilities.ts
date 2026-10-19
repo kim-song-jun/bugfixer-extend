@@ -58,9 +58,9 @@ export async function discoverAgentCliCapabilities(options: AgentCliProbeOptions
 	try {
 		const env = minimalProbeEnvironment(options.env ?? process.env, options.provider, probeHome);
 		const timeoutMs = options.timeoutMs ?? AGENT_CLI_PROBE_TIMEOUT_MS;
-		const versionOutput = await probe(options.executable, ['--version'], env, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath);
-		const helpOutput = await probe(options.executable, ['--help'], env, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath);
-		const resumeHelpOutput = options.provider === 'codex' ? await probe(options.executable, ['resume', '--help'], env, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath) : { stdout: '', stderr: '' };
+		const versionOutput = await probe(options.executable, ['--version'], env, probeHome, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath);
+		const helpOutput = await probe(options.executable, ['--help'], env, probeHome, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath);
+		const resumeHelpOutput = options.provider === 'codex' ? await probe(options.executable, ['resume', '--help'], env, probeHome, timeoutMs, options.guardianNodeExecutable, options.guardianScriptPath) : { stdout: '', stderr: '' };
 		allProbesCompleted = true;
 		const version = extractVersion(options.provider, `${versionOutput.stdout}\n${versionOutput.stderr}`);
 		const help = `${helpOutput.stdout}\n${helpOutput.stderr}\n${resumeHelpOutput.stdout}\n${resumeHelpOutput.stderr}`;
@@ -93,7 +93,7 @@ export async function discoverAgentCliCapabilities(options: AgentCliProbeOptions
 }
 
 function minimalProbeEnvironment(source: NodeJS.ProcessEnv, provider: ProviderId, isolatedProfileDirectory: string): NodeJS.ProcessEnv {
-	const env: NodeJS.ProcessEnv = { PATH: source.PATH ?? '', LANG: source.LANG ?? 'C.UTF-8', LC_ALL: source.LC_ALL ?? 'C.UTF-8' };
+	const env: NodeJS.ProcessEnv = { PATH: source.PATH ?? '', HOME: isolatedProfileDirectory, LANG: source.LANG ?? 'C.UTF-8', LC_ALL: source.LC_ALL ?? 'C.UTF-8' };
 	for (const key of ['TMPDIR', 'TEMP', 'SystemRoot']) {
 		if (source[key] !== undefined) { env[key] = source[key]; }
 	}
@@ -102,8 +102,8 @@ function minimalProbeEnvironment(source: NodeJS.ProcessEnv, provider: ProviderId
 	return env;
 }
 
-function probe(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, timeoutMs: number, guardianNodeExecutable?: string, guardianScriptPath?: string): Promise<{ stdout: string; stderr: string }> {
-	return runBoundedAgentCliProcess(executable, args, { env, timeoutMs, maxOutputBytes: MAX_PROBE_OUTPUT_BYTES, guardianNodeExecutable, guardianScriptPath });
+function probe(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, cwd: string, timeoutMs: number, guardianNodeExecutable?: string, guardianScriptPath?: string): Promise<{ stdout: string; stderr: string }> {
+	return runBoundedAgentCliProcess(executable, args, { env, cwd, timeoutMs, maxOutputBytes: MAX_PROBE_OUTPUT_BYTES, guardianNodeExecutable, guardianScriptPath });
 }
 
 function extractVersion(_provider: ProviderId, output: string): string {

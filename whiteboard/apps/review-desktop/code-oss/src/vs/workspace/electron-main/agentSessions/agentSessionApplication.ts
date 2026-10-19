@@ -20,6 +20,8 @@ import { AgentSessionService } from './agentSessionService.js';
 import { AgentSessionCommitApplication } from './agentSessionCommitApplication.js';
 import { AgentSessionMergeApplication } from './agentSessionMergeApplication.js';
 import { AgentSessionPublicationApplication } from './agentSessionPublicationApplication.js';
+import { inspectWorkspaceAgentSetup } from './agentSessionSetupInspection.js';
+import type { WorkspaceAgentSetupInspectionDTO } from '../../common/workspaceAgentSetupProtocol.js';
 import { AgentSessionContentCaptureCleanupError, captureAgentSessionContentSnapshot, type AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
 import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
@@ -49,6 +51,9 @@ export class AgentSessionApplication {
 	readonly publicationApplication: AgentSessionPublicationApplication;
 	readonly workflowScheduler: AgentWorkflowScheduler;
 	private recoveryReady = false;
+	private setupClosing = false;
+	private setupInspectionRequest: Promise<WorkspaceAgentSetupInspectionDTO> | undefined;
+	private setupCleanupFailure: AgentCliProcessError | undefined;
 	private readonly worktrees: ManagedWorktreeService;
 	private readonly workspacePreparationLocks = new OwnerOperationCoordinator();
 	/** Reserve at most eight capture slots; a failed DB write retains the exact captured bytes for retry. */
@@ -103,6 +108,33 @@ export class AgentSessionApplication {
 		return normalized;
 	}
 
+	async inspectSetup(projectId: string, provider: AgentSessionProvider, assertCurrent: () => void): Promise<WorkspaceAgentSetupInspectionDTO> {
+		assertCurrent();
+		if (!this.database.getProject(projectId)) { throw new Error('Setup inspection project is unavailable.'); }
+		if (this.setupClosing) { throw new Error('The setup inspection host is closing.'); }
+		if (this.setupCleanupFailure) { throw this.setupCleanupFailure; }
+		if (this.setupInspectionRequest) { throw new Error('A provider setup inspection is already running.'); }
+		const paths = this.runtimePaths();
+		assertExecutable(paths.standaloneNode, 'The packaged standalone Node runtime');
+		assertReadable(paths.cliProbeGuardian, 'The packaged CLI probe guardian');
+		const home = userInfo().homedir || homedir();
+		const executable = findProviderCli(provider, home);
+		const profileDirectory = join(home, provider === 'codex' ? '.codex' : '.claude');
+		const request = inspectWorkspaceAgentSetup({ projectId, provider, executable, profileDirectory,
+			environment: buildLaunchEnvironment(provider, profileDirectory, dirname(paths.standaloneNode), executable ? dirname(executable) : dirname(paths.standaloneNode)),
+			guardianNodeExecutable: paths.standaloneNode, guardianScriptPath: paths.cliProbeGuardian });
+		this.setupInspectionRequest = request;
+		try {
+			const result = await request;
+			assertCurrent();
+			if (this.setupClosing) { throw new Error('The setup inspection host is closing.'); }
+			return result;
+		} catch (error) {
+			if (error instanceof AgentCliProcessError && !error.cleanupVerified) { this.setupCleanupFailure = error; }
+			throw error;
+		} finally { if (this.setupInspectionRequest === request) { this.setupInspectionRequest = undefined; } }
+	}
+
 	async prepareCreatedSession(projectId: string, sessionId: string): Promise<WorkspaceAgentSessionWorkspacePreparationDTO> {
 		return this.prepareWorkspace(projectId, sessionId);
 	}
@@ -136,13 +168,18 @@ export class AgentSessionApplication {
 	}
 
 	async shutdown(): Promise<void> {
-		await this.publicationApplication.shutdown();
-		this.workflowScheduler.stopScheduling();
-		this.workflowScheduler.requestShutdownCancellation();
-		const receipts = await this.service.shutdown();
-		this.workflowScheduler.reconcileAfterShutdown();
-		const unverified = receipts.filter(receipt => !receipt.cleanupVerified);
-		if (unverified.length) { throw new Error(`Session shutdown left ${unverified.length} owned turn cleanup(s) unverified.`); }
+		this.setupClosing = true;
+		const setupDrain = this.setupInspectionRequest ? Promise.allSettled([this.setupInspectionRequest]) : undefined;
+		try {
+			await this.publicationApplication.shutdown();
+			this.workflowScheduler.stopScheduling();
+			this.workflowScheduler.requestShutdownCancellation();
+			const receipts = await this.service.shutdown();
+			this.workflowScheduler.reconcileAfterShutdown();
+			const unverified = receipts.filter(receipt => !receipt.cleanupVerified);
+			if (unverified.length) { throw new Error(`Session shutdown left ${unverified.length} owned turn cleanup(s) unverified.`); }
+		} finally { await setupDrain; }
+		if (this.setupCleanupFailure) { throw this.setupCleanupFailure; }
 	}
 
 	private runtimePaths(): AgentSessionRuntimePaths {
@@ -415,6 +452,12 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 function resolveProviderCli(provider: AgentSessionProvider, home: string): string {
+	const executable = findProviderCli(provider, home);
+	if (!executable) { throw new Error(`An executable ${provider} CLI was not found in the supported local macOS locations.`); }
+	return executable;
+}
+
+function findProviderCli(provider: AgentSessionProvider, home: string): string | undefined {
 	const name = provider === 'codex' ? 'codex' : 'claude';
 	const candidates = [
 		join(home, '.local', 'bin', name), join(home, '.npm-global', 'bin', name),
@@ -435,7 +478,7 @@ function resolveProviderCli(provider: AgentSessionProvider, home: string): strin
 		}
 		return canonical;
 	}
-	throw new Error(`An executable ${provider} CLI was not found in the supported local macOS locations.`);
+	return undefined;
 }
 
 function buildLaunchEnvironment(provider: AgentSessionProvider, profileDirectory: string, nodeDirectory: string, cliDirectory: string): Record<string, string> {

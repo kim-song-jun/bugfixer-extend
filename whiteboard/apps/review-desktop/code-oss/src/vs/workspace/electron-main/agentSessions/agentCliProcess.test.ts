@@ -44,7 +44,7 @@ describe('bounded CLI probe process ownership', () => {
 		);
 		await assert.rejects(
 			runBoundedAgentCliProcess(process.execPath, ['-e', 'process.exit(7)'], { env, timeoutMs: 1_000, maxOutputBytes: 1024 }),
-			error => error instanceof AgentCliProcessError && error.cleanupVerified,
+			error => error instanceof AgentCliProcessError && error.cleanupVerified && error.exitCode === 7,
 		);
 	});
 
