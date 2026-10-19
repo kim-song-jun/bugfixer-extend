@@ -246,18 +246,22 @@ test("agent-session v2 emits no snapshot when the opened file changes during its
   await execFileAsync("clang", ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-DREVIEW_BOUND_CHECKOUT_TESTING", source.pathname, "-o", helper]);
   const ready = path.join(canonicalTemporaryRoot, "opened-ready");
   const release = path.join(canonicalTemporaryRoot, "opened-release");
+
   const child = spawn(helper, ["--root", root, "--dev", rootStat.dev.toString(), "--ino", rootStat.ino.toString(), "read-agent-v2", "changing.txt"], {
     env: { ...process.env, REVIEW_BOUND_CHECKOUT_BARRIER_READY: ready, REVIEW_BOUND_CHECKOUT_BARRIER_RELEASE: release },
     stdio: ["ignore", "pipe", "pipe"],
   });
+
   const stdout = [];
   const stderr = [];
   child.stdout.on("data", (chunk) => stdout.push(chunk));
   child.stderr.on("data", (chunk) => stderr.push(chunk));
+
   const completed = new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve({ code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }));
   });
+
   try {
     await waitForFile(ready, child);
     await writeFile(file, "after!\n");
@@ -268,7 +272,8 @@ test("agent-session v2 emits no snapshot when the opened file changes during its
     assert.match(result.stderr, /changed while reading/u);
   } finally {
     if (child.exitCode === null) child.kill("SIGTERM");
-    await writeFile(release, "release\n").catch(() => {});
+    await writeFile(release, "release\n");
+    await completed;
   }
 
   const modeRoot = path.join(canonicalTemporaryRoot, "mode-root");
@@ -278,18 +283,22 @@ test("agent-session v2 emits no snapshot when the opened file changes during its
   const modeStat = await stat(modeRoot, { bigint: true });
   const modeReady = path.join(canonicalTemporaryRoot, "mode-ready");
   const modeRelease = path.join(canonicalTemporaryRoot, "mode-release");
+
   const inventoryChild = spawn(helper, ["--root", modeRoot, "--dev", modeStat.dev.toString(), "--ino", modeStat.ino.toString(), "inventory-agent-v2"], {
     env: { ...process.env, REVIEW_BOUND_CHECKOUT_BARRIER_READY: modeReady, REVIEW_BOUND_CHECKOUT_BARRIER_RELEASE: modeRelease },
     stdio: ["ignore", "pipe", "pipe"],
   });
+
   const inventoryStdout = [];
   const inventoryStderr = [];
   inventoryChild.stdout.on("data", (chunk) => inventoryStdout.push(chunk));
   inventoryChild.stderr.on("data", (chunk) => inventoryStderr.push(chunk));
+
   const inventoryCompleted = new Promise((resolve, reject) => {
     inventoryChild.once("error", reject);
     inventoryChild.once("close", (code) => resolve({ code, stdout: Buffer.concat(inventoryStdout).toString(), stderr: Buffer.concat(inventoryStderr).toString() }));
   });
+
   try {
     await waitForFile(modeReady, inventoryChild);
     await chmod(modeFile, 0o755);
@@ -299,7 +308,8 @@ test("agent-session v2 emits no snapshot when the opened file changes during its
     assert.match(result.stderr, /changed while hashing/u);
   } finally {
     if (inventoryChild.exitCode === null) inventoryChild.kill("SIGTERM");
-    await writeFile(modeRelease, "release\n").catch(() => {});
+    await writeFile(modeRelease, "release\n");
+    await inventoryCompleted;
   }
 });
 
