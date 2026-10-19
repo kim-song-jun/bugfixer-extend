@@ -29,7 +29,7 @@ function fixture(runner: AgentSessionPrTextRunner = async () => ({ state: 'faile
 	const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, name: 'PR text session', provider: 'claude', model: 'claude-test-model', profileRef: 'claude-profile-a', workspaceMode: 'gitWorktree' });
 	const canonicalFolder = realpathSync(repository); const identity = statSync(canonicalFolder, { bigint: true });
 	const snapshot: AgentSessionTurnSnapshot = { schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id,
-		taskId: null, provider: session.provider, model: 'historical-model', profileRef: 'historical-profile', cwd: canonicalFolder,
+		taskId: null, provider: session.provider, model: session.model, profileRef: session.profileRef, cwd: canonicalFolder,
 		folderIdentity: { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() }, managedWorktreeOwnerId: session.id,
 		permissionPolicy: { mode: 'mutating', approval: 'on-request' }, convention: null, references: [] };
 	let turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });

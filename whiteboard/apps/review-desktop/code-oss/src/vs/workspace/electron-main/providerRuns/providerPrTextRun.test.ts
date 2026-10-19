@@ -54,6 +54,20 @@ async function assertMissing(path: string): Promise<void> {
 	await assert.rejects(access(path), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
 }
 
+async function waitForPath(path: string, label: string, timeoutMs = 5_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			await access(path);
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+		await new Promise<void>(resolve => setTimeout(resolve, 10));
+	}
+	throw new Error(`Timed out waiting for ${label}.`);
+}
+
 test('PR text capability supports either explicitly selected provider without a fallback policy gate', () => {
 	for (const providerId of ['codex', 'claude'] as const) {
 		const capability = queryProviderPrTextCapability(request({ providerId }));
@@ -264,13 +278,19 @@ test('a supervisor throw after a real owned spawn cannot report cleanup as verif
 		assert.ok(executionCwd);
 		assert.ok(recoverySocket);
 		assert.equal(await access(executionCwd).then(() => true), true, 'an unverified owned process keeps its private recovery directory');
+		await waitForPath(recoverySocket, 'the owned helper to bind its exact recovery socket');
 		assert.equal(await access(recoverySocket).then(() => true), true, 'the durable receipt endpoint remains available for exact recovery');
 		supervisor.handle?.cancel();
 		assert.equal((await supervisor.handle!.result).cleanupVerified, true);
 		await rm(executionCwd, { recursive: true, force: false });
 		await assertMissing(executionCwd);
 	} finally {
-		supervisor.handle?.cancel();
+		let cleanupVerified = supervisor.handle === undefined && executionCwd === undefined;
+		if (supervisor.handle) {
+			supervisor.handle.cancel();
+			cleanupVerified = (await supervisor.handle.result).cleanupVerified;
+		}
+		if (!cleanupVerified) throw new Error('Owned provider cleanup is unverified; preserving its recovery directory and fixture.');
 		if (executionCwd) await rm(executionCwd, { recursive: true, force: true });
 		await rm(fixture.root, { recursive: true, force: true });
 	}

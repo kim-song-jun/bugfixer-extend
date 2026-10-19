@@ -1465,6 +1465,38 @@ export class CodeApplication extends Disposable {
 	}
 
 	private async initChannels(accessor: ServicesAccessor, mainProcessElectronServer: ElectronIPCServer, sharedProcessClient: Promise<MessagePortClient>, openProject: (projectId: string) => Promise<void>): Promise<void> {
+		// ServicesAccessor is valid only while invokeFunction is running. Resolve every
+		// service used below before PR-text recovery yields to asynchronous startup work.
+		const windowsMainService = accessor.get(IWindowsMainService);
+		const logService = accessor.get(ILogService);
+		const launchMainService = accessor.get(ILaunchMainService);
+		const diagnosticsMainService = accessor.get(IDiagnosticsMainService);
+		const policyService = accessor.get(IPolicyService);
+		const nativeManagedSettingsService = accessor.get(INativeManagedSettingsService);
+		const fileManagedSettingsService = accessor.get(IFileManagedSettingsService);
+		const userDataProfilesMainService = accessor.get(IUserDataProfilesMainService);
+		const updateService = accessor.get(IUpdateService);
+		const instantiationService = accessor.get(IInstantiationService);
+		const meteredConnectionService = accessor.get(IMeteredConnectionService) as MeteredConnectionMainService;
+		const diagnosticsService = accessor.get(IDiagnosticsService);
+		const encryptionMainService = accessor.get(IEncryptionMainService);
+		const browserViewMainService = accessor.get(IBrowserViewMainService);
+		const browserViewGroupMainService = accessor.get(IBrowserViewGroupMainService);
+		const signService = accessor.get(ISignService);
+		const keyboardLayoutMainService = accessor.get(IKeyboardLayoutMainService);
+		const nativeHostMainService = accessor.get(INativeHostMainService);
+		const workspacesService = accessor.get(IWorkspacesService);
+		const menubarMainService = accessor.get(IMenubarMainService);
+		const urlService = accessor.get(IURLService);
+		const webviewManagerService = accessor.get(IWebviewManagerService);
+		const storageMainService = accessor.get(IStorageMainService);
+		const externalTerminalMainService = accessor.get(IExternalTerminalMainService);
+		const sandboxHelperMainService = accessor.get(ISandboxHelperMainService);
+		const nativeMcpDiscoveryHelperService = accessor.get(INativeMcpDiscoveryHelperService);
+		const mcpGatewayService = accessor.get(IMcpGatewayService);
+		const loggerMainService = accessor.get(ILoggerMainService);
+		const extensionHostStarter = accessor.get(IExtensionHostStarter);
+		const utilityProcessWorkerMainService = accessor.get(IUtilityProcessWorkerMainService);
 
 		// Channels registered to node.js are exposed to second instances
 		// launching because that is the only way the second instance
@@ -1475,7 +1507,6 @@ export class CodeApplication extends Disposable {
 		let pendingTaskDeletionReplay: Promise<void> | undefined;
 
 		// Review operations are brokered through the main process for code windows.
-		const windowsMainService = accessor.get(IWindowsMainService);
 		if (this.reviewDesktopHost) {
 			const reviewDesktopChannel = new ReviewDesktopChannel(this.reviewDesktopHost,
 				sender => !!windowsMainService.getWindowByWebContents(sender));
@@ -1530,7 +1561,7 @@ export class CodeApplication extends Disposable {
 				},
 			});
 			const taskFolderWriterLock = new TaskFolderWriterLock();
-			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, accessor.get(ILogService), taskFolderWriterLock);
+			const providerRuns = this.workspaceProviderRuns = new WorkspaceProviderRunsChannel(this.workspaceDatabase, dashboardChannel, logService, taskFolderWriterLock);
 			const agentSessions = this.agentSessionApplication = new AgentSessionApplication(
 				this.workspaceDatabase, join(this.environmentMainService.userDataPath, 'agent-sessions'), taskFolderWriterLock, process.resourcesPath,
 			);
@@ -1733,7 +1764,7 @@ export class CodeApplication extends Disposable {
 			const connectorChannel = new WorkspaceConnectorChannel(
 				this.workspaceDatabase, dashboardChannel,
 				() => new KeychainVault(resolveKeychainVaultHelper(app.isPackaged, process.resourcesPath)),
-				accessor.get(ILogService),
+				logService,
 			);
 			validatedIpcMain.handle(WORKSPACE_CONNECTOR_CHANNEL, (event, command: string, arg: unknown) => connectorChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_CONNECTOR_CHANNEL)));
@@ -1794,7 +1825,7 @@ export class CodeApplication extends Disposable {
 			validatedIpcMain.handle(WORKSPACE_E2E_CHANNEL, (event, command: string, arg: unknown) => e2e.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_E2E_CHANNEL)));
 			const conventionAgent = this.workspaceConventionAgent = new WorkspaceConventionAgentChannel(
-				this.workspaceDatabase, dashboardChannel, accessor.get(ILogService),
+				this.workspaceDatabase, dashboardChannel, logService,
 			);
 			validatedIpcMain.handle(WORKSPACE_CONVENTION_AGENT_CHANNEL, (event, command: string, arg: unknown) => conventionAgent.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_CONVENTION_AGENT_CHANNEL)));
@@ -1805,21 +1836,21 @@ export class CodeApplication extends Disposable {
 			}
 		}
 
-		const launchChannel = ProxyChannel.fromService(accessor.get(ILaunchMainService), disposables, { disableMarshalling: true });
+		const launchChannel = ProxyChannel.fromService(launchMainService, disposables, { disableMarshalling: true });
 		this.mainProcessNodeIpcServer.registerChannel('launch', launchChannel);
 
-		const diagnosticsChannel = ProxyChannel.fromService(accessor.get(IDiagnosticsMainService), disposables, { disableMarshalling: true });
+		const diagnosticsChannel = ProxyChannel.fromService(diagnosticsMainService, disposables, { disableMarshalling: true });
 		this.mainProcessNodeIpcServer.registerChannel('diagnostics', diagnosticsChannel);
 
 		// Policies (main & shared process)
-		const policyChannel = disposables.add(new PolicyChannel(accessor.get(IPolicyService)));
+		const policyChannel = disposables.add(new PolicyChannel(policyService));
 		mainProcessElectronServer.registerChannel('policy', policyChannel);
 		sharedProcessClient.then(client => client.registerChannel('policy', policyChannel));
 
-		const nativeManagedSettingsChannel = disposables.add(new NativeManagedSettingsChannel(accessor.get(INativeManagedSettingsService)));
+		const nativeManagedSettingsChannel = disposables.add(new NativeManagedSettingsChannel(nativeManagedSettingsService));
 		mainProcessElectronServer.registerChannel('nativeManagedSettings', nativeManagedSettingsChannel);
 
-		const fileManagedSettingsChannel = disposables.add(new FileManagedSettingsChannel(accessor.get(IFileManagedSettingsService)));
+		const fileManagedSettingsChannel = disposables.add(new FileManagedSettingsChannel(fileManagedSettingsService));
 		mainProcessElectronServer.registerChannel('fileManagedSettings', fileManagedSettingsChannel);
 
 		// Local Files
@@ -1830,52 +1861,51 @@ export class CodeApplication extends Disposable {
 		sharedProcessClient.then(client => client.registerChannel(LOCAL_FILE_SYSTEM_CHANNEL_NAME, fileSystemProviderChannel));
 
 		// User Data Profiles
-		const userDataProfilesService = ProxyChannel.fromService(accessor.get(IUserDataProfilesMainService), disposables);
+		const userDataProfilesService = ProxyChannel.fromService(userDataProfilesMainService, disposables);
 		mainProcessElectronServer.registerChannel('userDataProfiles', userDataProfilesService);
 		sharedProcessClient.then(client => client.registerChannel('userDataProfiles', userDataProfilesService));
 
 		// Update
-		const updateService = accessor.get(IUpdateService);
 		const updateChannel = new UpdateChannel(updateService);
 		mainProcessElectronServer.registerChannel('update', updateChannel);
 
 		// Report explicit update checks natively. Review's renderer stubs out
 		// `IUpdateService`, so the main process owns the whole feedback path.
-		this._register(accessor.get(IInstantiationService).createInstance(ReviewUpdateDialog));
+		this._register(instantiationService.createInstance(ReviewUpdateDialog));
 
 		// Metered Connection
-		const meteredConnectionChannel = new MeteredConnectionChannel(accessor.get(IMeteredConnectionService) as MeteredConnectionMainService);
+		const meteredConnectionChannel = new MeteredConnectionChannel(meteredConnectionService);
 		mainProcessElectronServer.registerChannel(METERED_CONNECTION_CHANNEL, meteredConnectionChannel);
 		sharedProcessClient.then(client => client.registerChannel(METERED_CONNECTION_CHANNEL, meteredConnectionChannel));
 
 		// Process
-		const processChannel = ProxyChannel.fromService(new ProcessMainService(this.logService, accessor.get(IDiagnosticsService), accessor.get(IDiagnosticsMainService)), disposables);
+		const processChannel = ProxyChannel.fromService(new ProcessMainService(this.logService, diagnosticsService, diagnosticsMainService), disposables);
 		mainProcessElectronServer.registerChannel('process', processChannel);
 
 		// Encryption
-		const encryptionChannel = ProxyChannel.fromService(accessor.get(IEncryptionMainService), disposables);
+		const encryptionChannel = ProxyChannel.fromService(encryptionMainService, disposables);
 		mainProcessElectronServer.registerChannel('encryption', encryptionChannel);
 
 		// Browser View
-		const browserViewChannel = ProxyChannel.fromService(accessor.get(IBrowserViewMainService), disposables);
+		const browserViewChannel = ProxyChannel.fromService(browserViewMainService, disposables);
 		mainProcessElectronServer.registerChannel(ipcBrowserViewChannelName, browserViewChannel);
 		sharedProcessClient.then(client => client.registerChannel(ipcBrowserViewChannelName, browserViewChannel));
 
 		// Browser View Group
-		const browserViewGroupChannel = ProxyChannel.fromService(accessor.get(IBrowserViewGroupMainService), disposables);
+		const browserViewGroupChannel = ProxyChannel.fromService(browserViewGroupMainService, disposables);
 		mainProcessElectronServer.registerChannel(ipcBrowserViewGroupChannelName, browserViewGroupChannel);
 		sharedProcessClient.then(client => client.registerChannel(ipcBrowserViewGroupChannelName, browserViewGroupChannel));
 
 		// Signing
-		const signChannel = ProxyChannel.fromService(accessor.get(ISignService), disposables);
+		const signChannel = ProxyChannel.fromService(signService, disposables);
 		mainProcessElectronServer.registerChannel('sign', signChannel);
 
 		// Keyboard Layout
-		const keyboardLayoutChannel = ProxyChannel.fromService(accessor.get(IKeyboardLayoutMainService), disposables);
+		const keyboardLayoutChannel = ProxyChannel.fromService(keyboardLayoutMainService, disposables);
 		mainProcessElectronServer.registerChannel('keyboardLayout', keyboardLayoutChannel);
 
 		// Native host (main & shared process)
-		this.nativeHostMainService = accessor.get(INativeHostMainService);
+		this.nativeHostMainService = nativeHostMainService;
 		const nativeHostChannel = ProxyChannel.fromService(this.nativeHostMainService, disposables, {
 			// This event has main-process consumers but no IPC consumer, so its buffer would never drain.
 			unbufferedEvents: ['onDidBlurMainWindow']
@@ -1884,59 +1914,59 @@ export class CodeApplication extends Disposable {
 		sharedProcessClient.then(client => client.registerChannel('nativeHost', nativeHostChannel));
 
 		// Workspaces
-		const workspacesChannel = ProxyChannel.fromService(accessor.get(IWorkspacesService), disposables);
+		const workspacesChannel = ProxyChannel.fromService(workspacesService, disposables);
 		mainProcessElectronServer.registerChannel('workspaces', workspacesChannel);
 
 		// Menubar
-		const menubarChannel = ProxyChannel.fromService(accessor.get(IMenubarMainService), disposables);
+		const menubarChannel = ProxyChannel.fromService(menubarMainService, disposables);
 		mainProcessElectronServer.registerChannel('menubar', menubarChannel);
 
 		// URL handling
-		const urlChannel = ProxyChannel.fromService(accessor.get(IURLService), disposables);
+		const urlChannel = ProxyChannel.fromService(urlService, disposables);
 		mainProcessElectronServer.registerChannel('url', urlChannel);
 
 		// Webview Manager
-		const webviewChannel = ProxyChannel.fromService(accessor.get(IWebviewManagerService), disposables);
+		const webviewChannel = ProxyChannel.fromService(webviewManagerService, disposables);
 		mainProcessElectronServer.registerChannel('webview', webviewChannel);
 
 		// Storage (main & shared process)
-		const storageChannel = disposables.add((new StorageDatabaseChannel(this.logService, accessor.get(IStorageMainService))));
+		const storageChannel = disposables.add((new StorageDatabaseChannel(this.logService, storageMainService)));
 		mainProcessElectronServer.registerChannel('storage', storageChannel);
 		sharedProcessClient.then(client => client.registerChannel('storage', storageChannel));
 
 		// Profile Storage Changes Listener (shared process)
-		const profileStorageListener = disposables.add((new ProfileStorageChangesListenerChannel(accessor.get(IStorageMainService), accessor.get(IUserDataProfilesMainService), this.logService)));
+		const profileStorageListener = disposables.add((new ProfileStorageChangesListenerChannel(storageMainService, userDataProfilesMainService, this.logService)));
 		sharedProcessClient.then(client => client.registerChannel('profileStorageListener', profileStorageListener));
 
 		// External Terminal
-		const externalTerminalChannel = ProxyChannel.fromService(accessor.get(IExternalTerminalMainService), disposables);
+		const externalTerminalChannel = ProxyChannel.fromService(externalTerminalMainService, disposables);
 		mainProcessElectronServer.registerChannel('externalTerminal', externalTerminalChannel);
 
 		// Sandbox Helper
-		const sandboxHelperChannel = ProxyChannel.fromService(accessor.get(ISandboxHelperMainService), disposables);
+		const sandboxHelperChannel = ProxyChannel.fromService(sandboxHelperMainService, disposables);
 		mainProcessElectronServer.registerChannel('sandboxHelper', sandboxHelperChannel);
 
 		// MCP
-		const mcpDiscoveryChannel = ProxyChannel.fromService(accessor.get(INativeMcpDiscoveryHelperService), disposables);
+		const mcpDiscoveryChannel = ProxyChannel.fromService(nativeMcpDiscoveryHelperService, disposables);
 		mainProcessElectronServer.registerChannel(NativeMcpDiscoveryHelperChannelName, mcpDiscoveryChannel);
-		const mcpGatewayChannel = this._register(new McpGatewayChannel(mainProcessElectronServer, accessor.get(IMcpGatewayService), accessor.get(ILoggerMainService)));
+		const mcpGatewayChannel = this._register(new McpGatewayChannel(mainProcessElectronServer, mcpGatewayService, loggerMainService));
 		mainProcessElectronServer.registerChannel(McpGatewayChannelName, mcpGatewayChannel);
 
 		// Logger
-		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));
+		const loggerChannel = this._register(new LoggerChannel(loggerMainService));
 		mainProcessElectronServer.registerChannel('logger', loggerChannel);
 		sharedProcessClient.then(client => client.registerChannel('logger', loggerChannel));
 
 		// Extension Host Debug Broadcasting
-		const electronExtensionHostDebugBroadcastChannel = new ElectronExtensionHostDebugBroadcastChannel(accessor.get(IWindowsMainService));
+		const electronExtensionHostDebugBroadcastChannel = new ElectronExtensionHostDebugBroadcastChannel(windowsMainService);
 		mainProcessElectronServer.registerChannel('extensionhostdebugservice', electronExtensionHostDebugBroadcastChannel);
 
 		// Extension Host Starter
-		const extensionHostStarterChannel = ProxyChannel.fromService(accessor.get(IExtensionHostStarter), disposables);
+		const extensionHostStarterChannel = ProxyChannel.fromService(extensionHostStarter, disposables);
 		mainProcessElectronServer.registerChannel(ipcExtensionHostStarterChannelName, extensionHostStarterChannel);
 
 		// Utility Process Worker
-		const utilityProcessWorkerChannel = ProxyChannel.fromService(accessor.get(IUtilityProcessWorkerMainService), disposables);
+		const utilityProcessWorkerChannel = ProxyChannel.fromService(utilityProcessWorkerMainService, disposables);
 		mainProcessElectronServer.registerChannel(ipcUtilityProcessWorkerChannelName, utilityProcessWorkerChannel);
 		await pendingTaskDeletionReplay;
 	}

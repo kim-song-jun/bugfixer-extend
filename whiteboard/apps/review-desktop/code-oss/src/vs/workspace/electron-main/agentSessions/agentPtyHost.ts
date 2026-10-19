@@ -154,6 +154,8 @@ interface OwnedPty {
 	controlServerClosePromise?: Promise<void>;
 	controlServerWasListening: boolean;
 	controlServerBindFailed: boolean;
+	/** Captured once so every cleanup attempt checks the same process group. */
+	processGroupId?: number;
 	stopPromise?: Promise<AgentPtyStopResult>;
 	state: AgentPtyState;
 	providerExitCode?: number;
@@ -175,6 +177,13 @@ interface OwnedPty {
 	accessRevoked: boolean;
 	accessRevocationFailed: boolean;
 }
+
+type ProcessGroupInspection =
+	| { readonly state: 'gone' }
+	| { readonly state: 'live' }
+	| { readonly state: 'unknown'; readonly errorCode: ProcessGroupInspectionErrorCode };
+
+type ProcessGroupInspectionErrorCode = 'EACCES' | 'EINVAL' | 'EPERM' | 'UNKNOWN';
 
 /** Main-process owner for interactive PTYs. This foundation is not wired to app launch. */
 export class AgentPtyHost {
@@ -290,14 +299,18 @@ export class AgentPtyHost {
 				handleFlowControl: true,
 			});
 			record.pty = child;
+			record.processGroupId = child.pid;
+			if (!Number.isSafeInteger(record.processGroupId) || record.processGroupId! <= 0) {
+				throw new Error('The PTY process group identifier is invalid.');
+			}
 			record.disposables.push(child.onData(data => this.acceptPtyData(record, data)));
 			record.disposables.push(child.onExit(() => {
 				record.ptyExited = true;
 				resolvePtyExit();
 				if (record.state === 'starting') { record.rejectStartup(new Error('guardian exited before provider startup completed')); }
 				if (record.state !== 'stopping') {
-					const gone = processGroupGone(child.pid);
-					record.state = gone === true && record.accessRevoked ? 'exited' : 'cleanupUnverified';
+					const inspection = inspectProcessGroup(record.processGroupId);
+					record.state = inspection.state === 'gone' && record.accessRevoked ? 'exited' : 'cleanupUnverified';
 				}
 				this.notifyExitListeners(record);
 				void this.stop(handle);
@@ -555,10 +568,15 @@ export class AgentPtyHost {
 		if (!child) { return this.finishStop(record, true, undefined, revocationError); }
 		if (record.state === 'stopped') { return this.finishStop(record, true, undefined, revocationError); }
 		record.state = 'stopping';
-		const pgid = child.pid;
-		const before = processGroupGone(pgid);
-		if (before === true) { return this.waitForGroupCleanup(record, pgid, revocationError); }
-		if (before === undefined) { return this.finishStop(record, false, 'The PTY process group cannot be inspected.', revocationError); }
+		const pgid = record.processGroupId;
+		if (typeof pgid !== 'number' || !Number.isSafeInteger(pgid) || pgid <= 0) {
+			return this.finishStop(record, false, 'The PTY process group identifier is unavailable.', revocationError);
+		}
+		const before = inspectProcessGroup(pgid);
+		if (before.state === 'gone') { return this.waitForGroupCleanup(record, pgid, revocationError); }
+		if (before.state === 'unknown') {
+			return this.finishStop(record, false, describeProcessGroupInspection(record, pgid, before.errorCode), revocationError);
+		}
 		if (!record.controlDisconnected && !record.guardianCleanup && record.controlSocket && !record.controlSocket.destroyed) {
 			this.sendControl(record.controlSocket, { command: 'stop' });
 		} else {
@@ -569,12 +587,17 @@ export class AgentPtyHost {
 
 	private async waitForGroupCleanup(record: OwnedPty, pgid: number, revocationError?: string): Promise<AgentPtyStopResult> {
 		const deadline = Date.now() + this.stopVerifyMs;
-		let gone = processGroupGone(pgid);
-		while (gone === false && Date.now() < deadline) {
+		let inspection = inspectProcessGroup(pgid);
+		while (inspection.state === 'live' && Date.now() < deadline) {
 			await delay(PROCESS_GROUP_POLL_MS);
-			gone = processGroupGone(pgid);
+			inspection = inspectProcessGroup(pgid);
 		}
-		if (gone !== true) { return this.finishStop(record, false, 'The owned PTY process group is still live or cannot be verified.', revocationError); }
+		if (inspection.state !== 'gone') {
+			const error = inspection.state === 'unknown'
+				? describeProcessGroupInspection(record, pgid, inspection.errorCode)
+				: `The owned PTY process group is still live (launch PGID ${pgid}; inspection code LIVE).`;
+			return this.finishStop(record, false, error, revocationError);
+		}
 		if (record.pty && !record.ptyExited && !(await waitForPromise(record.ptyExitPromise, this.stopVerifyMs))) {
 			if (!record.outputDrainGapAdded) {
 				record.outputDrainGapAdded = true;
@@ -762,12 +785,23 @@ function isTerminalState(state: AgentPtyState): boolean {
 	return state === 'exited' || state === 'stopped' || state === 'cleanupUnverified';
 }
 
-function processGroupGone(pgid: number): boolean | undefined {
-	try { process.kill(-pgid, 0); return false; }
+function inspectProcessGroup(pgid: number | undefined): ProcessGroupInspection {
+	if (typeof pgid !== 'number' || !Number.isSafeInteger(pgid) || pgid <= 0) { return { state: 'unknown', errorCode: 'UNKNOWN' }; }
+	try { process.kill(-pgid, 0); return { state: 'live' }; }
 	catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		return code === 'ESRCH' ? true : undefined;
+		if (code === 'ESRCH') { return { state: 'gone' }; }
+		if (code === 'EACCES' || code === 'EINVAL' || code === 'EPERM') { return { state: 'unknown', errorCode: code }; }
+		return { state: 'unknown', errorCode: 'UNKNOWN' };
 	}
+}
+
+function describeProcessGroupInspection(record: OwnedPty, pgid: number, errorCode: ProcessGroupInspectionErrorCode): string {
+	const currentPtyPid = record.pty?.pid;
+	const childPid = typeof currentPtyPid === 'number' && Number.isSafeInteger(currentPtyPid) && currentPtyPid > 0
+		? currentPtyPid
+		: 'unavailable';
+	return `The PTY process group cannot be inspected (launch PGID ${pgid}; current PTY PID ${childPid}; inspection code ${errorCode}).`;
 }
 
 function isGuardianHello(value: unknown, capability: string, expectedPid: number | undefined): value is { event: 'hello'; capability: string; pid: number } {
