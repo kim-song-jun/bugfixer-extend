@@ -11,6 +11,7 @@ import type {
 	AgentSessionFolderIdentity,
 	AgentSessionKnowledgeRef,
 	AgentSessionPermissionPolicy,
+	AgentSessionTurnDTO,
 	AgentSessionTurnSnapshot,
 } from '../../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDatabase, WorkspaceFolderBinding } from '../workspaceDatabase.js';
@@ -94,6 +95,7 @@ export class AgentSessionWorkspaceResolver {
 		private readonly worktrees: ManagedWorktreeService,
 		private readonly writerLock: TaskFolderWriterLock,
 		private readonly recoveryReady: () => boolean,
+		private readonly ownsRunningReadOnlyTurn?: (turn: AgentSessionTurnDTO) => boolean,
 	) { }
 
 	async acquire(input: AcquireAgentSessionWorkspaceInput): Promise<AcquiredAgentSessionWorkspace> {
@@ -135,7 +137,7 @@ export class AgentSessionWorkspaceResolver {
 				launchSession = currentSession;
 				identity = currentIdentity;
 			}
-			this.assertNoUnresolvedCleanup(launchSession, identity);
+			this.assertNoUnresolvedCleanup(launchSession, identity, permissionPolicy);
 			const snapshot = this.snapshot(launchSession, identity);
 			const state: AcquiredState = { resolver: this, snapshot, identity, writerLease, onLostListeners: new Set(), invalidated: false, released: false };
 			const lease = createAcquiredLease(state);
@@ -184,7 +186,7 @@ export class AgentSessionWorkspaceResolver {
 		if (snapshot.permissionPolicy.mode === 'mutating' && session.workspaceMode === 'sharedFolder') {
 			this.assertMutationGrant(session, binding, current.folderIdentity);
 		}
-		this.assertNoUnresolvedCleanup(session, current, expectedStartingTurnId ? { id: expectedStartingTurnId, snapshot } : undefined);
+		this.assertNoUnresolvedCleanup(session, current, snapshot.permissionPolicy, expectedStartingTurnId ? { id: expectedStartingTurnId, snapshot } : undefined);
 		return snapshot;
 	}
 
@@ -293,6 +295,7 @@ export class AgentSessionWorkspaceResolver {
 	private assertNoUnresolvedCleanup(
 		session: AgentSessionDTO,
 		identity: WorkspaceIdentity,
+		permissionPolicy: AgentSessionPermissionPolicy,
 		allowedStartingTurn?: { readonly id: string; readonly snapshot: AgentSessionTurnSnapshot },
 	): void {
 		for (const project of this.database.listProjects()) {
@@ -302,7 +305,9 @@ export class AgentSessionWorkspaceResolver {
 						&& turn.cleanupVerified === false && JSON.stringify(turn.snapshot) === JSON.stringify(allowedStartingTurn.snapshot)) { continue; }
 					const unresolved = turn.state === 'starting' || turn.state === 'running' || turn.state === 'stopping' || !turn.cleanupVerified;
 					if (unresolved && (candidate.id === session.id || this.samePhysicalFolder(identity.folderIdentity, turn.snapshot.folderIdentity))) {
-					throw new Error('A session or matching launch folder has unresolved host-owned process cleanup; recovery is required before launch.');
+						if (permissionPolicy.mode === 'read-only' && turn.state === 'running' && turn.snapshot.permissionPolicy.mode === 'read-only'
+							&& candidate.projectId === session.projectId && candidate.id !== session.id && this.ownsRunningReadOnlyTurn?.(turn) === true) { continue; }
+						throw new Error('A session or matching launch folder has unresolved host-owned process cleanup; recovery is required before launch.');
 					}
 				}
 			}

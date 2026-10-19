@@ -205,6 +205,17 @@ export class AgentSessionService {
 		});
 	}
 
+	/** Trusted workspace check: a durable running row alone never establishes live PTY ownership. */
+	ownsRunningReadOnlyTurn(turn: AgentSessionTurnDTO): boolean {
+		const live = this.turns.get(turn.id);
+		return !!live && !this.shuttingDown && live.running && !live.launchPending && !live.stopRequested && !live.launchFailed
+			&& !live.transcriptPersistenceFailed && !live.providerIdentityMismatch && !live.changeEvidenceFailure && !live.workspaceReleased
+			&& live.projectId === turn.projectId && live.sessionId === turn.sessionId && turn.state === 'running' && live.turn.state === 'running'
+			&& turn.snapshot.permissionPolicy.mode === 'read-only' && live.turn.snapshot.permissionPolicy.mode === 'read-only'
+			&& JSON.stringify(turn.snapshot) === JSON.stringify(live.turn.snapshot)
+			&& live.runtime !== undefined && this.runtimeFactory.getSnapshot(live.runtime).state === 'running';
+	}
+
 	async preview(input: { readonly projectId: string; readonly sessionId: string; readonly permissionPolicy: AgentSessionPermissionPolicy }): Promise<AgentSessionLaunchPreview> {
 		this.assertAcceptingLaunches();
 		this.assertNoIdleMutationLease(input.projectId, input.sessionId);

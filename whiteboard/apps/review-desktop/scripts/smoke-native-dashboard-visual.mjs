@@ -2355,7 +2355,13 @@ async function verifyCompletedSessionOnboardingAfterRestart(page, fixture, tag, 
 
   assert.equal(await toggle.innerText(), '안내 다시 열기', 'The completed guide state must survive a normal app restart');
 
-  await page.keyboard.press('Meta+,');
+  await page.keyboard.press('F1');
+
+  const commandInput = page.locator('.quick-input-widget input');
+
+  await commandInput.waitFor({ state: 'visible' });
+  await commandInput.fill('>Whiteboard: Settings...');
+  await page.getByRole('option', { name: /Whiteboard: Settings\.\.\./ }).click();
 
   const settings = page.locator('.review-home-content.review-settings-page');
 

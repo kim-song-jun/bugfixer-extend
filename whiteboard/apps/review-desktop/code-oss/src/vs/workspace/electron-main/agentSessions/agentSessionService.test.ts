@@ -206,6 +206,46 @@ function dispose(fixture: ReturnType<typeof createFixture>): void {
 	rmSync(fixture.root, { recursive: true, force: true });
 }
 
+test('only host-owned running readers share a folder; unowned running rows and same-session starts stay blocked', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	let service: AgentSessionService;
+	const resolver = new AgentSessionWorkspaceResolver(fixture.database, fixture.worktrees, fixture.writerLock, () => true, turn => service.ownsRunningReadOnlyTurn(turn));
+	service = new AgentSessionService(fixture.database, resolver, runtime.factory);
+	const createReader = (name: string) => fixture.database.agentSessions.createSession({
+		projectId: fixture.project.id, bindingId: fixture.sharedBinding.id, name, provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder',
+	});
+	try {
+		const firstPreview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const first = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: firstPreview.ticketId });
+		assert.equal(service.ownsRunningReadOnlyTurn(first), true);
+		assert.equal(service.ownsRunningReadOnlyTurn({ ...first, snapshot: { ...first.snapshot, permissionPolicy: MUTATING } }), false);
+		const secondSession = createReader('Second reader');
+		const secondPreview = await service.preview({ projectId: fixture.project.id, sessionId: secondSession.id, permissionPolicy: READ_ONLY });
+		const second = await service.start({ projectId: fixture.project.id, sessionId: secondSession.id, ticketId: secondPreview.ticketId });
+		assert.equal(second.state, 'running');
+		assert.equal(service.ownsRunningReadOnlyTurn(second), true);
+		assert.equal(runtime.starts().length, 2);
+		await assert.rejects(service.preview({ projectId: fixture.project.id, sessionId: secondSession.id, permissionPolicy: READ_ONLY }), /cleanup|recovery/u);
+		const otherProject = fixture.database.createProject('Separate project with the same physical folder');
+		const otherBinding = fixture.database.createFolderBinding({ projectId: otherProject.id, path: fixture.ordinary });
+		const otherReader = fixture.database.agentSessions.createSession({ projectId: otherProject.id, bindingId: otherBinding.id, name: 'Cross-project reader', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		await assert.rejects(service.preview({ projectId: otherProject.id, sessionId: otherReader.id, permissionPolicy: READ_ONLY }), /cleanup|recovery/u);
+		const orphanSession = createReader('Unowned reader');
+		const orphanLease = await resolver.acquire({ projectId: fixture.project.id, sessionId: orphanSession.id, permissionPolicy: READ_ONLY });
+		const orphan = fixture.database.agentSessionTurns.createTurn({ projectId: fixture.project.id, sessionId: orphanSession.id, expectedSessionRevision: orphanSession.revision, snapshot: orphanLease.snapshot });
+		resolver.release(orphanLease);
+		const currentOrphanSession = fixture.database.agentSessions.getSession(fixture.project.id, orphanSession.id);
+		assert.ok(currentOrphanSession);
+		const unownedRunning = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, orphanSession.id, orphan.id, orphan.revision, currentOrphanSession.revision, { state: 'running' }).turn;
+		assert.equal(service.ownsRunningReadOnlyTurn(unownedRunning), false);
+		const blockedSession = createReader('Blocked by unowned cleanup');
+		await assert.rejects(service.preview({ projectId: fixture.project.id, sessionId: blockedSession.id, permissionPolicy: READ_ONLY }), /cleanup|recovery/u);
+	} finally {
+		try { await service.shutdown(); } finally { dispose(fixture); }
+	}
+});
+
 test('idle mutation lease blocks manual and workflow starts synchronously, scopes across sessions, and release permits launch', async () => {
 	const fixture = createFixture();
 	const runtime = createRunningRuntimeFactory();

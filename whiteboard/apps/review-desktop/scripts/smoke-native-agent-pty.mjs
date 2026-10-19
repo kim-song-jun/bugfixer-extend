@@ -665,12 +665,12 @@ try {
         notifyBlockedPreparationEntered();
         await new Promise((resolve, reject) => {
           if (signal.aborted) {
-            reject(new Error('cancelled'));
+            reject(new AgentSessionPreparationError('Fixture cancelled before launch resource creation.', true));
 
             return;
           }
 
-          signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+          signal.addEventListener('abort', () => reject(new AgentSessionPreparationError('Fixture cancelled before launch resource creation.', true)), { once: true });
         });
       }
 

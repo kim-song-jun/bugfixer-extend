@@ -80,7 +80,7 @@ export class AgentSessionApplication {
 		});
 		this.mcpBridge = new AgentSessionMcpBridge(this.collaboration, undefined, database);
 		this.providerIdentityReceiver = new AgentProviderIdentityReceiver(database);
-		this.workspaceResolver = new AgentSessionWorkspaceResolver(database, this.worktrees, writerLock, () => this.recoveryReady);
+		this.workspaceResolver = new AgentSessionWorkspaceResolver(database, this.worktrees, writerLock, () => this.recoveryReady, turn => this.service.ownsRunningReadOnlyTurn(turn));
 		this.service = new AgentSessionService(database, this.workspaceResolver, new AgentSessionPtyRuntimeFactory({
 			guardianNodeExecutable: this.runtimePaths().standaloneNode,
 			guardianScriptPath: this.runtimePaths().guardian,

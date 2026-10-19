@@ -251,6 +251,26 @@ test('shared-folder writers serialize with provider runs and recheck revoked gra
 	}
 });
 
+test('a trusted running reader permits another reader but never a writer in the same folder', {
+	skip: process.platform !== 'darwin' && 'The writer rejection exercises the native shared-folder lock.',
+}, async () => {
+	const fixture = createFixture();
+	try {
+		fixture.database.enableOrdinaryFolderMutation(fixture.project.id, fixture.sharedBinding.id);
+		const first = await fixture.resolver.acquire({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const starting = fixture.database.agentSessionTurns.createTurn({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, expectedSessionRevision: fixture.sharedSession.revision, snapshot: first.snapshot });
+		fixture.resolver.release(first);
+		const current = fixture.database.agentSessions.getSession(fixture.project.id, fixture.sharedSession.id);
+		assert.ok(current);
+		const running = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.sharedSession.id, starting.id, starting.revision, current.revision, { state: 'running' }).turn;
+		const resolver = new AgentSessionWorkspaceResolver(fixture.database, fixture.worktrees, fixture.writerLock, () => true, turn => turn.id === running.id);
+		const second = fixture.database.agentSessions.createSession({ projectId: fixture.project.id, bindingId: fixture.sharedBinding.id, name: 'Concurrent reader', provider: 'codex', model: 'gpt-5-codex', workspaceMode: 'sharedFolder' });
+		const reader = await resolver.acquire({ projectId: fixture.project.id, sessionId: second.id, permissionPolicy: READ_ONLY });
+		resolver.release(reader);
+		await assert.rejects(resolver.acquire({ projectId: fixture.project.id, sessionId: second.id, permissionPolicy: MUTATING }), /cleanup|recovery/u);
+	} finally { dispose(fixture); }
+});
+
 test('unresolved host cleanup blocks another session turn; renderer-supplied cleanup is not accepted', async () => {
 	const fixture = createFixture();
 	try {
