@@ -26,6 +26,9 @@ export function createCodexCommandSpec(request: ProviderRunRequest, executable =
 	if (!isValidProfileDirectory(request.profileDirectory)) {
 		throw new Error('Codex requires an explicit absolute profile directory.');
 	}
+	if (request.model !== undefined && !isValidModelId(request.model)) {
+		throw new Error('Codex model must be a non-empty bounded model identifier.');
+	}
 	if (request.permissionPolicy.approval === 'always') {
 		throw new Error('Codex CLI does not support the required always-approve policy');
 	}
@@ -35,8 +38,13 @@ export function createCodexCommandSpec(request: ProviderRunRequest, executable =
 	if (request.permissionPolicy.mode === 'read-only' && request.permissionPolicy.approval !== 'never') {
 		throw new Error('Codex read-only runs require the read-only sandbox without automatic review.');
 	}
+	if (request.prTextRun && (request.permissionPolicy.mode !== 'read-only' || request.permissionPolicy.approval !== 'never' || request.captureFinalText !== true)) {
+		throw new Error('Codex PR text runs require captured output under the read-only no-approval policy.');
+	}
 	const args = [
 		'exec', '--json',
+		...(request.prTextRun ? ['--ignore-user-config'] : []),
+		...(request.model !== undefined ? ['--model', request.model] : []),
 		...(request.permissionPolicy.mode === 'mutating' ? ['--approve-for-me'] : ['--sandbox', 'read-only']),
 		'--skip-git-repo-check',
 		'--ephemeral',
@@ -61,6 +69,10 @@ export function createCodexCommandSpec(request: ProviderRunRequest, executable =
 
 function isValidProfileDirectory(directory: string): boolean {
 	return directory.trim().length > 0 && isAbsolute(directory) && !/[\u0000-\u001f\u007f]/.test(directory);
+}
+
+function isValidModelId(model: string): boolean {
+	return model.length > 0 && model.length <= 128 && model.trim() === model && !/[\u0000-\u001f\u007f]/.test(model);
 }
 
 /** Parses only lifecycle metadata. Prompt text, model output, tool I/O and error messages are discarded. */

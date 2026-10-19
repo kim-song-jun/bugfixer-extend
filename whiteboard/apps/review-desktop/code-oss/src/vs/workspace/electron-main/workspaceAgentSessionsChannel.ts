@@ -34,7 +34,7 @@ import type {
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT } from '../common/workspaceAgentMergeProtocol.js';
 import {
 	AGENT_SESSION_PUBLICATION_HISTORY_LIMIT,
-	type AgentSessionPublicationPrepareInput,
+	type WorkspaceAgentPublicationTextPrepareInput,
 	type AgentSessionPublicationPageDTO,
 	type AgentSessionPublicationOperationDTO,
 	type AgentSessionPublicationProposalDTO,
@@ -50,6 +50,7 @@ import { computeAgentSessionChangeHunks } from './agentSessions/agentSessionChan
 import type { AgentSessionExplanationTarget } from './agentSessions/agentSessionReviewStore.js';
 import type { WorkspaceDatabase } from './workspaceDatabase.js';
 import type { WorkspaceAgentSetupInspectionDTO } from '../common/workspaceAgentSetupProtocol.js';
+import { dispatchWorkspaceAgentPrTextRequest, WORKSPACE_AGENT_PR_TEXT_COMMANDS, type WorkspaceAgentPrTextHost } from './workspaceAgentPrTextRequests.js';
 
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_READ_CHUNKS = 500;
@@ -124,7 +125,7 @@ export interface WorkspaceAgentMergeHost {
 export interface WorkspaceAgentPublicationHost {
 	listAccounts(scope: WorkspaceAgentPublicationScope, assertCurrent: () => void): Promise<WorkspaceAgentPublicationAccountsDTO>;
 	list(input: WorkspaceAgentPublicationPageInput): AgentSessionPublicationPageDTO | Promise<AgentSessionPublicationPageDTO>;
-	prepare(input: AgentSessionPublicationPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO>;
+	prepare(input: WorkspaceAgentPublicationTextPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO>;
 	approve(input: WorkspaceAgentPublicationMutationInput): AgentSessionPublicationProposalDTO;
 	publish(input: WorkspaceAgentPublicationMutationInput, assertCurrent: () => void): Promise<WorkspaceAgentPublicationExecutionDTO>;
 	continue(input: WorkspaceAgentPublicationRecoveryInput, assertCurrent: () => void): Promise<WorkspaceAgentPublicationExecutionDTO>;
@@ -152,10 +153,18 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly mergeHost?: WorkspaceAgentMergeHost,
 		private readonly publicationHost?: WorkspaceAgentPublicationHost,
 		private readonly setupInspection?: (projectId: string, provider: AgentSessionProvider, assertCurrent: () => void) => Promise<WorkspaceAgentSetupInspectionDTO>,
+		private readonly prTextHost?: WorkspaceAgentPrTextHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
 		const projectId = this.authorize(sender);
+		if (WORKSPACE_AGENT_PR_TEXT_COMMANDS.has(command)) {
+			if (!this.prTextHost) { throw new Error('PR text host is unavailable.'); }
+			const scope = this.beginScopedOperation(sender, projectId);
+			try {
+				return await dispatchWorkspaceAgentPrTextRequest(this.prTextHost, this.database, command, arg, projectId, () => this.assertScopeCurrent(scope)) as T;
+			} finally { this.finishScopedOperation(scope); }
+		}
 		switch (command) {
 			case 'inspectSetup': {
 				this.assertExactKeys(arg, ['projectId', 'provider'], [], 'setup inspection');
@@ -1133,14 +1142,23 @@ export class WorkspaceAgentSessionsChannel {
 			...(raw.limit === undefined ? {} : { limit: this.integer(raw.limit, 1, AGENT_SESSION_PUBLICATION_HISTORY_LIMIT, 'publication proposal page limit') }) };
 	}
 
-	private parsePublicationPrepare(value: unknown, authorizedProjectId: string): AgentSessionPublicationPrepareInput {
+	private parsePublicationPrepare(value: unknown, authorizedProjectId: string): WorkspaceAgentPublicationTextPrepareInput {
 		const raw = this.record(value);
-		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'sourceMergeId', 'remoteName', 'baseRef', 'accountRef', 'title', 'body', 'expectedRevision'], [], 'publication preparation');
-		if (typeof raw.body !== 'string' || Buffer.byteLength(raw.body, 'utf8') > 64 * 1024) { throw new Error('The publication body is invalid or exceeds its size limit.'); }
-		return { ...this.parsePublicationScope({ projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId }, authorizedProjectId),
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'sourceMergeId', 'remoteName', 'baseRef', 'accountRef', 'textRevision', 'expectedRevision'], [], 'publication preparation');
+		const scope = this.parsePublicationScope({ projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId }, authorizedProjectId);
+		const selection = this.record(raw.textRevision);
+		this.assertExactKeys(selection, ['scope', 'revision', 'contentHash'], [], 'selected PR text');
+		const textScope = this.record(selection.scope);
+		this.assertExactKeys(textScope, ['projectId', 'sessionId', 'targetTurnId'], [], 'PR text scope');
+		if (textScope.projectId !== scope.projectId || textScope.sessionId !== scope.sessionId || textScope.targetTurnId !== scope.turnId) { throw new Error('PR text selection is outside the publication scope.'); }
+		const textRevision = { scope: { projectId: scope.projectId, sessionId: scope.sessionId, targetTurnId: scope.turnId },
+			revision: this.integer(selection.revision, 1, MAX_SEQUENCE, 'PR text revision'), contentHash: this.changeFingerprint(selection.contentHash) };
+		const head = this.database.agentSessionPrTexts.getHead(textRevision.scope);
+		if (!head || head.revision !== textRevision.revision || head.content.contentHash !== textRevision.contentHash) { throw new Error('The selected PR text changed before preparation.'); }
+		return { ...scope,
 			sourceMergeId: this.uuid(raw.sourceMergeId, 'source merge proposal ID'), remoteName: this.string(raw.remoteName, 'publication remote name', 128),
 			baseRef: this.string(raw.baseRef, 'publication base ref', 1024), accountRef: this.string(raw.accountRef, 'publication account reference', 256),
-			title: this.string(raw.title, 'publication title', 256), body: raw.body,
+			textRevision,
 			expectedRevision: this.integer(raw.expectedRevision, 0, MAX_SEQUENCE, 'publication proposal revision') };
 	}
 

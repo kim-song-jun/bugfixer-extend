@@ -211,7 +211,7 @@ test('real MCP SDK client uses scoped loopback ports for all provider pairings a
 				pairClients.push(receiverClient);
 
 				const toolList = await senderClient.client.listTools();
-				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
+				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'pr_get', 'pr_list', 'pr_prepare', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
 				const request = {
 					name: 'messages_send',
 					arguments: { recipientSessionId: receiver.id, idempotencyKey: `stable-${senderProvider}-${receiverProvider}`, body: 'Inspect this collaboration request.' },
@@ -289,7 +289,7 @@ test('real MCP SDK exposes only scoped workflow status and cancel for its own se
 		);
 		client = await openMcpClient(access);
 		const listed = await client.client.listTools();
-		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
+		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'pr_get', 'pr_list', 'pr_prepare', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
 		const statusResult = await client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } });
 		const status = readSuccessfulToolPayload(statusResult, 'own workflows_status') as unknown as {
 			workflow: { id: string; state: string };

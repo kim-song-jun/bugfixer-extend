@@ -888,6 +888,11 @@ test('publication IPC binds approval and provider operations to persisted exact 
 	const sender = Object.assign(new EventEmitter(), { id: 881, isDestroyed: () => false }) as unknown as WebContents;
 	const forgedSender = { id: 882, isDestroyed: () => false } as WebContents;
 	database.setProjectView({ projectId, descriptorUri, openAtQuit: false, selectedTaskId: null, dashboardPosition: null });
+	const prTextScope = { projectId, sessionId, targetTurnId: turnId };
+	const initialPrText = database.agentSessionPrTexts.appendGeneratedRevision({
+		scope: prTextScope, expectedRevision: 0, idempotencyKey: `publication-fixture:${turnId}`,
+		source: { kind: 'liveAgentTurn', turnId }, sanitizedCompleteAgentText: { title: fixture.input.title, body: fixture.input.body }, knownSecrets: [],
+	});
 	const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
 	let accountsResponse: WorkspaceAgentPublicationAccountsDTO = { available: true, accounts: [{ accountRef: 'gh-account-primary', host: 'github.com', login: 'reviewer', active: true, state: 'success' }], reason: null };
 	let forgePreparedResponse = false;
@@ -915,7 +920,11 @@ test('publication IPC binds approval and provider operations to persisted exact 
 		},
 		async prepare(input, assertCurrent) {
 			assertCurrent();
-			const proposal = database.agentSessionPublications.createProposal({ ...fixture.input, ...input });
+			const selectedText = database.agentSessionPrTexts.getHead(input.textRevision.scope);
+			if (!selectedText || selectedText.revision !== input.textRevision.revision || selectedText.content.contentHash !== input.textRevision.contentHash) {
+				throw new Error('Selected PR text changed before the publication host prepared it.');
+			}
+			const proposal = database.agentSessionPublications.createProposal({ ...fixture.input, ...input, title: selectedText.content.title, body: selectedText.content.body });
 			return forgePreparedResponse ? { ...proposal, projectId: randomUUID() } : proposal;
 		},
 		approve(input) {
@@ -955,7 +964,7 @@ test('publication IPC binds approval and provider operations to persisted exact 
 	let channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, host);
 	const scope = { projectId, sessionId, turnId };
 	const prepareInput = { ...scope, sourceMergeId: fixture.sourceMergeId, remoteName: fixture.input.remoteName, baseRef: fixture.input.baseRef,
-		accountRef: fixture.input.accountRef, title: fixture.input.title, body: fixture.input.body, expectedRevision: 0 };
+		accountRef: fixture.input.accountRef, textRevision: { scope: prTextScope, revision: initialPrText.revision, contentHash: initialPrText.content.contentHash }, expectedRevision: 0 };
 	try {
 		assert.ok(database.getProject(projectId));
 		assert.ok(database.agentSessions.getSession(projectId, sessionId));
@@ -974,9 +983,13 @@ test('publication IPC binds approval and provider operations to persisted exact 
 		assert.equal(proposal.projectId, projectId);
 		assert.equal(proposal.sessionId, sessionId);
 		assert.equal(proposal.turnId, turnId);
+		assert.equal(proposal.title, initialPrText.content.title, 'Publication text is resolved from the selected persisted PR-text revision.');
+		assert.equal(proposal.body, initialPrText.content.body, 'The renderer cannot supply publication body text.');
 		const proposalPage = await channel.call<{ proposals: readonly AgentSessionPublicationProposalDTO[] }>(sender, 'listPublicationProposals', scope);
 		assert.deepEqual(proposalPage.proposals, [proposal]);
 		await assert.rejects(channel.call(sender, 'preparePublicationProposal', { ...prepareInput, actor: 'human' }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'preparePublicationProposal', { ...prepareInput, title: 'Renderer supplied title', body: 'Renderer supplied body' }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'preparePublicationProposal', { ...prepareInput, author: 'human', source: { kind: 'human' } }), /unknown fields/u);
 		forgePreparedResponse = true;
 		await assert.rejects(channel.call(sender, 'preparePublicationProposal', prepareInput), /outside the exact requested scope/u);
 		forgePreparedResponse = false;
@@ -1004,7 +1017,13 @@ test('publication IPC binds approval and provider operations to persisted exact 
 		const staleDialogGate = dialogGate = deferred();
 		const pendingStaleApproval = channel.call(sender, 'approvePublicationProposal', proposalInput);
 		await staleDialogGate.reached;
-		const newerInput = { ...prepareInput, expectedRevision: proposal.revision, title: `${prepareInput.title} revised` };
+		const newerText = database.agentSessionPrTexts.appendHumanRevision({ scope: prTextScope, expectedRevision: initialPrText.revision,
+			idempotencyKey: 'publication-human-followup', content: { title: 'Human-reviewed follow-up', body: 'Updated saved body.' } });
+		await assert.rejects(channel.call(sender, 'preparePublicationProposal', prepareInput), /selected PR text changed/u);
+		await assert.rejects(channel.call(sender, 'preparePublicationProposal', { ...prepareInput,
+			textRevision: { ...prepareInput.textRevision, scope: { ...prTextScope, targetTurnId: randomUUID() } } }), /outside the publication scope/u);
+		const newerInput = { ...prepareInput, expectedRevision: proposal.revision,
+			textRevision: { scope: prTextScope, revision: newerText.revision, contentHash: newerText.content.contentHash } };
 		const newer = await channel.call<AgentSessionPublicationProposalDTO>(sender, 'preparePublicationProposal', newerInput);
 		staleDialogGate.resolve();
 		await assert.rejects(pendingStaleApproval, /newer publication proposal/u);

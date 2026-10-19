@@ -28,6 +28,9 @@ export function createClaudeProviderCommand(request: ProviderRunRequest, executa
 	if (!isValidProfileDirectory(request.profileDirectory)) {
 		throw new Error('Claude Code requires an explicit absolute profile directory.');
 	}
+	if (request.model !== undefined && !isValidModelId(request.model)) {
+		throw new Error('Claude model must be a non-empty bounded model identifier.');
+	}
 	if (!executable.trim()) {
 		throw new Error('Claude Code executable cannot be empty.');
 	}
@@ -37,6 +40,7 @@ export function createClaudeProviderCommand(request: ProviderRunRequest, executa
 		executable,
 		args: [
 			'--print',
+			...(request.model !== undefined ? ['--model', request.model] : []),
 			'--input-format', 'stream-json',
 			'--output-format', 'stream-json',
 			'--verbose',
@@ -51,8 +55,56 @@ export function createClaudeProviderCommand(request: ProviderRunRequest, executa
 	};
 }
 
+/** PR text has its own stricter invocation; task and convention command behavior stays unchanged. */
+export function createClaudePrTextCommand(request: ProviderRunRequest, executable = 'claude'): ProviderCommandSpec {
+	if (request.providerId !== 'claude' || request.permissionPolicy.mode !== 'read-only' || request.permissionPolicy.approval !== 'never' || request.captureFinalText !== true) {
+		throw new Error('Claude PR text runs require capture-only read-only policy.');
+	}
+	if (!isValidProfileDirectory(request.profileDirectory)) {
+		throw new Error('Claude Code requires an explicit absolute profile directory.');
+	}
+	if (request.model !== undefined && !isValidModelId(request.model)) {
+		throw new Error('Claude model must be a non-empty bounded model identifier.');
+	}
+	if (!executable.trim()) {
+		throw new Error('Claude Code executable cannot be empty.');
+	}
+	const schema = JSON.stringify({
+		type: 'object',
+		properties: { title: { type: 'string' }, body: { type: 'string' } },
+		required: ['title', 'body'],
+		additionalProperties: false,
+	});
+	return {
+		executable,
+		args: [
+			'--print',
+			...(request.model !== undefined ? ['--model', request.model] : []),
+			'--input-format', 'stream-json',
+			'--output-format', 'stream-json',
+			'--verbose',
+			'--safe-mode',
+			'--no-session-persistence',
+			'--max-turns', '1',
+			'--tools', '',
+			'--disallowedTools', '*',
+			'--strict-mcp-config',
+			'--mcp-config', '{"mcpServers":{}}',
+			'--settings', '{"disableAllHooks":true}',
+			'--json-schema', schema,
+		],
+		stdin: JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: request.prompt }] } }) + '\n',
+		env: { CLAUDE_CONFIG_DIR: request.profileDirectory },
+		parseEvent: createClaudeProviderEventParser(),
+	};
+}
+
 function isValidProfileDirectory(directory: string): boolean {
 	return directory.trim().length > 0 && isAbsolute(directory) && !/[\u0000-\u001f\u007f]/.test(directory);
+}
+
+function isValidModelId(model: string): boolean {
+	return model.length > 0 && model.length <= 128 && model.trim() === model && !/[\u0000-\u001f\u007f]/.test(model);
 }
 
 /** Parses only session identity, bounded status metadata, and the final result status. */

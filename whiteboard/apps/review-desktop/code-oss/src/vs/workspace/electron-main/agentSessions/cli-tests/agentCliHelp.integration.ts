@@ -13,6 +13,9 @@ import { discoverAgentCliCapabilities } from '../agentCliCapabilities.js';
 import { createAgentSessionCommand } from '../agentSessionCommands.js';
 import { runBoundedAgentCliProcess } from '../agentCliProcess.js';
 import { inspectWorkspaceAgentSetup } from '../agentSessionSetupInspection.js';
+import { createClaudePrTextCommand } from '../../providerRuns/providerClaudeAdapter.js';
+import { createCodexCommandSpec } from '../../providerRuns/providerCodexAdapter.js';
+import type { ProviderRunRequest } from '../../providerRuns/providerRunTypes.js';
 
 describe('pinned provider CLI help and version discovery', () => {
 	it('Codex 0.163.0 reports the interactive flags required by the command builder', async () => {
@@ -45,6 +48,28 @@ describe('pinned provider CLI help and version discovery', () => {
 	});
 
 	for (const provider of ['codex', 'claude'] as const) {
+		it(`${provider} renders PR text command help anonymously without invoking a model (help-mode proof only)`, async () => {
+			const root = realpathSync(mkdtempSync(join(tmpdir(), 'agent-cli-pr-text-help-')));
+			try {
+				const executable = requiredExecutable(provider === 'codex' ? 'BUGFIXER_CODEX_CLI' : 'BUGFIXER_CLAUDE_CLI');
+				const request: ProviderRunRequest = {
+					providerId: provider, attemptId: 'ci-help-only', cwd: root, profileDirectory: root, prompt: 'Help only; never sent to a model.',
+					model: provider === 'codex' ? 'gpt-6.1-sol' : 'sonnet', permissionPolicy: { mode: 'read-only', approval: 'never' },
+					captureFinalText: true, prTextRun: true,
+					preflight: async () => ({ allowed: false, reason: 'Help inspection cannot execute a provider run.' }),
+				};
+				const command = provider === 'codex' ? createCodexCommandSpec(request, executable) : createClaudePrTextCommand(request, executable);
+				const args = [...command.args];
+				if (provider === 'codex') { assert.equal(args.pop(), '-'); }
+				args.push('--help');
+				const result = await runBoundedAgentCliProcess(executable, args, {
+					env: { PATH: process.env.PATH ?? '', HOME: root, ...(command.env ?? {}), LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+					cwd: root, timeoutMs: 10_000, maxOutputBytes: 256 * 1024,
+				});
+				assert.match(`${result.stdout}\n${result.stderr}`, /usage|options/iu);
+			} finally { rmSync(root, { recursive: true, force: true }); }
+		});
+
 		it(`${provider} setup inspection recognizes an anonymous profile without invoking a model`, async () => {
 			const root = realpathSync(mkdtempSync(join(tmpdir(), 'agent-cli-anonymous-setup-')));
 			const profileDirectory = join(root, 'profile');

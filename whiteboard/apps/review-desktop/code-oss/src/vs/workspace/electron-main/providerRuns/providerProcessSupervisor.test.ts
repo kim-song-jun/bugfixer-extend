@@ -640,3 +640,39 @@ test('a parent crash closes the gate pipe before provider execution', { skip: pr
 	assert.equal(isOwnedProcessGroupGone(pgid), true);
 	assert.throws(() => readFileSync(marker), { code: 'ENOENT' });
 });
+
+test('a parent crash closes the owner-lifetime pipe and the helper removes the provider descendants', { skip: process.platform !== 'darwin' }, async (t) => {
+	const directory = mkdtempSync(join(tmpdir(), 'provider-owner-lifetime-'));
+	chmodSync(directory, 0o700);
+	const helperScript = fileURLToPath(new URL('../../../../../../scripts/provider-group-control.mjs', import.meta.url));
+	const socketPath = join(directory, 'c.sock');
+	const recoveryControl = { nodeExecutable: process.execPath, helperScript, socketPath, nonce: 'd'.repeat(64) };
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const supervisorUrl = new URL('./providerProcessSupervisor.js', import.meta.url).href;
+	const descendantScript = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
+	const providerScript = `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { stdio: 'ignore' }); child.unref(); process.stdout.write('DESC_PID:' + child.pid + '\\n'); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
+	const source = `
+		import { ProviderProcessSupervisor } from ${JSON.stringify(supervisorUrl)};
+		const request = { providerId: 'claude', attemptId: 'owner-lifetime', cwd: process.cwd(), prompt: 'private', profileDirectory: '/tmp/profile', permissionPolicy: { mode: 'read-only', approval: 'never' }, ownerLifetime: true, recoveryControl: ${JSON.stringify(recoveryControl)}, preflight: async () => ({ allowed: true, cwdIdentity: 'test-root', policyProof: 'read-only' }) };
+		const spec = { executable: process.execPath, args: ['-e', ${JSON.stringify(providerScript)}], parseEvent: line => ({ event: { type: line } }) };
+		await new ProviderProcessSupervisor().run(request, spec, event => { process.stdout.write(event.type + '\\n'); }, pid => { process.stdout.write('OWNER_PGID:' + pid + '\\n'); });
+	`;
+	const owner = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+	let stdout = '';
+	owner.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+	const waitForValue = (pattern: RegExp, label: string): Promise<number> => new Promise((resolve, reject) => {
+		const finish = (error?: Error, value?: number): void => { clearTimeout(timeout); owner.stdout.off('data', check); error ? reject(error) : resolve(value!); };
+		const check = (): void => { const match = pattern.exec(stdout); if (match) finish(undefined, Number(match[1])); };
+		const timeout = setTimeout(() => finish(new Error(`${label} was not reported by the owned provider`)), 5000);
+		owner.stdout.on('data', check);
+		check();
+	});
+	const pgid = await waitForValue(/^OWNER_PGID:(\d+)$/m, 'owned process group');
+	const descendantPid = await waitForValue(/^DESC_PID:(\d+)$/m, 'provider descendant');
+	t.after(() => { if (!isOwnedProcessGroupGone(pgid)) { try { process.kill(-pgid, 'SIGKILL'); } catch { /* Test-owned group already exited. */ } } });
+	owner.kill('SIGKILL');
+	await new Promise<void>((resolve, reject) => { owner.once('error', reject); owner.once('close', () => resolve()); });
+	for (let attempt = 0; attempt < 400 && !isOwnedProcessGroupGone(pgid); attempt++) await delay(25);
+	assert.equal(isOwnedProcessGroupGone(pgid), true, 'the helper must terminate only its owned process group after owner EOF');
+	assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' }, 'provider descendants must not survive owner-process death');
+});

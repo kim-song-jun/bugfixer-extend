@@ -26,7 +26,7 @@ const GROUP_CHECK_INTERVAL_MS = 25;
 // the whole group. Reaping the leader first would make a later numeric-PGID
 // signal unsafe because the kernel may already have reused that identifier.
 const LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; "$@" 4>&- <&0 & provider_pid=$!; wait "$provider_pid"; provider_status=$?; printf "%s\\n" "$provider_status" >&4 || exit 125; while :; do sleep 1; done';
-const CONTROLLED_LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; node_executable=$1; helper_script=$2; socket_path=$3; attempt_id=$4; shift 4; "$node_executable" "$helper_script" "$socket_path" "$attempt_id" "$$" "$@"; helper_status=$?; kill -TERM -$$ 2>/dev/null; kill -KILL -$$ 2>/dev/null; exit "$helper_status"';
+const CONTROLLED_LAUNCH_GATE_SCRIPT = 'trap ":" TERM INT; IFS= read -r launch_gate <&3 || exit 125; [ "$launch_gate" = "GO" ] || exit 125; exec 3<&-; node_executable=$1; helper_script=$2; socket_path=$3; attempt_id=$4; owner_lifetime=$5; shift 5; if [ "$owner_lifetime" = "1" ]; then "$node_executable" "$helper_script" "$socket_path" "$attempt_id" "$$" --owner-lifetime "$@"; else "$node_executable" "$helper_script" "$socket_path" "$attempt_id" "$$" "$@"; fi; helper_status=$?; kill -TERM -$$ 2>/dev/null; kill -KILL -$$ 2>/dev/null; exit "$helper_status"';
 
 /** Windows process-tree ownership is not implemented, so provider execution is unavailable there. */
 export function isProviderProcessPlatformSupported(platform: NodeJS.Platform = process.platform): boolean {
@@ -89,6 +89,9 @@ export class ProviderProcessSupervisor {
 		if (request.recoveryControl && (process.platform !== 'darwin' || !isValidRecoveryControl(request.recoveryControl, request.attemptId))) {
 			return rejectedHandle(request, 'Provider recovery control is invalid or unavailable on this platform.');
 		}
+		if (request.ownerLifetime && !request.recoveryControl) {
+			return rejectedHandle(request, 'Owner-lifetime cleanup requires the trusted recovery helper.');
+		}
 		return launch(request, spec, onEvent, onOwnedProcessSpawned, this.cancelGraceMs, this.maxLineBytes);
 	}
 }
@@ -144,7 +147,7 @@ async function launch(
 	const recoveryControl = request.recoveryControl;
 	const shellCommand = recoveryControl ? CONTROLLED_LAUNCH_GATE_SCRIPT : LAUNCH_GATE_SCRIPT;
 	const shellArgs = recoveryControl
-		? ['-c', shellCommand, 'provider-launch-gate', recoveryControl.nodeExecutable, recoveryControl.helperScript, recoveryControl.socketPath, request.attemptId, spec.executable, ...spec.args]
+		? ['-c', shellCommand, 'provider-launch-gate', recoveryControl.nodeExecutable, recoveryControl.helperScript, recoveryControl.socketPath, request.attemptId, request.ownerLifetime ? '1' : '0', spec.executable, ...spec.args]
 		: ['-c', shellCommand, 'provider-launch-gate', spec.executable, ...spec.args];
 	try {
 		child = spawn('/bin/sh', shellArgs, {
@@ -153,7 +156,7 @@ async function launch(
 			shell: false,
 			windowsHide: true,
 			detached: process.platform !== 'win32',
-			stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...(recoveryControl ? ['pipe' as const] : [])],
+			stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...(recoveryControl ? ['pipe' as const] : []), ...(request.ownerLifetime ? ['pipe' as const] : [])],
 		});
 	} catch {
 		return rejectedHandle(request, 'Provider process could not be started.');
@@ -161,13 +164,18 @@ async function launch(
 	child.once('error', () => { spawnFailed = true; });
 	const launchGate = child.stdio[3] as NodeJS.WritableStream | null;
 	const nonceInput = recoveryControl ? (child.stdio as Array<Writable | null | undefined>).at(5) ?? null : null;
+	const ownerLifetimeInput = request.ownerLifetime ? (child.stdio as Array<Writable | null | undefined>).at(6) ?? null : null;
 	let nonceInputEndRequested = false;
+	let ownerLifetimeEndRequested = false;
+	let ownerLifetimeInputFailed = false;
 	// Attach before any async persistence callback: a shell that exits early can
 	// close fd3 while the callback is pending, and EPIPE must never be unhandled.
 	launchGate?.on('error', () => { launchGateFailed = true; });
 	launchGate?.on('close', () => { if (!launchGateWriteAttempted) launchGateFailed = true; });
 	nonceInput?.on('error', () => { controlNonceWriteFailed = true; });
 	nonceInput?.on('close', () => { if (!nonceInputEndRequested) controlNonceWriteFailed = true; });
+	ownerLifetimeInput?.on('error', () => { ownerLifetimeInputFailed = true; requestTermination(); });
+	ownerLifetimeInput?.on('close', () => { if (!ownerLifetimeEndRequested) { ownerLifetimeInputFailed = true; requestTermination(); } });
 
 	let terminalState: ProviderTerminalState | undefined;
 	let exitCode: number | null = null;
@@ -184,6 +192,10 @@ async function launch(
 	let guardianStreamDrainTimer: ReturnType<typeof setTimeout> | undefined;
 	const guardianIsGone = (): boolean => guardianExited || closeSeen || child.exitCode !== null || child.signalCode !== null;
 	const requestTermination = (): Promise<GroupCleanupResult> => {
+		if (ownerLifetimeInput && !ownerLifetimeEndRequested) {
+			ownerLifetimeEndRequested = true;
+			ownerLifetimeInput.end();
+		}
 		if (guardianIsGone()) {
 			cleanupPromise ??= Promise.resolve(child.pid ? verifyProcessGroupAfterGuardianExit(child.pid) : { verified: true });
 			return cleanupPromise;
@@ -389,6 +401,12 @@ async function launch(
 			await result;
 			return { ...handle, pid: undefined };
 		}
+	}
+	if (request.ownerLifetime && (!ownerLifetimeInput || ownerLifetimeInputFailed)) {
+		launchGateFailed = true;
+		handle.cancel();
+		await result;
+		return { ...handle, pid: undefined };
 	}
 	launchGateWriteAttempted = true;
 	try { launchGate.end('GO\n'); }

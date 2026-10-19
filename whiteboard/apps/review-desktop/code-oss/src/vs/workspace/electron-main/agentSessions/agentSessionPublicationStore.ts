@@ -74,7 +74,7 @@ export class AgentSessionPublicationStore {
 	) { }
 
 	createProposal(input: AgentSessionPublicationHostCreateInput): AgentSessionPublicationProposalDTO {
-		this.assertExactKeys(input, ['projectId', 'sessionId', 'turnId', 'sourceMergeId', 'remoteName', 'baseRef', 'accountRef', 'title', 'body', 'expectedRevision', 'sourceMerge', 'remote', 'account', 'base', 'diff']);
+		this.assertExactKeys(input, ['projectId', 'sessionId', 'turnId', 'sourceMergeId', 'remoteName', 'baseRef', 'accountRef', 'title', 'body', 'expectedRevision', 'sourceMerge', 'remote', 'account', 'base', 'diff'], ['textRevision']);
 		this.assertScope(input.projectId, input.sessionId, input.turnId); this.assertUuid(input.sourceMergeId, 'source merge ID');
 		if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) { throw this.error('invalidInput', 'Expected publication revision is invalid.'); }
 		const publishedArtifact = this.requireSuccessfulMerge(input);
@@ -88,10 +88,11 @@ export class AgentSessionPublicationStore {
 		const diff = this.normalizeDiff(input.diff, baseOid, sourceMerge.resultCommit);
 		const title = this.normalizeText(input.title, MAX_TITLE_BYTES, 'title', false);
 		const body = this.normalizeText(input.body, MAX_BODY_BYTES, 'body', true);
+		const textRevision = input.textRevision === undefined ? undefined : this.normalizeTextSelection(input.textRevision, input, title, body);
 		const semantic = { projectId: input.projectId, sessionId: input.sessionId, turnId: input.turnId, sourceMergeId: input.sourceMergeId,
 			sourceMergeRevision: sourceMerge.mergeRevision, sourceMergeFingerprint: sourceMerge.mergeFingerprint, sourceMergeOperationId: sourceMerge.mergeOperationId,
 			integrationOwnerId: sourceMerge.integrationOwnerId, resultCommit: sourceMerge.resultCommit, publishedArtifact,
-			remote, account, baseRef, baseOid, diff, title, body, draft: true as const };
+			remote, account, baseRef, baseOid, diff, title, body, draft: true as const, ...(textRevision ? { textRevision } : {}) };
 		const semanticFingerprint = digest(JSON.stringify(semantic));
 		return this.transaction(() => {
 			const latest = this.latestProposal(input.projectId, input.sessionId, input.turnId);
@@ -115,7 +116,7 @@ export class AgentSessionPublicationStore {
 				sourceMergeOperationId: sourceMerge.mergeOperationId, integrationOwnerId: sourceMerge.integrationOwnerId,
 				resultCommit: sourceMerge.resultCommit, publishedArtifact,
 				remote, account, baseRef, baseOid, publicationRef, expectedOldRemoteOid: null, diff, title, body, draft: true,
-				fingerprint: '', createdAt, expiresAt,
+				fingerprint: '', createdAt, expiresAt, ...(textRevision ? { textRevision } : {}),
 			};
 			const fingerprint = digest(JSON.stringify(payload));
 			const immutablePayload = { ...payload, fingerprint };
@@ -434,7 +435,7 @@ export class AgentSessionPublicationStore {
 		if (Buffer.byteLength(payloadJson, 'utf8') > MAX_PROPOSAL_BYTES) { throw this.error('invalidPersistedData', 'Persisted publication proposal exceeds its payload limit.'); }
 		let payload: StoredProposalPayload;
 		try { payload = JSON.parse(payloadJson) as StoredProposalPayload; } catch { throw this.error('invalidPersistedData', 'Persisted publication proposal JSON is invalid.'); }
-		this.assertExactKeys(payload, ['id', 'revision', 'projectId', 'bindingId', 'sessionId', 'turnId', 'sourceMergeId', 'sourceMergeRevision', 'sourceMergeFingerprint', 'sourceMergeOperationId', 'integrationOwnerId', 'resultCommit', 'publishedArtifact', 'remote', 'account', 'baseRef', 'baseOid', 'publicationRef', 'expectedOldRemoteOid', 'diff', 'title', 'body', 'draft', 'fingerprint', 'createdAt', 'expiresAt']);
+		this.assertExactKeys(payload, ['id', 'revision', 'projectId', 'bindingId', 'sessionId', 'turnId', 'sourceMergeId', 'sourceMergeRevision', 'sourceMergeFingerprint', 'sourceMergeOperationId', 'integrationOwnerId', 'resultCommit', 'publishedArtifact', 'remote', 'account', 'baseRef', 'baseOid', 'publicationRef', 'expectedOldRemoteOid', 'diff', 'title', 'body', 'draft', 'fingerprint', 'createdAt', 'expiresAt'], ['textRevision']);
 		const unsigned = { ...payload, fingerprint: '' };
 		if (payload.id !== String(row.id) || payload.projectId !== String(row.project_id) || payload.sessionId !== String(row.session_id) || payload.turnId !== String(row.turn_id)
 			|| payload.sourceMergeId !== String(row.source_merge_id) || payload.revision !== Number(row.revision) || payload.fingerprint !== String(row.proposal_fingerprint)
@@ -443,6 +444,7 @@ export class AgentSessionPublicationStore {
 		}
 		try {
 			this.assertScope(payload.projectId, payload.bindingId, payload.sessionId, payload.turnId);
+			if (payload.textRevision !== undefined) { this.normalizeTextSelection(payload.textRevision, payload, payload.title, payload.body); }
 			this.assertUuid(payload.sourceMergeId, 'source merge ID'); this.assertUuid(payload.sourceMergeOperationId, 'source merge operation ID'); this.assertUuid(payload.integrationOwnerId, 'integration owner ID');
 			if (!Number.isSafeInteger(payload.sourceMergeRevision) || payload.sourceMergeRevision < 1 || !SHA256_PATTERN.test(payload.sourceMergeFingerprint)
 				|| payload.publicationRef !== `refs/heads/bugfixer/pr/${payload.id}` || payload.expectedOldRemoteOid !== null || payload.draft !== true) { throw this.error('invalidPersistedData', 'Persisted publication proposal authority is invalid.'); }
@@ -576,6 +578,16 @@ export class AgentSessionPublicationStore {
 
 	private assertUuid(value: string, label: string): void {
 		if (typeof value !== 'string' || !UUID_PATTERN.test(value)) { throw this.error('invalidInput', `${label} is invalid.`); }
+	}
+
+	private normalizeTextSelection(value: NonNullable<AgentSessionPublicationPrepareInput['textRevision']>, scope: { readonly projectId: string; readonly sessionId: string; readonly turnId: string }, title: string, body: string) {
+		this.assertExactKeys(value, ['scope', 'revision', 'contentHash']);
+		this.assertExactKeys(value.scope, ['projectId', 'sessionId', 'targetTurnId']);
+		if (value.scope.projectId !== scope.projectId || value.scope.sessionId !== scope.sessionId || value.scope.targetTurnId !== scope.turnId
+			|| !Number.isSafeInteger(value.revision) || value.revision < 1 || value.contentHash !== digest(JSON.stringify([title, body]))) {
+			throw this.error('authorityMismatch', 'The exact PR text revision does not match its frozen title and body.');
+		}
+		return { scope: { projectId: scope.projectId, sessionId: scope.sessionId, targetTurnId: scope.turnId }, revision: value.revision, contentHash: value.contentHash };
 	}
 
 	private assertExactKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): void {

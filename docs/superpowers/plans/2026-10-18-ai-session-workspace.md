@@ -115,6 +115,7 @@
 - [ ] Test unknown/mixed attribution, later file changes, untracked/deleted/renamed/binary paths and symlink targets; show missing reasons/evidence honestly.
 - [ ] Connect per-file/hunk diff and explanation, exact local merge preview/approval, conflict files, repair and renewed review; preserve source branches until merged content is retained.
 - [ ] Implement PR preparation and user confirmation, then fresh fingerprint checks before commit/push/publication; exact path staging only and no user branch switch/force push.
+- [ ] Apply the approved MCP PR option B: AI-first title/body, chat requests and direct manual editing, immutable revision/request history, concurrent-edit protection, text-only `pr.prepare/get/list`, and exact saved-text revision pinning before native merge/account selection and separate publication approval. Verify persistence, scope, restart cleanup and rendered editing flows in CI; fixture evidence does not establish real provider or GitHub acceptance.
 - [ ] Test stale approvals, injected out-of-scope file, commit/push/PR partial failures and idempotent retry receipts against controlled Git/HTTP fixtures in CI.
 - [ ] Actual GitHub draft PR proof uses an explicitly authorized disposable repository and identity; no fixture claim substitutes for it.
 

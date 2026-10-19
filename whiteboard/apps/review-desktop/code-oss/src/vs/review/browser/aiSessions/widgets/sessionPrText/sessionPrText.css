@@ -1,0 +1,33 @@
+.ai-session-pr-text-mount { min-width: 0; }
+.ai-session-pr-text { display: flex; flex-direction: column; gap: 9px; min-width: 0; padding-block: 14px; color: var(--vscode-foreground); font: inherit; }
+.ai-session-pr-text h3, .ai-session-pr-text h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
+.ai-session-pr-text__note, .ai-session-pr-text__scope, .ai-session-pr-text__head, .ai-session-pr-text__status, .ai-session-pr-text__request, .ai-session-pr-text__digest, .ai-session-pr-text__candidate-title { margin: 0; overflow-wrap: anywhere; }
+.ai-session-pr-text__note { color: var(--vscode-descriptionForeground); }
+.ai-session-pr-text__scope, .ai-session-pr-text__digest { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.ai-session-pr-text__head, .ai-session-pr-text__request { color: var(--vscode-foreground); }
+.ai-session-pr-text__details { min-width: 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.ai-session-pr-text__details summary { width: fit-content; cursor: pointer; }
+.ai-session-pr-text__details summary:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-pr-text__detail { margin: 4px 0 0; overflow-wrap: anywhere; }
+.ai-session-pr-text__status { color: var(--vscode-descriptionForeground); }
+.ai-session-pr-text__error { margin: 0; color: var(--vscode-errorForeground); }
+.ai-session-pr-text__field { display: flex; flex-direction: column; gap: 5px; min-width: 0; color: var(--vscode-foreground); }
+.ai-session-pr-text__field input, .ai-session-pr-text__field textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px 9px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
+.ai-session-pr-text__field input { min-height: 34px; }
+.ai-session-pr-text__field textarea { min-height: 118px; resize: vertical; }
+.ai-session-pr-text__field input:focus-visible, .ai-session-pr-text__field textarea:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-pr-text__button { width: fit-content; max-width: 100%; min-height: 34px; padding: 5px 10px; color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-panel-border); border-radius: 2px; cursor: pointer; font: inherit; text-align: left; overflow-wrap: anywhere; }
+.ai-session-pr-text__button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+.ai-session-pr-text__button:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-pr-text__button:disabled { opacity: .55; cursor: default; }
+.ai-session-pr-text__section { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-pr-text__summary, .ai-session-pr-text__history { display: flex; flex-direction: column; gap: 4px; min-width: 0; margin: 0; padding-inline-start: 20px; }
+.ai-session-pr-text__summary { color: var(--vscode-descriptionForeground); }
+.ai-session-pr-text__history li { min-width: 0; }
+.ai-session-pr-text__history .ai-session-pr-text__button { width: 100%; }
+.ai-session-pr-text__history .ai-session-pr-text__button[aria-pressed="true"] { border-inline-start: 3px solid var(--vscode-focusBorder); }
+.ai-session-pr-text__candidate { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding-inline-start: 10px; border-inline-start: 3px solid var(--vscode-focusBorder); }
+.ai-session-pr-text__candidate-title { color: var(--vscode-descriptionForeground); }
+.ai-session-pr-text__candidate strong { overflow-wrap: anywhere; font-weight: 600; }
+.ai-session-pr-text__candidate pre { max-width: 100%; max-height: 240px; margin: 0; overflow: auto; color: var(--vscode-editor-foreground); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .ai-session-pr-text__button { width: 100%; } }

@@ -6,6 +6,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server, type Socket } from 'node:net';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentPrTextRevisionDTO } from '../../common/workspaceAgentPrTextProtocol.js';
 import type { AgentSessionExplanationCitation, AgentSessionReportedCheck, AgentSessionExplanationTarget } from './agentSessionReviewStore.js';
 import { computeAgentSessionChangeHunks } from './agentSessionChangeHunks.js';
 import { sanitizeCompleteAgentText } from './agentOutputRedactor.js';
@@ -16,7 +17,7 @@ import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 export const AGENT_SESSION_MCP_GATEWAY_MODULE = 'agentSessionMcpGateway.mjs';
 export const AGENT_SESSION_MCP_TOKEN_ENV = 'BUGFIXER_SESSION_MCP_TOKEN';
 
-export type AgentSessionReviewDatabase = Pick<WorkspaceDatabase, 'agentSessionTurns' | 'agentSessionChangeEvidence' | 'agentSessionContents' | 'agentSessionReviews'>;
+export type AgentSessionReviewDatabase = Pick<WorkspaceDatabase, 'agentSessionTurns' | 'agentSessionChangeEvidence' | 'agentSessionContents' | 'agentSessionReviews' | 'agentSessionPrTexts'>;
 
 const MAX_FRAME_BYTES = 65_536;
 const MAX_CONNECTIONS = 8;
@@ -285,6 +286,55 @@ async function dispatch(
 				expectedRevision: requiredInteger(params.expectedRevision, 'expectedRevision'),
 				idempotencyKey: requiredString(params.idempotencyKey, 'idempotencyKey'),
 			});
+		case 'pr.get': {
+			assertAllowedKeys(params, ['targetTurnId', 'revision', 'afterCharacter', 'maxCharacters']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const targetTurnId = requiredUuid(params.targetTurnId, 'targetTurnId');
+			requireScopedTargetTurn(collaboration, grant, database, targetTurnId, isActive, signal);
+			const scope = { projectId: grant.projectId, sessionId: grant.sessionId, targetTurnId };
+			const revision = params.revision === undefined ? database.agentSessionPrTexts.getHead(scope)
+				: database.agentSessionPrTexts.getRevision(scope, requiredInteger(params.revision, 'revision'));
+			if (!revision) { return { revision: null }; }
+			const after = optionalInteger(params.afterCharacter, 0);
+			const limit = optionalInteger(params.maxCharacters, 1000);
+			const safeBody = sanitizeCompleteAgentText(revision.content.body, { knownSecrets });
+			const characters = [...safeBody];
+			if (after < 0 || after > characters.length || limit < 1 || limit > 1000) { throw new Error('PR text body read bounds are invalid.'); }
+			const nextCharacter = Math.min(after + limit, characters.length);
+			return boundedReviewResult({ revision: prTextMetadata(revision), bodyFragment: characters.slice(after, nextCharacter).join(''),
+				...(safeBody === revision.content.body ? {} : { redactionApplied: true }),
+				afterCharacter: after, nextCharacter, totalCharacters: characters.length, hasMore: nextCharacter < characters.length }, knownSecrets);
+		}
+		case 'pr.list': {
+			assertAllowedKeys(params, ['targetTurnId', 'afterRevision', 'limit']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const targetTurnId = requiredUuid(params.targetTurnId, 'targetTurnId');
+			requireScopedTargetTurn(collaboration, grant, database, targetTurnId, isActive, signal);
+			const scope = { projectId: grant.projectId, sessionId: grant.sessionId, targetTurnId };
+			const limit = optionalInteger(params.limit, 1);
+			if (limit < 1 || limit > 5) { throw new Error('PR text history page limit is invalid.'); }
+			const page = database.agentSessionPrTexts.listRevisions(scope, {
+				afterRevision: optionalInteger(params.afterRevision, 0), limit: optionalInteger(params.limit, 1),
+			});
+			return boundedReviewResult({ ...page, revisions: page.revisions.map(prTextMetadata) }, knownSecrets);
+		}
+		case 'pr.prepare': {
+			assertAllowedKeys(params, ['targetTurnId', 'expectedRevision', 'idempotencyKey', 'title', 'body']);
+			const database = requireReviewDatabase(reviewDatabase);
+			const targetTurnId = requiredUuid(params.targetTurnId, 'targetTurnId');
+			const expectedRevision = requiredInteger(params.expectedRevision, 'expectedRevision');
+			const idempotencyKey = requiredString(params.idempotencyKey, 'idempotencyKey');
+			const title = requiredString(params.title, 'title');
+			const body = requiredString(params.body, 'body');
+			// No await may separate the live-grant check from the synchronous text-only CAS.
+			requireScopedTargetTurn(collaboration, grant, database, targetTurnId, isActive, signal);
+			const revision = database.agentSessionPrTexts.appendGeneratedRevision({
+				scope: { projectId: grant.projectId, sessionId: grant.sessionId, targetTurnId },
+				expectedRevision, idempotencyKey, source: { kind: 'liveAgentTurn', turnId: grant.turnId },
+				sanitizedCompleteAgentText: { title, body }, knownSecrets,
+			});
+			return boundedReviewResult({ revision: prTextMetadata(revision) }, knownSecrets);
+		}
 		case 'changes.get': {
 			assertAllowedKeys(params, ['turnId', 'evidenceVersion', 'path']);
 			const database = requireReviewDatabase(reviewDatabase);
@@ -345,6 +395,11 @@ function optionalInteger(value: unknown, fallback: number): number {
 	if (value === undefined) { return fallback; }
 	if (!Number.isSafeInteger(value)) { throw new Error('The numeric tool argument is invalid.'); }
 	return value as number;
+}
+
+function prTextMetadata(revision: AgentPrTextRevisionDTO) {
+	return { id: revision.id, scope: revision.scope, revision: revision.revision, author: revision.author,
+		source: revision.source, title: revision.content.title, contentHash: revision.content.contentHash, createdAt: revision.createdAt };
 }
 
 function requiredInteger(value: unknown, name: string): number {

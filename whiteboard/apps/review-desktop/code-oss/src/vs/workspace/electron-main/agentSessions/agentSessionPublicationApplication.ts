@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createHash } from 'node:crypto';
-import type { AgentSessionPublicationOperationDTO, AgentSessionPublicationPageDTO, AgentSessionPublicationPrepareInput, AgentSessionPublicationProposalDTO, WorkspaceAgentPublicationAccountsDTO, WorkspaceAgentPublicationExecutionDTO, WorkspaceAgentPublicationMutationInput, WorkspaceAgentPublicationPageInput, WorkspaceAgentPublicationRecoveryInput, WorkspaceAgentPublicationScope } from '../../common/workspaceAgentPublicationProtocol.js';
+import type { AgentSessionPublicationOperationDTO, AgentSessionPublicationPageDTO, AgentSessionPublicationProposalDTO, WorkspaceAgentPublicationAccountsDTO, WorkspaceAgentPublicationExecutionDTO, WorkspaceAgentPublicationMutationInput, WorkspaceAgentPublicationPageInput, WorkspaceAgentPublicationRecoveryInput, WorkspaceAgentPublicationScope, WorkspaceAgentPublicationTextPrepareInput } from '../../common/workspaceAgentPublicationProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { discoverPublicationAccounts, type PublicationAccountChoice, type PublicationSelectedAccount } from './agentPublicationGithub.js';
 import { PublicationFailure } from './agentPublicationProcess.js';
@@ -47,17 +47,30 @@ export class AgentSessionPublicationApplication {
 			{ afterRevision: input.afterRevision, limit: input.limit });
 	}
 
-	prepareProposal(input: AgentSessionPublicationPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO> {
+	prepareProposal(input: WorkspaceAgentPublicationTextPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO> {
 		return this.track(() => this.prepareProposalCore(input, this.guard(assertCurrent)));
 	}
-	private async prepareProposalCore(input: AgentSessionPublicationPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO> {
+	private async prepareProposalCore(input: WorkspaceAgentPublicationTextPrepareInput, assertCurrent: () => void): Promise<AgentSessionPublicationProposalDTO> {
 		this.requireScope(input);
 		const merge = this.database.agentSessionMerges.getProposal(input.sourceMergeId);
 		if (!merge || !this.sameScope(merge, input)) { throw new Error('PR source merge does not match the native request scope.'); }
+		const text = this.requireSelectedText(input);
 		const executor = await this.executor(input, assertCurrent);
-		const proposal = await executor.prepare(input);
+		const proposal = await executor.prepare({ ...input, title: text.content.title, body: text.content.body }, () => {
+			assertCurrent(); this.requireSelectedText(input);
+		});
 		assertCurrent();
 		return proposal;
+	}
+
+	private requireSelectedText(input: WorkspaceAgentPublicationTextPrepareInput) {
+		const selection = input.textRevision;
+		if (!selection || selection.scope.projectId !== input.projectId || selection.scope.sessionId !== input.sessionId || selection.scope.targetTurnId !== input.turnId) {
+			throw new Error('The selected PR text does not match this publication source.');
+		}
+		const text = this.database.agentSessionPrTexts.getHead(selection.scope);
+		if (!text || text.revision !== selection.revision || text.content.contentHash !== selection.contentHash) { throw new Error('PR text changed after selection. Review the latest saved text.'); }
+		return text;
 	}
 
 	approveProposal(input: WorkspaceAgentPublicationMutationInput): AgentSessionPublicationProposalDTO {

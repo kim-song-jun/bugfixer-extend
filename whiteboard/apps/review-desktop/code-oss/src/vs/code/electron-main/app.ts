@@ -228,11 +228,11 @@ export class CodeApplication extends Disposable {
 		return this.workspaceDataShutdown ??= (async () => {
 			try {
 				const results = await Promise.allSettled([
-					this.workspaceProviderRuns?.shutdown(),
-					this.agentSessionApplication?.shutdown(),
-					this.workspaceConventionAgent?.shutdown(),
-					this.workspaceEgoCapture?.shutdown(),
-					this.workspaceE2e?.shutdown(),
+					Promise.resolve().then(() => this.workspaceProviderRuns?.shutdown()),
+					Promise.resolve().then(() => this.agentSessionApplication?.shutdown()),
+					Promise.resolve().then(() => this.workspaceConventionAgent?.shutdown()),
+					Promise.resolve().then(() => this.workspaceEgoCapture?.shutdown()),
+					Promise.resolve().then(() => this.workspaceE2e?.shutdown()),
 				]);
 				const failures = results.filter(result => result.status === 'rejected').map(result => (result as PromiseRejectedResult).reason);
 				if (failures.length) { throw new AggregateError(failures, 'Workspace services did not shut down cleanly.'); }
@@ -1534,6 +1534,12 @@ export class CodeApplication extends Disposable {
 			const agentSessions = this.agentSessionApplication = new AgentSessionApplication(
 				this.workspaceDatabase, join(this.environmentMainService.userDataPath, 'agent-sessions'), taskFolderWriterLock, process.resourcesPath,
 			);
+			try { await agentSessions.prTextReady; }
+			catch (initializationError) {
+				try { await agentSessions.shutdown(); }
+				catch (shutdownError) { throw new AggregateError([initializationError, shutdownError], 'The PR text host failed startup recovery and owned session processes did not all drain.'); }
+				throw initializationError;
+			}
 			pendingTaskDeletionReplay = providerRuns.recoverPendingTaskDeletions();
 			validatedIpcMain.handle(WORKSPACE_DASHBOARD_CHANNEL, (event, command: string, arg: unknown) => dashboardChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
@@ -1701,6 +1707,17 @@ export class CodeApplication extends Disposable {
 					},
 				} satisfies WorkspaceAgentPublicationHost,
 				(projectId, provider, assertCurrent) => agentSessions.inspectSetup(projectId, provider, assertCurrent),
+				{
+					getPrTextDraft: scope => agentSessions.prTextApplication.getPrTextDraft(scope),
+					listPrTextRevisions: input => agentSessions.prTextApplication.listPrTextRevisions(input),
+					listPrTextRequests: input => agentSessions.prTextApplication.listPrTextRequests(input),
+					savePrTextRevision: (input, assertCurrent) => agentSessions.prTextApplication.savePrTextRevision(input, assertCurrent),
+					previewPrTextRequest: (input, assertCurrent) => agentSessions.prTextApplication.previewPrTextRequest(input, assertCurrent),
+					startPrTextRequest: (input, assertCurrent) => agentSessions.prTextApplication.startPrTextRequest(input, assertCurrent),
+					getPrTextRequest: input => agentSessions.prTextApplication.getPrTextRequest(input),
+					cancelPrTextRequest: input => agentSessions.prTextApplication.cancelPrTextRequest(input),
+					applyPrTextCandidate: (input, assertCurrent) => agentSessions.prTextApplication.applyPrTextCandidate(input, assertCurrent),
+				},
 			);
 			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {
 				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Agent session IPC is only available to the application main frame.'); }

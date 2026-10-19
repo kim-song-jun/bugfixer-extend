@@ -20,6 +20,8 @@ import { AgentSessionService } from './agentSessionService.js';
 import { AgentSessionCommitApplication } from './agentSessionCommitApplication.js';
 import { AgentSessionMergeApplication } from './agentSessionMergeApplication.js';
 import { AgentSessionPublicationApplication } from './agentSessionPublicationApplication.js';
+import { AgentSessionPrTextApplication } from './agentSessionPrTextApplication.js';
+import { createAgentSessionPrTextResolver } from './agentSessionPrTextEnvironment.js';
 import { inspectWorkspaceAgentSetup } from './agentSessionSetupInspection.js';
 import type { WorkspaceAgentSetupInspectionDTO } from '../../common/workspaceAgentSetupProtocol.js';
 import { AgentSessionContentCaptureCleanupError, captureAgentSessionContentSnapshot, type AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
@@ -49,6 +51,8 @@ export class AgentSessionApplication {
 	readonly commitApplication: AgentSessionCommitApplication;
 	readonly mergeApplication: AgentSessionMergeApplication;
 	readonly publicationApplication: AgentSessionPublicationApplication;
+	readonly prTextApplication: AgentSessionPrTextApplication;
+	readonly prTextReady: Promise<void>;
 	readonly workflowScheduler: AgentWorkflowScheduler;
 	private recoveryReady = false;
 	private setupClosing = false;
@@ -96,6 +100,30 @@ export class AgentSessionApplication {
 		this.commitApplication = new AgentSessionCommitApplication(database, this.worktrees, this.workspaceResolver, this.service);
 		this.mergeApplication = new AgentSessionMergeApplication(database, this.worktrees, database.agentSessionMerges, this.workspaceResolver, this.service);
 		this.publicationApplication = new AgentSessionPublicationApplication(database, this.worktrees, worktreeProfileDirectory, this.resourcesPath);
+		this.prTextApplication = new AgentSessionPrTextApplication(database, createAgentSessionPrTextResolver({
+			database, resourcesPath: this.resourcesPath,
+			homeDirectory: () => userInfo().homedir || homedir(),
+			runtimePaths: () => this.runtimePaths(),
+			normalizeProfileRef: (provider, profileRef) => this.normalizeProfileRef(provider, profileRef),
+			resolveExecutable: (provider, home) => resolveProviderCli(provider, home),
+			buildLaunchEnvironment,
+			verifyWorkspace: async (session, turn) => {
+				const binding = database.listFolderBindings(session.projectId).find(candidate => candidate.id === session.bindingId);
+				if (!binding) { throw new Error('The persisted session folder binding is unavailable.'); }
+				if (session.workspaceMode === 'sharedFolder') {
+					if (turn.snapshot.managedWorktreeOwnerId !== null || realpathSync(binding.path) !== turn.snapshot.folderIdentity.canonicalPath) {
+						throw new Error('The completed turn no longer matches its bound shared folder.');
+					}
+					return;
+				}
+				if (turn.snapshot.managedWorktreeOwnerId !== session.id || !binding.vcsRoot) { throw new Error('The completed turn has no session-owned worktree binding.'); }
+				const preparation = await this.inspectWorkspacePreparation(session);
+				if (preparation.state !== 'ready' || preparation.worktreePath !== turn.snapshot.folderIdentity.canonicalPath) {
+					throw new Error('The session-owned worktree is not the selected completed turn folder.');
+				}
+			},
+		}));
+		this.prTextReady = this.prTextApplication.initialize();
 		workflowScheduler = this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}
@@ -170,16 +198,23 @@ export class AgentSessionApplication {
 	async shutdown(): Promise<void> {
 		this.setupClosing = true;
 		const setupDrain = this.setupInspectionRequest ? Promise.allSettled([this.setupInspectionRequest]) : undefined;
+		const failures: unknown[] = [];
+		const independentDrains = await Promise.allSettled([
+			Promise.resolve().then(() => this.publicationApplication.shutdown()),
+			Promise.resolve().then(() => this.prTextApplication.shutdown()),
+		]);
+		for (const result of independentDrains) { if (result.status === 'rejected') { failures.push(result.reason); } }
+		try { this.workflowScheduler.stopScheduling(); } catch (error) { failures.push(error); }
+		try { this.workflowScheduler.requestShutdownCancellation(); } catch (error) { failures.push(error); }
 		try {
-			await this.publicationApplication.shutdown();
-			this.workflowScheduler.stopScheduling();
-			this.workflowScheduler.requestShutdownCancellation();
 			const receipts = await this.service.shutdown();
-			this.workflowScheduler.reconcileAfterShutdown();
 			const unverified = receipts.filter(receipt => !receipt.cleanupVerified);
-			if (unverified.length) { throw new Error(`Session shutdown left ${unverified.length} owned turn cleanup(s) unverified.`); }
-		} finally { await setupDrain; }
-		if (this.setupCleanupFailure) { throw this.setupCleanupFailure; }
+			if (unverified.length) { failures.push(new Error(`Session shutdown left ${unverified.length} owned turn cleanup(s) unverified.`)); }
+		} catch (error) { failures.push(error); }
+		try { this.workflowScheduler.reconcileAfterShutdown(); } catch (error) { failures.push(error); }
+		try { await setupDrain; } catch (error) { failures.push(error); }
+		if (this.setupCleanupFailure) { failures.push(this.setupCleanupFailure); }
+		if (failures.length) { throw new AggregateError(failures, 'Agent session shutdown did not verify cleanup.'); }
 	}
 
 	private runtimePaths(): AgentSessionRuntimePaths {

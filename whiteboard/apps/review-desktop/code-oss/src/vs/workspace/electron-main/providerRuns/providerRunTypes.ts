@@ -5,6 +5,12 @@
 
 export type ProviderId = 'codex' | 'claude';
 
+export interface ProviderPrTextSnapshot {
+	readonly snapshotId: string;
+	readonly sourceText: string;
+	readonly sha256: string;
+}
+
 /** Upper bound for one provider JSONL line; large enough for verbose events but finite. */
 export const PROVIDER_MAX_EVENT_LINE_BYTES = 1024 * 1024;
 export const PROVIDER_MAX_FINAL_TEXT_BYTES = 256 * 1024;
@@ -37,15 +43,21 @@ export interface ProviderRunRequest {
 	readonly cwd: string;
 	readonly prompt: string;
 	readonly profileDirectory: string;
+	/** Exact user-selected provider model; omitted for existing provider defaults. */
+	readonly model?: string;
 	readonly permissionPolicy: ProviderPermissionPolicy;
-	/** Opt in only for convention authoring/checking; ordinary task runs discard model prose. */
+	/** Opt in only for bounded convention and PR-text runs; ordinary task runs discard model prose. */
 	readonly captureFinalText?: boolean;
+	/** Marks the native PR-text invocation so adapters can apply only its own configuration policy. */
+	readonly prTextRun?: boolean;
 	/** Aborts a run that is queued or still behind the durable launch gate. */
 	readonly signal?: AbortSignal;
 	/** Required for mutating task runs; the helper binds and rechecks this exact folder identity before CLI exec. */
 	readonly boundFolder?: ProviderBoundFolder;
 	/** macOS-only recovery endpoint for a provider group that may outlive the app. */
 	readonly recoveryControl?: ProviderRecoveryControl;
+	/** Keep a private owner-lifetime pipe open until cleanup; EOF asks the trusted helper to terminate only this owned PGID. */
+	readonly ownerLifetime?: boolean;
 	/** Must prove the selected folder identity and the effective policy for this attempt. */
 	readonly preflight: (request: ProviderRunRequest) => Promise<ProviderRunPreflight>;
 }

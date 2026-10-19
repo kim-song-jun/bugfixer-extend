@@ -238,7 +238,9 @@ export type WorkspaceAgentSessionsCommand =
 	| 'prepareCommitProposal' | 'listCommitProposals' | 'approveCommitProposal' | 'applyCommitProposal' | 'recoverCommitProposal'
 	| 'listMergeProposals' | 'prepareMergeProposal' | 'approveMergeProposal' | 'applyMergeProposal' | 'reconcileMergeProposal'
 	| 'listPublicationAccounts' | 'listPublicationProposals' | 'preparePublicationProposal' | 'approvePublicationProposal'
-	| 'publishApprovedProposal' | 'continuePublicationOperation' | 'reconcilePublicationOperation' | 'getPublicationOperation';
+	| 'publishApprovedProposal' | 'continuePublicationOperation' | 'reconcilePublicationOperation' | 'getPublicationOperation'
+	| 'getPrTextDraft' | 'listPrTextRevisions' | 'listPrTextRequests' | 'savePrTextRevision'
+	| 'previewPrTextRequest' | 'startPrTextRequest' | 'getPrTextRequest' | 'cancelPrTextRequest' | 'applyPrTextCandidate';
 
 export interface WorkspaceAgentSessionProjectRequest { readonly projectId: string; }
 export type WorkspaceAgentSessionCreateRequest = CreateAgentSessionInput;

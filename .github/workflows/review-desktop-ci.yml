@@ -65,13 +65,13 @@ jobs:
           code-oss/src/vs/review/browser/aiSessions/features/onboarding/onboardingState.test.ts
       - name: Test native PR ref guard protocol
         run: pnpm --filter @dev.fast/review-desktop exec node --test --test-concurrency=1 native/pr-ref-guard/pr-ref-guard.test.mjs
-      - name: Test frozen v26 through v30 migrations and retained change content
+      - name: Test frozen v26 through v31 migrations and retained change content
         run: >-
           pnpm --filter @dev.fast/review-desktop exec
           env TSX_TSCONFIG_PATH=tsconfig.test.json
           node --import ./scripts/test-code-oss-preload.mjs --import tsx
           --test --test-concurrency=1
-          --test-name-pattern="^(frozen v(2[6-9]|30) database upgrades|agent-session content baselines|binary content gaps|managed-worktree content evidence|startup reconciliation adds)"
+          --test-name-pattern="^(frozen v(2[6-9]|30) database upgrades|v31 workspace database upgrades|workspace database startup records interruption for a persisted running PR text request|agent-session content baselines|binary content gaps|managed-worktree content evidence|startup reconciliation adds)"
           code-oss/src/vs/workspace/electron-main/workspaceDatabase.test.ts
       - name: Install pinned public CLIs for anonymous setup inspection
         timeout-minutes: 3
@@ -374,6 +374,14 @@ jobs:
           test -x "$BUGFIXER_NATIVE_PTY_NODE"
           test -f "$BUGFIXER_NATIVE_PTY_GUARDIAN"
           ELECTRON_RUN_AS_NODE=1 TSX_TSCONFIG_PATH=tsconfig.test.json "$app/Contents/MacOS/Whiteboard" --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/workspaceAgentSessionsChannel.test.ts code-oss/src/vs/workspace/electron-main/agentSessions/agentPublicationRuntime.test.ts
+
+      - name: Native PR text process ownership and restart recovery contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 5
+        working-directory: whiteboard/apps/review-desktop
+        run: |
+          TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPrTextApplication.test.ts code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPrTextEnvironment.test.ts code-oss/src/vs/workspace/electron-main/providerRuns/providerPrTextRun.test.ts
+          node --test --test-concurrency=1 native/provider-group-control/provider-group-control.test.mjs
 
       - name: Upload native PTY evidence
         if: always()

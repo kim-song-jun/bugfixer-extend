@@ -398,6 +398,61 @@ const TOOLS = [
 		method: 'workflows.cancel',
 	},
 	{
+		name: 'pr_get', description: 'Read metadata and a bounded Unicode body fragment of the current or an exact saved PR text revision. Pin the returned revision for subsequent body pages. This grants no GitHub account or publication authority.',
+		inputSchema: { type: 'object', required: ['targetTurnId'], properties: {
+			targetTurnId: { type: 'string', format: 'uuid' }, revision: { type: 'integer', minimum: 1 },
+			afterCharacter: { type: 'integer', minimum: 0 }, maxCharacters: { type: 'integer', minimum: 1, maximum: 1000 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['targetTurnId', 'revision', 'afterCharacter', 'maxCharacters'])) { return { error: 'Unexpected tool arguments.' }; }
+			const targetTurnId = stringField(args, 'targetTurnId', 64);
+			const afterCharacter = integerField(args, 'afterCharacter', 0, Number.MAX_SAFE_INTEGER, 0);
+			const maxCharacters = integerField(args, 'maxCharacters', 1, 1000, 1000);
+			const bad = [targetTurnId, afterCharacter, maxCharacters].find(field => field.error);
+			if (bad) { return bad; }
+			const value = { targetTurnId: targetTurnId.value, afterCharacter: afterCharacter.value, maxCharacters: maxCharacters.value };
+			if (args.revision === undefined) { return { value }; }
+			const revision = integerField(args, 'revision', 1, Number.MAX_SAFE_INTEGER, 0, true);
+			return revision.error ? revision : { value: { ...value, revision: revision.value } };
+		},
+		method: 'pr.get',
+	},
+	{
+		name: 'pr_list', description: 'Read bounded immutable PR text history metadata for this or an earlier turn of this session. Use pr_get to read the exact saved body in bounded pages.',
+		inputSchema: { type: 'object', required: ['targetTurnId'], properties: {
+			targetTurnId: { type: 'string', format: 'uuid' }, afterRevision: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 5 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['targetTurnId', 'afterRevision', 'limit'])) { return { error: 'Unexpected tool arguments.' }; }
+			const targetTurnId = stringField(args, 'targetTurnId', 64);
+			const afterRevision = integerField(args, 'afterRevision', 0, Number.MAX_SAFE_INTEGER, 0);
+			const limit = integerField(args, 'limit', 1, 5, 1);
+			const bad = [targetTurnId, afterRevision, limit].find(field => field.error);
+			return bad ?? { value: { targetTurnId: targetTurnId.value, afterRevision: afterRevision.value, limit: limit.value } };
+		},
+		method: 'pr.list',
+	},
+	{
+		name: 'pr_prepare', description: 'Author or revise PR title/body text only. Read its revision first, use a stable idempotency key, and summarize actual changes, retained reasons, tests and limits. This cannot select a GitHub account, approve, push or create a PR. The user can revise this text by chat or direct editing before native review.',
+		inputSchema: { type: 'object', required: ['targetTurnId', 'expectedRevision', 'idempotencyKey', 'title', 'body'], properties: {
+			targetTurnId: { type: 'string', format: 'uuid' }, expectedRevision: { type: 'integer', minimum: 0 },
+			idempotencyKey: { type: 'string', minLength: 1, maxLength: 128 }, title: { type: 'string', minLength: 1, maxLength: 256 }, body: { type: 'string', maxLength: 32768 },
+		}, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['targetTurnId', 'expectedRevision', 'idempotencyKey', 'title', 'body'])) { return { error: 'Unexpected tool arguments.' }; }
+			const targetTurnId = stringField(args, 'targetTurnId', 64);
+			const expectedRevision = integerField(args, 'expectedRevision', 0, Number.MAX_SAFE_INTEGER, 0, true);
+			const idempotencyKey = stringField(args, 'idempotencyKey', 128);
+			const title = stringField(args, 'title', 256);
+			const body = stringField(args, 'body', 32768);
+			const bad = [targetTurnId, expectedRevision, idempotencyKey, title, body].find(field => field.error);
+			if (bad) { return bad; }
+			if (!idempotencyKey.value.length || !title.value.trim().length) { return { error: 'idempotencyKey and title must not be empty.' }; }
+			return { value: { targetTurnId: targetTurnId.value, expectedRevision: expectedRevision.value, idempotencyKey: idempotencyKey.value, title: title.value, body: body.value } };
+		},
+		method: 'pr.prepare',
+	},
+	{
 		name: 'getChangeHunks', description: 'Read one changed file from an exact retained evidence version and its bounded hunk identities. redactionApplied means response text was redacted; hashes and hunk identities still describe the original retained bytes.',
 		inputSchema: { type: 'object', required: ['turnId', 'evidenceVersion', 'path'], properties: {
 			turnId: { type: 'string', format: 'uuid' }, evidenceVersion: { type: 'integer', minimum: 1 }, path: { type: 'string', minLength: 1, maxLength: 4096 },

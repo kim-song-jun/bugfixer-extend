@@ -21,15 +21,15 @@ const liveGroups = new Set();
 
 const liveSockets = new Set();
 
-async function startHelper({ providerCode, closeResult = false, guardian = false, wrongGroup = false } = {}) {
+async function startHelper({ providerCode, closeResult = false, guardian = false, wrongGroup = false, ownerLifetime = false } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'bfx-control-test-'));
   await (await import('node:fs/promises')).chmod(directory, 0o700);
   const socketPath = path.join(directory, 'attempt.sock');
   const helperPidPath = path.join(directory, 'helper.pid');
 
   const command = guardian
-    ? '"$1" "$2" "$3" "$4" "$$" "$5" "$6" "$7" & echo $! > "$8"; wait'
-    : `exec "$1" "$2" "$3" "$4" ${wrongGroup ? '1' : '"$$"'} "$5" "$6" "$7"`;
+    ? `"$1" "$2" "$3" "$4" "$$" ${ownerLifetime ? '--owner-lifetime ' : ''}"$5" "$6" "$7" & echo $! > "$8"; wait`
+    : `exec "$1" "$2" "$3" "$4" ${wrongGroup ? '1' : '"$$"'} ${ownerLifetime ? '--owner-lifetime ' : ''}"$5" "$6" "$7"`;
 
   const args = guardian
     ? ['-c', command, 'sh', process.execPath, scriptPath, socketPath, attemptId, process.execPath, '-e', providerCode, helperPidPath]
@@ -37,7 +37,7 @@ async function startHelper({ providerCode, closeResult = false, guardian = false
 
   const child = spawn('/bin/sh', args, {
     detached: true,
-    stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe', 'pipe', ...(ownerLifetime ? ['pipe'] : [])],
     env: { ...process.env, BFX_PROVIDER_CONTROL_GRACE_MS: String(graceMs), TEST_CONTROL_SOCKET: socketPath }
   });
 
@@ -51,7 +51,7 @@ async function startHelper({ providerCode, closeResult = false, guardian = false
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
   child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
 
-  return { child, directory, socketPath, helperPidPath, get stdout() { return stdout; }, get stderr() { return stderr; } };
+  return { child, directory, socketPath, helperPidPath, ownerLifetimeInput: ownerLifetime ? child.stdio[6] : undefined, get stdout() { return stdout; }, get stderr() { return stderr; } };
 }
 
 async function waitForSocket(socketPath, child, timeoutMs = 2500) {
@@ -252,6 +252,29 @@ test('TERM-ignoring provider is killed after bounded grace period', async t => {
     if (i === 99) assert.fail(`provider ${providerPid} still exists`);
     await delay(10);
   }
+});
+
+test('owner-lifetime EOF terminates the helper process group after bounded grace', async t => {
+  const marker = path.join(os.tmpdir(), `bfx-provider-owner-lifetime-${process.pid}`);
+  await rm(marker, { force: true });
+  const run = await startHelper({ ownerLifetime: true, providerCode: `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' }); child.unref(); require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(child.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);` });
+  t.after(async () => { await rm(marker, { force: true }); await cleanup(run); });
+  await waitForSocket(run.socketPath, run.child);
+  let descendantPid;
+  for (let i = 0; i < 100; i++) {
+    try { descendantPid = Number(await readFile(marker, 'utf8')); break; }
+    catch (error) { if (error.code !== 'ENOENT' || i === 99) throw error; await delay(10); }
+  }
+  assert.ok(descendantPid > 0);
+  run.ownerLifetimeInput.destroy();
+  await once(run.child, 'exit');
+  assert.equal(await waitForGroupGone(run.child.pid), true);
+  for (let i = 0; i < 100; i++) {
+    try { process.kill(descendantPid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; }
+    if (i === 99) assert.fail(`provider descendant ${descendantPid} still exists`);
+    await delay(10);
+  }
+  assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' }, 'provider descendant must not survive owner-lifetime EOF');
 });
 
 test('provider exit code is written to fd4 while helper stays available', async t => {

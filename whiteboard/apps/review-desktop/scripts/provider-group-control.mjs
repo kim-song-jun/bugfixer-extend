@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:net';
-import { chmodSync, closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, createReadStream, fstatSync, lstatSync, openSync, readSync, writeSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 
@@ -27,7 +27,9 @@ function diagnostic(message) {
 
 function parseArguments(argv) {
   if (argv.length < 4) throw new Error('expected socket path, attempt id, process group id, executable, and optional arguments');
-  const [socketPath, attemptId, pgidText, executable, ...args] = argv;
+  const [socketPath, attemptId, pgidText, ...remaining] = argv;
+  const ownerLifetime = remaining[0] === '--owner-lifetime';
+  const [executable, ...args] = remaining.slice(ownerLifetime ? 1 : 0);
 
   if (!socketPath.startsWith('/') || Buffer.byteLength(socketPath) > MAX_SOCKET_PATH_BYTES) throw new Error('invalid socket path');
 
@@ -39,7 +41,7 @@ function parseArguments(argv) {
 
   if (!executable || executable.includes('\0')) throw new Error('invalid provider executable');
 
-  return { socketPath, attemptId, pgid: Number(pgidText), executable, args };
+  return { socketPath, attemptId, pgid: Number(pgidText), executable, args, ownerLifetime };
 }
 
 function readNonceFromFd5() {
@@ -190,6 +192,21 @@ async function main() {
     }, graceMs).unref();
   };
 
+  if (config.ownerLifetime) {
+    const ownerLifetimeInfo = fstatSync(6);
+    if (!ownerLifetimeInfo.isFIFO() && !ownerLifetimeInfo.isSocket()) throw new Error('invalid owner-lifetime descriptor');
+    const ownerLifetime = createReadStream('', { fd: 6, autoClose: true });
+    ownerLifetime.on('end', () => {
+      diagnostic('application owner exited; terminating the owned provider group');
+      beginCancellation();
+    });
+    ownerLifetime.on('error', error => {
+      diagnostic(`owner-lifetime descriptor failed (${error.code ?? 'error'})`);
+      beginCancellation();
+    });
+    ownerLifetime.resume();
+  }
+
   process.on('SIGTERM', beginCancellation);
   process.on('SIGINT', beginCancellation);
 
@@ -265,7 +282,7 @@ async function main() {
   try {
     chmodSync(config.socketPath, 0o600);
     provider = spawn(config.executable, config.args, {
-      stdio: ['inherit', 'inherit', 'inherit', 'ignore', 'ignore', 'ignore'],
+      stdio: ['inherit', 'inherit', 'inherit', 'ignore', 'ignore', 'ignore', 'ignore'],
       env: process.env
     });
   } catch (error) {

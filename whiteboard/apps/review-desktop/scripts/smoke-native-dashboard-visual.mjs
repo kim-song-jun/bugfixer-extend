@@ -2695,7 +2695,17 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag, compute
   assert.equal(retainedDeletedFile.before.file.content, `remove ${tag}\n`);
   assert.equal(retainedDeletedFile?.after.state, 'absent');
 
-  const editedHunks = computeChangeHunks(retainedEdit);
+  const hunkFile = file => ({
+    ...file,
+    before: file.before.state === 'text'
+      ? { state: 'text', file: (({ path, kind, size, sha256, content }) => ({ path, kind, size, sha256, content }))(file.before.file) }
+      : file.before,
+    after: file.after.state === 'text'
+      ? { state: 'text', file: (({ path, kind, size, sha256, content }) => ({ path, kind, size, sha256, content }))(file.after.file) }
+      : file.after,
+  });
+
+  const editedHunks = computeChangeHunks(hunkFile(retainedEdit));
 
   assert.equal(editedHunks.status, 'hunks', 'The retained real-file modification must produce a selectable change hunk');
 
@@ -3492,11 +3502,25 @@ async function seedReviewedPublication(database, fixture) {
   const accountRef = 'ci-fixture-account-ref';
   const baseRef = 'refs/heads/main';
   const title = '[CI 전용] 로컬 병합 결과 검토 (외부 게시 없음)';
-  const body = '격리된 CI SQLite의 표시용 fixture입니다. GitHub 계정 조회, 네트워크 게시, 사람의 네이티브 승인은 수행하지 않았습니다.';
+  const body = '격리된 CI SQLite의 표시용 fixture입니다. 문구는 합성된 에이전트 초안이며 실제 모델은 실행하지 않았습니다. GitHub 계정 조회, 네트워크 게시, 사람의 네이티브 승인은 수행하지 않았습니다.';
+  const prTextScope = { projectId: merge.projectId, sessionId: merge.sessionId, targetTurnId: merge.turnId };
+  const prTextRevision = database.agentSessionPrTexts.appendGeneratedRevision({
+    scope: prTextScope,
+    expectedRevision: 0,
+    idempotencyKey: `ci-publication-text-${fixture.reviewedCommit.sessionId}`,
+    source: { kind: 'liveAgentTurn', turnId: merge.turnId },
+    sanitizedCompleteAgentText: { title, body },
+    knownSecrets: [],
+  });
+  const textRevision = {
+    scope: prTextScope,
+    revision: prTextRevision.revision,
+    contentHash: prTextRevision.content.contentHash,
+  };
 
   const proposal = database.agentSessionPublications.createProposal({
     projectId: merge.projectId, sessionId: merge.sessionId, turnId: merge.turnId, sourceMergeId: merge.id,
-    remoteName, baseRef, accountRef, title, body, expectedRevision: 0,
+    remoteName, baseRef, accountRef, title, body, expectedRevision: 0, textRevision,
     sourceMerge: { projectId: merge.projectId, bindingId: merge.bindingId, sessionId: merge.sessionId, turnId: merge.turnId,
       mergeProposalId: merge.id, mergeRevision: merge.revision, mergeFingerprint: merge.fingerprint,
       mergeOperationId: outcome.receipt.operationId, integrationOwnerId: merge.integrationOwnerId, resultCommit: sourceCommit },
@@ -3521,6 +3545,7 @@ async function seedReviewedPublication(database, fixture) {
   });
 
   assert.equal(operation.state, 'recoveryRequired');
+  assert.deepEqual(proposal.textRevision, textRevision, 'The synthetic publication proposal must pin the exact stored PR text revision');
 
   const originalGit = async (...args) => (await execFileAsync('git', ['-C', fixture.reviewedCommit.repository, ...args])).stdout.trim();
 
@@ -3546,6 +3571,8 @@ async function seedReviewedPublication(database, fixture) {
     operationId: operation.id,
     operationRevision: operation.revision,
     operationState: operation.state,
+    prText: { scope: prTextScope, revision: prTextRevision.revision, contentHash: prTextRevision.content.contentHash, title, body,
+      fixtureOnly: true, providerExecuted: false, source: 'liveAgentTurn CI fixture; no provider was invoked' },
     accountRef,
     syntheticAccountId: proposal.account.stableId,
     syntheticRepositoryId: proposal.remote.repositoryId,
@@ -3562,6 +3589,114 @@ async function seedReviewedPublication(database, fixture) {
 
 async function verifyPublicationReview(page, fixture, tag, screenshots, viewports) {
   const changes = await openReviewedCommitChanges(page, fixture);
+  const prText = changes.getByRole('region', { name: 'GitHub PR 제목과 설명', exact: true });
+  const titleInput = prText.getByRole('textbox', { name: 'PR 제목', exact: true });
+  const bodyInput = prText.getByRole('textbox', { name: 'PR 설명', exact: true });
+  const textReceipt = fixture.reviewedPublication.prText;
+  await titleInput.waitFor();
+  await bodyInput.waitFor();
+  assert.equal(await titleInput.inputValue(), textReceipt.title, 'The native text editor must load the synthetic AI-authored head from durable storage');
+  assert.equal(await bodyInput.inputValue(), textReceipt.body);
+  assert.equal(textReceipt.fixtureOnly, true);
+  assert.equal(textReceipt.providerExecuted, false);
+  assert.ok((await prText.locator('.ai-session-pr-text__head').innerText()).includes('저장된 최신 문구 v1 · 에이전트 작성'));
+  assert.ok((await bodyInput.inputValue()).includes('실제 모델은 실행하지 않았습니다'), 'The fixture content must disclose that no actual provider/model ran');
+  assert.ok((await prText.innerText()).includes('AI 요청 기록이 없습니다.'),
+    'The synthetic initial revision must not imply that an AI provider request occurred');
+  assert.equal(await prText.getByRole('button', { name: '이 제공자로 AI 작성 실행', exact: true }).count(), 0,
+    'The smoke flow must not invoke a provider or expose a prepared paid run');
+
+  const editedTitle = `${textReceipt.title} · 수동 수정`;
+  const editedBody = `${textReceipt.body}\n\nCI 검증: 수동 편집을 네이티브 저장 API로 기록했습니다.`;
+  await titleInput.fill(editedTitle);
+  await bodyInput.fill(editedBody);
+  await prText.getByRole('button', { name: '새 문구 버전 저장', exact: true }).click();
+  await prText.getByRole('status').filter({ hasText: 'PR 문구를 v2으로 저장했습니다.' }).waitFor();
+  const revisionHistory = prText.getByRole('list', { name: '저장된 PR 문구 버전', exact: true });
+  await revisionHistory.getByRole('button').filter({ hasText: `v1 · 에이전트 작성 · ${textReceipt.title}` }).waitFor();
+  await revisionHistory.getByRole('button').filter({ hasText: `v2 · 사람 수정 · ${editedTitle}` }).waitFor();
+  assert.equal(await titleInput.inputValue(), editedTitle);
+  assert.equal(await bodyInput.inputValue(), editedBody);
+
+  const unsavedTitle = `${editedTitle} · 미저장`;
+  const unsavedBody = `${editedBody}\n미저장 편집은 새로고침과 탭 재열기 뒤에도 유지되어야 합니다.`;
+  await titleInput.fill(unsavedTitle);
+  await bodyInput.fill(unsavedBody);
+  await prText.getByRole('button', { name: '최신 저장 기록 확인', exact: true }).click();
+  await prText.getByRole('status').filter({ hasText: '저장된 PR 문구 v2을 불러왔습니다.' }).waitFor();
+  assert.equal(await titleInput.inputValue(), unsavedTitle, 'Refreshing persisted history must not replace dirty title input');
+  assert.equal(await bodyInput.inputValue(), unsavedBody, 'Refreshing persisted history must not replace dirty body input');
+
+  const workspace = page.locator('.ai-session-workspace');
+  await workspace.getByRole('tab', { name: '터미널', exact: true }).click();
+  await workspace.getByRole('tab', { name: '변경', exact: true }).click();
+  await prText.getByRole('status').filter({ hasText: '저장된 PR 문구 v2을 불러왔습니다.' }).waitFor();
+  assert.equal(await titleInput.inputValue(), unsavedTitle, 'Hiding and reopening the same session must preserve dirty title input');
+  assert.equal(await bodyInput.inputValue(), unsavedBody, 'Hiding and reopening the same session must preserve dirty body input');
+  await revisionHistory.getByRole('button').filter({ hasText: `v1 · 에이전트 작성 · ${textReceipt.title}` }).waitFor();
+  await revisionHistory.getByRole('button').filter({ hasText: `v2 · 사람 수정 · ${editedTitle}` }).waitFor();
+  assert.equal(await revisionHistory.getByRole('button').filter({ hasText: unsavedTitle }).count(), 0,
+    'Unsaved edits must not appear in persisted revision history');
+
+  await titleInput.focus();
+  await titleInput.press('Tab');
+  const textKeyboardFocus = await prText.evaluate(element => {
+    const active = document.activeElement;
+    return {
+      inside: !!active && element.contains(active),
+      bodyFocused: active?.getAttribute('aria-label') === 'PR 설명',
+      visible: !!active && active.matches(':focus-visible'),
+      label: active?.getAttribute('aria-label') ?? '',
+    };
+  });
+  assert.equal(textKeyboardFocus.inside, true, 'Keyboard navigation must remain within the PR text editor');
+  assert.equal(textKeyboardFocus.bodyFocused, true, 'Tab from the title must move focus to the PR description');
+  assert.equal(textKeyboardFocus.visible, true, 'Keyboard focus must remain visibly indicated in the editor');
+
+  const disclosures = prText.locator('details.ai-session-pr-text__details');
+  assert.ok(await disclosures.count() > 0, 'Execution details must be available in a native disclosure');
+  assert.equal(await disclosures.evaluateAll(items => items.every(item => !item.open)), true, 'Technical execution details must remain folded by default');
+
+  const capturePrTextAtViewport = async (width, height) => {
+    await page.setViewportSize({ width, height });
+    await page.waitForFunction(({ expectedWidth, expectedHeight }) => window.innerWidth === expectedWidth && window.innerHeight === expectedHeight,
+      { expectedWidth: width, expectedHeight: height });
+    await verifyTheme(page, tag === 'dark', `pr-text-${tag}-${width}`);
+    await prText.evaluate(element => element.scrollIntoView({ block: 'end' }));
+    const textLayout = await prText.evaluate(element => {
+      const bounds = element.getBoundingClientRect();
+      const title = element.querySelector('[aria-label="PR 제목"]');
+      const body = element.querySelector('[aria-label="PR 설명"]');
+      const parent = element.closest('.ai-session-changes');
+      const statusBar = document.querySelector('.part.statusbar')?.getBoundingClientRect();
+      const visibleBottom = statusBar && statusBar.height > 0 ? Math.min(window.innerHeight, statusBar.top) : window.innerHeight;
+      return {
+        horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+        changesHorizontalOverflow: !!parent && parent.scrollWidth > parent.clientWidth + 1,
+        documentHorizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+        titleWidth: title?.getBoundingClientRect().width ?? 0,
+        bodyWidth: body?.getBoundingClientRect().width ?? 0,
+        endReachable: bounds.width > 0 && bounds.bottom <= visibleBottom + 1,
+        sectionTop: bounds.top,
+        sectionBottom: bounds.bottom,
+      };
+    });
+    assert.equal(textLayout.horizontalOverflow, false, `PR text editor must not overflow at ${tag}/${width}`);
+    assert.equal(textLayout.changesHorizontalOverflow, false, `PR text panel must not overflow at ${tag}/${width}`);
+    assert.equal(textLayout.documentHorizontalOverflow, false, `The native window must not overflow at ${tag}/${width}`);
+    assert.ok(textLayout.titleWidth > 0 && textLayout.bodyWidth > 0, `Both editable fields must have visible width at ${tag}/${width}`);
+    assert.equal(textLayout.endReachable, true, `The end of the PR text editor must scroll into view at ${tag}/${width}`);
+    await prText.evaluate(element => element.scrollIntoView({ block: 'start' }));
+    const screenshot = path.join(output, `ai-session-pr-text-${tag}-${width}x${height}.png`);
+    await capturePage(page, screenshot);
+    screenshots.push(screenshot);
+    viewports.push({ theme: tag, state: 'pr-text-editor-flat-layout', width, height, screenshot,
+      layout: textLayout, focus: textKeyboardFocus, detailsFolded: true, fixtureOnly: true, providerExecuted: false,
+      accountDiscoveryExecuted: false, networkWritesExecuted: false, nativeHumanApprovalExercised: false });
+  };
+  await capturePrTextAtViewport(1440, 760);
+  await capturePrTextAtViewport(760, 820);
+
   const publication = changes.getByRole('region', { name: 'GitHub 초안 PR', exact: true });
   await publication.locator('.ai-session-publication__detail').waitFor();
   const provenance = publication.locator('details.ai-session-publication__provenance');
@@ -3571,6 +3706,8 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
   const detail = publication.locator('.ai-session-publication__detail');
   const detailText = await detail.innerText();
   assert.ok(detailText.includes(receipt.proposalId), 'The selected merged source must show its real persisted publication proposal');
+  assert.ok(detailText.includes(receipt.prText.title) && detailText.includes(receipt.prText.body),
+    'Manual text revisions must not change the already pinned publication proposal');
   assert.ok(detailText.includes(receipt.syntheticAccountId) && detailText.includes(receipt.syntheticRepositoryId), 'Synthetic account and repository identities must be visible');
   assert.ok(detailText.includes(receipt.diffFingerprint) && detailText.includes(receipt.resultCommit), 'The full pinned diff and exact merged result must be visible');
   assert.ok(detailText.includes('[CI 전용]') && detailText.includes('네이티브 승인은 수행하지 않았습니다'), 'The fixture must visibly identify its synthetic approval boundary');

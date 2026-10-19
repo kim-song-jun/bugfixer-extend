@@ -38,7 +38,7 @@ export class AgentSessionPublicationExecutor {
 	constructor(private readonly store: AgentSessionPublicationStore, private readonly authority: PublicationHostAuthority, private readonly runtime: PublicationRuntime,
 		private readonly services: PublicationExecutionServices = { openGithub: PublicationGithubSession.open, createGit: PublicationGitContext.create }) { }
 
-	async prepare(input: AgentSessionPublicationPrepareInput): Promise<AgentSessionPublicationProposalDTO> {
+	async prepare(input: AgentSessionPublicationPrepareInput, assertCurrent?: () => void): Promise<AgentSessionPublicationProposalDTO> {
 		const exported = await this.authority.exportSource(input.sourceMergeId, input.remoteName);
 		let git: PublicationGitContext | undefined;
 		try {
@@ -50,6 +50,7 @@ export class AgentSessionPublicationExecutor {
 			const baseOid = await github.readBranch(remote, input.baseRef);
 			if (!baseOid) { throw new PublicationFailure('baseChanged'); }
 			const diff = await git.diff(baseOid, exported.source.resultCommit, remote, github);
+			assertCurrent?.();
 			return this.store.createProposal({ ...input, projectId: exported.source.projectId, sessionId: exported.source.sessionId, turnId: exported.source.turnId,
 				sourceMerge: exported.source, remote, account: github.account, base: { ref: input.baseRef, oid: baseOid }, diff });
 		} finally { exported.pack.fill(0); await git?.dispose(); }

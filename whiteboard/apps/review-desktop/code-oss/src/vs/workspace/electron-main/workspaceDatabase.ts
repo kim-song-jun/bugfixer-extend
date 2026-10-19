@@ -22,6 +22,8 @@ import { AgentSessionReviewStore } from './agentSessions/agentSessionReviewStore
 import { AgentSessionIntegrationStore } from './agentSessions/agentSessionIntegrationStore.js';
 import { AgentSessionMergeStore } from './agentSessions/agentSessionMergeStore.js';
 import { AGENT_SESSION_PUBLICATION_MIGRATION_SQL } from './agentSessions/agentSessionPublicationMigration.js';
+import { AgentSessionPrTextStore, AGENT_SESSION_PR_TEXT_MIGRATION_SQL } from './agentSessions/agentSessionPrTextStore.js';
+import { AgentSessionPrTextProcessStore } from './agentSessions/agentSessionPrTextProcessStore.js';
 import { AgentSessionPublicationStore } from './agentSessions/agentSessionPublicationStore.js';
 
 const nodeRequire = createRequire(import.meta.url);
@@ -310,7 +312,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 31;
+const schemaVersion = 32;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -330,6 +332,8 @@ export class WorkspaceDatabase {
 	readonly agentSessionIntegrations: AgentSessionIntegrationStore;
 	readonly agentSessionMerges: AgentSessionMergeStore;
 	readonly agentSessionPublications: AgentSessionPublicationStore;
+	readonly agentSessionPrTexts: AgentSessionPrTextStore;
+	readonly agentSessionPrTextProcesses: AgentSessionPrTextProcessStore;
 
 	private constructor(private readonly db: DatabaseSync) {
 		this.knowledge = new WorkspaceKnowledgeStore(db, () => this.assertOpen());
@@ -355,6 +359,8 @@ export class WorkspaceDatabase {
 			(projectId, sessionId, turnId) => this.agentSessionTurns.getTurn(projectId, sessionId, turnId),
 			proposalId => this.agentSessionIntegrations.getProposal(proposalId));
 		this.agentSessionPublications = new AgentSessionPublicationStore(db, proposalId => this.agentSessionMerges.getProposal(proposalId));
+		this.agentSessionPrTexts = new AgentSessionPrTextStore(db);
+		this.agentSessionPrTextProcesses = new AgentSessionPrTextProcessStore(db);
 	}
 
 	static open(path: string): WorkspaceDatabase {
@@ -412,6 +418,7 @@ export class WorkspaceDatabase {
 				if (version < 29) { WorkspaceDatabase.migrateV29(db); }
 				if (version < 30) { WorkspaceDatabase.migrateV30(db); }
 				if (version < 31) { WorkspaceDatabase.migrateV31(db); }
+				if (version < 32) { WorkspaceDatabase.migrateV32(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -420,6 +427,7 @@ export class WorkspaceDatabase {
 			const workspaceDatabase = new WorkspaceDatabase(db);
 			workspaceDatabase.interruptLiveProviderAttempts();
 			workspaceDatabase.reconcilePendingSubagentAttempts();
+			workspaceDatabase.agentSessionPrTexts.interruptRunningRequests();
 			return workspaceDatabase;
 		} catch (error) {
 			db.close();
@@ -1432,6 +1440,42 @@ export class WorkspaceDatabase {
 
 	private static migrateV31(db: DatabaseSync): void {
 		db.exec(AGENT_SESSION_PUBLICATION_MIGRATION_SQL);
+	}
+
+	private static migrateV32(db: DatabaseSync): void {
+		db.exec(AGENT_SESSION_PR_TEXT_MIGRATION_SQL);
+		db.exec(`
+			CREATE TABLE agent_session_pr_text_owned_processes (
+				request_id TEXT NOT NULL REFERENCES agent_session_pr_text_requests(id) ON DELETE RESTRICT,
+				attempt_id TEXT NOT NULL CHECK (length(attempt_id) = 36),
+				pgid INTEGER NOT NULL CHECK (pgid > 0),
+				node_executable TEXT NOT NULL CHECK (length(CAST(node_executable AS BLOB)) BETWEEN 1 AND 4096),
+				helper_script TEXT NOT NULL CHECK (length(CAST(helper_script AS BLOB)) BETWEEN 1 AND 4096),
+				socket_path TEXT NOT NULL CHECK (length(CAST(socket_path AS BLOB)) BETWEEN 1 AND 103),
+				nonce TEXT NOT NULL CHECK (length(nonce) = 64 AND nonce NOT GLOB '*[^0-9a-f]*'),
+				recorded_at TEXT NOT NULL,
+				PRIMARY KEY (request_id, attempt_id),
+				UNIQUE (request_id, attempt_id, pgid, nonce)
+			) STRICT;
+			CREATE TABLE agent_session_pr_text_process_cleanup_receipts (
+				request_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+				pgid INTEGER NOT NULL CHECK (pgid > 0),
+				nonce TEXT NOT NULL CHECK (length(nonce) = 64 AND nonce NOT GLOB '*[^0-9a-f]*'),
+				verified_at TEXT NOT NULL,
+				PRIMARY KEY (request_id, attempt_id),
+				FOREIGN KEY (request_id, attempt_id, pgid, nonce)
+					REFERENCES agent_session_pr_text_owned_processes(request_id, attempt_id, pgid, nonce) ON DELETE RESTRICT
+			) STRICT;
+			CREATE TRIGGER agent_session_pr_text_owned_processes_immutable_update BEFORE UPDATE ON agent_session_pr_text_owned_processes
+			BEGIN SELECT RAISE(ABORT, 'PR text process identities are immutable'); END;
+			CREATE TRIGGER agent_session_pr_text_owned_processes_immutable_delete BEFORE DELETE ON agent_session_pr_text_owned_processes
+			BEGIN SELECT RAISE(ABORT, 'PR text process identities are immutable'); END;
+			CREATE TRIGGER agent_session_pr_text_process_cleanup_immutable_update BEFORE UPDATE ON agent_session_pr_text_process_cleanup_receipts
+			BEGIN SELECT RAISE(ABORT, 'PR text cleanup receipts are immutable'); END;
+			CREATE TRIGGER agent_session_pr_text_process_cleanup_immutable_delete BEFORE DELETE ON agent_session_pr_text_process_cleanup_receipts
+			BEGIN SELECT RAISE(ABORT, 'PR text cleanup receipts are immutable'); END;
+		`);
+		db.exec('PRAGMA user_version = 32;');
 	}
 
 	private static migrateV4(db: DatabaseSync): void {

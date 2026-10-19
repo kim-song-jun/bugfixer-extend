@@ -12,12 +12,14 @@ import type {
 	WorkspaceAgentMergePrepareInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput,
 } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT as MERGE_PAGE_SIZE } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
+import type { IWorkspaceAgentPrTextService, WorkspaceAgentPrTextSelection } from '../../../../../workspace/common/workspaceAgentPrTextHostProtocol.js';
+import { createSessionPrText } from '../sessionPrText/index.js';
 import { createSessionPublication, type SessionPublicationActions } from './sessionPublication.js';
 import './sessionChanges.css';
 
 export interface SessionChangesKnowledgeReference extends WorkspaceAgentExplanationCitationDTO { readonly label: string; }
 export interface SessionChangesContext { readonly projectId: string; readonly sessionId: string; readonly turnId: string; readonly knowledgeReferences: readonly SessionChangesKnowledgeReference[]; }
-export interface SessionChangesActions extends SessionPublicationActions {
+export interface SessionChangesActions extends SessionPublicationActions, IWorkspaceAgentPrTextService {
 	readonly latest: () => Promise<WorkspaceAgentChangeEvidenceDTO | null>;
 	readonly list: (beforeVersion: number, limit: number) => Promise<WorkspaceAgentChangeEvidencePageDTO>;
 	readonly file: (evidence: WorkspaceAgentChangeEvidenceDTO, path: string) => Promise<WorkspaceAgentChangeFileDTO | null>;
@@ -49,6 +51,18 @@ const PAGE_SIZE = 50;
 export function createSessionChanges(parent: HTMLElement, context: SessionChangesContext, actions: SessionChangesActions): SessionChangesController {
 	parent.classList.add('ai-session-changes');
 	const publication = createSessionPublication();
+	const prText = createSessionPrText();
+	const prTextMount = document.createElement('div');
+	prTextMount.className = 'ai-session-pr-text-mount';
+	let selectedPrText: WorkspaceAgentPrTextSelection | undefined;
+	let selectionRenderQueued = false;
+	const onSelectedPrTextChange = (selection: WorkspaceAgentPrTextSelection | undefined): void => {
+		if (samePrTextSelection(selectedPrText, selection)) { return; }
+		selectedPrText = selection;
+		if (selectionRenderQueued || !visible || disposed) { return; }
+		selectionRenderQueued = true;
+		queueMicrotask(() => { selectionRenderQueued = false; if (visible && !disposed) { render(); } });
+	};
 	let currentContext = context;
 	let currentActions = actions;
 	let snapshots: WorkspaceAgentChangeEvidenceDTO[] = [];
@@ -131,6 +145,10 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 		const windowLabel = firstVersion === undefined ? '기록 없음' : `${latestWindow ? '최신 기록' : '기록'} · v${firstVersion}${firstVersion === lastVersion ? '' : `–v${lastVersion}`}`;
 		status.textContent = loading ? '변경 기록을 불러오는 중입니다.' : `${windowLabel} · 선택한 실행 ${currentContext.turnId}`; parent.appendChild(status);
 		if (errorText) { const error = document.createElement('p'); error.className = 'ai-session-changes__message'; error.setAttribute('role', 'alert'); error.textContent = errorText; parent.appendChild(error); }
+		if (visible) {
+			parent.appendChild(prTextMount);
+			prText.render(prTextMount, { projectId: currentContext.projectId, sessionId: currentContext.sessionId, targetTurnId: currentContext.turnId }, currentActions, render, onSelectedPrTextChange);
+		}
 		if (!selected) {
 			const empty = document.createElement('p'); empty.className = 'ai-session-changes__empty'; empty.textContent = loading ? '기록을 확인하고 있습니다.' : errorText ? '다시 새로고침해 주세요.' : '확인 가능한 변경 기록이 없습니다. 파일이 바뀌지 않았다는 뜻은 아닙니다.'; parent.appendChild(empty); restoreFocus(); return;
 		}
@@ -505,7 +523,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			const publicationSourceIsCurrent = (): boolean => !!evidenceAtRender && !disposed && visible && selectedMergeProposalId === proposal.id && proposal.state === 'merged' && sourceMatches &&
 				isMergeCurrent(mergeRequestAtRender, commitRequestAtRender, contextAtRender, evidenceAtRender, commitProposal.id) &&
 				mergeWindow.some(item => item.id === proposal.id && item.state === 'merged' && item.fingerprint === proposal.fingerprint);
-			publication.render(detail, currentContext, currentActions, proposal, publicationSourceIsCurrent, render);
+			publication.render(detail, currentContext, currentActions, proposal, publicationSourceIsCurrent, selectedPrText, render);
 		}
 		detail.appendChild(controls); parentNode.appendChild(detail);
 	};
@@ -960,10 +978,10 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 	function isMergeCurrent(request: number, commitRequest: number, requested: SessionChangesContext, evidence: WorkspaceAgentChangeEvidenceDTO, sourceProposalId: string): boolean { return !disposed && request === mergeGeneration && commitRequest === commitGeneration && requested === currentContext && evidence === selected && mergeCommitProposalId === sourceProposalId; }
 
 	return {
-		setContext(next, nextActions) { if (next.projectId === currentContext.projectId && next.sessionId === currentContext.sessionId && next.turnId === currentContext.turnId) { currentActions = nextActions; currentContext = next; return; } publication.invalidate(); currentContext = next; currentActions = nextActions; generation++; loading = false; snapshots = []; selected = undefined; beforeVersion = 0; hasMore = true; latestWindow = true; errorText = undefined; clearFileSelection(); if (visible) { void loadLatest(); } else { render(); } },
-		setVisible(next) { if (visible !== next) { publication.invalidate(); } visible = next; if (next) { if (!snapshots.length && !loading) { void loadLatest(); } else { render(); } } },
+		setContext(next, nextActions) { if (next.projectId === currentContext.projectId && next.sessionId === currentContext.sessionId && next.turnId === currentContext.turnId) { currentActions = nextActions; currentContext = next; return; } publication.invalidate(); prText.invalidate(); selectedPrText = undefined; currentContext = next; currentActions = nextActions; generation++; loading = false; snapshots = []; selected = undefined; beforeVersion = 0; hasMore = true; latestWindow = true; errorText = undefined; clearFileSelection(); if (visible) { void loadLatest(); } else { render(); } },
+		setVisible(next) { if (visible !== next) { publication.invalidate(); if (!next) { prText.invalidate(); selectedPrText = undefined; } } visible = next; if (next) { if (!snapshots.length && !loading) { void loadLatest(); } else { render(); } } },
 		refresh() { void loadLatest(); },
-		dispose() { disposed = true; generation++; fileGeneration++; publication.dispose(); parent.replaceChildren(); },
+		dispose() { disposed = true; generation++; fileGeneration++; publication.dispose(); prText.dispose(); parent.replaceChildren(); },
 	};
 
 }
@@ -997,6 +1015,9 @@ async function latestMergeProposalRevision(actions: SessionChangesActions, conte
 }
 
 function button(label: string): HTMLButtonElement { const element = document.createElement('button'); element.type = 'button'; element.className = 'ai-session-changes__button'; element.textContent = label; return element; }
+function samePrTextSelection(left: WorkspaceAgentPrTextSelection | undefined, right: WorkspaceAgentPrTextSelection | undefined): boolean {
+	return left === right || (!!left && !!right && left.revision === right.revision && left.contentHash === right.contentHash && left.scope.projectId === right.scope.projectId && left.scope.sessionId === right.scope.sessionId && left.scope.targetTurnId === right.scope.targetTurnId);
+}
 function textArea(placeholder: string, focusKey: string, value: string): HTMLTextAreaElement { const element = document.createElement('textarea'); element.placeholder = placeholder; element.dataset.focusKey = focusKey; element.value = value; return element; }
 function field(parent: HTMLElement, labelText: string, control: HTMLElement): void { const label = document.createElement('label'); label.className = 'ai-session-changes__field'; label.append(document.createTextNode(labelText), control); parent.appendChild(label); }
 function appendText(parent: HTMLElement, className: string, value: string): void { const element = document.createElement('p'); element.className = className; element.textContent = value; parent.appendChild(element); }

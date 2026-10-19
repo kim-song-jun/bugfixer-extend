@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,7 @@ import {
 	TaskSetRevisionConflictError,
 	WorkspaceDatabase,
 } from './workspaceDatabase.js';
+import { createMergedPublicationFixture } from './agentSessions/agentSessionPublicationFixture.testHelpers.js';
 
 function withDatabase(run: (path: string, database: WorkspaceDatabase) => void): void {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-workspace-db-'));
@@ -246,7 +247,7 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
 		try {
-			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 31);
+			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 32);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_merge_artifacts'").get());
 			assert.equal(Number(migratedSchema.prepare('SELECT count(*) AS count FROM agent_session_merge_artifacts').get()?.count), version === 30 ? 5 : 0);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_publication_proposals'").get());
@@ -272,11 +273,80 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 	}
 }
 
-test('frozen v26 database upgrades to v31 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
-test('frozen v27 database upgrades to v31 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
-test('frozen v28 database upgrades to v31 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
-test('frozen v29 database upgrades to v31 without changing durable commit proposal, approval, or outcome rows', () => assertFrozenChangeEvidenceMigration(29));
-test('frozen v30 database upgrades to v31 without changing successful merge rows, receipts, or artifacts', () => assertFrozenChangeEvidenceMigration(30));
+test('frozen v26 database upgrades to v32 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
+test('frozen v27 database upgrades to v32 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
+test('frozen v28 database upgrades to v32 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
+test('frozen v29 database upgrades to v32 without changing durable commit proposal, approval, or outcome rows', () => assertFrozenChangeEvidenceMigration(29));
+test('frozen v30 database upgrades to v32 without changing successful merge rows, receipts, or artifacts', () => assertFrozenChangeEvidenceMigration(30));
+
+test('v31 workspace database upgrades to v32 while preserving real publication proposal, approval, and operation rows', () => {
+	const fixture = createMergedPublicationFixture();
+	let database = WorkspaceDatabase.open(fixture.sourcePath);
+	let databaseOpen = true;
+	try {
+		const proposal = database.agentSessionPublications.createProposal(fixture.input);
+		database.agentSessionPublications.recordTrustedHumanApproval(proposal.id, proposal.revision, proposal.fingerprint);
+		const startedOperation = database.agentSessionPublications.startOperation(proposal.id, proposal.fingerprint);
+		const operation = database.agentSessionPublications.appendEvent(startedOperation.id, startedOperation.revision, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
+		const proposalBefore = database.agentSessionPublications.getProposal(proposal.id)!;
+		const operationBefore = database.agentSessionPublications.readOperation(operation.id);
+		database.close();
+		databaseOpen = false;
+
+		const v31 = new DatabaseSync(fixture.sourcePath);
+		try {
+			v31.exec(`PRAGMA foreign_keys = OFF;
+			DROP TABLE agent_session_pr_text_process_cleanup_receipts;
+			DROP TABLE agent_session_pr_text_owned_processes;
+			DROP TABLE agent_session_pr_text_request_events;
+			DROP TABLE agent_session_pr_text_requests;
+			DROP TABLE agent_session_pr_text_revisions;
+			PRAGMA user_version = 31;`);
+			assert.equal(Number(v31.prepare('PRAGMA user_version').get()?.user_version), 31);
+			assert.equal(Number(v31.prepare('SELECT count(*) AS count FROM agent_session_publication_proposals').get()?.count), 1);
+			assert.equal(Number(v31.prepare('SELECT count(*) AS count FROM agent_session_publication_approvals').get()?.count), 1);
+			assert.equal(Number(v31.prepare('SELECT count(*) AS count FROM agent_session_publication_operations').get()?.count), 1);
+			assert.equal(Number(v31.prepare('SELECT count(*) AS count FROM agent_session_publication_events').get()?.count), 1);
+		} finally { v31.close(); }
+
+		database = WorkspaceDatabase.open(fixture.sourcePath);
+		databaseOpen = true;
+		assert.deepEqual(database.agentSessionPublications.getProposal(proposal.id), proposalBefore);
+		assert.deepEqual(database.agentSessionPublications.readOperation(operation.id), operationBefore);
+		const v32 = new DatabaseSync(fixture.sourcePath);
+		try {
+			assert.equal(Number(v32.prepare('PRAGMA user_version').get()?.user_version), 32);
+			assert.ok(v32.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_pr_text_revisions'").get());
+		} finally { v32.close(); }
+	} finally {
+		if (databaseOpen) { database.close(); }
+		fixture.dispose();
+	}
+});
+
+test('workspace database startup records interruption for a persisted running PR text request', () => {
+	const fixture = createMergedPublicationFixture();
+	let database = WorkspaceDatabase.open(fixture.sourcePath);
+	let databaseOpen = true;
+	const scope = { projectId: fixture.input.projectId, sessionId: fixture.input.sessionId, targetTurnId: fixture.input.turnId };
+	try {
+		const contextJSON = '{}';
+		const request = database.agentSessionPrTexts.createRequest({ scope, idempotencyKey: 'startup-interrupt', baseRevision: 0, provider: 'codex', model: 'fixture-model',
+			profileRef: null, contextDigest: createHash('sha256').update(contextJSON, 'utf8').digest('hex'), contextJSON, instruction: 'Draft a PR title and body.' });
+		const running = database.agentSessionPrTexts.startRequest({ requestId: request.id, expectedStateRevision: request.stateRevision, attemptId: randomUUID() });
+		database.close();
+		databaseOpen = false;
+
+		database = WorkspaceDatabase.open(fixture.sourcePath);
+		databaseOpen = true;
+		const recovered = database.agentSessionPrTexts.getRequest(scope, request.id)!;
+		assert.equal(recovered.state, 'interrupted');
+		assert.equal(recovered.stateRevision, running.stateRevision + 1);
+	} finally {
+		if (databaseOpen) { database.close(); }
+		fixture.dispose();
+	}
+});
 
 test('agent-session content baselines and final bytes remain turn-scoped and durable across reopen', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-agent-session-content-'));

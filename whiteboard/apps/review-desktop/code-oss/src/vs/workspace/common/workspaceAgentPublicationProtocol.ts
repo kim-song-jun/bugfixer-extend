@@ -3,6 +3,8 @@
  *  Licensed under the MIT License. See the LICENSE file in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import type { WorkspaceAgentPrTextSelection } from './workspaceAgentPrTextHostProtocol.js';
+
 /** Browser-safe publication review contracts. Authentication material is deliberately absent. */
 export const AGENT_SESSION_PUBLICATION_HISTORY_LIMIT = 5;
 export const AGENT_SESSION_PUBLICATION_OPERATION_EVENT_LIMIT = 32;
@@ -43,6 +45,10 @@ export interface WorkspaceAgentPublicationRecoveryInput extends WorkspaceAgentPu
 	readonly operationId: string;
 }
 
+export interface WorkspaceAgentPublicationTextPrepareInput extends Omit<AgentSessionPublicationPrepareInput, 'title' | 'body' | 'textRevision'> {
+	readonly textRevision: WorkspaceAgentPrTextSelection;
+}
+
 export interface AgentSessionPublicationPrepareInput {
 	readonly projectId: string;
 	readonly sessionId: string;
@@ -54,6 +60,7 @@ export interface AgentSessionPublicationPrepareInput {
 	readonly title: string;
 	readonly body: string;
 	readonly expectedRevision: number;
+	readonly textRevision?: WorkspaceAgentPrTextSelection;
 }
 
 export interface AgentSessionPublicationMergedSource {
@@ -144,6 +151,7 @@ export interface AgentSessionPublicationProposalDTO {
 	readonly title: string;
 	readonly body: string;
 	readonly draft: true;
+	readonly textRevision?: WorkspaceAgentPrTextSelection;
 	readonly fingerprint: string;
 	readonly createdAt: string;
 	readonly expiresAt: string;

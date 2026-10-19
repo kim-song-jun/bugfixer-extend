@@ -31,6 +31,24 @@ test('Codex command keeps prompt and paths as argv values and applies the reques
 	assert.equal(spec.stdin, 'fix; do not run shell fragments');
 	assert.deepEqual(spec.env, { CODEX_HOME: '/profiles/codex' });
 	assert.equal(spec.args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+	assert.equal(spec.args.includes('--ignore-user-config'), false, 'ordinary task and convention behavior keeps the selected config');
+});
+
+test('Codex PR text uses the selected model, read-only workspace, and supported user-config exclusion only in PR mode', () => {
+	const spec = createCodexCommandSpec({ ...request(), model: 'gpt-6.1-codex', captureFinalText: true, prTextRun: true });
+	assert.deepEqual(spec.args, [
+		'exec', '--json', '--ignore-user-config', '--model', 'gpt-6.1-codex', '--sandbox', 'read-only',
+		'--skip-git-repo-check', '--ephemeral', '-',
+	]);
+	assert.deepEqual(spec.env, { CODEX_HOME: '/profiles/codex' }, 'the selected CODEX_HOME still owns authentication');
+	assert.throws(() => createCodexCommandSpec({ ...request('mutating', 'on-request'), prTextRun: true, captureFinalText: true }), /read-only no-approval/u);
+});
+
+test('Codex uses the explicitly selected model as a separate argv value and rejects malformed model IDs', () => {
+	const spec = createCodexCommandSpec({ ...request(), model: 'gpt-6.1-codex' });
+	assert.deepEqual(spec.args.slice(0, 5), ['exec', '--json', '--model', 'gpt-6.1-codex', '--sandbox']);
+	assert.throws(() => createCodexCommandSpec({ ...request(), model: '  gpt-6.1-codex' }), /model identifier/);
+	assert.throws(() => createCodexCommandSpec({ ...request(), model: 'x'.repeat(129) }), /model identifier/);
 });
 
 test('Codex mutating mode uses the installed CLI workspace-write and automatic-review flags', () => {

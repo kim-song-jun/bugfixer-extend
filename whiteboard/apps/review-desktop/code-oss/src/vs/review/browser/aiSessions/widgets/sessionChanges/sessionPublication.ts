@@ -2,16 +2,17 @@ import type {
 	AgentSessionPublicationEvent, AgentSessionPublicationOperationDTO,
 	AgentSessionPublicationPageDTO, AgentSessionPublicationProposalDTO, WorkspaceAgentPublicationExecutionDTO,
 	WorkspaceAgentPublicationMutationInput, WorkspaceAgentPublicationPageInput, WorkspaceAgentPublicationRecoveryInput,
-	WorkspaceAgentPublicationScope, AgentSessionPublicationPrepareInput, WorkspaceAgentPublicationAccountsDTO,
+	WorkspaceAgentPublicationScope, WorkspaceAgentPublicationTextPrepareInput, WorkspaceAgentPublicationAccountsDTO,
 } from '../../../../../workspace/common/workspaceAgentPublicationProtocol.js';
 import type { AgentSessionMergeProposalDTO } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
+import type { WorkspaceAgentPrTextSelection } from '../../../../../workspace/common/workspaceAgentPrTextHostProtocol.js';
 
 const PAGE_SIZE = 5;
 
 export interface SessionPublicationActions {
 	readonly listPublicationAccounts: (scope: WorkspaceAgentPublicationScope) => Promise<WorkspaceAgentPublicationAccountsDTO>;
 	readonly listPublicationProposals: (input: WorkspaceAgentPublicationPageInput) => Promise<AgentSessionPublicationPageDTO>;
-	readonly preparePublicationProposal: (input: AgentSessionPublicationPrepareInput) => Promise<AgentSessionPublicationProposalDTO>;
+	readonly preparePublicationProposal: (input: WorkspaceAgentPublicationTextPrepareInput) => Promise<AgentSessionPublicationProposalDTO>;
 	readonly approvePublicationProposal: (input: WorkspaceAgentPublicationMutationInput) => Promise<{ readonly approved: boolean; readonly proposal: AgentSessionPublicationProposalDTO }>;
 	readonly publishApprovedProposal: (input: WorkspaceAgentPublicationMutationInput) => Promise<WorkspaceAgentPublicationExecutionDTO>;
 	readonly continuePublicationOperation: (input: WorkspaceAgentPublicationRecoveryInput) => Promise<WorkspaceAgentPublicationExecutionDTO>;
@@ -20,7 +21,7 @@ export interface SessionPublicationActions {
 }
 
 interface SessionPublicationState {
-	readonly render: (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, sourceIsCurrent: () => boolean, refresh: () => void) => void;
+	readonly render: (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, sourceIsCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void) => void;
 	readonly invalidate: () => void;
 	readonly dispose: () => void;
 }
@@ -39,8 +40,6 @@ export function createSessionPublication(): SessionPublicationState {
 	let selectedAccountRef = '';
 	let remoteName = 'origin';
 	let baseRef = 'refs/heads/main';
-	let title = '';
-	let body = '';
 	let status = '';
 	let error = '';
 	let busy = false;
@@ -59,7 +58,7 @@ export function createSessionPublication(): SessionPublicationState {
 		generation++;
 		operationReadToken++; proposalPage = undefined; proposals = []; selectedProposalId = undefined; operation = undefined; operationReadError = false; operationRefreshNeeded = false; operationLoading = false; proposalDetailsOpen = false;
 		accountPage = undefined; selectedAccountRef = ''; remoteName = 'origin'; baseRef = 'refs/heads/main';
-		title = ''; body = ''; status = ''; error = ''; busy = false; proposalsLoading = false; accountsLoading = false; pageLoading = false; initialListAttempted = false;
+		status = ''; error = ''; busy = false; proposalsLoading = false; accountsLoading = false; pageLoading = false; initialListAttempted = false;
 	};
 	const isCurrent = (request: number, proposalId?: string): boolean => !disposed && request === generation && sourceIsCurrent() && (!proposalId || selectedProposalId === proposalId);
 	const update = (): void => { if (!disposed) { refreshView?.(); } };
@@ -171,12 +170,11 @@ export function createSessionPublication(): SessionPublicationState {
 		}
 	};
 
-	const render = (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, isSourceCurrent: () => boolean, refresh: () => void): void => {
+	const render = (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, isSourceCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void): void => {
 		const nextContextKey = `${scope.projectId}:${scope.sessionId}:${scope.turnId}`;
 		const nextSourceKey = `${source.id}:${source.fingerprint}:${source.outcomes.at(-1)?.receipt.resultingHead ?? ''}`;
 		if (contextKey !== nextContextKey || sourceKey !== nextSourceKey) {
 			contextKey = nextContextKey; sourceKey = nextSourceKey; reset();
-			title = source.commitMessage; body = `로컬 병합 결과 ${source.outcomes.at(-1)?.receipt.resultingHead ?? ''}을 검토해 주세요.`;
 		}
 		sourceIsCurrent = isSourceCurrent;
 		refreshView = refresh;
@@ -185,6 +183,11 @@ export function createSessionPublication(): SessionPublicationState {
 		const heading = document.createElement('h4'); heading.textContent = 'GitHub 초안 PR'; section.appendChild(heading);
 		appendText(section, 'ai-session-publication__note', '완료된 로컬 병합 결과를 GitHub에 초안 PR로 게시합니다. PR 작성은 별도 사람 승인 뒤에 진행합니다.');
 		appendText(section, 'ai-session-publication__facts', `로컬 병합 ${source.id} · 작업 ${source.outcomes.at(-1)?.receipt.operationId ?? '—'} · 결과 HEAD ${source.outcomes.at(-1)?.receipt.resultingHead ?? '확인할 수 없음'}`);
+		if (selectedText) {
+			appendText(section, 'ai-session-publication__facts', `선택한 저장 PR 문구 v${selectedText.revision} · 지문 ${selectedText.contentHash}`);
+		} else {
+			appendText(section, 'ai-session-publication__note', '위의 PR 문안을 먼저 저장해 주세요. 저장한 제목과 본문으로 검토안을 준비합니다.');
+		}
 		const artifact = source.artifacts.find(item => item.event.phase === 'published');
 		if (artifact?.event.phase === 'published') { appendText(section, 'ai-session-publication__facts', `로컬 병합 기준 ${artifact.event.targetRef} · ${artifact.event.resultingHead}`); }
 		if (error) { appendText(section, 'ai-session-publication__error', error); }
@@ -193,7 +196,7 @@ export function createSessionPublication(): SessionPublicationState {
 		const discover = button(accountsLoading ? '계정 확인 중…' : accountPage ? 'GitHub 계정 상태 다시 확인' : 'GitHub 계정 확인', 'publication-discover-account'); discover.disabled = accountsLoading || busy; discover.addEventListener('click', () => void loadAccounts(scope, actions, request)); section.appendChild(discover);
 		let prepareButton: HTMLButtonElement | undefined;
 		const syncPrepareDisabled = (): void => {
-			if (prepareButton) { prepareButton.disabled = busy || proposalsLoading || !proposalPage || !accountPage?.available || !accountPage.accounts.some(account => account.accountRef === selectedAccountRef && account.state === 'success') || !isRemoteName(remoteName) || !baseRef.trim() || !title.trim(); }
+			if (prepareButton) { prepareButton.disabled = busy || proposalsLoading || !proposalPage || !selectedText || !accountPage?.available || !accountPage.accounts.some(account => account.accountRef === selectedAccountRef && account.state === 'success') || !isRemoteName(remoteName) || !baseRef.trim(); }
 		};
 		if (accountPage) {
 			const accountLabel = fieldLabel('GitHub 계정'); const accountSelect = document.createElement('select'); accountSelect.dataset.focusKey = 'publication-account'; accountSelect.setAttribute('aria-label', 'GitHub 계정');
@@ -203,8 +206,6 @@ export function createSessionPublication(): SessionPublicationState {
 			if (!accountPage.available) { appendText(section, 'ai-session-publication__note', '사용 가능한 GitHub 계정이 없습니다. 연결 상태를 확인해 주세요.'); }
 			const remote = textInput('원격 이름', remoteName); remote.input.maxLength = 64; remote.input.addEventListener('input', () => { remoteName = remote.input.value; syncPrepareDisabled(); }); section.appendChild(remote.label);
 			const base = textInput('기준 브랜치', baseRef); base.input.placeholder = 'refs/heads/main'; base.input.addEventListener('input', () => { baseRef = base.input.value; syncPrepareDisabled(); }); section.appendChild(base.label);
-			const proposalTitle = textInput('초안 PR 제목', title); proposalTitle.input.maxLength = 200; proposalTitle.input.addEventListener('input', () => { title = proposalTitle.input.value; syncPrepareDisabled(); }); section.appendChild(proposalTitle.label);
-			const proposalBody = textArea('초안 PR 설명', body); proposalBody.input.maxLength = 20_000; proposalBody.input.addEventListener('input', () => { body = proposalBody.input.value; }); section.appendChild(proposalBody.label);
 			prepareButton = button('초안 PR 제안 고정', 'publication-prepare'); syncPrepareDisabled(); prepareButton.addEventListener('click', () => void thisPrepare()); section.appendChild(prepareButton);
 		}
 		if (proposalsLoading && !proposalPage) { appendText(section, 'ai-session-publication__status', '저장된 초안 PR 제안을 불러오는 중입니다.'); }
@@ -230,13 +231,13 @@ export function createSessionPublication(): SessionPublicationState {
 		}
 
 		async function thisPrepare(): Promise<void> {
-			if (!isCurrent(request) || busy || !selectedAccountRef || !proposalPage) { return; }
+			if (!isCurrent(request) || busy || !selectedAccountRef || !proposalPage || !selectedText) { return; }
 			if (!isRemoteName(remoteName)) { error = '원격 이름을 입력해 주세요. 원격 URL은 입력할 수 없습니다.'; update(); return; }
 			const revision = Math.max(0, ...proposals.map(item => item.revision));
 			busy = true; status = '검토용 초안 PR 제안을 저장하고 있습니다.'; error = ''; update();
 			try {
 				const created = await actions.preparePublicationProposal({ ...scope, sourceMergeId: source.id, remoteName: remoteName.trim(), baseRef: baseRef.trim(), accountRef: selectedAccountRef,
-					title: title.trim(), body, expectedRevision: revision });
+					textRevision: selectedText, expectedRevision: revision });
 				if (!isCurrent(request)) { return; }
 				if (created.projectId !== scope.projectId || created.sessionId !== scope.sessionId || created.turnId !== scope.turnId || created.sourceMergeId !== source.id) { throw new Error('proposal scope mismatch'); }
 				proposals = [...proposals.filter(item => item.id !== created.id), created].sort((left, right) => left.revision - right.revision).slice(-PAGE_SIZE);
@@ -389,9 +390,6 @@ function button(label: string, focusKey?: string): HTMLButtonElement { const ele
 function fieldLabel(label: string): HTMLLabelElement { const element = document.createElement('label'); element.className = 'ai-session-publication__field'; const title = document.createElement('span'); title.textContent = label; element.appendChild(title); return element; }
 function textInput(label: string, value: string): { readonly label: HTMLLabelElement; readonly input: HTMLInputElement } {
 	const container = fieldLabel(label); const input = document.createElement('input'); input.type = 'text'; input.className = 'ai-session-publication__input'; input.dataset.focusKey = `publication-input:${label}`; input.value = value; input.setAttribute('aria-label', label); container.appendChild(input); return { label: container, input };
-}
-function textArea(label: string, value: string): { readonly label: HTMLLabelElement; readonly input: HTMLTextAreaElement } {
-	const container = fieldLabel(label); const input = document.createElement('textarea'); input.className = 'ai-session-publication__input'; input.dataset.focusKey = `publication-input:${label}`; input.value = value; input.rows = 5; input.setAttribute('aria-label', label); container.appendChild(input); return { label: container, input };
 }
 function operationLabel(value: AgentSessionPublicationOperationDTO['state']): string { return value === 'started' ? '진행 중 또는 조회 필요' : value === 'published' ? '게시 확인됨' : value === 'recoveryRequired' ? '복구 조회 필요' : value === 'notPublished' ? '게시되지 않음' : '실패'; }
 function eventLabel(value: AgentSessionPublicationEvent): string {

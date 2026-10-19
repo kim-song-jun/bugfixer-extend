@@ -8,7 +8,7 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { ProviderRunRequest } from './providerRunTypes.js';
-import { createClaudeProviderCommand, parseClaudeProviderEvent } from './providerClaudeAdapter.js';
+import { createClaudePrTextCommand, createClaudeProviderCommand, parseClaudeProviderEvent } from './providerClaudeAdapter.js';
 
 function request(overrides: Partial<ProviderRunRequest> = {}): ProviderRunRequest {
 	return {
@@ -43,6 +43,13 @@ test('Claude default profile uses the CLI default while custom profiles remain i
 	assert.deepEqual(customCommand.env, { CLAUDE_CONFIG_DIR: '/profile/claude-custom' });
 });
 
+test('Claude uses the explicitly selected model as a separate argv value and rejects malformed model IDs', () => {
+	const command = createClaudeProviderCommand(request({ model: 'claude-sonnet-4-5' }));
+	assert.deepEqual(command.args.slice(0, 4), ['--print', '--model', 'claude-sonnet-4-5', '--input-format']);
+	assert.throws(() => createClaudeProviderCommand(request({ model: ' claude-sonnet-4-5' })), /model identifier/);
+	assert.throws(() => createClaudeProviderCommand(request({ model: 'x'.repeat(129) })), /model identifier/);
+});
+
 test('Claude default profile remains native when HOME differs from the account home', () => {
 	const priorHome = process.env.HOME;
 	try {
@@ -75,6 +82,30 @@ test('convention agent mode disables all Claude tools so it can use only supplie
 	assert.ok(command.args.includes('--tools'));
 	assert.equal(command.args[command.args.indexOf('--tools') + 1], '');
 	assert.equal(command.args.includes('bypassPermissions'), false);
+});
+
+test('PR text command disables built-in and MCP tools without changing convention command defaults', () => {
+	const command = createClaudePrTextCommand(request({
+		model: 'claude-sonnet-4-5',
+		prompt: 'Use this immutable input snapshot.',
+		captureFinalText: true,
+	}), '/opt/claude');
+	assert.deepEqual(command.args.slice(0, 5), ['--print', '--model', 'claude-sonnet-4-5', '--input-format', 'stream-json']);
+	assert.ok(command.args.includes('--strict-mcp-config'));
+	assert.equal(command.args[command.args.indexOf('--mcp-config') + 1], '{"mcpServers":{}}');
+	assert.equal(command.args[command.args.indexOf('--settings') + 1], '{"disableAllHooks":true}');
+	assert.equal(command.args.at(-2), '--json-schema');
+	assert.deepEqual(JSON.parse(command.args.at(-1)!), {
+		type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' } },
+		required: ['title', 'body'], additionalProperties: false,
+	});
+	assert.equal(command.args[command.args.indexOf('--tools') + 1], '');
+	assert.equal(command.args[command.args.indexOf('--disallowedTools') + 1], '*');
+	assert.equal(command.args[command.args.indexOf('--max-turns') + 1], '1');
+	assert.ok(command.args.includes('--safe-mode'));
+	assert.ok(command.args.includes('--no-session-persistence'));
+	assert.equal(command.stdin?.includes('Use this immutable input snapshot.'), true);
+	assert.deepEqual(command.env, { CLAUDE_CONFIG_DIR: '/profile/claude' });
 });
 
 test('Claude task runs retain restricted file tools while capturing the final result', () => {
