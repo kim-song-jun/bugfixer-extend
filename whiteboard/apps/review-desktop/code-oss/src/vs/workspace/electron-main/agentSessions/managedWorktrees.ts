@@ -5,6 +5,7 @@
 
 import { createHmac, createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type {
@@ -12,8 +13,10 @@ import type {
 	AgentSessionMergeResolutionDTO,
 	AgentSessionMergeArtifactEvent,
 	AgentSessionMergeArtifactRecord,
+	AgentSessionMergeProposalDTO,
 } from '../../common/workspaceAgentMergeProtocol.js';
 import type { AgentSessionIntegrationGitIdentity } from '../../common/workspaceAgentIntegrationProtocol.js';
+import { publicationEnvironment, runPublicationProcess, verifyPublicationExecutable, type PublicationExecutable } from './agentPublicationProcess.js';
 
 const COMMAND_TIMEOUT_MS = 15_000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
@@ -270,7 +273,15 @@ interface PreparedReviewedTree { readonly treeOid: string; readonly rawDiffFinge
 
 interface LeaseManifest extends ManagedWorktreeLease { readonly version: 1 | 2; readonly signature: string; }
 interface LeaseManifestPayload extends ManagedWorktreeLease { readonly version: 1 | 2; }
-interface OperationLock { readonly ownerId: string; readonly operation: 'merge' | 'remove' | 'ensureIntegration' | 'prepareCommit' | 'applyReviewedCommit'; readonly operationId: string; readonly pid: number; readonly processStart: string; readonly signature: string; }
+interface OperationLock { readonly ownerId: string; readonly operation: 'merge' | 'remove' | 'ensureIntegration' | 'prepareCommit' | 'applyReviewedCommit' | 'publication'; readonly operationId: string; readonly pid: number; readonly processStart: string; readonly signature: string; }
+
+/** Host-only capability. No source path, lock token, or private Git context is exposed. */
+export interface ManagedPublicationInput { readonly repositoryPath: string; readonly remoteName: string; readonly merge: AgentSessionMergeProposalDTO; }
+export interface ManagedPublicationLease {
+	exportPinned(input: ManagedPublicationInput): Promise<{ readonly pack: Buffer; readonly canonicalUrl: string }>;
+	assertPinned(input: ManagedPublicationInput): Promise<{ readonly canonicalUrl: string }>;
+	release(): Promise<void>;
+}
 
 /** App-profile-owned Git worktrees. A merge preview is an exact, expiring snapshot, not approval. */
 export class ManagedWorktreeService {
@@ -280,6 +291,9 @@ export class ManagedWorktreeService {
 	private activeCommitPreparations = 0;
 	private readonly keyPath: string;
 	private readonly manifestKey: Buffer;
+	// Async-local routing prevents a concurrent ordinary manager call from inheriting
+	// publication's executable/config authority, or vice versa.
+	private readonly publicationReads = new AsyncLocalStorage<{ readonly git: PublicationExecutable; readonly home: string }>();
 
 	constructor(profileDirectory: string) {
 		mkdirSync(profileDirectory, { recursive: true, mode: 0o700 });
@@ -296,6 +310,121 @@ export class ManagedWorktreeService {
 		if (this.manifestKey.length < 64 || (statSync(this.keyPath).mode & 0o077) !== 0) {
 			throw new Error('Managed worktree manifest key is unavailable or has unsafe permissions.');
 		}
+	}
+
+	/** Acquisition deliberately does not require a current generation: recovery is read-only. */
+	async acquirePublicationLease(integrationOwnerId: string, git: PublicationExecutable): Promise<ManagedPublicationLease> {
+		const pinnedGit = { ...git };
+		const root = lstatSync(this.root);
+		if (!root.isDirectory() || root.isSymbolicLink() || realpathSync(this.root) !== this.root || (root.mode & 0o077) !== 0
+			|| (process.getuid && root.uid !== process.getuid())) { throw new Error('Publication manager directory ownership is invalid.'); }
+		await verifyPublicationExecutable(pinnedGit);
+		const lock = await this.acquireIntegrationLock(integrationOwnerId, 'publication');
+		let exporting = false;
+		const inspectPinned = async (input: ManagedPublicationInput, includePack: boolean): Promise<{ readonly pack?: Buffer; readonly canonicalUrl: string }> => {
+			lock.assertOwned();
+			if (exporting) { throw new Error('A publication export is already using this lease.'); }
+			exporting = true;
+			let home: string | undefined;
+			let pack: Buffer | undefined;
+			try {
+				home = mkdtempSync(join(this.root, '.publication-read-'));
+				const result = await this.publicationReads.run({ git: pinnedGit, home }, async () => {
+					const merge = structuredClone(input.merge);
+					const lease = await this.readAndValidate(integrationOwnerId);
+					this.assertPublicationSource(lease, input.repositoryPath, merge);
+					const canonicalUrl = await this.publicationRemote(lease.repositoryPath, input.remoteName);
+					if (!includePack) { lock.assertOwned(); return { canonicalUrl }; }
+					const context = await this.createSafeMergeContext(lease, false);
+					try {
+						// No thin pack, replacement refs, lazy fetching, mutable checkout staging,
+						// or user-configured transport is involved. Include the complete closure.
+						pack = (await this.safeMergeGit(context, lease.worktreePath,
+							['pack-objects', '--stdout', '--revs', '--no-reuse-delta', '--no-reuse-object', '--threads=1'],
+							{ input: Buffer.from(`${lease.head}\n`, 'ascii'), maxOutputBytes: 128 * 1024 * 1024 })).stdout;
+						lock.assertOwned();
+						this.assertPublicationSource(await this.readAndValidate(integrationOwnerId), input.repositoryPath, merge);
+						if (canonicalUrl !== await this.publicationRemote(lease.repositoryPath, input.remoteName)) { throw new Error('Publication remote changed during source export.'); }
+						return { pack, canonicalUrl };
+					} finally { this.removeSafeMergeContext(context); }
+				});
+				return result;
+			} catch (error) { pack?.fill(0); throw error; }
+			finally {
+				try { if (home) { this.removeSafeMergeContext({ root: home, gitDirectory: '', objectDirectory: '', environment: {} }); } }
+				catch (error) { pack?.fill(0); throw error; }
+				finally { exporting = false; }
+			}
+		};
+		return {
+			exportPinned: async input => {
+				const result = await inspectPinned(input, true);
+				if (!result.pack) { throw new Error('Publication pack export returned no pack.'); }
+				return { pack: result.pack, canonicalUrl: result.canonicalUrl };
+			},
+			assertPinned: async input => ({ canonicalUrl: (await inspectPinned(input, false)).canonicalUrl }),
+			release: async () => {
+				if (exporting) { throw new Error('A publication export must finish before releasing its lease.'); }
+				lock.release();
+			},
+		};
+	}
+
+	private assertPublicationSource(lease: ManagedWorktreeLease, repositoryPath: string, merge: AgentSessionMergeProposalDTO): void {
+		const receipt = merge.outcomes.at(-1)?.receipt;
+		const published = merge.artifacts.at(-1)?.event;
+		const intent = merge.artifacts.find(record => record.event.phase === 'intent')?.event;
+		const registered = merge.artifacts.find(record => record.event.phase === 'generationRegistered')?.event;
+		const materialized = merge.artifacts.find(record => record.event.phase === 'generationMaterialized')?.event;
+		const candidate = merge.artifacts.find(record => record.event.phase === 'candidatePrepared')?.event;
+		const generation = lease.generations?.find(item => item.generationId === lease.generationId);
+		const last = lease.lastOperation;
+		if (merge.kind !== 'merge' || merge.state !== 'merged' || merge.outcomes.at(-1)?.state !== 'merged'
+			|| merge.artifacts.length !== 5 || merge.artifacts.some((record, index) => record.revision !== index + 1)
+			|| !receipt || !last || !generation || !merge.approval || merge.approval.proposalFingerprint !== merge.fingerprint
+			|| lease.kind !== 'integration' || lease.state !== 'active' || lease.pendingOperation
+			|| lease.repositoryPath !== repositoryPath || realpathSync(repositoryPath) !== repositoryPath
+			|| merge.integrationOwnerId !== lease.ownerId || receipt.integrationOwnerId !== lease.ownerId
+			|| receipt.proposalId !== merge.id || receipt.proposalFingerprint !== merge.fingerprint
+			|| receipt.resultingHead !== lease.head || last.kind !== 'merge' || last.outcome !== 'merged'
+			|| last.id !== receipt.operationId || last.commit !== lease.head || last.proposalId !== merge.id || last.proposalFingerprint !== merge.fingerprint
+			|| last.sourceOwnerId !== merge.sessionOwnerId || last.sourceHead !== merge.sourceHead || last.targetHead !== merge.targetHead
+			|| last.mergeBase !== merge.mergeBase || last.diffFingerprint !== merge.diffFingerprint
+			|| published?.phase !== 'published' || published.targetRef !== `refs/heads/${lease.branch}` || published.resultingHead !== lease.head
+			|| published.currentGenerationId !== lease.generationId || intent?.phase !== 'intent' || intent.generationId !== lease.generationId
+			|| intent.priorGeneration?.generationId !== (published.priorGenerationId ?? undefined)
+			|| registered?.phase !== 'generationRegistered' || registered.registrationId !== lease.registrationId || registered.generationPath !== this.generationArtifactPathFromLease(lease.ownerId, generation)
+			|| intent.registrationId !== registered.registrationId || intent.generationPath !== registered.generationPath
+			|| candidate?.phase !== 'candidatePrepared' || candidate.outcome !== 'clean' || candidate.candidateCommitOid !== lease.head || candidate.candidateTreeOid !== generation.treeOid
+			|| materialized?.phase !== 'generationMaterialized' || materialized.head !== lease.head || materialized.conflictDigest !== null
+			|| materialized.indexDigest !== generation.indexDigest || materialized.treeDigest !== generation.treeDigest) {
+			throw new Error('Publication source no longer matches its signed generation and successful merge artifact.');
+		}
+	}
+
+	private async publicationRemote(repositoryPath: string, remoteName: string): Promise<string> {
+		if (!/^[A-Za-z0-9._-]{1,64}$/u.test(remoteName)) { throw new Error('Publication remote name is invalid.'); }
+		// Read literal local config without includes. Never ask Git to expand a URL,
+		// honor a rewrite, select a push default, or execute a remote helper.
+		const bytes = await this.gitBuffer(repositoryPath, ['config', '--local', '--no-includes', '--null', '--list']);
+		const values = new Map<string, string[]>();
+		for (const record of decodeGitUtf8(bytes).split('\0').filter(Boolean)) {
+			const separator = record.indexOf('\n');
+			const key = (separator < 0 ? record : record.slice(0, separator));
+			const lower = key.toLowerCase();
+			if (lower.startsWith('include.') || lower.startsWith('includeif.') || /^url\..*\.(insteadof|pushinsteadof)$/u.test(lower)
+				|| lower === 'extensions.worktreeconfig' || lower === 'remote.pushdefault') { throw new Error('Publication does not support included, rewritten, or worktree-specific remote configuration.'); }
+			values.set(key, [...(values.get(key) ?? []), separator < 0 ? '' : record.slice(separator + 1)]);
+		}
+		const urls = values.get(`remote.${remoteName}.url`) ?? [];
+		const pushUrls = values.get(`remote.${remoteName}.pushurl`) ?? [];
+		if (urls.length !== 1 || pushUrls.length > 1 || (pushUrls.length === 1 && pushUrls[0] !== urls[0])
+			|| values.has(`remote.${remoteName}.vcs`) || values.has(`remote.${remoteName}.receivepack`) || values.has(`remote.${remoteName}.uploadpack`)) {
+			throw new Error('Publication requires one exact canonical GitHub remote without helper overrides.');
+		}
+		const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9_.-]{1,100}?)(?:\.git)?$/u.exec(urls[0]);
+		if (!match || match[2] === '.' || match[2] === '..') { throw new Error('Publication remote is unsupported; an exact github.com HTTPS or Git SSH remote is required.'); }
+		return `https://github.com/${match[1]}/${match[2]}.git`;
 	}
 
 	async create(input: { repositoryPath: string; ownerId: string; kind: 'session' | 'integration'; baseRef: string }): Promise<ManagedWorktreeLease> {
@@ -2200,24 +2329,45 @@ export class ManagedWorktreeService {
 	}
 
 	private async withIntegrationLock<T>(ownerId: string, operation: OperationLock['operation'], run: () => Promise<T>): Promise<T> {
+		const lock = await this.acquireIntegrationLock(ownerId, operation);
+		try { return await run(); } finally { lock.release(); }
+	}
+
+	private async acquireIntegrationLock(ownerId: string, operation: OperationLock['operation']): Promise<{ assertOwned(): void; release(): void }> {
 		this.validateOwnerId(ownerId);
 		const lockPath = join(this.root, `${ownerId}.operation-lock.json`);
 		if (await this.operationLockIsLive(ownerId)) { throw new Error('Integration operation is owned by a live process; refusing concurrent mutation.'); }
 		const unsigned = { ownerId, operation, operationId: randomUUID(), pid: process.pid, processStart: await this.processStartToken(process.pid) };
 		const lock: OperationLock = { ...unsigned, signature: this.sign(unsigned) };
+		let created: { readonly dev: number; readonly ino: number } | undefined;
 		try {
 			const lockFd = openSync(lockPath, 'wx', 0o600);
-			try { writeFileSync(lockFd, JSON.stringify(lock)); fsyncSync(lockFd); } finally { closeSync(lockFd); }
+			try { created = fstatSync(lockFd); writeFileSync(lockFd, JSON.stringify(lock)); fsyncSync(lockFd); } finally { closeSync(lockFd); }
 			const rootFd = openSync(this.root, 'r');
 			try { fsyncSync(rootFd); } finally { closeSync(rootFd); }
 		}
-		catch (error) { throw new Error(`Integration operation lock could not be acquired safely: ${this.errorMessage(error)}`); }
-		try { return await run(); }
-		finally {
-			const current = this.readOperationLock(lockPath);
-			if (current.operationId !== lock.operationId || !this.isValidSignature(current)) { throw new Error('Operation lock ownership changed; recovery is required.'); }
-			unlinkSync(lockPath);
+		catch (error) {
+			if (created && existsSync(lockPath)) {
+				const current = lstatSync(lockPath);
+				if (current.isSymbolicLink() || current.dev !== created.dev || current.ino !== created.ino) { throw new Error('Incomplete operation lock changed ownership; manual recovery is required.'); }
+				unlinkSync(lockPath);
+				const rootFd = openSync(this.root, 'r');
+				try { fsyncSync(rootFd); } finally { closeSync(rootFd); }
+			}
+			throw new Error(`Integration operation lock could not be acquired safely: ${this.errorMessage(error)}`);
 		}
+		let released = false;
+		const assertOwned = (): void => {
+			if (released) { throw new Error('Operation lease has already been released.'); }
+			const current = this.readOperationLock(lockPath);
+			if (current.operationId !== lock.operationId || current.ownerId !== ownerId || current.operation !== operation || !this.isValidSignature(current)) { throw new Error('Operation lock ownership changed; recovery is required.'); }
+		};
+		return { assertOwned, release: () => {
+			if (released) { return; }
+			assertOwned(); unlinkSync(lockPath); released = true;
+			const rootFd = openSync(this.root, 'r');
+			try { fsyncSync(rootFd); } finally { closeSync(rootFd); }
+		} };
 	}
 
 	private async operationLockIsLive(ownerId: string, verificationAttempt = 0): Promise<boolean> {
@@ -2245,10 +2395,13 @@ export class ManagedWorktreeService {
 
 	private readOperationLock(lockPath: string): OperationLock {
 		let lock: OperationLock;
+		const metadata = lstatSync(lockPath);
+		if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 16 * 1024 || (metadata.mode & 0o077) !== 0
+			|| (process.getuid && metadata.uid !== process.getuid())) { throw new Error('Operation lock file ownership is invalid; manual recovery is required.'); }
 		try { lock = JSON.parse(readFileSync(lockPath, 'utf8')) as OperationLock; }
 		catch (error) { throw new Error(`Operation lock metadata is malformed or ambiguous; manual recovery is required: ${this.errorMessage(error)}`); }
 		if (!lock || !UUID_PATTERN.test(lock.ownerId) || !UUID_PATTERN.test(lock.operationId)
-			|| !['merge', 'remove', 'ensureIntegration', 'prepareCommit', 'applyReviewedCommit'].includes(lock.operation) || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
+			|| !['merge', 'remove', 'ensureIntegration', 'prepareCommit', 'applyReviewedCommit', 'publication'].includes(lock.operation) || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
 			|| typeof lock.processStart !== 'string' || !lock.processStart || !this.isValidSignature(lock)) {
 			throw new Error('Operation lock metadata is invalid or ambiguous; manual recovery is required.');
 		}
@@ -2256,7 +2409,7 @@ export class ManagedWorktreeService {
 	}
 
 	private async processStartToken(pid: number): Promise<string> {
-		const result = await this.runCommand('ps', ['-p', String(pid), '-o', 'lstart='], 2_000);
+		const result = await this.runCommand('/bin/ps', ['-p', String(pid), '-o', 'lstart='], 2_000, { isolated: true });
 		return result.stdout.toString('utf8').trim();
 	}
 
@@ -2283,6 +2436,18 @@ export class ManagedWorktreeService {
 	}
 
 	private runCommand(command: string, args: readonly string[], timeoutMs: number, options: { readonly env?: NodeJS.ProcessEnv; readonly isolated?: boolean; readonly input?: Buffer; readonly maxOutputBytes?: number; readonly allowExitCodes?: readonly number[] } = {}): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
+		const publication = this.publicationReads.getStore();
+		if (publication) {
+			if (command !== 'git') { throw new Error('Publication source validation only permits the pinned Git executable.'); }
+			const env = publicationEnvironment(publication.home);
+			for (const [key, value] of Object.entries(options.env ?? {})) { if (value !== undefined) { env[key] = value; } }
+			// Only the private copy of an index may be refreshed. A nonzero refresh
+			// (ordinarily inspected by diff-files) is already a publication rejection.
+			return runPublicationProcess({ executable: publication.git,
+				args: ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args],
+				cwd: publication.home, env, input: options.input, maxOutputBytes: options.maxOutputBytes ?? MAX_BUFFER_BYTES, timeoutMs,
+			}).then(stdout => ({ stdout, stderr: Buffer.alloc(0), exitCode: 0 }));
+		}
 		return new Promise((resolvePromise, rejectPromise) => {
 			const child = spawn(command, args, { detached: process.platform !== 'win32', env: this.gitEnvironment(options.env, options.isolated), shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
 			const stdout: Buffer[] = [];

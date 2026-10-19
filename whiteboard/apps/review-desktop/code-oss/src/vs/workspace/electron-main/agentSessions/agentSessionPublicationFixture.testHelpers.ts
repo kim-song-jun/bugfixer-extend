@@ -63,8 +63,8 @@ export function createMergedPublicationFixture(options: MergedPublicationFixture
 		source.agentSessionIntegrations.recordTrustedHumanApproval(commit.id, commit.revision);
 		const commitOperation = randomUUID(); const commitReceipt = { operationId: commitOperation, sourceHead: commit.sourceHead, proposedGitTreeHash: commit.proposedGitTreeHash,
 			diffFingerprint: commit.diffFingerprint, candidateHead: 'd'.repeat(baseOid.length), resultingHead: null, changedPaths: [], failureCode: null };
-		const commitApplying = source.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 0, state: 'applying', action: 'commit', receipt: commitReceipt });
-		source.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 1, state: 'succeeded', action: 'commit', receipt: { ...commitReceipt, resultingHead: 'd'.repeat(baseOid.length), changedPaths: ['src/change.ts'] }, retryOfOutcomeId: commitApplying.id });
+		source.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 0, state: 'applying', action: 'commit', receipt: commitReceipt });
+		source.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 1, state: 'succeeded', action: 'commit', receipt: { ...commitReceipt, resultingHead: 'd'.repeat(baseOid.length), changedPaths: ['src/change.ts'] } });
 		const integrationOwnerId = source.agentSessionMerges.getOrCreateIntegrationOwner(project.id, binding.id);
 		const mergeText = 'diff --git a/src/change.ts b/src/change.ts\n+after\n';
 		const merge = source.agentSessionMerges.createProposal({ ...scope, commitProposalId: commit.id, commitProposalRevision: commit.revision, commitProposalFingerprint: commit.fingerprint,

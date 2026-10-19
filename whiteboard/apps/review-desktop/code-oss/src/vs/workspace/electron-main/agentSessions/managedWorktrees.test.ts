@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -78,6 +78,32 @@ function commit(worktree: string, path: string, contents: string, message: strin
 	git(worktree, 'add', path);
 	git(worktree, 'commit', '-qm', message);
 }
+
+test('publication uses the signed integration lock and existing PID-reuse recovery protocol', async () => {
+	await fixture(async (root, _repository, service) => {
+		const ownerId = randomUUID();
+		const path = realpathSync('/usr/bin/git');
+		const executable = { path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') };
+		const lockPath = join(root, 'profile', 'managed-worktrees', `${ownerId}.operation-lock.json`);
+		await assert.rejects(service.acquirePublicationLease(ownerId, { ...executable, sha256: '0'.repeat(64) }));
+		assert.equal(existsSync(lockPath), false, 'Untrusted Git does not acquire a durable lock');
+		const stale = { ownerId, operation: 'publication', operationId: randomUUID(), pid: process.pid, processStart: 'prior-PID-incarnation' };
+		writeFileSync(lockPath, JSON.stringify({ ...stale, signature: (service as unknown as TestInternals).sign(stale) }), { mode: 0o600 });
+		const lease = await service.acquirePublicationLease(ownerId, executable);
+		try {
+			const acquired = JSON.parse(readFileSync(lockPath, 'utf8')) as typeof stale;
+			assert.equal(acquired.operation, 'publication'); assert.notEqual(acquired.operationId, stale.operationId);
+			await assert.rejects(new ManagedWorktreeService(join(root, 'profile')).acquirePublicationLease(ownerId, executable), /live process/u);
+			await assert.rejects((service as unknown as TestInternals).withIntegrationLock(ownerId, 'merge', async () => undefined), /live process/u);
+			await assert.rejects((service as unknown as TestInternals).withIntegrationLock(ownerId, 'remove', async () => undefined), /live process/u);
+		} finally { await lease.release(); }
+		await lease.release(); assert.equal(existsSync(lockPath), false);
+		const next = await service.acquirePublicationLease(ownerId, executable); await next.release();
+		writeFileSync(lockPath, JSON.stringify({ ...stale, signature: '0'.repeat(64) }), { mode: 0o600 });
+		await assert.rejects(service.acquirePublicationLease(ownerId, executable), /invalid or ambiguous/u);
+		assert.equal(existsSync(lockPath), true, 'Unverifiable foreign lock is retained for explicit recovery');
+	});
+});
 
 async function reviewedBinding(service: ManagedWorktreeService, ownerId: string, path: string, contents: string) {
 	const sourceHead = git((await service.inspect(ownerId)).worktreePath, 'rev-parse', 'HEAD');
@@ -683,10 +709,10 @@ test('merge hooks stay disabled and operation locks reject concurrent owners the
 		assert.equal(existsSync(join(root, 'profile', 'managed-worktrees', `${integration.ownerId}.operation-lock.json`)), false);
 		const lockPath = join(root, 'profile', 'managed-worktrees', `${integration.ownerId}.operation-lock.json`);
 		const staleUnsigned = { ownerId: integration.ownerId, operation: 'merge' as const, operationId: randomUUID(), pid: process.pid, processStart: 'old-process-start-token' };
-		writeFileSync(lockPath, JSON.stringify({ ...staleUnsigned, signature: internals.sign(staleUnsigned) }));
+		writeFileSync(lockPath, JSON.stringify({ ...staleUnsigned, signature: internals.sign(staleUnsigned) }), { mode: 0o600 });
 		assert.equal(await internals.withIntegrationLock(integration.ownerId, 'merge', () => 'recovered stale lock'), 'recovered stale lock');
 		assert.equal(existsSync(lockPath), false);
-		writeFileSync(lockPath, '{ forged lock');
+		writeFileSync(lockPath, '{ forged lock', { mode: 0o600 });
 		await assert.rejects(internals.withIntegrationLock(integration.ownerId, 'merge', () => undefined), /invalid|ambiguous|recovery/i);
 		rmSync(lockPath);
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });

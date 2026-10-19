@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -18,9 +19,11 @@ import {
   assertPackagedArtifacts,
   assertRuntimeClosure,
   assertRuntimeContents,
+  PR_REF_GUARD,
   requiredPackagedArtifacts,
   runtimeRootForPackagedRoot,
   stageDiffrBinary,
+  stagePrRefGuard,
 } from "./stage-review-runtime.mjs";
 
 test("runtime closure rejects transitive esbuild packages and native binaries", async () => {
@@ -127,8 +130,11 @@ test("final package verification requires the CLI and rechecks archives outside 
   const cli = path.join(runtime, RUNTIME_CLI_ENTRY);
 
   try {
+    if (process.platform !== "win32") await stagePrRefGuard(runtime);
+
     for (const artifact of requiredPackagedArtifacts(packaged)) {
       if (artifact === cli) continue;
+      if (artifact === path.join(runtime, PR_REF_GUARD)) continue;
       await mkdir(path.dirname(artifact), { recursive: true });
 
       if (artifact === path.join(runtime, "node_modules")) {
@@ -165,6 +171,29 @@ test("final package verification requires the CLI and rechecks archives outside 
     await writeFile(cli, "export {};\n");
     await assertRuntimeClosure(runtime);
     await assertPackagedArtifacts(packaged);
+
+    if (process.platform !== "win32") {
+      const guard = path.join(runtime, PR_REF_GUARD);
+      const guardBytes = await readFile(guard);
+
+      assert.ok(
+        requiredPackagedArtifacts(packaged).includes(guard),
+        "macOS/Linux artifact validation must require the staged PR guard",
+      );
+      await rm(guard);
+      await assert.rejects(
+        assertPackagedArtifacts(packaged),
+        /missing .*bin\/pr-ref-guard/,
+      );
+      await writeFile(guard, guardBytes, { mode: 0o755 });
+      await chmod(guard, 0o644);
+      await assert.rejects(
+        assertPackagedArtifacts(packaged),
+        /canonical executable file/,
+      );
+      await chmod(guard, 0o755);
+      await assertPackagedArtifacts(packaged);
+    }
 
     const providerGroupControl = path.join(
       runtime,

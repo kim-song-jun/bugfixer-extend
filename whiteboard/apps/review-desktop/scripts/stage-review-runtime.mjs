@@ -4,6 +4,7 @@ import {
   chmod,
   copyFile,
   cp,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -65,6 +66,8 @@ export const NODE_RUNTIME_LICENSE = "licenses/node/LICENSE";
 
 export const PROVIDER_GROUP_CONTROL_SCRIPT = "bin/provider-group-control.mjs";
 
+export const PR_REF_GUARD = "bin/pr-ref-guard";
+
 export function runtimeRootForPackagedRoot(packagedRoot) {
   const resolved = path.resolve(packagedRoot);
 
@@ -101,6 +104,10 @@ export function requiredPackagedArtifacts(packagedRoot) {
     entries.push(path.join(RUNTIME_DIRECTORY_NAME, PROVIDER_GROUP_CONTROL_SCRIPT));
   }
 
+  if (process.platform !== "win32") {
+    entries.push(path.join(RUNTIME_DIRECTORY_NAME, PR_REF_GUARD));
+  }
+
   if (!path.resolve(packagedRoot).endsWith(".app")) {
     entries.push("extensions/vscodevim.vim/package.json");
   }
@@ -117,6 +124,10 @@ export async function assertPackagedArtifacts(packagedRoot) {
     } catch {
       throw new Error(`Review Desktop package is missing ${artifact}.`);
     }
+  }
+
+  if (process.platform !== "win32") {
+    await verifyPrRefGuardHelper(runtimeRootForPackagedRoot(packagedRoot));
   }
 
   if (resolvedPackagedApp(packagedRoot)) {
@@ -215,6 +226,11 @@ export async function stageReviewRuntime(packagedRoot) {
     await stageKeychainVaultHelper(runtimeRoot);
     await stageNodeRuntime(runtimeRoot);
     await stageProviderGroupControlScript(runtimeRoot);
+  }
+
+  if (process.platform !== "win32") {
+    await stagePrRefGuard(runtimeRoot);
+    await verifyPrRefGuardHelper(runtimeRoot);
   }
 
   await makeTreeOwnerWritable(path.join(runtimeRoot, "tutorial", "git-stub"));
@@ -423,6 +439,52 @@ export async function stageProviderGroupControlScript(
   await copyFile(source, destination);
 
   return destination;
+}
+
+export async function stagePrRefGuard(
+  runtimeRoot,
+  source = path.join(appDirectory, "native/pr-ref-guard/pr-ref-guard.c"),
+) {
+  if (process.platform === "win32") {
+    throw new Error("The PR reference guard can only be built on macOS or Linux.");
+  }
+
+  if (!(await stat(source).catch(() => null))?.isFile()) {
+    throw new Error(`Missing native helper source: ${source}`);
+  }
+
+  const destination = path.join(runtimeRoot, PR_REF_GUARD);
+  await mkdir(path.dirname(destination), { recursive: true });
+  await execFileAsync(process.platform === "darwin" ? "clang" : "cc", [
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-O2",
+    source,
+    "-o",
+    destination,
+  ]);
+  await chmod(destination, 0o755);
+
+  return destination;
+}
+
+export async function verifyPrRefGuardHelper(runtimeRoot) {
+  const helperPath = path.join(runtimeRoot, PR_REF_GUARD);
+  const helperInfo = await lstat(helperPath);
+
+  if (
+    !helperInfo.isFile() ||
+    helperInfo.isSymbolicLink() ||
+    helperInfo.size > 16 * 1024 * 1024 ||
+    (helperInfo.mode & 0o111) === 0 ||
+    (helperInfo.mode & 0o022) !== 0 ||
+    (await realpath(helperPath)) !== helperPath
+  ) {
+    throw new Error("The staged PR reference guard is not a canonical executable file.");
+  }
+  return helperPath;
 }
 
 function resolvedPackagedApp(packagedRoot) {

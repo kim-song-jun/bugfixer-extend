@@ -54,6 +54,8 @@ jobs:
           ps -eo comm= | awk '/node/ {node++} /chrome|chromium|firefox/ {browser++} END {print "node=" node+0, "browser=" browser+0}'
       - name: Test persistence, mailboxes and managed Git worktrees
         run: pnpm --filter @dev.fast/review-desktop test:agent-sessions
+      - name: Test native PR ref guard protocol
+        run: pnpm --filter @dev.fast/review-desktop exec node --test --test-concurrency=1 native/pr-ref-guard/pr-ref-guard.test.mjs
       - name: Test frozen v26 through v30 migrations and retained change content
         run: >-
           pnpm --filter @dev.fast/review-desktop exec
@@ -337,7 +339,7 @@ jobs:
         timeout-minutes: 5
         run: ELECTRON_RUN_AS_NODE=1 "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app/Contents/MacOS/Whiteboard" apps/review-desktop/scripts/smoke-native-agent-pty.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-pty-smoke"
 
-      - name: Native project-window session IPC contracts
+      - name: Native project-window session IPC and publication runtime contracts
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         timeout-minutes: 5
         working-directory: whiteboard/apps/review-desktop
@@ -348,7 +350,7 @@ jobs:
           export BUGFIXER_NATIVE_PTY_REQUIRED=1
           test -x "$BUGFIXER_NATIVE_PTY_NODE"
           test -f "$BUGFIXER_NATIVE_PTY_GUARDIAN"
-          ELECTRON_RUN_AS_NODE=1 TSX_TSCONFIG_PATH=tsconfig.test.json "$app/Contents/MacOS/Whiteboard" --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/workspaceAgentSessionsChannel.test.ts
+          ELECTRON_RUN_AS_NODE=1 TSX_TSCONFIG_PATH=tsconfig.test.json "$app/Contents/MacOS/Whiteboard" --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/workspaceAgentSessionsChannel.test.ts code-oss/src/vs/workspace/electron-main/agentSessions/agentPublicationRuntime.test.ts
 
       - name: Upload native PTY evidence
         if: always()
