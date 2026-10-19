@@ -362,6 +362,13 @@ jobs:
         timeout-minutes: 5
         run: ELECTRON_RUN_AS_NODE=1 "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app/Contents/MacOS/Whiteboard" apps/review-desktop/scripts/smoke-native-agent-pty.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-pty-smoke"
 
+      - name: Native session terminal UI contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 8
+        env:
+          WHITEBOARD_NATIVE_SESSION_TERMINAL_FIXTURE: '1'
+        run: node apps/review-desktop/scripts/smoke-native-session-terminal.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-session-terminal-smoke"
+
       - name: Native project-window session IPC and publication runtime contracts
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         timeout-minutes: 5
@@ -398,6 +405,15 @@ jobs:
         with:
           name: review-desktop-native-ui-smoke
           path: ${{ runner.temp }}/review-desktop-native-ui-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload native session terminal evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-desktop-native-session-terminal-smoke
+          path: ${{ runner.temp }}/review-desktop-native-session-terminal-smoke
           if-no-files-found: warn
           retention-days: 7
 
