@@ -426,8 +426,10 @@ try {
   for (let attempt = 0; attempt < 2; attempt++) {
     retryTaintedStop = await taintedHost.stop(tainted);
     receipt.taintedCleanup.retries.push({ state: retryTaintedStop.state, cleanupVerified: retryTaintedStop.cleanupVerified, error: retryTaintedStop.error });
+
     if (retryTaintedStop.cleanupVerified) break;
   }
+
   assert.equal(retryTaintedStop.state, 'stopped');
   assert.equal(retryTaintedStop.cleanupVerified, true);
   assert.ok(taintedRevokeAttempts >= 2, 'The exact retained PTY must retry launch access revocation.');
