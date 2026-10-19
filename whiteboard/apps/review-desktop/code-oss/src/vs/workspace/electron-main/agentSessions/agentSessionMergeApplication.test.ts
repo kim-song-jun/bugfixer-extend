@@ -328,7 +328,7 @@ test('missing durable merge journal readback cannot advance the integration ref'
 	} finally { state.cleanup(); }
 });
 
-test('a crash after durable intent keeps its exact artifact history across reopen and never retries publication', async () => {
+test('a crash before materialization proves not-applied across reopen and never retries publication', async () => {
 	const state = await fixture();
 	try {
 		const proposal = await state.mergeApplication.prepareProposal(state.mergeInput);
@@ -351,18 +351,23 @@ test('a crash after durable intent keeps its exact artifact history across reope
 			projectId: proposal.projectId, sessionId: proposal.sessionId, turnId: proposal.turnId,
 			proposalId: proposal.id, expectedRevision: proposal.revision, expectedFingerprint: proposal.fingerprint,
 		});
-		assert.equal(applying.outcomes.at(-1)?.state, 'recoveryRequired');
+		assert.equal(applying.outcomes.at(-1)?.state, 'notApplied');
 		assert.deepEqual(applying.artifacts.map(record => record.event.phase), ['intent']);
 		assert.equal(git(target.worktreePath, 'rev-parse', 'HEAD'), targetHead);
 
 		state.reopen();
-		const reconciled = await state.mergeApplication.reconcileApplying({
+		const reopened = state.database.agentSessionMerges.getProposal(proposal.id)!;
+		assert.equal(reopened.outcomes.at(-1)?.state, 'notApplied');
+		assert.deepEqual(reopened.artifacts.map(record => record.event.phase), ['intent']);
+		await assert.rejects(state.mergeApplication.reconcileApplying({
 			projectId: proposal.projectId, sessionId: proposal.sessionId, turnId: proposal.turnId,
 			proposalId: proposal.id, expectedRevision: proposal.revision, expectedFingerprint: proposal.fingerprint,
 			operationId: applying.outcomes.at(-1)!.receipt.operationId,
-		});
-		assert.equal(reconciled.outcomes.at(-1)?.state, 'recoveryRequired');
-		assert.deepEqual(reconciled.artifacts.map(record => record.event.phase), ['intent']);
+		}), /Only an exact applying or recovery-required merge/u);
+		await assert.rejects(state.mergeApplication.applyApprovedProposal({
+			projectId: proposal.projectId, sessionId: proposal.sessionId, turnId: proposal.turnId,
+			proposalId: proposal.id, expectedRevision: proposal.revision, expectedFingerprint: proposal.fingerprint,
+		}), /terminal; prepare and approve a fresh proposal/u);
 		assert.equal(git(target.worktreePath, 'rev-parse', 'HEAD'), targetHead);
 	} finally { state.cleanup(); }
 });

@@ -536,13 +536,15 @@ test('explicit recovery finishes a verified candidate published before its final
 		commit(session.worktreePath, 'recovery-candidate.txt', 'retained candidate\n', 'recovery candidate');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
 		let journal: TestMergeJournal | undefined;
+		let artifactStoreAvailable = false;
 		const result = await mergeReviewed(service, preview, {
 			captureJournal: value => { journal = value; },
-			beforeArtifact: event => { if (event.phase === 'published') { throw new Error('simulated durable artifact outage'); } }
+			beforeArtifact: event => { if (event.phase === 'published' && !artifactStoreAvailable) { throw new Error('simulated durable artifact outage'); } }
 		});
 		assert.equal(result.state, 'recoveryRequired');
 		assert.ok(journal);
 		assert.notEqual(git(repository, 'rev-parse', `refs/heads/${integration.branch}`), preview.targetHead);
+		artifactStoreAvailable = true;
 		const recovered = await service.reconcileReviewedMerge({
 			integrationOwnerId: integration.ownerId, operationId: journal.operationId,
 			readApplying: journal.readApplying, recordArtifact: journal.recordArtifact, readArtifacts: journal.readArtifacts

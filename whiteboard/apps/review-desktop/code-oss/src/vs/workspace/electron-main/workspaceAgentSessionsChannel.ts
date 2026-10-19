@@ -868,7 +868,7 @@ export class WorkspaceAgentSessionsChannel {
 
 	private assertMergeProposalCurrent(proposal: AgentSessionMergeProposalDTO): void {
 		if (Date.parse(proposal.expiresAt) <= Date.now()) { throw new Error('Merge proposal approval has expired. Prepare and review a fresh proposal.'); }
-		const newer = this.requireMergeHost().list({ projectId: proposal.projectId, sessionId: proposal.sessionId, turnId: proposal.turnId, afterRevision: proposal.revision, limit: 1 });
+		const newer = this.database.agentSessionMerges.listProposals(proposal.projectId, proposal.sessionId, proposal.turnId, { afterRevision: proposal.revision, limit: 1 });
 		if (newer.proposals.length) { throw new Error('A newer merge proposal exists; review that exact revision instead.'); }
 	}
 

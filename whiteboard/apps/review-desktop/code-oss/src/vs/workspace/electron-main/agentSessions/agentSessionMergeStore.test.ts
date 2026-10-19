@@ -101,7 +101,7 @@ test('durable merge proposal pins successful commit, full source delta, human ap
 		assert.deepEqual(database.agentSessionMerges.readArtifacts(receipt.operationId), artifactRecords);
 		const merged = database.agentSessionMerges.recordOutcome({ proposalId: proposal.id, expectedOutcomeRevision: 1, state: 'merged', receipt: { ...receipt, resultingHead: candidate.candidateCommitOid, changedPaths: proposal.paths.map(path => path.path) }, retryOfOutcomeId: applying.id });
 		assert.equal(merged.state, 'merged');
-		assert.throws(() => database.agentSessionMerges.recordOutcome({ proposalId: proposal.id, expectedOutcomeRevision: 2, state: 'applying', receipt: { ...receipt, operationId: randomUUID() } }), /only exact journal reconciliation/);
+		assert.throws(() => database.agentSessionMerges.recordOutcome({ proposalId: proposal.id, expectedOutcomeRevision: 2, state: 'applying', receipt: { ...receipt, operationId: randomUUID() } }), /only exact journal reconciliation/i);
 		const raw = new DatabaseSync(databasePath);
 		try {
 			assert.throws(() => raw.prepare('UPDATE agent_session_merge_proposals SET payload_json = ? WHERE id = ?').run('{}', proposal.id), /immutable/);
