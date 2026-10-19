@@ -19,7 +19,7 @@ import type {
 } from '../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentChangeFileDTO, WorkspaceAgentExplanationCitationDTO, WorkspaceAgentReportedCheckDTO } from '../common/workspaceAgentChangesProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_OUTPUT_EVENT } from '../common/workspaceAgentSessionProtocol.js';
-import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage } from '../common/workspaceAgentCommunicationProtocol.js';
+import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNativeNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
 import type {
 	AgentWorkflowDTO, AgentWorkflowNodePlan, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowRunDTO, AgentWorkflowStatusDTO,
 } from '../common/workspaceAgentWorkflowProtocol.js';
@@ -134,6 +134,13 @@ export interface WorkspaceAgentPublicationHost {
 	confirmProposal(sender: WebContents, proposal: AgentSessionPublicationProposalDTO): Promise<boolean>;
 }
 
+/** Native notification preference is app-global, while callers remain scoped to their authenticated project window. */
+export interface WorkspaceAgentNativeNotificationHost {
+	getStatus(): WorkspaceAgentSessionNativeNotificationStatus;
+	setEnabled(enabled: boolean): WorkspaceAgentSessionNativeNotificationStatus;
+	acknowledgeOpened(sender: WebContents, projectId: string, notificationId: string, requestId: string): boolean;
+}
+
 /** Project-scoped IPC for durable sessions and host-owned PTY capabilities. */
 export class WorkspaceAgentSessionsChannel {
 	private readonly attachments = new Map<string, ScopedAttachment>();
@@ -154,6 +161,7 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly publicationHost?: WorkspaceAgentPublicationHost,
 		private readonly setupInspection?: (projectId: string, provider: AgentSessionProvider, assertCurrent: () => void) => Promise<WorkspaceAgentSetupInspectionDTO>,
 		private readonly prTextHost?: WorkspaceAgentPrTextHost,
+		private readonly nativeNotificationHost?: WorkspaceAgentNativeNotificationHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -610,10 +618,36 @@ export class WorkspaceAgentSessionsChannel {
 					limit: request.limit === undefined ? 50 : this.integer(request.limit, 1, 100, 'notification page limit'),
 				}) as T;
 			}
+			case 'getNotification': {
+				this.assertExactKeys(arg, ['projectId', 'notificationId'], [], 'notification lookup');
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				return (this.database.agentSessions.getNotification(projectId, this.uuid(request.notificationId, 'notification ID')) ?? null) as T;
+			}
 			case 'notificationStatus': {
 				const request = this.record(arg);
 				this.assertProjectId(request.projectId, projectId);
 				return this.database.agentSessions.notificationStatus(projectId) as T;
+			}
+			case 'nativeNotificationStatus': {
+				this.assertProjectRequest(arg, projectId);
+				if (!this.nativeNotificationHost) { throw new Error('Native AI session notifications are unavailable.'); }
+				return this.nativeNotificationHost.getStatus() as T;
+			}
+			case 'setNativeNotificationsEnabled': {
+				this.assertExactKeys(arg, ['projectId', 'enabled'], [], 'native notification preference');
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				if (typeof request.enabled !== 'boolean') { throw new Error('The native notification preference must be a boolean.'); }
+				if (!this.nativeNotificationHost) { throw new Error('Native AI session notifications are unavailable.'); }
+				return this.nativeNotificationHost.setEnabled(request.enabled) as T;
+			}
+			case 'acknowledgeNativeNotificationOpen': {
+				this.assertExactKeys(arg, ['projectId', 'notificationId', 'requestId'], [], 'native notification open acknowledgement');
+				const request = this.record(arg);
+				this.assertProjectId(request.projectId, projectId);
+				if (!this.nativeNotificationHost) { throw new Error('Native AI session notifications are unavailable.'); }
+				return this.nativeNotificationHost.acknowledgeOpened(sender, projectId, this.uuid(request.notificationId, 'notification ID'), this.uuid(request.requestId, 'notification request ID')) as T;
 			}
 			case 'listMessages': {
 				const request = this.parseSessionRequest(arg, projectId);

@@ -13,6 +13,7 @@ import {
 	skipSessionOnboarding,
 	type SessionOnboardingState,
 } from '../../features/onboarding/index.js';
+import { agentSessionStateLabel } from '../../entities/agentSession/index.js';
 
 const STEPS = ['프로젝트', 'CLI와 계정', '세션·모델', '작업 범위', '첫 작업'] as const;
 
@@ -310,7 +311,7 @@ export function createSessionOnboarding(parent: HTMLElement, context: SessionOnb
 			const list = document.createElement('ul'); list.className = 'ai-session-onboarding__list';
 			for (const session of currentContext.sessions) {
 				const item = document.createElement('li');
-				const select = makeButton(`${session.name} · ${providerLabel(session.provider)} · ${session.model} · ${session.state}`, 'quiet');
+				const select = makeButton(`${session.name} · ${providerLabel(session.provider)} · ${session.model} · ${agentSessionStateLabel[session.state]}`, 'quiet');
 				select.setAttribute('aria-current', session.id === currentContext.selectedSessionId ? 'true' : 'false');
 				select.dataset.onboardingFocus = `select-session-${session.id}`; select.addEventListener('click', () => currentActions.selectSession(session.id)); item.appendChild(select); list.appendChild(item);
 			}

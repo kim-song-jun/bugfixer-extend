@@ -505,6 +505,9 @@ export interface ReviewCanvasSettingsContent {
   // review server and the CLI both read.
   telemetryEnabled: boolean;
   setTelemetryEnabled(enabled: boolean): Promise<boolean>;
+  /** Operating-system permission is not observable here; this reports only capability and observed delivery. */
+  nativeNotifications?: ReviewNativeNotificationStatus;
+  setNativeNotificationsEnabled?(enabled: boolean): Promise<ReviewNativeNotificationStatus>;
   theme: ReviewThemeChoice;
   setTheme(choice: ReviewThemeChoice): Promise<ReviewThemeChoice>;
   keymap: ReviewKeymapChoice;
@@ -531,6 +534,12 @@ export interface ReviewCanvasSettingsContent {
   // has reviews and no longer shows the Welcome rail. Absent when the
   // install status endpoint is unavailable.
   install?: ReviewCanvasInstallContent;
+}
+
+export interface ReviewNativeNotificationStatus {
+  readonly enabled: boolean;
+  readonly availability: "unknown" | "supported" | "unsupported";
+  readonly lastDelivery: "notAttempted" | "shown" | "failed";
 }
 
 /** Workspace attachment identity is independent of the displayed source generation. */

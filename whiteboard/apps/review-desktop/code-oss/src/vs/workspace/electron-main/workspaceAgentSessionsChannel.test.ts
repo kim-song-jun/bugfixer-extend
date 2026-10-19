@@ -16,7 +16,7 @@ import type { ICodeWindow } from '../../platform/window/electron-main/window.js'
 import type { IWindowsMainService } from '../../platform/windows/electron-main/windows.js';
 import type { IDisposable } from '../../base/common/lifecycle.js';
 import type { AgentSessionTranscriptPageDTO, AgentSessionTurnSnapshot, SessionNotificationDTO } from '../common/workspaceAgentSessionProtocol.js';
-import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
+import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNativeNotificationStatus, WorkspaceAgentSessionNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO } from '../common/workspaceAgentWorkflowProtocol.js';
 import type { AgentSessionIntegrationProposalDTO } from '../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionMergeProposalDTO } from '../common/workspaceAgentMergeProtocol.js';
@@ -40,6 +40,55 @@ function deferred() {
 }
 
 function wait(milliseconds: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, milliseconds)); }
+
+test('native notification preferences stay behind project-window IPC and notification lookup never crosses projects', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-native-notification-scope-'));
+	const database = WorkspaceDatabase.open(':memory:');
+	try {
+		const firstDescriptor = URI.file(join(directory, 'first.code-workspace')).toString();
+		const otherDescriptor = URI.file(join(directory, 'other.code-workspace')).toString();
+		const firstProject = database.createProjectWorkspace('First', directory, firstDescriptor);
+		const otherProject = database.createProjectWorkspace('Other', directory, otherDescriptor);
+		const sender = Object.assign(new EventEmitter(), { id: 83, isDestroyed: () => false }) as unknown as WebContents;
+		const firstWindow = {
+			config: { reviewWindowLaunch: { kind: 'project', projectId: firstProject.project.id } },
+			openedWorkspace: { id: 'first-workspace', configPath: URI.parse(firstDescriptor) },
+		} as unknown as ICodeWindow;
+		const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? firstWindow : undefined } as IWindowsMainService;
+		let enabled = false;
+		const nativeHost = {
+			getStatus: (): WorkspaceAgentSessionNativeNotificationStatus => ({ enabled, availability: 'supported', lastDelivery: 'notAttempted' }),
+			setEnabled: (value: boolean): WorkspaceAgentSessionNativeNotificationStatus => { enabled = value; return nativeHost.getStatus(); },
+			acknowledgeOpened: (ackSender: WebContents, projectId: string, notificationId: string, requestId: string): boolean =>
+				ackSender === sender && projectId === firstProject.project.id && notificationId === firstNotification.id && requestId === '00000000-0000-4000-8000-000000000001',
+		};
+		const channel = new WorkspaceAgentSessionsChannel(
+			database, windows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, nativeHost,
+		);
+		const firstSession = database.agentSessions.createSession({ projectId: firstProject.project.id, bindingId: firstProject.binding.id, name: 'First session', provider: 'codex', model: 'fixture', workspaceMode: 'sharedFolder' });
+		const otherSession = database.agentSessions.createSession({ projectId: otherProject.project.id, bindingId: otherProject.binding.id, name: 'Other session', provider: 'claude', model: 'fixture', workspaceMode: 'sharedFolder' });
+		database.agentSessions.sendMessage(firstProject.project.id, firstSession.id, { recipientSessionId: firstSession.id, idempotencyKey: 'first-message', body: 'first project' });
+		database.agentSessions.sendMessage(otherProject.project.id, otherSession.id, { recipientSessionId: otherSession.id, idempotencyKey: 'other-message', body: 'other project' });
+		const otherNotification = database.agentSessions.listNotifications(otherProject.project.id, { limit: 1 })[0];
+		const firstNotification = database.agentSessions.listNotifications(firstProject.project.id, { limit: 1 })[0];
+		assert.deepEqual(await channel.call(sender, 'getNotification', { projectId: firstProject.project.id, notificationId: firstNotification.id }), firstNotification);
+		assert.equal(await channel.call(sender, 'getNotification', { projectId: firstProject.project.id, notificationId: otherNotification.id }), null);
+		await assert.rejects(channel.call(sender, 'getNotification', { projectId: otherProject.project.id, notificationId: otherNotification.id }), /does not match this window/u);
+		assert.deepEqual(await channel.call(sender, 'nativeNotificationStatus', { projectId: firstProject.project.id }), nativeHost.getStatus());
+		assert.deepEqual(await channel.call(sender, 'setNativeNotificationsEnabled', { projectId: firstProject.project.id, enabled: true }), {
+			enabled: true, availability: 'supported', lastDelivery: 'notAttempted',
+		});
+		assert.equal(await channel.call(sender, 'acknowledgeNativeNotificationOpen', {
+			projectId: firstProject.project.id, notificationId: firstNotification.id, requestId: '00000000-0000-4000-8000-000000000001',
+		}), true);
+		await assert.rejects(channel.call(sender, 'acknowledgeNativeNotificationOpen', {
+			projectId: otherProject.project.id, notificationId: otherNotification.id, requestId: '00000000-0000-4000-8000-000000000001',
+		}), /does not match this window/u);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
 
 const nativePtyNode = process.env['BUGFIXER_NATIVE_PTY_NODE'];
 const nativePtyGuardian = process.env['BUGFIXER_NATIVE_PTY_GUARDIAN'];

@@ -26,6 +26,7 @@ export interface SessionLogsController {
 	setVisible(visible: boolean): void;
 	setConnected(connected: boolean): void;
 	setContext(context: SessionLogsContext, loadPage: SessionLogsPageLoader): void;
+	confirmContext(context: SessionLogsContext): Promise<boolean>;
 	invalidateContext(): void;
 	refresh(): void;
 	dispose(): void;
@@ -37,6 +38,7 @@ const PAGE_ENTRIES = 100;
 const PAGE_BYTES = 512 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const MAX_GAP_MARKERS = 100;
+const CONTEXT_CONFIRMATION_TIMEOUT_MS = 10_000;
 
 type KindFilter = 'all' | 'terminal' | 'log';
 type SeverityFilter = 'all' | AgentSessionTranscriptSeverity;
@@ -135,6 +137,21 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	let severityFilter: SeverityFilter = 'all';
 	let sourceFilter: SourceFilter = 'all';
 	let searchText = '';
+	let confirmedContextKey: string | undefined;
+	const contextConfirmations = new Set<{ readonly key: string; readonly resolve: (confirmed: boolean) => void; readonly timer: ReturnType<typeof setTimeout> }>();
+	const contextKey = (value: SessionLogsContext): string => JSON.stringify([value.projectId, value.sessionId, value.turnId]);
+	const settleContextConfirmations = (key: string, confirmed: boolean): void => {
+		for (const pending of [...contextConfirmations]) {
+			if (pending.key !== key) { continue; }
+			contextConfirmations.delete(pending);
+			clearTimeout(pending.timer);
+			pending.resolve(confirmed);
+		}
+	};
+	const cancelContextConfirmations = (): void => {
+		for (const pending of contextConfirmations) { clearTimeout(pending.timer); pending.resolve(false); }
+		contextConfirmations.clear();
+	};
 
 	const render = (): void => {
 		const filtered = entries.filter(entry => matches(entry, kindFilter, severityFilter, sourceFilter, searchText));
@@ -183,6 +200,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		lastError = undefined;
 		const generation = ++requestGeneration;
 		const requestedContext = context;
+		const requestedContextKey = contextKey(requestedContext);
 		const afterSequence = cursor;
 		const options: AgentSessionTranscriptPageOptions = {
 			afterSequence,
@@ -194,6 +212,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			const page = await loadPage(options);
 			if (disposed || generation !== requestGeneration || requestedContext !== context) { return; }
 			applyPage(page, direction);
+			confirmedContextKey = requestedContextKey;
 		} catch (cause) {
 			if (disposed || generation !== requestGeneration) { return; }
 			connected = false;
@@ -203,6 +222,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			if (generation === requestGeneration) {
 				loading = false;
 				render();
+				settleContextConfirmations(requestedContextKey, confirmedContextKey === requestedContextKey && !lastError);
 			}
 		}
 	};
@@ -371,6 +391,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			if (disposed || visible === value) { return; }
 			visible = value;
 			if (!visible) {
+				cancelContextConfirmations();
 				if (timer) { clearTimeout(timer); timer = undefined; }
 				requestGeneration++;
 				loading = false;
@@ -388,8 +409,10 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		},
 		setContext(value, nextLoadPage): void {
 			if (disposed) { return; }
+			cancelContextConfirmations();
 			contextGeneration++;
 			context = value;
+			confirmedContextKey = undefined;
 			loadPage = nextLoadPage;
 			connected = true;
 			requestGeneration++;
@@ -398,8 +421,24 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			render();
 			if (visible && connected) { void fetchPage('newer').finally(schedulePoll); }
 		},
+		confirmContext(value): Promise<boolean> {
+			const key = contextKey(value);
+			if (disposed || !visible || contextKey(context) !== key) { return Promise.resolve(false); }
+			if (confirmedContextKey === key && !loading && !lastError) { return Promise.resolve(true); }
+			return new Promise(resolve => {
+				const timer = setTimeout(() => {
+					for (const pending of contextConfirmations) {
+						if (pending.key === key && pending.resolve === resolve) { contextConfirmations.delete(pending); break; }
+					}
+					resolve(false);
+				}, CONTEXT_CONFIRMATION_TIMEOUT_MS);
+				contextConfirmations.add({ key, resolve, timer });
+				if (!loading) { void fetchPage('newer'); }
+			});
+		},
 		invalidateContext(): void {
 			if (disposed) { return; }
+			cancelContextConfirmations();
 			contextGeneration++;
 			requestGeneration++;
 			visible = false;
@@ -411,6 +450,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		dispose(): void {
 			if (disposed) { return; }
 			disposed = true;
+			cancelContextConfirmations();
 			contextGeneration++;
 			requestGeneration++;
 			if (timer) { clearTimeout(timer); timer = undefined; }

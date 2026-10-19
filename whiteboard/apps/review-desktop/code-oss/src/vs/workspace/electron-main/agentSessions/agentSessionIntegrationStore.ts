@@ -16,6 +16,7 @@ import type {
 import type { AgentSessionChangeEvidenceDTO } from './agentSessionChangeEvidenceStore.js';
 import type { AgentSessionExplanationDTO, AgentSessionExplanationTarget } from './agentSessionReviewStore.js';
 import type { AgentSessionStore } from './agentSessionStore.js';
+import { runAgentSessionTransaction } from './agentSessionNotificationEvents.js';
 
 export type {
 	AgentSessionIntegrationAction, AgentSessionIntegrationActionReceipt, AgentSessionIntegrationApprovalDTO,
@@ -468,9 +469,7 @@ export class AgentSessionIntegrationStore {
 	}
 
 	private transaction<T>(operation: () => T): T {
-		this.db.exec('BEGIN IMMEDIATE');
-		try { const result = operation(); this.db.exec('COMMIT'); return result; }
-		catch (error) { this.db.exec('ROLLBACK'); throw error; }
+		return runAgentSessionTransaction(this.db, operation);
 	}
 }
 

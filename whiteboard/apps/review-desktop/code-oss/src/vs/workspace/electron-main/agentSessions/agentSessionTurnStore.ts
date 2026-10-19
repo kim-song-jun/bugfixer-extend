@@ -20,6 +20,7 @@ import type {
 	CreateAgentSessionTurnInput,
 } from '../../common/workspaceAgentSessionProtocol.js';
 import { canTransitionAgentSessionState } from './agentSessionTransitions.js';
+import { runAgentSessionTransaction } from './agentSessionNotificationEvents.js';
 import { AgentSessionStore } from './agentSessionStore.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -509,15 +510,7 @@ export class AgentSessionTurnStore {
 	}
 
 	private transaction<T>(run: () => T): T {
-		this.db.exec('BEGIN IMMEDIATE;');
-		try {
-			const value = run();
-			this.db.exec('COMMIT;');
-			return value;
-		} catch (error) {
-			this.db.exec('ROLLBACK;');
-			throw error;
-		}
+		return runAgentSessionTransaction(this.db, run);
 	}
 }
 

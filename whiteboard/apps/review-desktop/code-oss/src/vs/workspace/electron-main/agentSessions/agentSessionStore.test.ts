@@ -11,7 +11,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
-import type { AgentSessionState, CreateAgentSessionInput } from '../../common/workspaceAgentSessionProtocol.js';
+import { runAgentSessionTransaction } from './agentSessionNotificationEvents.js';
+import type { AgentSessionState, CreateAgentSessionInput, SessionNotificationDTO } from '../../common/workspaceAgentSessionProtocol.js';
 
 function withDatabase(run: (database: WorkspaceDatabase) => void): void {
 	const database = WorkspaceDatabase.open(':memory:');
@@ -219,6 +220,52 @@ test('waiting session states create durable typed alerts from state transitions'
 	});
 });
 
+test('committed notification observers read the exact scoped SQLite row and never replay or cross projects', () => {
+	withDatabase(database => {
+		const first = projectFixture(database, 'First notification project');
+		const second = projectFixture(database, 'Second notification project');
+		const firstSender = database.agentSessions.createSession(sessionInput(first.project.id, first.binding.id));
+		const firstRecipient = database.agentSessions.createSession(sessionInput(first.project.id, first.binding.id, { name: 'First recipient' }));
+		const secondSender = database.agentSessions.createSession(sessionInput(second.project.id, second.binding.id));
+		const secondRecipient = database.agentSessions.createSession(sessionInput(second.project.id, second.binding.id, { name: 'Second recipient' }));
+		const preexisting = database.agentSessions.sendMessage(first.project.id, firstSender.id, {
+			recipientSessionId: firstRecipient.id, idempotencyKey: 'before-subscribe', body: 'Already committed.',
+		});
+		const seen: SessionNotificationDTO[] = [];
+		const observerErrors: unknown[] = [];
+		const subscription = database.agentSessions.onDidCommitNotification(notification => {
+			seen.push(notification);
+			assert.deepEqual(database.agentSessions.getNotification(notification.projectId, notification.id), notification);
+		}, error => observerErrors.push(error));
+		try {
+			assert.deepEqual(seen, [], 'Subscribing does not replay notifications already in SQLite.');
+			const firstMessage = database.agentSessions.sendMessage(first.project.id, firstSender.id, {
+				recipientSessionId: firstRecipient.id, idempotencyKey: 'after-subscribe-first', body: 'First project event.',
+			});
+			assert.equal(database.agentSessions.getNotification(second.project.id, seen[0]?.id ?? '00000000-0000-4000-8000-000000000000'), null,
+				'A notification ID cannot be read under another project scope.');
+			const secondMessage = database.agentSessions.sendMessage(second.project.id, secondSender.id, {
+				recipientSessionId: secondRecipient.id, idempotencyKey: 'after-subscribe-second', body: 'Second project event.',
+			});
+			assert.deepEqual(seen.map(item => ({ projectId: item.projectId, sessionId: item.sessionId, target: item.target })), [
+				{ projectId: first.project.id, sessionId: firstRecipient.id, target: { kind: 'message', id: firstMessage.id } },
+				{ projectId: second.project.id, sessionId: secondRecipient.id, target: { kind: 'message', id: secondMessage.id } },
+			]);
+			assert.equal(database.agentSessions.getNotification(first.project.id, seen[1].id), null, 'A second-project event is not visible in the first-project scope.');
+			assert.equal(database.agentSessions.getNotification(first.project.id, seen[0].id)?.id, seen[0].id);
+			database.agentSessions.sendMessage(first.project.id, firstSender.id, {
+				recipientSessionId: firstRecipient.id, idempotencyKey: 'after-subscribe-first', body: 'First project event.',
+			});
+			assert.equal(seen.length, 2, 'An idempotent source retry does not replay its notification.');
+			assert.equal(database.agentSessions.getNotification(first.project.id, preexisting.id), null,
+				'Message IDs are not mistaken for notification IDs.');
+			assert.deepEqual(observerErrors, []);
+		} finally {
+			subscription.dispose();
+		}
+	});
+});
+
 test('notification retries preserve generated timestamps but reject changed explicit timestamps', () => {
 	withDatabase(database => {
 		const { project, binding } = projectFixture(database);
@@ -226,13 +273,28 @@ test('notification retries preserve generated timestamps but reject changed expl
 		const event = { eventId: `session:${session.id}:manual-time`, projectId: project.id, sessionId: session.id, kind: 'input' as const,
 			target: { kind: 'session' as const, id: session.id } };
 		const db = Reflect.get(database, 'db') as DatabaseSync;
+			const recorded = runAgentSessionTransaction(db, () => database.agentSessions.recordNotificationWithinTransaction({ ...event, createdAt: '2026-10-19T00:00:00.000Z' }));
+			assert.deepEqual(runAgentSessionTransaction(db, () => database.agentSessions.recordNotificationWithinTransaction(event)), recorded,
+				'An omitted timestamp retry is idempotent and keeps the generated record timestamp.');
+			assert.throws(() => runAgentSessionTransaction(db, () => database.agentSessions.recordNotificationWithinTransaction({ ...event, createdAt: '2026-10-19T00:00:01.000Z' })), /different event content/i);
+	});
+});
+
+test('an unmanaged transaction is rejected before inserting a durable notification', () => {
+	withDatabase(database => {
+		const { project, binding } = projectFixture(database);
+		const session = database.agentSessions.createSession(sessionInput(project.id, binding.id));
+		const db = Reflect.get(database, 'db') as DatabaseSync;
+		const eventId = `session:${session.id}:unmanaged`;
 		db.exec('BEGIN IMMEDIATE;');
-		const recorded = database.agentSessions.recordNotificationWithinTransaction({ ...event, createdAt: '2026-10-19T00:00:00.000Z' });
-		db.exec('COMMIT;');
-		db.exec('BEGIN IMMEDIATE;');
-		assert.deepEqual(database.agentSessions.recordNotificationWithinTransaction(event), recorded, 'An omitted timestamp retry is idempotent and keeps the generated record timestamp.');
-		assert.throws(() => database.agentSessions.recordNotificationWithinTransaction({ ...event, createdAt: '2026-10-19T00:00:01.000Z' }), /different event content/i);
-		db.exec('COMMIT;');
+		try {
+			assert.throws(() => database.agentSessions.recordNotificationWithinTransaction({ eventId, projectId: project.id, sessionId: session.id,
+				kind: 'input', target: { kind: 'session', id: session.id } }), /agent session transaction/i);
+			assert.equal(Number(db.prepare('SELECT COUNT(*) AS count FROM agent_session_notifications WHERE event_id = ?').get(eventId)?.count), 0,
+				'Unmanaged callers fail before the notification INSERT.');
+		} finally {
+			db.exec('ROLLBACK;');
+		}
 	});
 });
 
@@ -243,9 +305,7 @@ test('a notification identity conflict rolls back the source session transition'
 		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'starting');
 		const eventId = `session:${session.id}:revision:${session.revision + 1}:state:waitingForInput`;
 		const db = Reflect.get(database, 'db') as DatabaseSync;
-		db.exec('BEGIN IMMEDIATE;');
-		database.agentSessions.recordNotificationWithinTransaction({ eventId, projectId: project.id, sessionId: session.id, kind: 'error', target: { kind: 'session', id: session.id } });
-		db.exec('COMMIT;');
+			runAgentSessionTransaction(db, () => database.agentSessions.recordNotificationWithinTransaction({ eventId, projectId: project.id, sessionId: session.id, kind: 'error', target: { kind: 'session', id: session.id } }));
 		assert.throws(() => database.agentSessions.transitionSession(project.id, session.id, session.revision, 'waitingForInput'), /different event content/i);
 		assert.equal(database.agentSessions.getSession(project.id, session.id)?.state, 'starting');
 		assert.equal(database.agentSessions.listNotifications(project.id, { limit: 10 }).length, 1);

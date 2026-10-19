@@ -11,6 +11,7 @@ import type { CancellationToken } from "../../../../base/common/cancellation.js"
 import { Emitter } from "../../../../base/common/event.js";
 import { Disposable, DisposableStore, MutableDisposable, toDisposable } from "../../../../base/common/lifecycle.js";
 import { FileAccess } from "../../../../base/common/network.js";
+import { ipcRenderer } from "../../../../base/parts/sandbox/electron-browser/globals.js";
 import type { ICursorPositionChangedEvent } from "../../../../editor/common/cursorEvents.js";
 import { ICommandService } from "../../../../platform/commands/common/commands.js";
 import { ConfigurationTarget, IConfigurationService } from "../../../../platform/configuration/common/configuration.js";
@@ -61,6 +62,7 @@ import type {
 	ReviewCanvasModule,
 	ReviewCanvasOnboarding,
 	ReviewCanvasSettingsContent,
+	ReviewNativeNotificationStatus,
 	ReviewCanvasSetupActions,
 	ReviewCanvasTutorialBridge,
 	ReviewCliInstallStatus,
@@ -71,6 +73,7 @@ import type {
 	TutorialProgressV1,
 	TutorialStepId,
 } from "../../../common/reviewProtocol.js";
+import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from "../../../../workspace/common/workspaceAgentSessionProtocol.js";
 import {
 	REVIEW_CANVAS_RESUME_EVENT,
 	REVIEW_TUTORIAL_PROGRESS_STORAGE_KEY,
@@ -753,6 +756,11 @@ export class ReviewCanvasEditorPane extends EditorPane {
 		// Settings must render even when the server preference cannot be read;
 		// the row then shows the default, off.
 		const scratchpadEnabled = await this.desktopConnection.readScratchpadEnabled().catch(() => false);
+		const nativeNotificationProjectId = this.environment.reviewWindowLaunch.kind === 'project'
+			? this.environment.reviewWindowLaunch.projectId : undefined;
+		const nativeNotifications = nativeNotificationProjectId
+			? await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'nativeNotificationStatus', { projectId: nativeNotificationProjectId }) as ReviewNativeNotificationStatus
+			: undefined;
 		return {
 			telemetryEnabled: this.currentTelemetryEnabled(),
 			setTelemetryEnabled: async (enabled) => {
@@ -766,6 +774,14 @@ export class ReviewCanvasEditorPane extends EditorPane {
 				await this.configurationService.updateValue(REVIEW_TELEMETRY_SETTING, enabled, ConfigurationTarget.USER);
 				return this.currentTelemetryEnabled();
 			},
+			...(nativeNotifications && nativeNotificationProjectId ? {
+				nativeNotifications,
+				setNativeNotificationsEnabled: async (enabled: boolean) => await ipcRenderer.invoke(
+					WORKSPACE_AGENT_SESSIONS_CHANNEL,
+					'setNativeNotificationsEnabled',
+					{ projectId: nativeNotificationProjectId, enabled },
+				) as ReviewNativeNotificationStatus,
+			} : {}),
 			theme: currentReviewThemeChoice(this.configurationService, this.reviewThemeService),
 			setTheme: async (choice) => {
 				this.reviewTelemetryService.capture("setting_changed", {

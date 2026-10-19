@@ -37,3 +37,10 @@ export interface WorkspaceAgentSessionNotificationStatus {
 	readonly unreadCount: number;
 	readonly latestSequence: number;
 }
+
+/** OS support and observed delivery are reported separately from user permission, which the app cannot reliably inspect. */
+export interface WorkspaceAgentSessionNativeNotificationStatus {
+	readonly enabled: boolean;
+	readonly availability: 'unknown' | 'supported' | 'unsupported';
+	readonly lastDelivery: 'notAttempted' | 'shown' | 'failed';
+}

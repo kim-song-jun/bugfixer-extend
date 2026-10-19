@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { AgentSessionMergeProposalDTO } from '../../common/workspaceAgentMergeProtocol.js';
 import type { AgentSessionStore } from './agentSessionStore.js';
+import { runAgentSessionTransaction } from './agentSessionNotificationEvents.js';
 import {
 	AGENT_SESSION_PUBLICATION_DIFF_MAX_BYTES,
 	AGENT_SESSION_PUBLICATION_HISTORY_LIMIT,
@@ -609,9 +610,7 @@ export class AgentSessionPublicationStore {
 	}
 
 	private transaction<T>(callback: () => T): T {
-		this.db.exec('BEGIN IMMEDIATE');
-		try { const value = callback(); this.db.exec('COMMIT'); return value; }
-		catch (error) { this.db.exec('ROLLBACK'); throw error; }
+		return runAgentSessionTransaction(this.db, callback);
 	}
 }
 

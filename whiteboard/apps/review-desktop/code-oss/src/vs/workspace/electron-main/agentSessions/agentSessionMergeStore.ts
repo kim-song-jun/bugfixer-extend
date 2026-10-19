@@ -16,6 +16,7 @@ import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT } from '../../common/workspaceA
 import type { AgentSessionIntegrationGitIdentity, AgentSessionIntegrationProposalDTO } from '../../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
 import type { AgentSessionStore } from './agentSessionStore.js';
+import { runAgentSessionTransaction } from './agentSessionNotificationEvents.js';
 
 export type {
 	AgentSessionMergeApprovalDTO, AgentSessionMergeApplyingBinding, AgentSessionMergeOutcomeDTO,
@@ -817,7 +818,7 @@ export class AgentSessionMergeStore {
 		for (const key of required) { if (!Object.hasOwn(object, key)) { throw new Error(`Merge ${label} is missing ${key}.`); } }
 		for (const key of Object.keys(object)) { if (!allowed.has(key)) { throw new Error(`Merge ${label} contains unknown fields.`); } }
 	}
-	private transaction<T>(operation: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const result = operation(); this.db.exec('COMMIT'); return result; } catch (error) { this.db.exec('ROLLBACK'); throw error; } }
+	private transaction<T>(operation: () => T): T { return runAgentSessionTransaction(this.db, operation); }
 }
 
 function digest(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }

@@ -2299,7 +2299,7 @@ async function verifySessionOnboardingAfterRestart(page, fixture, tag, screensho
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 3/5 · 세션·모델', { exact: true }).waitFor();
   await guide.getByRole('heading', { name: '기존 작업이나 세션·모델 선택', exact: true }).waitFor();
   await guide.getByRole('button', { name: `“${fixture.taskTitle}” 작업으로 Codex 세션 만들기`, exact: true }).waitFor();
-  await guide.getByRole('button', { name: `${fixture.reviewedCommit.name} · ${fixture.reviewedCommit.provider === 'codex' ? 'Codex' : 'Claude'} · ${fixture.reviewedCommit.model} · exited`, exact: true }).waitFor();
+  await guide.getByRole('button', { name: `${fixture.reviewedCommit.name} · ${fixture.reviewedCommit.provider === 'codex' ? 'Codex' : 'Claude'} · ${fixture.reviewedCommit.model} · 유휴`, exact: true }).waitFor();
 
   await captureOnboardingViewport(page, guide, tag, 'actual-project-task-session', screenshots, viewports);
 
@@ -2347,6 +2347,20 @@ async function verifyCompletedSessionOnboardingAfterRestart(page, fixture, tag, 
   const settings = page.locator('.review-home-content.review-settings-page');
 
   await settings.waitFor({ state: 'visible' });
+  const nativeNotificationRow = settings.getByRole('region', { name: 'AI 세션', exact: true })
+    .getByText('운영체제 알림', { exact: true }).locator('..');
+  const nativeNotificationToggle = settings.getByRole('checkbox', { name: 'AI 세션 운영체제 알림', exact: true });
+
+  await nativeNotificationToggle.waitFor({ state: 'visible' });
+  assert.equal(await nativeNotificationToggle.isChecked(), false, 'Native session notifications must remain opt-in by default');
+  await nativeNotificationRow.getByText(/기본으로 꺼져 있습니다\./).waitFor();
+
+  const settingsScreenshot = path.join(output, `ai-session-notification-settings-default-off-${tag}.png`);
+
+  await capturePage(page, settingsScreenshot);
+  screenshots.push(settingsScreenshot);
+  viewports.push({ theme: tag, state: 'native-session-notifications-default-off', width: 1440, height: 900, screenshot: settingsScreenshot });
+
   await settings.getByRole('button', { name: '안내 다시 보기', exact: true }).click();
 
   const guide = workspace.locator('.ai-session-onboarding');
@@ -3003,6 +3017,12 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
   assert.equal(immutableEvidence.version, finalContent.evidenceVersion, 'The reviewed commit evidence must match its content capture version');
 
   database.agentSessionTurns.transitionTurn(fixture.projectId, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
+
+  const completedSession = database.agentSessions.getSession(fixture.projectId, session.id);
+
+  assert.ok(completedSession, 'The successful fixture turn must retain its project session.');
+
+  assert.equal(completedSession.state, 'idle', 'The session returns to idle after its successful turn exits; exited is the turn state.');
 
   const explanation = database.agentSessionReviews.recordHumanExplanation({
     target: { ...scope, evidenceVersion: finalContent.evidenceVersion, evidenceFingerprint: immutableEvidence.fingerprint, path: 'selected.txt', hunkId: null },

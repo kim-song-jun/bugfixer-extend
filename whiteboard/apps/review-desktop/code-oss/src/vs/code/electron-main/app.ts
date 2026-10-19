@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, BrowserWindow, desktopCapturer, Details, dialog, globalShortcut, GPUFeatureStatus, powerMonitor, protocol, screen as electronScreen, session, Session, systemPreferences, WebFrameMain } from 'electron';
+import { app, BrowserWindow, desktopCapturer, Details, dialog, globalShortcut, GPUFeatureStatus, Notification, powerMonitor, protocol, screen as electronScreen, session, Session, systemPreferences, WebFrameMain } from 'electron';
 import { addUNCHostToAllowlist, disableUNCAccessRestrictions } from '../../base/node/unc.js';
 import { validatedIpcMain } from '../../base/parts/ipc/electron-main/ipcMain.js';
 import { hostname, release } from 'os';
@@ -155,6 +155,8 @@ import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/work
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspaceProviderRunProtocol.js';
 import { TaskFolderWriterLock } from '../../workspace/electron-main/providerRuns/taskFolderWriterLock.js';
 import { AgentSessionApplication } from '../../workspace/electron-main/agentSessions/agentSessionApplication.js';
+import { AgentSessionNativeNotifications } from '../../workspace/electron-main/agentSessions/agentSessionNativeNotifications.js';
+import { AgentSessionNativeNotificationOpenCoordinator } from '../../workspace/electron-main/agentSessions/agentSessionNativeNotificationOpenCoordinator.js';
 import { WorkspaceAgentSessionsChannel, type WorkspaceAgentMergeHost, type WorkspaceAgentPublicationHost } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
 import { formatCommitDialogValue } from '../../workspace/electron-main/agentSessions/agentSessionCommitDialog.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../workspace/common/workspaceAgentSessionProtocol.js';
@@ -199,6 +201,8 @@ export class CodeApplication extends Disposable {
 	private reportProjectWindowRestoreFailure!: (projectId: string, error: unknown) => void;
 	private workspaceProviderRuns: WorkspaceProviderRunsChannel | undefined;
 	private agentSessionApplication: AgentSessionApplication | undefined;
+	private agentSessionNativeNotifications: AgentSessionNativeNotifications | undefined;
+	private agentSessionNativeNotificationOpens: AgentSessionNativeNotificationOpenCoordinator<ICodeWindow> | undefined;
 	private workspaceConventionAgent: WorkspaceConventionAgentChannel | undefined;
 	private workspaceEgoCapture: WorkspaceEgoCaptureChannel | undefined;
 	private workspaceE2e: WorkspaceE2eChannel | undefined;
@@ -227,6 +231,9 @@ export class CodeApplication extends Disposable {
 	private closeWorkspaceData(): Promise<void> {
 		return this.workspaceDataShutdown ??= (async () => {
 			try {
+				this.agentSessionNativeNotificationOpens?.shutdown();
+				this.agentSessionNativeNotifications?.dispose();
+				this.agentSessionNativeNotifications = undefined;
 				const results = await Promise.allSettled([
 					Promise.resolve().then(() => this.workspaceProviderRuns?.shutdown()),
 					Promise.resolve().then(() => this.agentSessionApplication?.shutdown()),
@@ -1571,6 +1578,39 @@ export class CodeApplication extends Disposable {
 				catch (shutdownError) { throw new AggregateError([initializationError, shutdownError], 'The PR text host failed startup recovery and owned session processes did not all drain.'); }
 				throw initializationError;
 			}
+			const nativeNotificationOpens = this.agentSessionNativeNotificationOpens = new AgentSessionNativeNotificationOpenCoordinator<ICodeWindow>({
+				getNotification: (projectId, notificationId) => {
+					if (this.workspaceDataShutdown) { return null; }
+					return this.workspaceDatabase?.agentSessions.getNotification(projectId, notificationId) ?? null;
+				},
+				getProjectDescriptor: projectId => {
+					if (this.workspaceDataShutdown) { return undefined; }
+					return this.workspaceDatabase?.getProjectView(projectId)?.descriptorUri.toString();
+				},
+				openProject,
+				findProjectWindow: (projectId, descriptor) => windowsMainService.getWindows().find(window => hasProjectWindow(projectId, descriptor, [window])),
+				focusWindow: window => window.focus(),
+				dispatchOpen: (window, notificationId, requestId) => window.sendWhenReady('vscode:runAction', CancellationToken.None, {
+					id: 'review.openAgentSessionNotification',
+					from: 'review',
+					args: [notificationId, requestId],
+				}),
+			});
+			this._register(windowsMainService.onDidDestroyWindow(window => {
+				nativeNotificationOpens.windowClosed(window);
+			}));
+			const nativeNotifications = this.agentSessionNativeNotifications = new AgentSessionNativeNotifications(
+				this.workspaceDatabase.agentSessions,
+				this.stateService,
+				{
+					isSupported: () => Notification.isSupported(),
+					create: options => new Notification(options),
+				},
+				async (projectId, notificationId) => {
+					await nativeNotificationOpens.open(projectId, notificationId);
+				},
+				logService,
+			);
 			pendingTaskDeletionReplay = providerRuns.recoverPendingTaskDeletions();
 			validatedIpcMain.handle(WORKSPACE_DASHBOARD_CHANNEL, (event, command: string, arg: unknown) => dashboardChannel.call(event.sender, command, arg));
 			this._register(toDisposable(() => validatedIpcMain.removeHandler(WORKSPACE_DASHBOARD_CHANNEL)));
@@ -1748,6 +1788,14 @@ export class CodeApplication extends Disposable {
 					getPrTextRequest: input => agentSessions.prTextApplication.getPrTextRequest(input),
 					cancelPrTextRequest: input => agentSessions.prTextApplication.cancelPrTextRequest(input),
 					applyPrTextCandidate: (input, assertCurrent) => agentSessions.prTextApplication.applyPrTextCandidate(input, assertCurrent),
+				},
+				{
+					getStatus: () => nativeNotifications.getStatus(),
+					setEnabled: enabled => nativeNotifications.setEnabled(enabled),
+					acknowledgeOpened: (sender, projectId, notificationId, requestId) => {
+						const senderWindow = windowsMainService.getWindowByWebContents(sender);
+						return !!senderWindow && nativeNotificationOpens.acknowledge(senderWindow, projectId, notificationId, requestId);
+					},
 				},
 			);
 			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {

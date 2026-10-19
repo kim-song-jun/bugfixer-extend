@@ -19,6 +19,7 @@ import type {
 	SessionNotificationTarget,
 	SessionPageOptions,
 } from '../../common/workspaceAgentSessionProtocol.js';
+import { assertAgentSessionTransactionManaged, publishAgentSessionNotificationAfterCommit, runAgentSessionTransaction, subscribeToCommittedAgentSessionNotifications } from './agentSessionNotificationEvents.js';
 import { canTransitionAgentSessionState, isAgentSessionState } from './agentSessionTransitions.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,6 +34,12 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
 export class AgentSessionStore {
 	constructor(private readonly db: DatabaseSync, private readonly assertOpen: () => void) { }
+
+	/** Observes only newly inserted notifications after their source transaction commits. */
+	onDidCommitNotification(listener: (notification: SessionNotificationDTO) => void, onError: (error: unknown) => void): { dispose(): void } {
+		this.assertOpen();
+		return subscribeToCommittedAgentSessionNotifications(this.db, listener, onError);
+	}
 
 	createSession(input: CreateAgentSessionInput): AgentSessionDTO {
 		this.assertOpen();
@@ -245,6 +252,15 @@ export class AgentSessionStore {
 			FROM agent_session_notifications WHERE project_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`).all(projectId, afterSequence, limit).map(row => this.notificationFromRow(row));
 	}
 
+	getNotification(projectId: string, notificationId: string): SessionNotificationDTO | null {
+		this.assertOpen();
+		this.validateUuid(projectId, 'project ID');
+		this.validateUuid(notificationId, 'notification ID');
+		const row = this.db.prepare(`SELECT id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at
+			FROM agent_session_notifications WHERE project_id = ? AND id = ?`).get(projectId, notificationId);
+		return row ? this.notificationFromRow(row) : null;
+	}
+
 	/** Records a typed alert in the caller's lifecycle/proposal transaction so state and its receipt cannot diverge. */
 	recordNotificationWithinTransaction(input: {
 		readonly eventId: string;
@@ -255,7 +271,7 @@ export class AgentSessionStore {
 		readonly createdAt?: string;
 	}): SessionNotificationDTO {
 		this.assertOpen();
-		if (!this.db.isTransaction) { throw new Error('A durable session notification must share its source event transaction.'); }
+		assertAgentSessionTransactionManaged(this.db);
 		this.validateUuid(input.projectId, 'project ID');
 		this.validateUuid(input.sessionId, 'session ID');
 		if (typeof input.eventId !== 'string' || Buffer.byteLength(input.eventId, 'utf8') < 1 || Buffer.byteLength(input.eventId, 'utf8') > 512) { throw new Error('The notification event ID must contain 1 to 512 bytes.'); }
@@ -285,8 +301,10 @@ export class AgentSessionStore {
 			(id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`)
 			.run(id, input.eventId, input.projectId, input.sessionId, notificationSequence, input.kind, targetKind, target.id, targetTurnId, createdAt);
-		return this.notificationFromRow(this.db.prepare(`SELECT id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at
+		const notification = this.notificationFromRow(this.db.prepare(`SELECT id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at
 			FROM agent_session_notifications WHERE id = ?`).get(id)!);
+		publishAgentSessionNotificationAfterCommit(this.db, notification);
+		return notification;
 	}
 
 	notificationStatus(projectId: string): { readonly unreadCount: number; readonly latestSequence: number } {
@@ -386,14 +404,6 @@ export class AgentSessionStore {
 	}
 
 	private transaction<T>(run: () => T): T {
-		this.db.exec('BEGIN IMMEDIATE;');
-		try {
-			const value = run();
-			this.db.exec('COMMIT;');
-			return value;
-		} catch (error) {
-			this.db.exec('ROLLBACK;');
-			throw error;
-		}
+		return runAgentSessionTransaction(this.db, run);
 	}
 }

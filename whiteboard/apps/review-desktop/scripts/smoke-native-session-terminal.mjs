@@ -22,6 +22,7 @@ const authEnvironmentNames = [
   'OPENAI_API_KEY', 'OPENAI_ACCESS_TOKEN', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'CODEX_AUTH_TOKEN',
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_API_KEY',
 ];
+
 const presentAuthEnvironmentNames = authEnvironmentNames.filter(name => Object.hasOwn(process.env, name));
 assert.deepEqual(presentAuthEnvironmentNames, [], `Provider credential environment keys must be absent: ${presentAuthEnvironmentNames.join(', ')}`);
 
@@ -50,6 +51,7 @@ const receipt = {
   cleanupVerified: false,
   failure: null,
 };
+
 let root;
 let database;
 let browser;

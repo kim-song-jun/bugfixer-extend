@@ -6,6 +6,7 @@ const PAGE_SIZE = 50;
 const MAX_MESSAGES = 500;
 const MAX_BYTES = 1024 * 1024;
 const POLL_INTERVAL_MS = 3500;
+const TARGET_REVEAL_TIMEOUT_MS = 10_000;
 
 export interface SessionMessagesActions {
 	readonly loadPage: (afterSequence: number, limit: number) => Promise<WorkspaceAgentSessionMailboxPage>;
@@ -16,7 +17,7 @@ export interface SessionMessagesActions {
 export interface SessionMessagesController {
 	setContext(projectId: string, recipientSessionId: string, actions: SessionMessagesActions, targetMessageId?: string): void;
 	setTargetMessageId(messageId: string | undefined): void;
-	revealMessage(messageId: string): void;
+	revealMessage(messageId: string): Promise<boolean>;
 	setVisible(visible: boolean): void;
 	refresh(): void;
 	dispose(): void;
@@ -82,6 +83,26 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 	let messages: WorkspaceAgentSessionMailboxMessage[] = [];
 	let locateGeneration = 0;
 	let listDirty = true;
+	let targetRevealTimer: ReturnType<typeof setTimeout> | undefined;
+	let resolveTargetReveal: ((opened: boolean) => void) | undefined;
+
+	const finishTargetReveal = (opened: boolean): void => {
+		if (targetRevealTimer) { clearTimeout(targetRevealTimer); targetRevealTimer = undefined; }
+		const resolve = resolveTargetReveal;
+		resolveTargetReveal = undefined;
+		resolve?.(opened);
+	};
+
+	const beginTargetReveal = (): Promise<boolean> => {
+		finishTargetReveal(false);
+		return new Promise(resolve => {
+			resolveTargetReveal = resolve;
+			targetRevealTimer = setTimeout(() => {
+				targetFocusPending = false;
+				finishTargetReveal(false);
+			}, TARGET_REVEAL_TIMEOUT_MS);
+		});
+	};
 
 	const totalBytes = (): number => messages.reduce((sum, message) => sum + utf8Bytes(message.body), 0);
 
@@ -126,13 +147,14 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 		if (!target) { return false; }
 		target.scrollIntoView({ block: 'center' });
 		target.focus({ preventScroll: true });
-		return true;
+		return document.activeElement === target;
 	};
 
 	const focusPendingTarget = (): boolean => {
 		if (disposed || !visible || !targetFocusPending || !focusTarget()) { return false; }
 		targetFocusPending = false;
 		targetNotice = '알림에서 연 메시지를 강조했습니다. 사람의 조회는 AI 읽음 상태를 바꾸지 않습니다.';
+		finishTargetReveal(true);
 		return true;
 	};
 
@@ -339,6 +361,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 			targetNotice = errorMessage;
 			targetFocusPending = false;
 			targetLookupFailed = true;
+			finishTargetReveal(false);
 		} finally {
 			if (!disposed && generation === locateGeneration && request === requestGeneration && context === contextGeneration) {
 				findingTarget = false;
@@ -352,6 +375,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 	};
 
 	firstButton.addEventListener('click', () => {
+		finishTargetReveal(false);
 		if (timer) { clearTimeout(timer); timer = undefined; }
 		requestGeneration++;
 		locateGeneration++;
@@ -391,6 +415,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 			currentActions = actionsValue;
 			const changed = currentProjectId !== projectIdValue || currentRecipientSessionId !== recipientSessionIdValue;
 			const targetChanged = currentTargetMessageId !== targetMessageIdValue;
+			if (changed || targetChanged) { finishTargetReveal(false); }
 			if (changed) {
 				if (timer) { clearTimeout(timer); timer = undefined; }
 				contextGeneration++;
@@ -432,6 +457,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 		},
 		setTargetMessageId(messageId): void {
 			if (disposed || currentTargetMessageId === messageId) { return; }
+			finishTargetReveal(false);
 			currentTargetMessageId = messageId;
 			targetFocusPending = !!messageId;
 			targetLookupFailed = false;
@@ -449,8 +475,9 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 				void loadTargetMessage();
 			}
 		},
-		revealMessage(messageId): void {
-			if (disposed || !messageId) { return; }
+		revealMessage(messageId): Promise<boolean> {
+			if (disposed || !messageId || !visible) { return Promise.resolve(false); }
+			const completion = beginTargetReveal();
 			if (currentTargetMessageId !== messageId) {
 				currentTargetMessageId = messageId;
 				targetFocusPending = true;
@@ -468,9 +495,9 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 				} else if (visible && !loading) {
 					void loadTargetMessage();
 				}
-				return;
+				return completion;
 			}
-			if (targetFocusPending || findingTarget) { return; }
+			if (targetFocusPending || findingTarget) { return completion; }
 			targetFocusPending = true;
 			targetLookupFailed = false;
 			errorMessage = undefined;
@@ -480,11 +507,13 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 			} else if (visible) {
 				void loadTargetMessage();
 			}
+			return completion;
 		},
 		setVisible(value): void {
 			if (disposed || visible === value) { return; }
 			visible = value;
 			if (!visible) {
+				finishTargetReveal(false);
 				if (timer) { clearTimeout(timer); timer = undefined; }
 				requestGeneration++;
 				locateGeneration++;
@@ -501,6 +530,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 		dispose(): void {
 			if (disposed) { return; }
 			disposed = true;
+			finishTargetReveal(false);
 			contextGeneration++;
 			requestGeneration++;
 			locateGeneration++;

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
+import { runAgentSessionTransaction } from './agentSessionNotificationEvents.js';
 import { createMergedPublicationFixture } from './agentSessionPublicationFixture.testHelpers.js';
 
 test('publication journal binds a real merged result, is idempotent, strict, bounded, and readable after reopen', () => {
@@ -79,15 +80,22 @@ test('publication journal binds a real merged result, is idempotent, strict, bou
 
 test('publication history retains at most five full proposals and never prunes approved or started authority', () => {
 	const fixture = createMergedPublicationFixture(); let database: WorkspaceDatabase | undefined;
+	let disposeNotificationObserver: { dispose(): void } | undefined;
 	try {
 		database = WorkspaceDatabase.open(fixture.sourcePath);
 		const store = database.agentSessionPublications;
+		const committedNotifications: string[] = [];
+		disposeNotificationObserver = database.agentSessions.onDidCommitNotification(notification => committedNotifications.push(notification.eventId), error => { throw error; });
 		const ids: string[] = [];
 		for (let revision = 0; revision < 6; revision++) {
 			const proposal = store.createProposal({ ...fixture.input, expectedRevision: revision, title: `Change ${revision}` });
 			ids.push(proposal.id);
 			if (revision > 0) { store.recordTrustedHumanApproval(proposal.id, proposal.revision, proposal.fingerprint); }
 		}
+		assert.equal(committedNotifications.length, 6, 'Each newly inserted publication proposal has one post-commit event.');
+		const retried = store.createProposal({ ...fixture.input, expectedRevision: 5, title: 'Change 5' });
+		assert.equal(retried.id, ids[5]);
+		assert.equal(committedNotifications.length, 6, 'An idempotent proposal retry does not replay its committed notification.');
 		const first = store.listProposals(fixture.input.projectId, fixture.input.sessionId, fixture.input.turnId);
 		assert.deepEqual(first.proposals.map(proposal => proposal.id), ids.slice(1));
 		assert.equal(first.hasMore, false);
@@ -95,17 +103,18 @@ test('publication history retains at most five full proposals and never prunes a
 		const prunedProposalAlert = database.agentSessions.listNotifications(fixture.input.projectId, { limit: 100 }).find(item => item.eventId === `publicationProposal:${ids[0]}:review`);
 		assert.deepEqual(prunedProposalAlert?.target, { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId }, 'The durable alert keeps its exact pruned target.');
 		const sqlite = Reflect.get(database, 'db') as DatabaseSync;
-		sqlite.exec('BEGIN IMMEDIATE;');
-		assert.deepEqual(database.agentSessions.recordNotificationWithinTransaction({ eventId: `publicationProposal:${ids[0]}:review`, projectId: fixture.input.projectId,
-			sessionId: fixture.input.sessionId, kind: 'prReady', target: { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId } }), prunedProposalAlert,
-		'An idempotent event retry remains valid after its proposal is pruned.');
-		sqlite.exec('COMMIT;');
+		assert.deepEqual(
+			runAgentSessionTransaction(sqlite, () => database.agentSessions.recordNotificationWithinTransaction({ eventId: `publicationProposal:${ids[0]}:review`, projectId: fixture.input.projectId,
+				sessionId: fixture.input.sessionId, kind: 'prReady', target: { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId } })),
+			prunedProposalAlert,
+			'An idempotent event retry remains valid after its proposal is pruned.',
+		);
 		const latest = first.proposals.at(-1)!;
 		const started = store.startOperation(latest.id, latest.fingerprint);
 		assert.throws(() => store.createProposal({ ...fixture.input, expectedRevision: 6, title: 'Change 6' }), /history is full/);
 		assert.deepEqual(store.readOperation(started.id), started);
 		assert.equal(store.getProposal(latest.id)?.approval?.proposalFingerprint, latest.fingerprint);
-	} finally { database?.close(); fixture.dispose(); }
+	} finally { disposeNotificationObserver?.dispose(); database?.close(); fixture.dispose(); }
 });
 
 test('publication recovery preserves a partially created PR ID after a base SHA race and superseding proposal', () => {

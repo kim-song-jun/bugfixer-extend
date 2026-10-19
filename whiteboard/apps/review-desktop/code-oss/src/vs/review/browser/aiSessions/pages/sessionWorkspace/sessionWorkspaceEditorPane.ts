@@ -571,6 +571,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return this.projectId === projectId && this.environment.reviewWindowLaunch.kind === 'project' && this.environment.reviewWindowLaunch.projectId === projectId;
 	}
 
+	cancelNotificationNavigation(): void {
+		this.notificationNavigationGeneration++;
+	}
+
 	private async stopExactTurn(sessionId: string, turnId: string): Promise<void> {
 		const session = this.sessions.find(item => item.id === sessionId && item.projectId === this.projectId);
 		const turn = session ? this.latestTurn(sessionId) : undefined;
@@ -931,7 +935,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return this.notificationsMount;
 	}
 
-	private async openNotification(notification: SessionNotificationDTO): Promise<boolean> {
+	async openNotification(notification: SessionNotificationDTO): Promise<boolean> {
 		const generation = ++this.notificationNavigationGeneration;
 		const isCurrent = (): boolean => generation === this.notificationNavigationGeneration && this.projectId === notification.projectId;
 		if (!this.projectId || notification.projectId !== this.projectId) { this.showError('현재 프로젝트의 알림이 아닙니다.'); return false; }
@@ -998,8 +1002,25 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.error = undefined;
 		this.render();
 		requestAnimationFrame(() => { if (isCurrent()) { this.root?.querySelector<HTMLElement>(`#ai-session-tab-${this.activeTab}`)?.focus({ preventScroll: true }); } });
-		if (notification.target.kind === 'message') { this.sessionMessages?.revealMessage(notification.target.id); }
+		if (notification.target.kind === 'message') {
+			const revealed = await this.sessionMessages?.revealMessage(notification.target.id);
+			if (!isCurrent()) { return false; }
+			if (!revealed) {
+				restoreNavigation();
+				if (isCurrent()) { this.showError('알림 메시지를 실제 우편함 항목에서 찾아 포커스하지 못했습니다. 알림은 읽지 않은 상태로 보존했습니다.'); }
+				return false;
+			}
+		}
 		if (targetTurnId) { this.render(); }
+		if (notification.target.kind === 'turn') {
+			const logsShown = await this.sessionLogs?.confirmContext({ projectId: requestedProjectId, sessionId: recipient.id, turnId: notification.target.id });
+			if (!isCurrent()) { return false; }
+			if (!logsShown) {
+				restoreNavigation();
+				if (isCurrent()) { this.showError('알림의 정확한 실행 기록을 불러와 표시하지 못했습니다. 알림은 읽지 않은 상태로 보존했습니다.'); }
+				return false;
+			}
+		}
 		if ('turnId' in notification.target) {
 			try {
 				const selectedExactTarget = await this.sessionChangesController?.revealNotificationTarget(notification.target, isCurrent);
@@ -1373,14 +1394,53 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 
 interface OpenWorkspaceRequest {
 	onboarding: boolean;
+	notification?: SessionNotificationDTO;
 	complete?: () => void;
+	notificationComplete?: (opened: boolean) => void;
 	fail?: (error: unknown) => void;
+	cancel?: () => void;
+	settled?: boolean;
+	timer?: ReturnType<typeof setTimeout>;
 }
 
 const openEmitter = new Emitter<OpenWorkspaceRequest>();
-export function openAgentSessionWorkspace(): void { openEmitter.fire({ onboarding: false }); }
+const pendingOpenRequests: OpenWorkspaceRequest[] = [];
+const activeOpenRequests = new Set<OpenWorkspaceRequest>();
+let openRequestsReady = false;
+const OPEN_REQUEST_TIMEOUT_MS = 30_000;
+const NATIVE_NOTIFICATION_REQUEST_TIMEOUT_MS = 15_000;
+function settleOpenRequest(request: OpenWorkspaceRequest, opened: boolean, error?: unknown): void {
+	if (request.settled) { return; }
+	request.settled = true;
+	if (request.timer) { clearTimeout(request.timer); request.timer = undefined; }
+	activeOpenRequests.delete(request);
+	const pendingIndex = pendingOpenRequests.indexOf(request);
+	if (pendingIndex >= 0) { pendingOpenRequests.splice(pendingIndex, 1); }
+	if (request.notification) {
+		if (!opened || error !== undefined) { request.cancel?.(); }
+		request.notificationComplete?.(opened && !error);
+	}
+	else if (error !== undefined) { request.fail?.(error); }
+	else { request.complete?.(); }
+}
+function submitOpenRequest(request: OpenWorkspaceRequest): void {
+	activeOpenRequests.add(request);
+	request.timer = setTimeout(() => settleOpenRequest(request, false, new Error('AI 세션 작업 공간 요청이 제한 시간 안에 완료되지 않았습니다.')),
+		request.notification ? NATIVE_NOTIFICATION_REQUEST_TIMEOUT_MS : OPEN_REQUEST_TIMEOUT_MS);
+	if (openRequestsReady) { openEmitter.fire(request); return; }
+	if (pendingOpenRequests.length >= 32) {
+		const error = new Error('AI 세션 알림을 열 준비가 되지 않았습니다. 알림은 읽지 않은 상태로 보존했습니다.');
+		settleOpenRequest(request, false, error);
+		return;
+	}
+	pendingOpenRequests.push(request);
+}
+export function openAgentSessionWorkspace(): void { submitOpenRequest({ onboarding: false }); }
+function openAgentSessionNotification(notification: SessionNotificationDTO): Promise<boolean> {
+	return new Promise(resolve => submitOpenRequest({ onboarding: false, notification, notificationComplete: resolve }));
+}
 function openAgentSessionOnboarding(): Promise<void> {
-	return new Promise((resolve, reject) => openEmitter.fire({ onboarding: true, complete: resolve, fail: reject }));
+	return new Promise((resolve, reject) => submitOpenRequest({ onboarding: true, complete: resolve, fail: reject }));
 }
 
 class AgentSessionWorkspaceContribution extends Disposable implements IWorkbenchContribution {
@@ -1395,10 +1455,32 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 		@INotificationService private readonly notificationService: INotificationService) {
 		super();
 		this._register(openEmitter.event(request => {
-			void this.open(true, request.onboarding).then(() => request.complete?.(), error => {
-				request.fail?.(error);
+			if (request.settled) { return; }
+			void this.open(true, request.onboarding, () => !request.settled).then(async pane => {
+				if (request.settled) { return; }
+				if (request.notification) {
+					if (!(pane instanceof AgentSessionWorkspaceEditorPane) || !pane.matchesProject(request.notification.projectId)) {
+						throw new Error('알림이 속한 프로젝트의 AI 세션 작업 공간을 열지 못했습니다.');
+					}
+					request.cancel = () => pane.cancelNotificationNavigation();
+					if (request.settled) { request.cancel(); return; }
+					settleOpenRequest(request, await pane.openNotification(request.notification));
+					return;
+				}
+				settleOpenRequest(request, true);
+			}).catch(error => {
+				settleOpenRequest(request, false, error);
 				this.notificationService.error('AI 세션 작업 공간을 열지 못했습니다. 다시 시도해 주세요.');
 			});
+		}));
+		openRequestsReady = true;
+		for (const request of [...pendingOpenRequests]) { if (!request.settled) { openEmitter.fire(request); } }
+		this._register(toDisposable(() => {
+			openRequestsReady = false;
+			for (const request of [...activeOpenRequests]) {
+				settleOpenRequest(request, false, new Error('AI 세션 작업 공간이 닫혀 알림 요청을 완료하지 못했습니다.'));
+			}
+			pendingOpenRequests.length = 0;
 		}));
 		window.addEventListener('resize', this.onResize);
 		this._register(toDisposable(() => window.removeEventListener('resize', this.onResize)));
@@ -1409,14 +1491,16 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 		}
 	};
-	private async open(activate: boolean, showOnboarding = false): Promise<void> {
+	private async open(activate: boolean, showOnboarding = false, isCurrent: () => boolean = () => true): Promise<EditorPane | undefined> {
 		const launch = this.environment.reviewWindowLaunch;
-		if (launch.kind !== 'project') return;
+		if (launch.kind !== 'project') return undefined;
 		await this.groups.whenRestored;
+		if (!isCurrent()) { return undefined; }
 		try {
 			if (window.innerWidth > 980) {
 				this.layoutService.setPartHidden(false, Parts.SIDEBAR_PART);
 				const sidebar = await this.paneCompositeService.openPaneComposite('workbench.view.devfast.projectSidebar', ViewContainerLocation.Sidebar);
+				if (!isCurrent()) { return undefined; }
 				if (!sidebar) throw new Error('프로젝트 메뉴를 열지 못했습니다.');
 			}
 		} catch (error) {
@@ -1427,12 +1511,15 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 			.find(({ editor }) => editor instanceof AgentSessionWorkspaceEditorInput && editor.projectId === launch.projectId);
 		const editorInput = existing?.editor ?? this.instantiationService.createInstance(AgentSessionWorkspaceEditorInput, launch.projectId);
 		const group = existing?.group ?? this.groups.activeGroup;
+		if (!isCurrent()) { return undefined; }
 		const pane = await this.editorService.openEditor(editorInput, { pinned: true, revealIfVisible: true, ...(activate ? {} : { inactive: true, preserveFocus: true }) }, group);
+		if (!isCurrent()) { return undefined; }
 		if (showOnboarding && pane instanceof AgentSessionWorkspaceEditorPane && pane.matchesProject(launch.projectId)) {
 			pane.openOnboardingGuide();
 		} else if (showOnboarding) {
 			throw new Error('현재 프로젝트의 AI 세션 안내를 열지 못했습니다. 프로젝트 창에서 다시 시도해 주세요.');
 		}
+		return pane;
 	}
 }
 
@@ -1455,5 +1542,55 @@ class OpenAgentSessionOnboardingAction extends Action2 {
 }
 
 registerAction2(OpenAgentSessionOnboardingAction);
+
+class OpenAgentSessionNotificationAction extends Action2 {
+	constructor() {
+		super({ id: 'review.openAgentSessionNotification', title: localize2('review.openAgentSessionNotification', 'Whiteboard: AI 세션 알림 열기'), f1: false });
+	}
+
+	override async run(accessor: ServicesAccessor, notificationId: string, requestId: string): Promise<void> {
+		const environment = accessor.get(INativeWorkbenchEnvironmentService);
+		const notificationService = accessor.get(INotificationService);
+		const launch = environment.reviewWindowLaunch;
+		if (launch.kind !== 'project') { notificationService.error('AI 세션 알림은 해당 프로젝트 창에서만 열 수 있습니다.'); return; }
+		let notification: SessionNotificationDTO | null;
+		try {
+			notification = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getNotification', {
+				projectId: launch.projectId,
+				notificationId,
+			}) as SessionNotificationDTO | null;
+		} catch {
+			notificationService.error('저장된 AI 세션 알림을 확인하지 못했습니다. 읽지 않은 상태로 보존했습니다.');
+			return;
+		}
+		if (!notification || notification.id !== notificationId || notification.projectId !== launch.projectId) {
+			notificationService.error('저장된 AI 세션 알림을 찾지 못했습니다. 알림은 읽지 않은 상태로 보존했습니다.');
+			return;
+		}
+		if (!await openAgentSessionNotification(notification)) {
+			notificationService.error('알림의 정확한 항목을 열지 못했습니다. 알림은 읽지 않은 상태로 보존했습니다.');
+			return;
+		}
+		try {
+			const acknowledged = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'acknowledgeNativeNotificationOpen', {
+				projectId: launch.projectId,
+				notificationId: notification.id,
+				requestId,
+			}) as boolean;
+			if (!acknowledged) {
+				notificationService.error('알림 열기 요청이 만료되었거나 프로젝트 창이 닫혀 읽음 상태를 저장하지 않았습니다.');
+				return;
+			}
+			await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'markNotificationRead', {
+				projectId: launch.projectId,
+				notificationId: notification.id,
+			});
+		} catch {
+			notificationService.error('알림은 열었지만 읽음 상태를 저장하지 못했습니다.');
+		}
+	}
+}
+
+registerAction2(OpenAgentSessionNotificationAction);
 
 registerWorkbenchContribution2(AgentSessionWorkspaceContribution.ID, AgentSessionWorkspaceContribution, WorkbenchPhase.AfterRestored);

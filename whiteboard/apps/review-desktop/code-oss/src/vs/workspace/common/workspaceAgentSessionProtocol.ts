@@ -241,7 +241,8 @@ export interface AgentSessionTranscriptPageDTO {
 /** Project-window IPC contract. Runtime authority is always derived from the sender's live window. */
 export type WorkspaceAgentSessionsCommand =
 	| 'inspectSetup' | 'listSessions' | 'createSession' | 'workspacePreparation' | 'prepareWorkspace' | 'listTurns' | 'preview' | 'start' | 'stop'
-	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect' | 'readTranscript' | 'listNotifications' | 'markNotificationRead' | 'notificationStatus' | 'listMessages' | 'getMessage'
+	| 'attach' | 'read' | 'write' | 'resize' | 'disconnect' | 'readTranscript' | 'listNotifications' | 'getNotification' | 'markNotificationRead' | 'notificationStatus'
+	| 'nativeNotificationStatus' | 'setNativeNotificationsEnabled' | 'acknowledgeNativeNotificationOpen' | 'listMessages' | 'getMessage'
 	| 'listWorkflows' | 'getWorkflow' | 'createWorkflow' | 'reviseWorkflow' | 'approveWorkflow' | 'startWorkflow' | 'cancelWorkflow'
 	| 'getLatestChangeEvidence' | 'listChangeEvidence' | 'getChangeFile' | 'getChangeHunks'
 	| 'getLatestChangeExplanation' | 'listChangeExplanationRevisions' | 'recordHumanChangeExplanation'

@@ -2,6 +2,7 @@ import type {
   ReviewCanvasSettingsContent,
   ReviewCliInstallStatus,
   ReviewKeymapChoice,
+  ReviewNativeNotificationStatus,
   ReviewThemeChoice,
 } from "@dev.fast/review-protocol";
 import { type ReactNode, useEffect, useState } from "react";
@@ -53,6 +54,9 @@ export function SettingsPage({
   const [scratchpadEnabled, setScratchpadEnabled] = useState(
     settings.scratchpadEnabled,
   );
+  const [nativeNotifications, setNativeNotifications] = useState(
+    settings.nativeNotifications,
+  );
 
   const [installStatus, setInstallStatus] = useState<
     ReviewCliInstallStatus | undefined
@@ -64,6 +68,11 @@ export function SettingsPage({
   useEffect(
     () => setInstallStatus(settings.install?.status),
     [settings.install?.status],
+  );
+
+  useEffect(
+    () => setNativeNotifications(settings.nativeNotifications),
+    [settings.nativeNotifications],
   );
 
   const install =
@@ -103,23 +112,48 @@ export function SettingsPage({
             이 설정은 이 컴퓨터의 Whiteboard에 적용됩니다.
           </p>
 
-          {reopenSessionGuide ? (
+          {reopenSessionGuide || (nativeNotifications && settings.setNativeNotificationsEnabled) ? (
             <Section label="AI 세션">
-              <Row
-                label="시작 안내"
-                description="이 프로젝트의 CLI, 세션, 실행 범위와 변경 검토 안내를 다시 엽니다. AI 작업은 실행하지 않습니다."
-              >
-                <button
-                  type="button"
-                  className="review-settings-button"
-                  disabled={busy !== null}
-                  onClick={() =>
-                    void run("session-onboarding", reopenSessionGuide)
-                  }
+              {reopenSessionGuide ? (
+                <Row
+                  label="시작 안내"
+                  description="이 프로젝트의 CLI, 세션, 실행 범위와 변경 검토 안내를 다시 엽니다. AI 작업은 실행하지 않습니다."
                 >
-                  안내 다시 보기
-                </button>
-              </Row>
+                  <button
+                    type="button"
+                    className="review-settings-button"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      void run("session-onboarding", reopenSessionGuide)
+                    }
+                  >
+                    안내 다시 보기
+                  </button>
+                </Row>
+              ) : null}
+              {nativeNotifications && settings.setNativeNotificationsEnabled ? (
+                <Row
+                  label="운영체제 알림"
+                  description={nativeNotificationDescription(nativeNotifications)}
+                >
+                  <label className="review-settings-toggle" aria-label="AI 세션 운영체제 알림">
+                    <input
+                      type="checkbox"
+                      aria-label="AI 세션 운영체제 알림"
+                      checked={nativeNotifications.enabled}
+                      disabled={busy !== null}
+                      onChange={(event) => {
+                        const enabled = event.target.checked;
+                        void run(
+                          "native-notifications",
+                          () => settings.setNativeNotificationsEnabled!(enabled),
+                          setNativeNotifications,
+                        );
+                      }}
+                    />
+                  </label>
+                </Row>
+              ) : null}
             </Section>
           ) : null}
 
@@ -325,6 +359,26 @@ export function SettingsPage({
       </div>
     </main>
   );
+}
+
+function nativeNotificationDescription(status: ReviewNativeNotificationStatus): string {
+  if (status.availability === "unsupported") {
+    return "이 환경은 운영체제 알림을 지원하지 않습니다. 기본 설정은 꺼져 있으며, 알림 권한 상태는 앱에서 확인할 수 없습니다.";
+  }
+  if (status.lastDelivery === "failed") {
+    return "최근 알림 표시가 실패했습니다. macOS 시스템 설정에서 Whiteboard 알림이 허용되어 있는지 확인해 주세요. 앱에서는 권한 허용 여부를 확인할 수 없습니다.";
+  }
+  if (status.lastDelivery === "shown") {
+    return "최근 표시 요청이 운영체제에 전달되었습니다. macOS 설정에 따라 화면에 보이지 않을 수 있으며, 앱에서는 권한 허용 여부를 확인할 수 없습니다.";
+  }
+  if (status.availability === "unknown") {
+    return status.enabled
+      ? "운영체제 알림 지원 여부는 아직 확인되지 않았습니다. 새 AI 세션 알림에서 확인하며, macOS 권한 허용 여부는 앱에서 확인할 수 없습니다."
+      : "기본으로 꺼져 있습니다. 알림 지원 여부는 아직 확인되지 않았으며, macOS 권한 허용 여부는 앱에서 확인할 수 없습니다.";
+  }
+  return status.enabled
+    ? "새 AI 세션 알림을 운영체제에 표시합니다. 알림에는 세션 이름, 메시지와 코드가 포함되지 않습니다. macOS 알림 허용 여부는 앱에서 확인할 수 없습니다."
+    : "기본으로 꺼져 있습니다. 켜면 새 AI 세션 알림을 운영체제에 표시합니다. 세션 이름, 메시지와 코드는 포함되지 않습니다.";
 }
 
 function Section({ label, children }: { label: string; children: ReactNode }) {
