@@ -2985,6 +2985,7 @@ async function prepareReviewedConflictResolution(fixture) {
   const indexBytes = await readFile(path.join(gitDirectory, 'index'));
   const stagedTree = (await git('write-tree')).trim();
   const fullDiff = await git('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', receipt.targetHead, stagedTree);
+
   const resolution = {
     actor: 'CI fixture human-resolution simulation; no AI provider was executed.',
     text: resolvedText,
@@ -2994,6 +2995,7 @@ async function prepareReviewedConflictResolution(fixture) {
     fullDiffFingerprint: createHash('sha256').update(fullDiff).digest('hex'),
     indexDigest: createHash('sha256').update(await git('ls-files', '--stage', '-z')).digest('hex'),
   };
+
   resolution.treeDigest = createHash('sha256').update(await git('ls-tree', '-r', '-z', '--full-tree', resolution.stagedTree)).digest('hex');
 
   assert.equal((await git('rev-parse', 'HEAD')).trim(), receipt.targetHead, 'Manual staging must not advance the detached generation HEAD');
@@ -3031,6 +3033,7 @@ async function verifyReviewedResolutionProposal(page, fixture, tag, screenshots,
   await page.setViewportSize({ width: 760, height: 820 });
   await page.waitForFunction(() => window.innerWidth === 760);
   await diff.scrollIntoViewIfNeeded();
+
   const narrowLayout = await review.evaluate(element => {
     const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 병합 적용');
     const bounds = action?.getBoundingClientRect();
@@ -3076,6 +3079,7 @@ async function verifyReviewedResolutionApply(page, fixture, tag, screenshots, vi
   await page.setViewportSize({ width: 760, height: 820 });
   await page.waitForFunction(() => window.innerWidth === 760);
   await apply.scrollIntoViewIfNeeded();
+
   const layout = await review.evaluate(element => {
     const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 병합 적용');
     const bounds = action?.getBoundingClientRect();
@@ -3379,6 +3383,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
   await selectedProposal.waitFor();
   await selectedProposal.focus();
   await selectedProposal.press('Tab');
+
   const keyboardFocus = await publication.evaluate(element => {
     const active = document.activeElement;
 

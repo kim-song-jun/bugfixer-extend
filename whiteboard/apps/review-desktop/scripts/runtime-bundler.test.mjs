@@ -136,9 +136,11 @@ test("final package verification requires the CLI and rechecks archives outside 
 
     for (const artifact of requiredPackagedArtifacts(packaged)) {
       if (artifact === cli) continue;
+
       if (artifact === path.join(runtime, PR_REF_GUARD)) {
         continue;
       }
+
       await mkdir(path.dirname(artifact), { recursive: true });
 
       if (artifact === path.join(runtime, "node_modules")) {

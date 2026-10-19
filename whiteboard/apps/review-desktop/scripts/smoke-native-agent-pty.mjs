@@ -358,6 +358,7 @@ try {
 
   let taintedRevokeAttempts = 0;
   let allowTaintedRevocation = false;
+
   const taintedHost = createHost(() => {
     let buffered = '';
     let readyEmitted = false;
@@ -380,6 +381,7 @@ try {
     };
   }, undefined, () => {
     taintedRevokeAttempts++;
+
     if (!allowTaintedRevocation) throw new Error('fixture access revocation failed');
   });
 
@@ -420,6 +422,7 @@ try {
   allowTaintedRevocation = true;
   receipt.taintedCleanup.retries = [];
   let retryTaintedStop;
+
   for (let attempt = 0; attempt < 2; attempt++) {
     retryTaintedStop = await taintedHost.stop(tainted);
     receipt.taintedCleanup.retries.push({ state: retryTaintedStop.state, cleanupVerified: retryTaintedStop.cleanupVerified, error: retryTaintedStop.error });
