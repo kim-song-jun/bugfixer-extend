@@ -297,7 +297,7 @@ export class AgentPtyHost {
 				if (record.state === 'starting') { record.rejectStartup(new Error('guardian exited before provider startup completed')); }
 				if (record.state !== 'stopping') {
 					const gone = processGroupGone(child.pid);
-					record.state = gone === true ? 'stopped' : 'cleanupUnverified';
+					record.state = gone === true && record.accessRevoked ? 'exited' : 'cleanupUnverified';
 				}
 				this.notifyExitListeners(record);
 				void this.stop(handle);
@@ -422,7 +422,7 @@ export class AgentPtyHost {
 
 	async release(handle: AgentPtyHandle): Promise<void> {
 		const record = this.requireOwned(handle);
-		if (record.state !== 'stopped' || record.listeners.size > 0 || record.exitListeners.size > 0) { throw new Error('A PTY handle can be released only after verified stop and detach.'); }
+		if (record.state !== 'stopped' || !record.accessRevoked || record.listeners.size > 0 || record.exitListeners.size > 0) { throw new Error('A PTY handle can be released only after verified stop and detach.'); }
 		if (!(await this.cleanupControlResources(record))) { throw new Error('PTY control resources could not be closed safely.'); }
 		record.output.length = 0;
 		record.outputBytes = 0;
@@ -552,46 +552,41 @@ export class AgentPtyHost {
 		}
 		if (record.state === 'starting') { record.rejectStartup(new Error('PTY stopped while starting')); }
 		const child = record.pty;
-		if (!child) { return this.withRevocationResult(await this.finishStop(record, true), revocationError); }
-		if (record.state === 'stopped') { return this.withRevocationResult(await this.finishStop(record, true), revocationError); }
+		if (!child) { return this.finishStop(record, true, undefined, revocationError); }
+		if (record.state === 'stopped') { return this.finishStop(record, true, undefined, revocationError); }
 		record.state = 'stopping';
 		const pgid = child.pid;
 		const before = processGroupGone(pgid);
-		if (before === true) { return this.withRevocationResult(await this.waitForGroupCleanup(record, pgid), revocationError); }
-		if (before === undefined) { return this.withRevocationResult(await this.finishStop(record, false, 'The PTY process group cannot be inspected.'), revocationError); }
+		if (before === true) { return this.waitForGroupCleanup(record, pgid, revocationError); }
+		if (before === undefined) { return this.finishStop(record, false, 'The PTY process group cannot be inspected.', revocationError); }
 		if (!record.controlDisconnected && !record.guardianCleanup && record.controlSocket && !record.controlSocket.destroyed) {
 			this.sendControl(record.controlSocket, { command: 'stop' });
 		} else {
 			for (const socket of record.controlSockets) { socket.destroy(); }
 		}
-		return this.withRevocationResult(await this.waitForGroupCleanup(record, pgid), revocationError);
+		return this.waitForGroupCleanup(record, pgid, revocationError);
 	}
 
-	private withRevocationResult(result: AgentPtyStopResult, revocationError?: string): AgentPtyStopResult {
-		if (!revocationError) { return result; }
-		return { state: 'cleanupUnverified', cleanupVerified: false, error: [result.error, revocationError].filter(Boolean).join(' ') };
-	}
-
-	private async waitForGroupCleanup(record: OwnedPty, pgid: number): Promise<AgentPtyStopResult> {
+	private async waitForGroupCleanup(record: OwnedPty, pgid: number, revocationError?: string): Promise<AgentPtyStopResult> {
 		const deadline = Date.now() + this.stopVerifyMs;
 		let gone = processGroupGone(pgid);
 		while (gone === false && Date.now() < deadline) {
 			await delay(PROCESS_GROUP_POLL_MS);
 			gone = processGroupGone(pgid);
 		}
-		if (gone !== true) { return this.finishStop(record, false, 'The owned PTY process group is still live or cannot be verified.'); }
+		if (gone !== true) { return this.finishStop(record, false, 'The owned PTY process group is still live or cannot be verified.', revocationError); }
 		if (record.pty && !record.ptyExited && !(await waitForPromise(record.ptyExitPromise, this.stopVerifyMs))) {
 			if (!record.outputDrainGapAdded) {
 				record.outputDrainGapAdded = true;
 				this.appendOutput(record, '', true);
 			}
-			return this.finishStop(record, false, 'The PTY exit event did not confirm output drain.');
+			return this.finishStop(record, false, 'The PTY exit event did not confirm output drain.', revocationError);
 		}
-		return this.finishStop(record, true);
+		return this.finishStop(record, true, undefined, revocationError);
 	}
 
-	private async finishStop(record: OwnedPty, verified: boolean, error?: string): Promise<AgentPtyStopResult> {
-		record.state = verified ? 'stopped' : 'cleanupUnverified';
+	private async finishStop(record: OwnedPty, verified: boolean, error?: string, revocationError?: string): Promise<AgentPtyStopResult> {
+		record.state = 'stopping';
 		if (verified && record.ptyExited) {
 			this.finishSanitizer(record);
 			this.disposePtyListeners(record);
@@ -601,16 +596,18 @@ export class AgentPtyHost {
 				if (!(await this.cleanupControlResources(record))) {
 					record.state = 'cleanupUnverified';
 					this.notifyExitListeners(record);
-					return { state: 'cleanupUnverified', cleanupVerified: false, error: 'PTY control resources did not close within the bounded cleanup window.' };
+					return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources did not close within the bounded cleanup window.', revocationError].filter(Boolean).join(' ') };
 				}
 			} catch {
 				record.state = 'cleanupUnverified';
 				this.notifyExitListeners(record);
-				return { state: 'cleanupUnverified', cleanupVerified: false, error: 'PTY control resources could not be closed.' };
+				return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources could not be closed.', revocationError].filter(Boolean).join(' ') };
 			}
 		}
+		const state: AgentPtyStopResult['state'] = verified && !revocationError ? 'stopped' : 'cleanupUnverified';
+		record.state = state;
 		this.notifyExitListeners(record);
-		return { state: record.state, cleanupVerified: verified, ...(error ? { error } : {}) };
+		return { state, cleanupVerified: verified && !revocationError, ...([error, revocationError].filter(Boolean).length ? { error: [error, revocationError].filter(Boolean).join(' ') } : {}) };
 	}
 
 	private async cleanupControlResources(record: OwnedPty): Promise<boolean> {

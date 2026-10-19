@@ -135,13 +135,13 @@ process.once('SIGINT', requestAbort);
 
 process.once('SIGTERM', requestAbort);
 
-function createHost(createSanitizer = () => createAgentPtyOutputSanitizer({ knownSecrets: [secret] }), persistOutput) {
+function createHost(createSanitizer = () => createAgentPtyOutputSanitizer({ knownSecrets: [secret] }), persistOutput, revokeAccess = () => {}) {
   const options = {
     guardianNodeExecutable: nodeExecutable,
     guardianScriptPath,
     createSanitizer,
     // The direct host contracts use a disposable fixture with no launch-scoped access.
-    revokeAccess: () => {},
+    revokeAccess,
     maxOutputBytes: 4096,
     maxOutputChunks: 16,
   };
@@ -356,6 +356,8 @@ try {
   await assert.rejects(failureHost.start({ executable: path.join(root, 'missing-provider'), args: [], cwd: root, env: {}, cols: 80, rows: 24 }), /failed to start/);
   receipt.checks.push('provider spawn failure rejects');
 
+  let taintedRevokeAttempts = 0;
+  let allowTaintedRevocation = false;
   const taintedHost = createHost(() => {
     let buffered = '';
     let readyEmitted = false;
@@ -376,6 +378,9 @@ try {
       },
       flush() { return buffered; },
     };
+  }, undefined, () => {
+    taintedRevokeAttempts++;
+    if (!allowTaintedRevocation) throw new Error('fixture access revocation failed');
   });
 
   const tainted = await launchFixture(taintedHost, 'tainted');
@@ -384,12 +389,49 @@ try {
 
   await taintedHost.write(tainted, 'secret\n');
   await until(() => taintedHost.getSnapshot(tainted).outputSanitizerFailed, 'sanitizer failure');
-  assert.equal((await taintedHost.stop(tainted)).cleanupVerified, true);
+  const firstTaintedStop = await taintedHost.stop(tainted);
+  const firstTaintedSnapshot = taintedHost.getSnapshot(tainted);
+  const firstTaintedPage = taintedHost.read(tainted, 0);
+  receipt.taintedCleanup = {
+    first: {
+      state: firstTaintedStop.state,
+      cleanupVerified: firstTaintedStop.cleanupVerified,
+      error: firstTaintedStop.error,
+      snapshot: {
+        state: firstTaintedSnapshot.state,
+        outputSanitizerFailed: firstTaintedSnapshot.outputSanitizerFailed,
+        accessRevocationFailed: firstTaintedSnapshot.accessRevocationFailed,
+        latestSequence: firstTaintedPage.latestSequence,
+        cursor: firstTaintedPage.cursor,
+        retentionGap: firstTaintedPage.retentionGap,
+        gap: firstTaintedPage.chunks.some(chunk => chunk.gap),
+      },
+    },
+  };
+  assert.equal(firstTaintedStop.state, 'cleanupUnverified');
+  assert.equal(firstTaintedStop.cleanupVerified, false);
+  assert.ok(firstTaintedStop.error && !firstTaintedStop.error.includes(secret), 'Cleanup failure must report a static, non-sensitive host error.');
+  assert.notEqual(firstTaintedSnapshot.state, 'stopped', 'Failed revocation must not publish a stopped state.');
+  assert.equal(firstTaintedSnapshot.accessRevocationFailed, true);
   assert.ok(!retained(taintedHost, tainted).includes(secret) && !rejectedOutput.join('').includes(secret), 'Failed sanitizer must never flush buffered sensitive text');
-  assert.ok(taintedHost.read(tainted, 0).chunks.some(chunk => chunk.gap));
+  assert.ok(firstTaintedPage.chunks.some(chunk => chunk.gap));
   taintedAttachment.dispose();
+  await assert.rejects(taintedHost.release(tainted), /verified stop/i, 'A handle with unverified access revocation must remain owned.');
+  allowTaintedRevocation = true;
+  receipt.taintedCleanup.retries = [];
+  let retryTaintedStop;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    retryTaintedStop = await taintedHost.stop(tainted);
+    receipt.taintedCleanup.retries.push({ state: retryTaintedStop.state, cleanupVerified: retryTaintedStop.cleanupVerified, error: retryTaintedStop.error });
+    if (retryTaintedStop.cleanupVerified) break;
+  }
+  assert.equal(retryTaintedStop.state, 'stopped');
+  assert.equal(retryTaintedStop.cleanupVerified, true);
+  assert.ok(taintedRevokeAttempts >= 2, 'The exact retained PTY must retry launch access revocation.');
+  assert.ok(!retained(taintedHost, tainted).includes(secret) && !rejectedOutput.join('').includes(secret), 'Retry must not expose buffered sensitive data.');
+  assert.ok(taintedHost.read(tainted, 0).chunks.some(chunk => chunk.gap));
   await taintedHost.release(tainted);
-  receipt.checks.push('sanitizer failure cannot flush raw buffered text');
+  receipt.checks.push('sanitizer failure cannot flush raw buffered text', 'failed access revocation blocks stopped publication and release until same-handle retry succeeds');
 
   const serviceDatabase = WorkspaceDatabase.open(path.join(root, 'agent-session-workspace.db'));
 
