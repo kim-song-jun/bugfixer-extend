@@ -13,7 +13,7 @@ import { AgentSessionControlRequestStore, AGENT_SESSION_CONTROL_REQUESTS_MIGRATI
 import type { AgentSessionLaunchPreview } from './agentSessionService.js';
 
 const PROJECT = randomUUID();
-const POLICY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'on-request' };
+const POLICY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
 
 function fixture() {
 	const db = new DatabaseSync(':memory:');

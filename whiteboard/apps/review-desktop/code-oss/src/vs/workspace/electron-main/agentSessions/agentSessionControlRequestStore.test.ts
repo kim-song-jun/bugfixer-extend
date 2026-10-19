@@ -10,7 +10,7 @@ import test from 'node:test';
 import type { AgentSessionPermissionPolicy } from '../../common/workspaceAgentSessionProtocol.js';
 import { AgentSessionControlRequestStore, AGENT_SESSION_CONTROL_REQUESTS_MIGRATION_V34 } from './agentSessionControlRequestStore.js';
 
-const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'on-request' };
+const READ_ONLY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
 const PROJECT = randomUUID();
 
 function fixture() {
