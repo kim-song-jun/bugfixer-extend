@@ -525,6 +525,8 @@ export interface ReviewCanvasSettingsContent {
   diffrConfig: ReviewDiffrConfigActions;
   reloadWindow(): Promise<void>;
   manageExtensions(): void;
+  /** Available only in the native window that owns a project. Reopens guidance without running a model. */
+  openSessionOnboarding?(): Promise<void>;
   // Agent installs are managed here too, so they stay reachable once Home
   // has reviews and no longer shows the Welcome rail. Absent when the
   // install status endpoint is unavailable.

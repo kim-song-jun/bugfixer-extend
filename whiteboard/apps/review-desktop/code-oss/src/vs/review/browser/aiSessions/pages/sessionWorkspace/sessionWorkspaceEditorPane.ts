@@ -7,6 +7,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { ipcRenderer } from '../../../../../base/parts/sandbox/electron-browser/globals.js';
 import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.js';
+import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
@@ -30,12 +31,16 @@ import { IWorkbenchLayoutService, Parts } from '../../../../../workbench/service
 import { IPaneCompositePartService } from '../../../../../workbench/services/panecomposite/browser/panecomposite.js';
 import { ViewContainerLocation } from '../../../../../workbench/common/views.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
+import { localize2 } from '../../../../../nls.js';
 import { Emitter } from '../../../../../base/common/event.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+import type { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../../workbench/common/contributions.js';
 import { ITerminalService } from '../../../../../workbench/contrib/terminal/browser/terminal.js';
 import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscriptPageDTO, AgentSessionTranscriptPageOptions, AgentSessionTurnDTO, CreateAgentSessionInput, SessionNotificationDTO, SessionPageOptions, WorkspaceAgentSessionWorkspacePreparationDTO } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
+import type { WorkspaceAgentSetupInspectionDTO } from '../../../../../workspace/common/workspaceAgentSetupProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO, CreateAgentWorkflowInput } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
 import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO, WorkspaceAgentChangeHunksDTO, WorkspaceAgentExplanationDTO, WorkspaceAgentExplanationPageDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
 import type { AgentSessionIntegrationProposalDTO, WorkspaceAgentCommitPrepareInput, WorkspaceAgentCommitProposalInput, WorkspaceAgentCommitRecoveryInput } from '../../../../../workspace/common/workspaceAgentIntegrationProtocol.js';
@@ -51,6 +56,7 @@ import { renderSessionList } from '../../widgets/sessionList/index.js';
 import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
 import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
 import { createSessionNotifications, type SessionNotificationsActions, type SessionNotificationsController } from '../../widgets/sessionNotifications/index.js';
+import { createSessionOnboarding, type SessionOnboardingActions, type SessionOnboardingContext, type SessionOnboardingController, type SessionOnboardingPreview, type SessionOnboardingTab } from '../../widgets/sessionOnboarding/index.js';
 import { createSessionMessages, type SessionMessagesActions, type SessionMessagesController } from '../../widgets/sessionMessages/index.js';
 import { createSessionWorkflow, type SessionWorkflowActions, type SessionWorkflowController } from '../../widgets/sessionWorkflow/index.js';
 import { createSessionChanges, type SessionChangesActions, type SessionChangesContext, type SessionChangesController } from '../../widgets/sessionChanges/index.js';
@@ -157,13 +163,26 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private notificationsMount: HTMLElement | undefined;
 	private sessionNotifications: SessionNotificationsController | undefined;
 	private pendingNotificationMessage: PendingNotificationMessage | undefined;
+	private onboardingMount: HTMLElement | undefined;
+	private sessionOnboarding: SessionOnboardingController | undefined;
+	private onboardingProjectId: string | undefined;
+	private onboardingOpen: boolean | undefined;
+	private onboardingFocusTogglePending = false;
+	private setupInspection: WorkspaceAgentSetupInspectionDTO | undefined;
+	private setupInspectionLoading = false;
+	private setupInspectionError = false;
+	private setupInspectionGeneration = 0;
+	private setupInspectionDisposed = false;
+	private onboardingCreateProvider: AgentSessionDTO['provider'] | undefined;
+	private onboardingCreateTaskId: string | undefined;
 
 	constructor(group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IThemeService themeService: IThemeService,
-		@IStorageService storageService: IStorageService,
+		@IStorageService private readonly storageService: IStorageService,
 		@ITerminalService terminalService: ITerminalService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
+		@IOpenerService private readonly openerService: IOpenerService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@IFileService private readonly fileService: IFileService,
 		@IEditorService private readonly editorService: IEditorService,
@@ -177,6 +196,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this._register(toDisposable(() => this.sessionWorkflow?.dispose()));
 		this._register(toDisposable(() => this.sessionChangesController?.dispose()));
 		this._register(toDisposable(() => this.sessionNotifications?.dispose()));
+		this._register(toDisposable(() => { this.setupInspectionDisposed = true; this.setupInspectionGeneration++; this.sessionOnboarding?.dispose(); }));
 	}
 
 	protected createEditor(parent: HTMLElement): void {
@@ -190,7 +210,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	protected override setEditorVisible(visible: boolean): void {
 		this.editorVisible = visible;
-		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionChangesController?.setVisible(false); this.sessionNotifications?.setVisible(false); }
+		if (!visible) { this.terminalController?.hide(); this.sessionLogs?.setVisible(false); this.sessionMessages?.setVisible(false); this.sessionWorkflow?.setVisible(false); this.sessionChangesController?.setVisible(false); this.sessionNotifications?.setVisible(false); this.sessionOnboarding?.setVisible(false); }
 		else this.render();
 		this.updateLifecyclePolling();
 	}
@@ -203,6 +223,13 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			return;
 		}
 		if (this.projectId !== input.projectId) {
+			this.setupInspectionGeneration++;
+			this.setupInspection = undefined;
+			this.setupInspectionLoading = false;
+			this.setupInspectionError = false;
+			this.onboardingOpen = undefined;
+			this.onboardingCreateProvider = undefined;
+			this.onboardingCreateTaskId = undefined;
 			this.terminalController?.dispose();
 			this.sessionLogs?.invalidateContext();
 			this.sessionMessages?.setVisible(false);
@@ -312,6 +339,8 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.sessionPermissionModes.set(session.id, draft.permissionMode);
 			persistSessionSelection(this.projectId, session.id);
 			this.creating = false;
+			this.onboardingCreateProvider = undefined;
+			this.onboardingCreateTaskId = undefined;
 		} catch (error) { this.error = this.errorMessage(error, '세션을 만들지 못했습니다.'); }
 		finally { this.operation = false; this.render(); }
 		if (createdSessionId) {
@@ -377,14 +406,18 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		finally { this.operation = false; this.render(); }
 	}
 
-	private async stopTurn(): Promise<void> {
+	private async stopTurn(expectedSessionId?: string, expectedTurnId?: string): Promise<void> {
+		const projectId = this.projectId;
 		const sessionId = this.selectedSessionId;
 		const turn = sessionId ? this.latestTurn(sessionId) : undefined;
-		if (!this.projectId || !sessionId || !turn || this.operation) return;
+		if (!projectId || !sessionId || !turn || this.operation) return;
+		if (expectedSessionId !== undefined && (sessionId !== expectedSessionId || turn.id !== expectedTurnId || turn.projectId !== projectId || turn.sessionId !== sessionId || turn.snapshot.projectId !== projectId || turn.snapshot.sessionId !== sessionId)) { return; }
 		this.operation = true; this.error = undefined; this.render();
 		try {
-			const stopped = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'stop', { projectId: this.projectId, sessionId, turnId: turn.id }) as AgentSessionTurnDTO;
+			const stopped = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'stop', { projectId, sessionId, turnId: turn.id }) as AgentSessionTurnDTO;
+			if (this.projectId !== projectId || stopped.projectId !== projectId || stopped.sessionId !== sessionId || stopped.id !== turn.id) { return; }
 			await this.loadTurns(sessionId);
+			if (this.projectId !== projectId) { return; }
 			this.sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId: this.projectId }) as readonly AgentSessionDTO[];
 			this.terminalController?.finish(sessionId, stopped.id, stopped.exitCode ?? undefined);
 			this.notice = '실행 중단을 요청했습니다.';
@@ -393,6 +426,154 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	}
 
 	private latestTurn(sessionId: string): AgentSessionTurnDTO | undefined { return this.turns.get(sessionId)?.at(-1); }
+
+	private async inspectSetup(provider: AgentSessionDTO['provider']): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId || this.setupInspectionLoading || this.setupInspectionDisposed) { return; }
+		const generation = ++this.setupInspectionGeneration;
+		this.setupInspection = undefined;
+		this.setupInspectionLoading = true;
+		this.setupInspectionError = false;
+		this.render();
+		try {
+			const result = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'inspectSetup', { projectId, provider }) as WorkspaceAgentSetupInspectionDTO;
+			if (this.setupInspectionDisposed || generation !== this.setupInspectionGeneration || this.projectId !== projectId) { return; }
+			if (result.projectId !== projectId || result.provider !== provider) { throw new Error('setup scope mismatch'); }
+			this.setupInspection = result;
+		} catch {
+			if (this.setupInspectionDisposed || generation !== this.setupInspectionGeneration || this.projectId !== projectId) { return; }
+			this.setupInspectionError = true;
+		} finally {
+			if (!this.setupInspectionDisposed && generation === this.setupInspectionGeneration && this.projectId === projectId) {
+				this.setupInspectionLoading = false;
+				this.render();
+			}
+		}
+	}
+
+	private updateOnboardingMount(): HTMLElement {
+		if (!this.projectId || !this.dashboard) { throw new Error('Onboarding requires a loaded project dashboard.'); }
+		if (!this.onboardingMount) {
+			this.onboardingMount = document.createElement('section');
+			this.onboardingMount.className = 'ai-session__onboarding-mount';
+		}
+		const actions: SessionOnboardingActions = {
+			inspect: provider => { void this.inspectSetup(provider); },
+			openCreate: (provider, taskId) => {
+				if (!this.availableTasks().some(task => task.id === taskId)) { return; }
+				this.onboardingCreateProvider = provider;
+				this.onboardingCreateTaskId = taskId;
+				this.creating = true;
+				this.createFormFocusPending = true;
+				this.createPermissionMode = 'read-only';
+				this.preview = undefined;
+				this.render();
+			},
+			selectSession: sessionId => {
+				if (!this.sessions.some(session => session.projectId === this.projectId && session.id === sessionId)) { return; }
+				this.selectSession(sessionId);
+			},
+			openPreview: sessionId => {
+				if (!this.sessions.some(session => session.projectId === this.projectId && session.id === sessionId)) { return; }
+				if (this.selectedSessionId !== sessionId) { this.selectSession(sessionId); }
+				void this.prepareLaunch(sessionId);
+			},
+			openTab: (sessionId, tab) => {
+				if (!this.sessions.some(session => session.projectId === this.projectId && session.id === sessionId)) { return; }
+				this.activeTab = tab;
+				localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, tab);
+				if (this.selectedSessionId !== sessionId) { this.selectSession(sessionId); }
+				else { this.render(); }
+				requestAnimationFrame(() => this.root?.querySelector<HTMLElement>(`#ai-session-tab-${tab}`)?.focus({ preventScroll: true }));
+			},
+			stopExact: (sessionId, turnId) => { void this.stopExactTurn(sessionId, turnId); },
+			openProviderGuide: provider => {
+				const url = provider === 'codex' ? 'https://developers.openai.com/codex/quickstart' : 'https://code.claude.com/docs/en/quickstart';
+				void this.openerService.open(url, { openExternal: true }).then(opened => {
+					if (!opened) { this.showError('공식 CLI 안내 페이지를 열지 못했습니다. 다시 시도해 주세요.'); }
+				}).catch(() => this.showError('공식 CLI 안내 페이지를 열지 못했습니다. 다시 시도해 주세요.'));
+			},
+			copyText: text => this.clipboardService.writeText(text),
+		};
+		const selected = this.sessions.find(session => session.id === this.selectedSessionId && session.projectId === this.projectId);
+		const selectedTurn = selected ? this.latestTurn(selected.id) : undefined;
+		const exactTurn = selectedTurn?.projectId === this.projectId && selectedTurn.sessionId === selected?.id
+			&& selectedTurn.snapshot.projectId === this.projectId && selectedTurn.snapshot.sessionId === selected?.id ? selectedTurn : undefined;
+		const candidatePreview = this.preview && selected && this.previewSessionId === selected.id ? this.preview : undefined;
+		const exactPreview = candidatePreview?.snapshot.projectId === this.projectId
+			&& candidatePreview.snapshot.sessionId === selected?.id
+			&& candidatePreview.snapshot.bindingId === selected?.bindingId
+			? candidatePreview as SessionOnboardingPreview : undefined;
+		const context: SessionOnboardingContext = {
+			project: { id: this.projectId, name: this.dashboard.project.name, path: this.dashboard.folder.path, bindingLabel: this.dashboard.folder.path },
+			tasks: this.availableTasks().map(task => ({ id: task.id, title: task.title })),
+			sessions: this.sessions.filter(session => session.projectId === this.projectId),
+			selectedSessionId: selected?.id,
+			selectedTurn: exactTurn,
+			preview: exactPreview,
+			inspection: this.setupInspection?.projectId === this.projectId ? this.setupInspection : undefined,
+			inspectionLoading: this.setupInspectionLoading,
+			inspectionError: this.setupInspectionError ? 'failed' : undefined,
+		};
+		if (!this.sessionOnboarding) {
+			this.sessionOnboarding = createSessionOnboarding(this.onboardingMount, context, actions, this.storageService, status => {
+				if (status !== 'skipped' && status !== 'completed') { return; }
+				this.onboardingOpen = false;
+				this.onboardingFocusTogglePending = true;
+				this.sessionOnboarding?.setVisible(false);
+				this.render();
+			});
+			this.onboardingProjectId = this.projectId;
+			this.onboardingOpen = this.onboardingOpen ?? this.sessionOnboarding.getState().status === 'active';
+		} else {
+			this.sessionOnboarding.setContext(context, actions);
+			if (this.onboardingProjectId !== this.projectId || this.onboardingOpen === undefined) {
+				this.onboardingProjectId = this.projectId;
+				this.onboardingOpen = this.sessionOnboarding.getState().status === 'active';
+			}
+		}
+		this.sessionOnboarding.setVisible(this.onboardingOpen === true);
+		return this.onboardingMount;
+	}
+
+	private createOnboardingToggle(): HTMLButtonElement {
+		const state = this.sessionOnboarding?.getState();
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.className = 'ai-session__secondary ai-session__onboarding-toggle';
+		button.dataset.onboardingToggle = 'true';
+		button.textContent = this.onboardingOpen ? '안내 닫기' : state?.status === 'completed' ? '안내 다시 열기' : state?.status === 'skipped' ? '이어서 안내 보기' : '시작 안내 보기';
+		button.setAttribute('aria-expanded', String(this.onboardingOpen === true));
+		button.addEventListener('click', () => {
+			this.onboardingOpen = !this.onboardingOpen;
+			if (this.onboardingOpen) { this.sessionOnboarding?.reopen(); }
+			this.sessionOnboarding?.setVisible(this.onboardingOpen);
+			this.render();
+		});
+		return button;
+	}
+
+	public openOnboardingGuide(): void {
+		this.onboardingOpen = true;
+		this.sessionOnboarding?.reopen();
+		this.sessionOnboarding?.setVisible(true);
+		this.render();
+	}
+
+	public matchesProject(projectId: string): boolean {
+		return this.projectId === projectId && this.environment.reviewWindowLaunch.kind === 'project' && this.environment.reviewWindowLaunch.projectId === projectId;
+	}
+
+	private async stopExactTurn(sessionId: string, turnId: string): Promise<void> {
+		const session = this.sessions.find(item => item.id === sessionId && item.projectId === this.projectId);
+		const turn = session ? this.latestTurn(sessionId) : undefined;
+		if (!session || this.selectedSessionId !== sessionId || !turn || turn.id !== turnId || turn.projectId !== this.projectId || turn.sessionId !== session.id || turn.snapshot.projectId !== this.projectId || turn.snapshot.sessionId !== session.id) {
+			this.error = '선택한 세션의 현재 실행과 일치하지 않아 중단 요청을 보내지 않았습니다.';
+			this.render();
+			return;
+		}
+		await this.stopTurn(sessionId, turnId);
+	}
 
 	private getLogsPanel(): HTMLElement {
 		if (this.logsPanel) { return this.logsPanel; }
@@ -797,6 +978,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (!this.root) return;
 		this.sessionListScrollTop = this.root.querySelector<HTMLElement>('.ai-session__list')?.scrollTop ?? this.sessionListScrollTop;
 		const activeElement = document.activeElement;
+		const onboardingFinished = this.onboardingFocusTogglePending;
+		this.onboardingFocusTogglePending = false;
+		const focusedOnboardingKey = !onboardingFinished && !this.createFormFocusPending && activeElement instanceof HTMLElement && this.onboardingMount?.contains(activeElement) ? activeElement.dataset.onboardingFocus : undefined;
+		const onboardingToggleFocused = activeElement instanceof HTMLElement && this.root.contains(activeElement) && activeElement.dataset.onboardingToggle === 'true';
 		const focusedLogsElement = activeElement instanceof HTMLElement && this.logsPanel?.contains(activeElement) ? activeElement : undefined;
 		const focusedMessagesElement = activeElement instanceof HTMLElement && this.sessionMessagesPanel?.contains(activeElement) ? activeElement : undefined;
 		const focusedWorkflowElement = activeElement instanceof HTMLElement && this.sessionWorkflowPanel?.contains(activeElement) ? activeElement : undefined;
@@ -815,6 +1000,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			return;
 		}
 		this.root.setAttribute('aria-busy', String(this.loading || this.operation));
+		const onboardingMount = this.dashboard ? this.updateOnboardingMount() : undefined;
 		const shell = document.createElement('div'); shell.className = 'ai-session__shell';
 		const projectHeader = document.createElement('header');
 		projectHeader.className = 'ai-session__project-header';
@@ -822,7 +1008,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		projectName.className = 'ai-session__project-name';
 		projectName.textContent = this.dashboard?.project.name ?? '프로젝트';
 		projectHeader.appendChild(projectName);
-		if (this.dashboard) { projectHeader.appendChild(this.updateNotificationsMount()); }
+		if (this.dashboard) {
+			const headerActions = document.createElement('div'); headerActions.className = 'ai-session__project-header-actions';
+			headerActions.append(this.updateNotificationsMount(), this.createOnboardingToggle());
+			projectHeader.appendChild(headerActions);
+		}
 		shell.appendChild(projectHeader);
 		const main = document.createElement('main'); main.className = 'ai-session__main';
 		if (this.loading && !this.dashboard) {
@@ -832,7 +1022,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		} else {
 			const tasks = this.availableTasks();
 			const taskNames = new Map(tasks.map(task => [task.id, task.title]));
-			const startCreating = () => { this.creating = true; this.createFormFocusPending = true; this.createPermissionMode = 'read-only'; this.preview = undefined; this.render(); };
+			const startCreating = () => { this.creating = true; this.onboardingCreateProvider = undefined; this.onboardingCreateTaskId = undefined; this.createFormFocusPending = true; this.createPermissionMode = 'read-only'; this.preview = undefined; this.render(); };
 			const compactToolbar = document.createElement('div'); compactToolbar.className = 'ai-session__narrow-toolbar';
 			const selector = document.createElement('label'); selector.className = 'ai-session__narrow-selector'; selector.textContent = '세션 선택';
 			const select = document.createElement('select'); select.setAttribute('aria-label', '현재 세션 선택');
@@ -882,6 +1072,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			}
 		}
 
+		if (onboardingMount) { main.prepend(onboardingMount); }
 		if (this.error) this.renderInlineMessage(main, this.error, true);
 		if (this.notice) this.renderInlineMessage(main, this.notice, false);
 		shell.appendChild(main); this.root.appendChild(shell);
@@ -895,6 +1086,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (focusedMessagesElement?.isConnected) { focusedMessagesElement.focus({ preventScroll: true }); }
 		if (focusedWorkflowElement?.isConnected) { focusedWorkflowElement.focus({ preventScroll: true }); }
 		if (focusedNotificationsElement?.isConnected) { focusedNotificationsElement.focus({ preventScroll: true }); }
+		if (focusedOnboardingKey) {
+			const matching = [...this.root.querySelectorAll<HTMLElement>('[data-onboarding-focus]')].find(element => element.dataset.onboardingFocus === focusedOnboardingKey && !element.hasAttribute('disabled'));
+			matching?.focus({ preventScroll: true });
+		}
+		if (onboardingFinished || onboardingToggleFocused) { this.root.querySelector<HTMLElement>('[data-onboarding-toggle="true"]')?.focus({ preventScroll: true }); }
 		if (!logsShouldBeVisible) { this.sessionLogs?.setVisible(false); }
 		if (!messagesShouldBeVisible) { this.sessionMessages?.setVisible(false); }
 		if (!workflowShouldBeVisible) { this.sessionWorkflow?.setVisible(false); }
@@ -998,8 +1194,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const taskSelect = task.control as HTMLSelectElement;
 		for (const item of tasks) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.title; taskSelect.appendChild(option); }
 		if (this.dashboard?.view.selectedTaskId && tasks.some(item => item.id === this.dashboard?.view.selectedTaskId)) taskSelect.value = this.dashboard.view.selectedTaskId;
+		if (this.onboardingCreateTaskId && tasks.some(item => item.id === this.onboardingCreateTaskId)) taskSelect.value = this.onboardingCreateTaskId;
 		const provider = this.field(form, '공급자', 'provider', '', 'select').control as HTMLSelectElement;
 		for (const [value, label] of [['codex', 'Codex'], ['claude', 'Claude']] as const) { const option = document.createElement('option'); option.value = value; option.textContent = label; provider.appendChild(option); }
+		if (this.onboardingCreateProvider) { provider.value = this.onboardingCreateProvider; }
 		const model = this.field(form, '모델 ID', 'model', '공급자가 지원하는 모델 ID', 'text'); model.control.required = true;
 		const modelHelp = document.createElement('p'); modelHelp.className = 'ai-session__field-help'; modelHelp.textContent = '공급자가 지원하는 모델 ID를 그대로 입력합니다. 별칭이나 계정 선택은 제공하지 않습니다.'; model.wrapper.appendChild(modelHelp);
 		const permission = this.field(form, '권한 범위', 'permission', '', 'select').control as HTMLSelectElement;
@@ -1011,7 +1209,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		form.appendChild(workspace);
 		const buttons = document.createElement('div'); buttons.className = 'ai-session__form-actions';
 		const create = document.createElement('button'); create.type = 'submit'; create.className = 'ai-session__primary'; create.disabled = this.operation; create.textContent = '세션 만들고 실행 미리보기';
-		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.creating = false; this.render(); });
+		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.creating = false; this.onboardingCreateProvider = undefined; this.onboardingCreateTaskId = undefined; this.render(); });
 		buttons.append(create, cancel); form.appendChild(buttons);
 		form.addEventListener('submit', event => { event.preventDefault(); void this.createSession({ name: name.control.value, taskId: taskSelect.value, provider: provider.value as CreateDraft['provider'], model: model.control.value, permissionMode: permission.value as AgentSessionPermissionPolicy['mode'] }); });
 		form.classList.add('ai-session__create-form');
@@ -1096,8 +1294,17 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	[new SyncDescriptor(AgentSessionWorkspaceEditorInput)],
 );
 
-const openEmitter = new Emitter<void>();
-export function openAgentSessionWorkspace(): void { openEmitter.fire(); }
+interface OpenWorkspaceRequest {
+	onboarding: boolean;
+	complete?: () => void;
+	fail?: (error: unknown) => void;
+}
+
+const openEmitter = new Emitter<OpenWorkspaceRequest>();
+export function openAgentSessionWorkspace(): void { openEmitter.fire({ onboarding: false }); }
+function openAgentSessionOnboarding(): Promise<void> {
+	return new Promise((resolve, reject) => openEmitter.fire({ onboarding: true, complete: resolve, fail: reject }));
+}
 
 class AgentSessionWorkspaceContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.devfast.aiSessionWorkspace';
@@ -1110,8 +1317,11 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 		@IPaneCompositePartService private readonly paneCompositeService: IPaneCompositePartService,
 		@INotificationService private readonly notificationService: INotificationService) {
 		super();
-		this._register(openEmitter.event(() => {
-			void this.open(true).catch(() => this.notificationService.error('AI 세션 작업 공간을 열지 못했습니다. 다시 시도해 주세요.'));
+		this._register(openEmitter.event(request => {
+			void this.open(true, request.onboarding).then(() => request.complete?.(), error => {
+				request.fail?.(error);
+				this.notificationService.error('AI 세션 작업 공간을 열지 못했습니다. 다시 시도해 주세요.');
+			});
 		}));
 		window.addEventListener('resize', this.onResize);
 		this._register(toDisposable(() => window.removeEventListener('resize', this.onResize)));
@@ -1122,7 +1332,7 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 		}
 	};
-	private async open(activate: boolean): Promise<void> {
+	private async open(activate: boolean, showOnboarding = false): Promise<void> {
 		const launch = this.environment.reviewWindowLaunch;
 		if (launch.kind !== 'project') return;
 		await this.groups.whenRestored;
@@ -1140,8 +1350,33 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 			.find(({ editor }) => editor instanceof AgentSessionWorkspaceEditorInput && editor.projectId === launch.projectId);
 		const editorInput = existing?.editor ?? this.instantiationService.createInstance(AgentSessionWorkspaceEditorInput, launch.projectId);
 		const group = existing?.group ?? this.groups.activeGroup;
-		await this.editorService.openEditor(editorInput, { pinned: true, revealIfVisible: true, ...(activate ? {} : { inactive: true, preserveFocus: true }) }, group);
+		const pane = await this.editorService.openEditor(editorInput, { pinned: true, revealIfVisible: true, ...(activate ? {} : { inactive: true, preserveFocus: true }) }, group);
+		if (showOnboarding && pane instanceof AgentSessionWorkspaceEditorPane && pane.matchesProject(launch.projectId)) {
+			pane.openOnboardingGuide();
+		} else if (showOnboarding) {
+			throw new Error('현재 프로젝트의 AI 세션 안내를 열지 못했습니다. 프로젝트 창에서 다시 시도해 주세요.');
+		}
 	}
 }
+
+class OpenAgentSessionOnboardingAction extends Action2 {
+	constructor() {
+		super({
+			id: 'review.openAgentSessionOnboarding',
+			title: localize2('review.openAgentSessionOnboarding', 'Whiteboard: AI 세션 안내 다시 열기'),
+			f1: true
+		});
+	}
+
+	override async run(accessor: ServicesAccessor): Promise<void> {
+		const environment = accessor.get(INativeWorkbenchEnvironmentService);
+		if (environment.reviewWindowLaunch.kind !== 'project') {
+			return;
+		}
+		await openAgentSessionOnboarding();
+	}
+}
+
+registerAction2(OpenAgentSessionOnboardingAction);
 
 registerWorkbenchContribution2(AgentSessionWorkspaceContribution.ID, AgentSessionWorkspaceContribution, WorkbenchPhase.AfterRestored);

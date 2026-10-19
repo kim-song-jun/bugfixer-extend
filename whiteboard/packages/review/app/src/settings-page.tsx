@@ -74,19 +74,23 @@ export function SettingsPage({
   const run = async <T,>(
     key: string,
     action: () => Promise<T>,
-    adopt: (value: T) => void,
+    adopt?: (value: T) => void,
   ) => {
     setBusy(key);
     setError(null);
 
     try {
-      adopt(await action());
+      const value = await action();
+
+      adopt?.(value);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
   };
+
+  const reopenSessionGuide = settings.openSessionOnboarding;
 
   return (
     <main className="review-home">
@@ -98,6 +102,24 @@ export function SettingsPage({
           <p className="review-settings-lede">
             이 설정은 이 컴퓨터의 Whiteboard에 적용됩니다.
           </p>
+
+          {reopenSessionGuide ? (
+            <Section label="AI 세션">
+              <Row
+                label="시작 안내"
+                description="이 프로젝트의 CLI, 세션, 실행 범위와 변경 검토 안내를 다시 엽니다. AI 작업은 실행하지 않습니다."
+              >
+                <button
+                  type="button"
+                  className="review-settings-button"
+                  disabled={busy !== null}
+                  onClick={() => void run("session-onboarding", reopenSessionGuide)}
+                >
+                  안내 다시 보기
+                </button>
+              </Row>
+            </Section>
+          ) : null}
 
           {install ? (
             <Section label="에이전트">

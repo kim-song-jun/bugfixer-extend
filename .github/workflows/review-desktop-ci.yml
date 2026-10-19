@@ -54,6 +54,13 @@ jobs:
           ps -eo comm= | awk '/node/ {node++} /chrome|chromium|firefox/ {browser++} END {print "node=" node+0, "browser=" browser+0}'
       - name: Test persistence, mailboxes and managed Git worktrees
         run: pnpm --filter @dev.fast/review-desktop test:agent-sessions
+      - name: Test resumable project onboarding state
+        run: >-
+          pnpm --filter @dev.fast/review-desktop exec
+          env TSX_TSCONFIG_PATH=tsconfig.test.json
+          node --import ./scripts/test-code-oss-preload.mjs --import tsx
+          --test --test-concurrency=1
+          code-oss/src/vs/review/browser/aiSessions/features/onboarding/onboardingState.test.ts
       - name: Test native PR ref guard protocol
         run: pnpm --filter @dev.fast/review-desktop exec node --test --test-concurrency=1 native/pr-ref-guard/pr-ref-guard.test.mjs
       - name: Test frozen v26 through v30 migrations and retained change content

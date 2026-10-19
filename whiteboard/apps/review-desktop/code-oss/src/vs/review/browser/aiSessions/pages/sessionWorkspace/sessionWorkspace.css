@@ -19,6 +19,9 @@
 .ai-session__shell { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); width: 100%; min-height: 100%; }
 .ai-session__project-header { position: sticky; z-index: 5; top: 0; display: flex; min-height: 52px; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 16px; box-sizing: border-box; padding: 7px 18px; border-bottom: 1px solid var(--ai-line); background: var(--ai-surface); }
 .ai-session__project-name { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.ai-session__project-header-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.ai-session__onboarding-mount[hidden] { display: none; }
+.ai-session__onboarding-toggle { white-space: nowrap; }
 .ai-session__notifications-mount { flex: none; }
 .ai-session__list { position: sticky; top: 52px; box-sizing: border-box; min-width: 0; height: calc(100vh - 52px); overflow: auto; padding: 20px 12px; border-right: 1px solid var(--ai-line); }
 .ai-session__list-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 10px; border-bottom: 1px solid var(--ai-line); }
@@ -120,6 +123,7 @@
 @media (max-width: 760px) {
 	.ai-session__shell { display: block; }
 	.ai-session__project-header { position: sticky; }
+	.ai-session__project-header-actions { min-width: 0; }
 	.ai-session__list { display: none; }
 	.ai-session__narrow-toolbar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--ai-line); color: var(--ai-muted); }
 	.ai-session__narrow-selector select { min-width: 0; flex: 1; }

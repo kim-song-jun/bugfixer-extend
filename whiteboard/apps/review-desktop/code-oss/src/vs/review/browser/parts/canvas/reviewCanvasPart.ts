@@ -36,6 +36,7 @@ import type {
 import { EditorPaneSelectionChangeReason } from "../../../../workbench/common/editor.js";
 import type { IEditorGroup } from "../../../../workbench/services/editor/common/editorGroupsService.js";
 import { IHostService } from "../../../../workbench/services/host/browser/host.js";
+import { INativeWorkbenchEnvironmentService } from "../../../../workbench/services/environment/electron-browser/environmentService.js";
 import { ILifecycleService } from "../../../../workbench/services/lifecycle/common/lifecycle.js";
 import { IWorkbenchLayoutService, Parts } from "../../../../workbench/services/layout/browser/layoutService.js";
 import {
@@ -211,6 +212,7 @@ export class ReviewCanvasEditorPane extends EditorPane {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IEditorProgressService editorProgressService: IEditorProgressService,
 		@ILifecycleService lifecycleService: ILifecycleService,
+		@INativeWorkbenchEnvironmentService private readonly environment: INativeWorkbenchEnvironmentService,
 	) {
 		super(ReviewCanvasEditorPane.ID, group, telemetryService, reviewThemeService, storageService);
 		this.sessionTelemetry = new ReviewSessionTelemetry((name, properties, context) =>
@@ -826,6 +828,12 @@ export class ReviewCanvasEditorPane extends EditorPane {
 				},
 			},
 			manageExtensions: () => void this.commandService.executeCommand("review.manageExtensions"),
+			openSessionOnboarding: this.environment.reviewWindowLaunch.kind === 'project'
+				? async () => {
+					try { await this.commandService.executeCommand('review.openAgentSessionOnboarding'); }
+					catch { throw new Error('AI 세션 안내를 열지 못했습니다. 프로젝트 창에서 다시 시도해 주세요.'); }
+				}
+				: undefined,
 		};
 	}
 
