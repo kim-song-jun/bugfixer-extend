@@ -1,5 +1,15 @@
 # AI Session Workspace Implementation Plan
 
+## 2026-10-20 continuation scope
+
+- [ ] Registered parent/child monitoring in the existing session list, per-node logs, explicit terminal instruction focus, same-ownership parent selection, and click-time exact-turn stop. Source and focused tests are being added; require exact-commit CI native tree/collapse/focus/child-only stop evidence before marking done.
+- [ ] `sessions.requestStart` B: durable requests, human native preview/approval, changed-input invalidation and idempotent approval/rejection/cancellation. A request cannot launch a provider.
+- [ ] `sessions.stop` B: own exact turn plus designated exact targets in the currently approved workflow, approval-version revalidation, durable receipt before self-revocation, distinguish acceptance from verified cleanup.
+- [ ] Waiting transport A: real terminals and observed-stage notifications only; no inferred provider approval waiting/clear.
+- [ ] Resolve current native CI regressions: 760 px commit facts overflow and owned-app teardown identity refusal. Keep process identity, group/port absence and fixture isolation assertions intact.
+
+The scope choices above are user-confirmed. Artifact sharing scope remains a separate pending choice. Build/test/typecheck/lint/provider probes and native/browser verification execute in GitHub CI, with no local automated workload.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver real concurrent Codex/Claude terminal sessions with local worktree integration, MCP collaboration, inspectable evidence/logs/alerts, human PR confirmation, and Korean onboarding.

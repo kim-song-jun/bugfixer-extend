@@ -113,6 +113,14 @@ export class SessionTerminalController extends Disposable {
 
 	hasTerminal(sessionId: string, turnId: string): boolean { return this.records.has(`${sessionId}:${turnId}`); }
 
+	focus(sessionId: string, turnId: string): boolean {
+		const key = `${sessionId}:${turnId}`;
+		const record = this.records.get(key);
+		if (this.disposed || this.attachedKey !== key || !record) { return false; }
+		record.instance.focus(true);
+		return true;
+	}
+
 	finish(sessionId: string, turnId: string, exitCode: number | undefined): void {
 		this.ptys.get(`${sessionId}:${turnId}`)?.finish(exitCode);
 	}

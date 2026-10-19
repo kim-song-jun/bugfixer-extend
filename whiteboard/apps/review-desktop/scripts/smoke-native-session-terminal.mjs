@@ -1,6 +1,7 @@
 /** Drive two real app-created Codex custom PTYs through the packaged native UI. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { lstatSync, readlinkSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -140,7 +141,7 @@ async function absent(filePath) {
 }
 
 function processInventory() {
-  const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,command='], {
+  const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart=,command='], {
     encoding: 'utf8', timeout: 3_000, maxBuffer: 8 * 1024 * 1024,
   });
 
@@ -149,13 +150,13 @@ function processInventory() {
   for (const line of output.split('\n')) {
     const fields = line.trim().split(/\s+/);
 
-    if (fields.length < 9) continue;
+    if (fields.length < 10) continue;
     const pid = Number(fields[0]);
     const ppid = Number(fields[1]);
     const pgid = Number(fields[2]);
 
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isSafeInteger(pgid)) continue;
-    inventory.set(pid, { pid, ppid, pgid, started: fields.slice(3, 8).join(' '), command: fields.slice(8).join(' ') });
+    inventory.set(pid, { pid, ppid, pgid, stat: fields[3], started: fields.slice(4, 9).join(' '), command: fields.slice(9).join(' ') });
   }
 
   return inventory;
@@ -283,6 +284,11 @@ function verifyLiveIdentity(expected) {
   }
 
   if (!sameProcessIdentity(expected, current)) {
+    const describe = identity => ({
+      pgid: identity.pgid, started: identity.started, stat: identity.stat,
+      commandSha256: createHash('sha256').update(identity.command).digest('hex'),
+    });
+    receipt.cleanup.push({ kind: 'process-identity-mismatch', pid: expected.pid, expected: describe(expected), observed: describe(current) });
     throw new Error(`PID ${expected.pid} is live but its process start, group, or command identity changed; refusing to signal it.`);
   }
 
@@ -343,17 +349,9 @@ async function stopOwnedApp() {
   if (!appChild?.pid) return;
 
   if (!appProcessTreeCaptured) throw new Error('No complete owned app process tree was captured; refusing broad teardown.');
-  const identities = [...appProcessIdentities.values()].sort((a, b) => Number(a.pid === appChild.pid) - Number(b.pid === appChild.pid));
+  const identities = [...appProcessIdentities.values()].sort((a, b) => Number(b.pid === appChild.pid) - Number(a.pid === appChild.pid));
 
-  for (const expected of identities) {
-    if (!verifyLiveIdentity(expected)) continue;
-    receipt.cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal: 'SIGTERM' });
-
-    try { process.kill(expected.pid, 'SIGTERM'); }
-    catch (error) { if (error?.code !== 'ESRCH') throw error; }
-  }
-
-  const identitiesGone = async () => identities.every(expected => !verifyLiveIdentity(expected));
+  const identitiesGone = () => identities.every(expected => !processAlive(expected.pid));
 
   const groupGone = () => {
     const inventory = processInventory();
@@ -363,10 +361,39 @@ async function stopOwnedApp() {
     return !processGroupAlive(appChild.pid);
   };
 
+  const root = appProcessIdentity;
+
+  if (!root) throw new Error('No exact app root identity was captured; refusing shutdown.');
+
+  if (verifyLiveIdentity(root)) {
+    receipt.cleanup.push({ kind: 'app-process-signal', pid: root.pid, signal: 'SIGTERM', phase: 'root-first' });
+
+    try { process.kill(root.pid, 'SIGTERM'); }
+    catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  }
+
+  try {
+    await waitFor(() => identitiesGone() && groupGone(), `app-owned graceful shutdown ${appChild.pid}`, 2_000);
+
+    if (!appExited) await waitFor(() => appExited, `owned app leader ${appChild.pid} close event`, 5_000);
+
+    return true;
+  } catch (error) {
+    receipt.cleanup.push({ kind: 'app-root-grace-expired', error: error.message });
+  }
+
+  for (const expected of identities) {
+    if (!verifyLiveIdentity(expected)) continue;
+    receipt.cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal: 'SIGTERM' });
+
+    try { process.kill(expected.pid, 'SIGTERM'); }
+    catch (error) { if (error?.code !== 'ESRCH') throw error; }
+  }
+
   let graceful = false;
 
   try {
-    await waitFor(async () => (await identitiesGone()) && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGTERM`, 12_000);
+    await waitFor(() => identitiesGone() && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGTERM`, 10_000);
     graceful = true;
   } catch (gracefulError) {
     receipt.cleanup.push({ kind: 'app-graceful-shutdown-escalation', error: gracefulError.message });
@@ -379,7 +406,7 @@ async function stopOwnedApp() {
       catch (error) { if (error?.code !== 'ESRCH') throw error; }
     }
 
-    await waitFor(async () => (await identitiesGone()) && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGKILL`, 5_000);
+    await waitFor(() => identitiesGone() && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGKILL`, 5_000);
   }
 
   if (!appExited) await waitFor(() => appExited, `owned app leader ${appChild.pid} close event`, 5_000);
@@ -430,7 +457,7 @@ async function verifyWorkspaceViewport(page) {
   return geometry;
 }
 
-async function createAndStartSession(page, name, model) {
+async function createAndStartSession(page, name, model, parentSessionId) {
   await page.locator('.ai-session__list').getByRole('button', { name: '새 AI 세션 만들기', exact: true }).click();
   const form = page.locator('.ai-session__create-form');
   await form.waitFor({ state: 'visible' });
@@ -438,6 +465,8 @@ async function createAndStartSession(page, name, model) {
   await form.locator('[name="provider"]').selectOption('codex');
   await form.locator('[name="model"]').fill(model);
   await form.locator('[name="permission"]').selectOption('read-only');
+
+  if (parentSessionId) await form.locator('[name="parentSession"]').selectOption(parentSessionId);
   await form.getByRole('button', { name: '세션 만들고 실행 미리보기', exact: true }).click();
   const preview = page.locator('.ai-session__preview');
   await preview.waitFor({ state: 'visible', timeout: 30_000 });
@@ -456,6 +485,8 @@ async function createAndStartSession(page, name, model) {
   Object.defineProperty(session, 'processIdentity', { value: captureFixtureIdentity(pid) });
   session.id = database.agentSessions.listSessions(receipt.project.projectId).find(candidate => candidate.name === name)?.id;
   assert.ok(session.id, `The real workspace database must contain UI-created session ${name}.`);
+  assert.equal(database.agentSessions.getSession(receipt.project.projectId, session.id)?.parentSessionId, parentSessionId ?? null,
+    'The app database must persist the exact human-selected parent ownership link.');
   receipt.ownedProcesses.push({ kind: 'codex-fixture', pid, owner: 'owned app session terminal', observedAt: session.observedAt });
 
   return session;
@@ -620,7 +651,7 @@ try {
   first.workspaceGeometry = await verifyWorkspaceViewport(page);
   await page.screenshot({ path: path.join(output, 'session-a-terminal.png') });
 
-  const second = await createAndStartSession(page, 'CI terminal session B', 'ci-fixture-codex-session-b');
+  const second = await createAndStartSession(page, 'CI terminal session B', 'ci-fixture-codex-session-b', first.id);
   assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live while session B starts.');
   assert.equal(processAlive(second.fixturePid), true, 'Session B must start as an independent live PTY process.');
   assert.notEqual(first.fixturePid, second.fixturePid, 'Concurrent sessions must have distinct real fixture process IDs.');
@@ -637,6 +668,14 @@ try {
 
   const sessionA = workspace.locator('.ai-session__session-row').filter({ hasText: first.name });
   const sessionB = workspace.locator('.ai-session__session-row').filter({ hasText: second.name });
+  const parentToggle = workspace.getByRole('button', { name: `${first.name} 하위 세션 접기`, exact: true });
+  assert.equal(await workspace.getByRole('list', { name: `${first.name} 하위 세션`, exact: true }).locator('.ai-session__session-row').filter({ hasText: second.name }).count(), 1,
+    'The second real session must appear inside its registered parent branch.');
+  await parentToggle.click();
+  assert.equal(await sessionB.count(), 0, 'Collapsing the parent must hide only its descendant branch.');
+  assert.equal(processAlive(second.fixturePid), true, 'Collapsing a branch must not stop its child PTY.');
+  await workspace.getByRole('button', { name: `${first.name} 하위 세션 펼치기`, exact: true }).click();
+  await sessionB.waitFor({ state: 'visible' });
   await sessionA.click();
   await page.getByRole('tab', { name: '터미널', exact: true }).waitFor({ state: 'visible' });
   const firstReopenedInstance = await terminalInstance(page);
@@ -650,7 +689,8 @@ try {
   first.inputTagsObserved.push('FIXTURE_TAG_A_CONCURRENT');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_B'), false, 'Session A must not receive session B input.');
   first.terminalInstanceRetained = true;
-  await page.getByRole('tab', { name: '로그', exact: true }).click();
+  await workspace.getByRole('button', { name: `${first.name} 로그`, exact: true }).click();
+  assert.equal(await page.getByRole('tab', { name: '로그', exact: true }).getAttribute('aria-selected'), 'true');
   await page.getByRole('tab', { name: '터미널', exact: true }).click();
   const firstAfterTabs = await terminalInstance(page);
   assert.equal(await firstAfterTabs.evaluate((element, retained) => element === retained, firstInstance), true,
@@ -658,14 +698,15 @@ try {
   await waitTerminalText(page, `READY pid=${first.fixturePid}`, 'session A terminal tab reopen');
   assert.equal((await readTerminalText(page)).match(/READY pid=/g)?.length, 1);
 
-  await sessionB.click();
+  await workspace.getByRole('button', { name: `${second.name} 지시`, exact: true }).click();
   const secondReopenedInstance = await terminalInstance(page);
   assert.equal(await secondReopenedInstance.evaluate((element, retained) => element === retained, secondInstance), true,
     'Switching back to session B must reattach the same actual TerminalInstance DOM wrapper.');
   await waitTerminalText(page, `READY pid=${second.fixturePid}`, 'session B reopen');
   assert.equal((await readTerminalText(page)).match(/READY pid=/g)?.length, 1, 'Reopening B must not create another fixture process.');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_A_CONCURRENT'), false, 'Session B must not receive session A input.');
-  await page.locator('.ai-session__terminal .xterm-screen').click();
+  await waitFor(() => page.locator('.ai-session__terminal .xterm-helper-textarea').evaluate(element => document.activeElement === element),
+    'individual instruction action focuses only the selected actual terminal');
   await page.keyboard.type('FIXTURE_TAG_B_CONCURRENT\n');
   await waitTerminalText(page, 'ECHO FIXTURE_TAG_B_CONCURRENT', 'session B concurrent input');
   second.inputTagsObserved.push('FIXTURE_TAG_B_CONCURRENT');
@@ -682,12 +723,14 @@ try {
     await waitTerminalText(page, `READY pid=${session.fixturePid}`, `${session.name} selected for UI stop`);
     const terminalText = await readTerminalText(page);
     assert.ok(terminalText.includes(`READY pid=${session.fixturePid}`));
-    await page.locator('.ai-session__detail-header').getByRole('button', { name: '중단', exact: true }).click();
+    await workspace.getByRole('button', { name: `${session.name} 중단`, exact: true }).click();
     await waitFor(() => !processAlive(session.fixturePid), `${session.name} fixture PID exit after UI stop`, 20_000);
     await waitFor(() => database.agentSessionTurns.listTurns(receipt.project.projectId, session.id)
       .some(turn => turn.state === 'exited' && turn.cleanupVerified === true && turn.providerConversationId === null),
     `${session.name} durable cleanupVerified turn after UI stop`, 10_000);
     session.stopped = true;
+
+    if (session.id === second.id) assert.equal(processAlive(first.fixturePid), true, 'Stopping the child must leave its parent PTY alive.');
   }
 
   const turnsA = database.agentSessionTurns.listTurns(project.project.id, first.id);
@@ -699,6 +742,7 @@ try {
   receipt.turns = persistedTurns.map(turn => ({ id: turn.id, sessionId: turn.sessionId, state: turn.state, cleanupVerified: turn.cleanupVerified, providerConversationId: turn.providerConversationId }));
   receipt.checks.push('trusted UI create/preview/confirm/start reached actual custom PTY service for two concurrent fixture sessions');
   receipt.checks.push('both duplex inputs, xterm-observed resize, log/terminal tab reattach, session switching, and UI stop succeeded');
+  receipt.checks.push('registered parent tree, collapse without termination, node logs and explicit terminal instruction focus, and child-only stop verified');
 } catch (error) {
   receipt.failure = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 

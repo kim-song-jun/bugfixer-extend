@@ -27,8 +27,18 @@
 .ai-session__list-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 10px; border-bottom: 1px solid var(--ai-line); }
 .ai-session__list-heading h2 { margin: 0; font-size: 15px; font-weight: 650; }
 .ai-session__text-button { padding: 5px 7px; border: 0; color: var(--vscode-textLink-foreground); background: transparent; font: inherit; cursor: pointer; }
-.ai-session__session-list { display: flex; flex-direction: column; }
-.ai-session__session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; width: 100%; padding: 11px 8px; border: 0; border-bottom: 1px solid var(--ai-line); color: var(--ai-foreground); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.ai-session__hierarchy-scope { margin: 10px 8px; color: var(--ai-muted); font-size: 12px; overflow-wrap: anywhere; }
+.ai-session__session-list, .ai-session__branch { margin: 0; padding: 0; list-style: none; }
+.ai-session__branch { margin-left: 10px; padding-left: 8px; border-left: 1px solid var(--ai-line); }
+.ai-session__branch--deep { margin-left: 0; padding-left: 0; }
+.ai-session__node { min-width: 0; }
+.ai-session__node-heading { display: flex; align-items: flex-start; min-width: 0; }
+.ai-session__node-toggle { flex: none; width: 28px; min-height: 36px; margin-top: 3px; padding: 0; border: 0; color: var(--ai-muted); background: transparent; font: inherit; cursor: pointer; }
+.ai-session__node-toggle:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
+.ai-session__node-actions { display: flex; flex-wrap: wrap; gap: 2px 8px; padding: 0 8px 6px; border-bottom: 1px solid var(--ai-line); }
+.ai-session__node-actions .ai-session__text-button { min-height: 32px; }
+.ai-session__node-actions .ai-session__text-button:disabled { color: var(--vscode-disabledForeground); cursor: default; }
+.ai-session__session-row { display: grid; flex: 1; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; width: 100%; padding: 9px 8px 5px; border: 0; color: var(--ai-foreground); background: transparent; font: inherit; text-align: left; cursor: pointer; }
 .ai-session__session-row:hover { background: var(--vscode-list-hoverBackground); }
 .ai-session__session-row[aria-current="true"] { color: var(--ai-selection-foreground, var(--ai-foreground)); background: var(--ai-selection); box-shadow: inset 3px 0 var(--vscode-focusBorder); }
 .ai-session__session-row:focus-visible, .ai-session__text-button:focus-visible, .ai-session__tab:focus-visible,
@@ -37,7 +47,7 @@
 	outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px;
 }
 .ai-session__session-name { overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.ai-session__session-meta, .ai-session__session-task { grid-column: 1 / -1; overflow: hidden; color: var(--ai-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ai-session__session-meta, .ai-session__session-task, .ai-session__session-parent { grid-column: 1 / -1; overflow: hidden; color: var(--ai-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .ai-session__session-state { align-self: start; color: var(--ai-muted); font-size: 12px; }
 .ai-session__main { min-width: 0; padding: 22px clamp(16px, 2.6vw, 34px) 32px; }
 .ai-session__detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding-bottom: 17px; border-bottom: 1px solid var(--ai-line); }

@@ -54,6 +54,7 @@ import type { WorkspaceDashboardDTO, WorkspaceDashboardTaskItemDTO } from '../..
 import { WORKSPACE_DASHBOARD_CHANNEL } from '../../../../../workspace/common/workspaceDashboardProtocol.js';
 import { restoreSessionSelection, persistSessionSelection } from '../../features/sessionSelection/index.js';
 import { renderSessionList } from '../../widgets/sessionList/index.js';
+import { assertPinnedSessionStopResponse, requestPinnedSessionStop } from '../../features/sessionControl/index.js';
 import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
 import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
 import { createSessionNotifications, type SessionNotificationsActions, type SessionNotificationsController } from '../../widgets/sessionNotifications/index.js';
@@ -80,6 +81,7 @@ interface CreateDraft {
 	readonly provider: 'codex' | 'claude';
 	readonly model: string;
 	readonly permissionMode: AgentSessionPermissionPolicy['mode'];
+	readonly parentSessionId?: string;
 }
 
 const SESSION_STORAGE_TAB = 'devfast.aiSessions.view';
@@ -137,7 +139,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private editorVisible = true;
 	private resizeListener: (() => void) | undefined;
 	private lifecycleTimer: ReturnType<typeof setInterval> | undefined;
+	private lifecycleRefreshPending = false;
 	private sessionListScrollTop = 0;
+	private readonly collapsedSessionIds = new Set<string>();
+	private instructionFocusSessionId: string | undefined;
 	private terminalController: SessionTerminalController | undefined;
 	private readonly terminalService: ITerminalService;
 	private logsPanel: HTMLElement | undefined;
@@ -304,7 +309,15 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	}
 
 	private selectSession(sessionId: string): void {
-		if (sessionId === this.selectedSessionId || !this.projectId) return;
+		if (!this.projectId || !this.sessions.some(session => session.id === sessionId) || sessionId === this.selectedSessionId && !this.creating) return;
+		this.creating = false;
+		this.instructionFocusSessionId = undefined;
+		const seen = new Set<string>();
+		let parentId = this.sessions.find(session => session.id === sessionId)?.parentSessionId;
+		while (parentId && !seen.has(parentId)) {
+			seen.add(parentId); this.collapsedSessionIds.delete(parentId);
+			parentId = this.sessions.find(session => session.id === parentId)?.parentSessionId;
+		}
 		this.notificationNavigationGeneration++;
 		if (this.pendingNotificationMessage?.sessionId !== sessionId) { this.pendingNotificationMessage = undefined; }
 		if (this.previewSessionId !== sessionId) { this.preview = undefined; this.previewSessionId = undefined; }
@@ -326,6 +339,33 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		void Promise.all([this.loadTurns(sessionId), this.loadWorkspacePreparation(sessionId)]).then(() => this.render()).catch(error => this.showError(this.errorMessage(error, '세션 정보를 불러오지 못했습니다.')));
 	}
 
+	private openSessionView(sessionId: string, view: 'terminal' | 'logs'): void {
+		if (!this.sessions.some(session => session.id === sessionId)) { return; }
+		this.selectSession(sessionId);
+		this.creating = false;
+		this.setTab(view);
+		this.instructionFocusSessionId = view === 'terminal' ? sessionId : undefined;
+		this.notice = view === 'terminal' ? '선택한 세션의 터미널에 직접 지시를 입력하세요. 입력 전에는 세션에 아무 내용도 전송하지 않습니다.' : undefined;
+		this.render();
+	}
+
+	private async stopListedSession(sessionId: string): Promise<void> {
+		const projectId = this.projectId;
+		if (!projectId || this.operation) { return; }
+		const turnId = this.latestTurn(sessionId)?.id;
+		this.selectSession(sessionId);
+		try {
+			const result = await requestPinnedSessionStop({ projectId, sessionId, turnId }, {
+				refresh: async () => { await this.loadTurns(sessionId); return this.latestTurn(sessionId); },
+				isCurrent: () => this.projectId === projectId && this.selectedSessionId === sessionId,
+				stop: id => this.stopTurn(sessionId, id),
+			});
+			if (this.projectId !== projectId || this.selectedSessionId !== sessionId) { return; }
+			if (result === 'reviewRequired') { this.notice = '현재 실행 정보를 새로 확인했습니다. 실행이 바뀌었거나 처음 확인한 세션입니다. 대상 실행을 확인한 뒤 중단을 다시 눌러 주세요.'; this.render(); }
+			if (result === 'notRequested' && !this.error) { this.notice = '다른 작업이 진행 중이거나 대상 실행이 바뀌어 중단 요청을 보내지 않았습니다. 현재 실행을 확인하고 다시 눌러 주세요.'; this.render(); }
+		} catch (error) { this.showError(this.errorMessage(error, '선택한 세션의 실행을 확인하지 못했습니다.')); }
+	}
+
 	private async createSession(draft: CreateDraft): Promise<void> {
 		if (!this.projectId || !this.dashboard || this.operation) return;
 		const task = this.dashboard.tasks.find(candidate => candidate.id === draft.taskId && !candidate.archivedAt && !candidate.trashedAt && !candidate.deletionPendingAt);
@@ -335,12 +375,19 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		try {
 			const input: CreateAgentSessionInput = {
 				projectId: this.projectId, bindingId: task.bindingId, taskId: task.id,
+				parentSessionId: draft.parentSessionId,
 				name: draft.name.trim(), provider: draft.provider, model: draft.model.trim(), profileRef: 'local-primary',
 				workspaceMode: this.dashboard.folder.vcsKind === 'git' ? 'gitWorktree' : 'sharedFolder',
 			};
 			const session = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'createSession', input) as AgentSessionDTO;
 			this.sessions = [session, ...this.sessions];
 			this.selectedSessionId = session.id;
+			let parentId = session.parentSessionId;
+			const seen = new Set<string>();
+			while (parentId && !seen.has(parentId)) {
+				seen.add(parentId); this.collapsedSessionIds.delete(parentId);
+				parentId = this.sessions.find(parent => parent.id === parentId)?.parentSessionId ?? null;
+			}
 			createdSessionId = session.id;
 			this.sessionPermissionModes.set(session.id, draft.permissionMode);
 			persistSessionSelection(this.projectId, session.id);
@@ -412,22 +459,32 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		finally { this.operation = false; this.render(); }
 	}
 
-	private async stopTurn(expectedSessionId?: string, expectedTurnId?: string): Promise<void> {
+	private async stopTurn(expectedSessionId?: string, expectedTurnId?: string): Promise<boolean> {
 		const projectId = this.projectId;
 		const sessionId = this.selectedSessionId;
 		const turn = sessionId ? this.latestTurn(sessionId) : undefined;
-		if (!projectId || !sessionId || !turn || this.operation) return;
-		if (expectedSessionId !== undefined && (sessionId !== expectedSessionId || turn.id !== expectedTurnId || turn.projectId !== projectId || turn.sessionId !== sessionId || turn.snapshot.projectId !== projectId || turn.snapshot.sessionId !== sessionId)) { return; }
-		this.operation = true; this.error = undefined; this.render();
+		if (!projectId || !sessionId || !turn || this.operation) return false;
+		if (expectedSessionId !== undefined && (sessionId !== expectedSessionId || turn.id !== expectedTurnId || turn.projectId !== projectId || turn.sessionId !== sessionId || turn.snapshot.projectId !== projectId || turn.snapshot.sessionId !== sessionId)) { return false; }
+		let requestSent = false;
+		this.operation = true; this.error = undefined; this.notice = undefined; this.render();
 		try {
-			const stopped = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'stop', { projectId, sessionId, turnId: turn.id }) as AgentSessionTurnDTO;
-			if (this.projectId !== projectId || stopped.projectId !== projectId || stopped.sessionId !== sessionId || stopped.id !== turn.id) { return; }
+			const pending = ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'stop', { projectId, sessionId, turnId: turn.id }) as Promise<AgentSessionTurnDTO>;
+			requestSent = true;
+			const stopped = await pending;
+			assertPinnedSessionStopResponse({ projectId, sessionId, turnId: turn.id }, stopped);
+			if (this.projectId !== projectId) { return true; }
 			await this.loadTurns(sessionId);
-			if (this.projectId !== projectId) { return; }
+			if (this.projectId !== projectId) { return true; }
 			this.sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId: this.projectId }) as readonly AgentSessionDTO[];
 			this.terminalController?.finish(sessionId, stopped.id, stopped.exitCode ?? undefined);
 			this.notice = '실행 중단을 요청했습니다.';
-		} catch (error) { this.error = this.errorMessage(error, '실행을 중단하지 못했습니다.'); }
+			return true;
+		} catch (error) {
+			if (this.projectId === projectId) {
+				this.error = `${requestSent ? '중단 요청의 결과를 확인하지 못했습니다.' : '중단 요청을 보내지 못했습니다.'} ${this.errorMessage(error, '현재 실행 상태를 새로 확인해 주세요.')}`;
+			}
+			return requestSent;
+		}
 		finally { this.operation = false; this.render(); }
 	}
 
@@ -1074,6 +1131,9 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (!this.root) return;
 		this.sessionListScrollTop = this.root.querySelector<HTMLElement>('.ai-session__list')?.scrollTop ?? this.sessionListScrollTop;
 		const activeElement = document.activeElement;
+		const focusedSessionControl = activeElement instanceof HTMLElement && this.root.contains(activeElement)
+			? (['sessionSelect', 'sessionAction', 'sessionToggle'] as const).map(key => ({ key, value: activeElement.dataset[key] })).find(control => control.value)
+			: undefined;
 		const onboardingFinished = this.onboardingFocusTogglePending;
 		this.onboardingFocusTogglePending = false;
 		const focusedOnboardingKey = !onboardingFinished && !this.createFormFocusPending && activeElement instanceof HTMLElement && this.onboardingMount?.contains(activeElement) ? activeElement.dataset.onboardingFocus : undefined;
@@ -1123,7 +1183,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			const selector = document.createElement('label'); selector.className = 'ai-session__narrow-selector'; selector.textContent = '세션 선택';
 			const select = document.createElement('select'); select.setAttribute('aria-label', '현재 세션 선택');
 			const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = '세션 선택'; select.appendChild(placeholder);
-			for (const session of this.sessions) { const option = document.createElement('option'); option.value = session.id; option.textContent = session.name; select.appendChild(option); }
+			for (const session of this.sessions) { const option = document.createElement('option'); option.value = session.id; option.textContent = session.parentSessionId ? `${session.name} · 상위 ${this.sessions.find(parent => parent.id === session.parentSessionId)?.name ?? '확인 필요'}` : session.name; select.appendChild(option); }
 			select.value = this.selectedSessionId ?? '';
 			select.addEventListener('change', () => { if (select.value) this.selectSession(select.value); });
 			selector.appendChild(select);
@@ -1131,7 +1191,17 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			compactToolbar.append(selector, compactCreate); shell.appendChild(compactToolbar);
 
 			const list = document.createElement('aside'); list.className = 'ai-session__list'; list.setAttribute('aria-label', 'AI 세션 목록');
-			renderSessionList(list, this.sessions, this.selectedSessionId, { onSelect: id => this.selectSession(id), onCreate: startCreating }, taskNames);
+			renderSessionList(list, this.sessions, this.selectedSessionId, {
+				onSelect: id => this.selectSession(id), onCreate: startCreating,
+				onOpen: (id, view) => this.openSessionView(id, view), onStop: id => void this.stopListedSession(id),
+				collapsedIds: this.collapsedSessionIds, busy: this.operation,
+				onToggle: id => {
+					if (this.collapsedSessionIds.has(id)) { this.collapsedSessionIds.delete(id); }
+					else { this.collapsedSessionIds.add(id); }
+					this.render();
+					this.root?.querySelector<HTMLElement>(`[data-session-toggle="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+				},
+			}, taskNames);
 			shell.appendChild(list);
 
 			if (this.creating || this.sessions.length === 0) {
@@ -1183,6 +1253,10 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		if (focusedMessagesElement?.isConnected) { focusedMessagesElement.focus({ preventScroll: true }); }
 		if (focusedWorkflowElement?.isConnected) { focusedWorkflowElement.focus({ preventScroll: true }); }
 		if (focusedNotificationsElement?.isConnected) { focusedNotificationsElement.focus({ preventScroll: true }); }
+		if (focusedSessionControl?.value) {
+			const attribute = { sessionSelect: 'data-session-select', sessionAction: 'data-session-action', sessionToggle: 'data-session-toggle' }[focusedSessionControl.key];
+			this.root.querySelector<HTMLElement>(`[${attribute}="${CSS.escape(focusedSessionControl.value)}"]`)?.focus({ preventScroll: true });
+		}
 		if (focusedOnboardingKey) {
 			const matching = [...this.root.querySelectorAll<HTMLElement>('[data-onboarding-focus]')].find(element => element.dataset.onboardingFocus === focusedOnboardingKey && !element.hasAttribute('disabled'));
 			matching?.focus({ preventScroll: true });
@@ -1197,30 +1271,36 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	}
 
 	private updateLifecyclePolling(): void {
-		const sessionId = this.selectedSessionId;
-		const turn = sessionId ? this.latestTurn(sessionId) : undefined;
-		const shouldPoll = this.editorVisible && !!sessionId && this.activeTab === 'terminal' && !!turn && ['starting', 'running', 'stopping'].includes(turn.state);
+		const shouldPoll = this.editorVisible && !!this.projectId && !!this.selectedSessionId && !this.creating && !this.preview;
 		if (!shouldPoll && this.lifecycleTimer) { clearInterval(this.lifecycleTimer); this.lifecycleTimer = undefined; }
 		if (shouldPoll && !this.lifecycleTimer) {
-			this.lifecycleTimer = setInterval(() => void this.refreshLifecycle(sessionId!), 2500);
+			this.lifecycleTimer = setInterval(() => { if (this.selectedSessionId) { void this.refreshLifecycle(this.selectedSessionId); } }, 2500);
 		}
 	}
 
 	private async refreshLifecycle(sessionId: string): Promise<void> {
-		if (!this.projectId || this.operation || this.selectedSessionId !== sessionId) return;
+		const projectId = this.projectId;
+		if (!projectId || this.operation || this.lifecycleRefreshPending || this.selectedSessionId !== sessionId) return;
+		this.lifecycleRefreshPending = true;
+		const isCurrent = () => this.projectId === projectId && this.selectedSessionId === sessionId && !this.operation && !this.creating && !this.preview && this.editorVisible;
 		try {
 			const previousTurnState = this.latestTurn(sessionId)?.state;
-			const previousSessionState = this.sessions.find(session => session.id === sessionId)?.state;
-			await this.loadTurns(sessionId);
-			this.sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId: this.projectId }) as readonly AgentSessionDTO[];
+			const previousSessions = this.sessions;
+			await this.loadTurns(sessionId, isCurrent);
+			if (!isCurrent()) { return; }
+			const sessions = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listSessions', { projectId }) as readonly AgentSessionDTO[];
+			if (!isCurrent()) { return; }
+			if (sessions.some(session => session.projectId !== projectId)) { throw new Error('다른 프로젝트의 세션 목록을 받았습니다.'); }
+			this.sessions = sessions;
 			const nextTurnState = this.latestTurn(sessionId)?.state;
-			const nextSessionState = this.sessions.find(session => session.id === sessionId)?.state;
-			if (previousTurnState !== nextTurnState || previousSessionState !== nextSessionState) {
+			const sessionsChanged = previousSessions.length !== sessions.length || sessions.some((session, index) => session.id !== previousSessions[index]?.id || session.revision !== previousSessions[index]?.revision);
+			if (previousTurnState !== nextTurnState || sessionsChanged) {
 				const completedTurn = this.latestTurn(sessionId);
 				if (completedTurn && ['exited', 'interrupted', 'failed'].includes(completedTurn.state)) this.terminalController?.finish(sessionId, completedTurn.id, completedTurn.exitCode ?? undefined);
 				this.render();
 			}
-		} catch (error) { this.showError(this.errorMessage(error, '실행 상태를 새로고침하지 못했습니다.')); }
+		} catch (error) { if (isCurrent()) { this.showError(this.errorMessage(error, '실행 상태를 새로고침하지 못했습니다.')); } }
+		finally { this.lifecycleRefreshPending = false; }
 	}
 
 	private availableTasks(): readonly WorkspaceDashboardTaskItemDTO[] {
@@ -1230,8 +1310,17 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private renderTerminal(container: HTMLElement, session: AgentSessionDTO, turn: AgentSessionTurnDTO | undefined): void {
 		if (!this.editorVisible) return;
 		const terminalController = this.terminalController;
+		const show = (turn: AgentSessionTurnDTO): void => {
+			if (!terminalController) { return; }
+			void terminalController.show(container, session.id, turn).then(() => {
+				requestAnimationFrame(() => {
+					if (this.editorVisible && this.selectedSessionId === session.id && this.activeTab === 'terminal' && this.instructionFocusSessionId === session.id
+						&& terminalController.focus(session.id, turn.id)) { this.instructionFocusSessionId = undefined; }
+				});
+			}).catch(error => this.showError(this.errorMessage(error, '세션 터미널에 연결하지 못했습니다.')));
+		};
 		if (turn && terminalController?.hasTerminal(session.id, turn.id)) {
-			void terminalController.show(container, session.id, turn).catch(error => this.showError(this.errorMessage(error, '세션 터미널에 연결하지 못했습니다.')));
+			show(turn);
 			return;
 		}
 		if (!turn || !['starting', 'running'].includes(turn.state)) {
@@ -1241,7 +1330,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 				: '실행 중인 터미널이 없습니다. 실행 준비를 눌러 권한과 작업 폴더를 확인해 주세요.';
 			container.appendChild(state); return;
 		}
-		if (terminalController) void terminalController.show(container, session.id, turn).catch(error => this.showError(this.errorMessage(error, '세션 터미널에 연결하지 못했습니다.')));
+		show(turn);
 	}
 
 	private renderWorkspacePreparation(parent: HTMLElement, status: WorkspaceAgentSessionWorkspacePreparationDTO): void {
@@ -1292,6 +1381,17 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		for (const item of tasks) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.title; taskSelect.appendChild(option); }
 		if (this.dashboard?.view.selectedTaskId && tasks.some(item => item.id === this.dashboard?.view.selectedTaskId)) taskSelect.value = this.dashboard.view.selectedTaskId;
 		if (this.onboardingCreateTaskId && tasks.some(item => item.id === this.onboardingCreateTaskId)) taskSelect.value = this.onboardingCreateTaskId;
+		const parentSelect = this.field(form, '상위 세션 (선택)', 'parentSession', '', 'select').control as HTMLSelectElement;
+		const updateParents = (): void => {
+			parentSelect.replaceChildren();
+			const independent = document.createElement('option'); independent.value = ''; independent.textContent = '독립 세션'; parentSelect.appendChild(independent);
+			const task = tasks.find(item => item.id === taskSelect.value);
+			for (const session of this.sessions) {
+				if (session.projectId !== this.projectId || session.bindingId !== task?.bindingId || session.taskId !== task?.id) { continue; }
+				const option = document.createElement('option'); option.value = session.id; option.textContent = `${session.name} · ${session.provider} · ${session.model}`; parentSelect.appendChild(option);
+			}
+		};
+		updateParents(); taskSelect.addEventListener('change', updateParents);
 		const provider = this.field(form, '공급자', 'provider', '', 'select').control as HTMLSelectElement;
 		for (const [value, label] of [['codex', 'Codex'], ['claude', 'Claude']] as const) { const option = document.createElement('option'); option.value = value; option.textContent = label; provider.appendChild(option); }
 		if (this.onboardingCreateProvider) { provider.value = this.onboardingCreateProvider; }
@@ -1308,7 +1408,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		const create = document.createElement('button'); create.type = 'submit'; create.className = 'ai-session__primary'; create.disabled = this.operation; create.textContent = '세션 만들고 실행 미리보기';
 		const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'ai-session__secondary'; cancel.textContent = '취소'; cancel.addEventListener('click', () => { this.creating = false; this.onboardingCreateProvider = undefined; this.onboardingCreateTaskId = undefined; this.render(); });
 		buttons.append(create, cancel); form.appendChild(buttons);
-		form.addEventListener('submit', event => { event.preventDefault(); void this.createSession({ name: name.control.value, taskId: taskSelect.value, provider: provider.value as CreateDraft['provider'], model: model.control.value, permissionMode: permission.value as AgentSessionPermissionPolicy['mode'] }); });
+		form.addEventListener('submit', event => { event.preventDefault(); void this.createSession({ name: name.control.value, taskId: taskSelect.value, parentSessionId: parentSelect.value || undefined, provider: provider.value as CreateDraft['provider'], model: model.control.value, permissionMode: permission.value as AgentSessionPermissionPolicy['mode'] }); });
 		form.classList.add('ai-session__create-form');
 		section.appendChild(form); parent.appendChild(section);
 	}
