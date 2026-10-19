@@ -549,6 +549,7 @@ try {
       const fixtureMode = mode === 'immediate' ? 'immediate' : mode === 'verify-revoke' ? 'verify-revoke' : 'normal';
       const args = [fixturePath, identityFile, fixtureMode, revocationMarker, terminationEvidence];
       const environment = { CODEX_HOME: profileRoot };
+
       const launchEnvironment = {
         ...environment,
         PATH: '/usr/bin:/bin',
@@ -559,6 +560,7 @@ try {
         USER: os.userInfo().username,
         LOGNAME: os.userInfo().username,
       };
+
       const launch = { executable: nodeExecutable, args, cwd: snapshot.cwd, env: launchEnvironment, cols: 80, rows: 24 };
 
       return {
