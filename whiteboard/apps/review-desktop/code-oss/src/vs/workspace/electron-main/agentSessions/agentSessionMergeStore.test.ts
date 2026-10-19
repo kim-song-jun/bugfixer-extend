@@ -37,7 +37,8 @@ test('durable merge proposal pins successful commit, full source delta, human ap
 		const currentSession = database.agentSessions.getSession(project.id, session.id)!;
 		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, currentSession.revision, { state: 'running' });
 		database.agentSessionContents.recordAfter({ scope, snapshot: capture('after\n', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: '2'.repeat(40), cleanupVerified: true });
-		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
+		const finalSession = database.agentSessions.getSession(project.id, session.id)!;
+		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, finalSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
 		const evidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
 		const explanation = database.agentSessionReviews.recordHumanExplanation({ target: { ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: 'src/selected.ts', hunkId: null },
 			expectedLatestRevision: 0, what: 'Updated selected source.', why: 'The requested behavior needs this change.', citations: [], checkClaims: [], status: 'confirmed' });
@@ -203,7 +204,8 @@ function createMergeFixture(): { readonly database: WorkspaceDatabase; readonly 
 		database.agentSessionContents.recordBaseline({ scope, snapshot: makeCapture('before', '2026-10-19T00:00:00.000Z'), revision: '1'.repeat(40) });
 		const current = database.agentSessions.getSession(project.id, session.id)!; const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, current.revision, { state: 'running' });
 		database.agentSessionContents.recordAfter({ scope, snapshot: makeCapture('after', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: '2'.repeat(40), cleanupVerified: true });
-		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
+		const finalSession = database.agentSessions.getSession(project.id, session.id)!;
+		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, finalSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
 		const evidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
 		const explanation = database.agentSessionReviews.recordHumanExplanation({ target: { ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: 'file.txt', hunkId: null }, expectedLatestRevision: 0, what: 'Changed it.', why: 'Requested.', citations: [], checkClaims: [], status: 'confirmed' });
 		const commitProposal = database.agentSessionIntegrations.createProposal({ ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint,

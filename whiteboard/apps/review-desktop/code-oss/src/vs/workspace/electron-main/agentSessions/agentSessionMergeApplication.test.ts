@@ -83,10 +83,12 @@ async function fixture() {
 	const turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot: turnSnapshot });
 	const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
 	database.agentSessionContents.recordBaseline({ scope, snapshot: content(folderIdentity, 'before\n', '2026-10-19T00:00:00.000Z'), revision: originalHead });
-	const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, session.revision, { state: 'running' });
+	const currentSession = database.agentSessions.getSession(project.id, session.id)!;
+	const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, turn.revision, currentSession.revision, { state: 'running' });
 	writeFileSync(join(worktreePath, 'src/change.txt'), 'after\n');
 	database.agentSessionContents.recordAfter({ scope, snapshot: content(folderIdentity, 'after\n', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: originalHead, cleanupVerified: true });
-	database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
+	const finalSession = database.agentSessions.getSession(project.id, session.id)!;
+	database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, finalSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
 	const evidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
 	const explanation = database.agentSessionReviews.recordHumanExplanation({
 		target: { ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: 'src/change.txt', hunkId: null },

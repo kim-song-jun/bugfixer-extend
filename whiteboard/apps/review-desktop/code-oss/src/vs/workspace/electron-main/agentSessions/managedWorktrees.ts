@@ -2364,9 +2364,9 @@ export class ManagedWorktreeService {
 		return env;
 	}
 
-	/** Identity/config discovery alone honors the caller's explicit global config file. */
+	/** Identity/config discovery alone honors explicit global config and system-config opt-out. */
 	private discoveryGitEnvironment(): NodeJS.ProcessEnv {
-		return process.env.GIT_CONFIG_GLOBAL === undefined ? {} : { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
+		return Object.fromEntries(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
 	}
 
 	private sign(value: object): string {

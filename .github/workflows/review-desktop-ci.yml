@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Disposable Git fixtures supply their own config; hosted runners register system LFS filters.
+  GIT_CONFIG_NOSYSTEM: '1'
+
 concurrency:
   group: review-desktop-root-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

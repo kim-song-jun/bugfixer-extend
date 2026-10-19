@@ -177,7 +177,7 @@ export class AgentSessionMergeStore {
 		const payload: MergeProposalPayload = { diffText: input.diffText, commitMessage, author, committer, paths, ...(resolution ? { resolution } : {}) };
 		const payloadJson = JSON.stringify(payload);
 		if (Buffer.byteLength(payloadJson, 'utf8') > MAX_PROPOSAL_BYTES) { throw new Error('Merge proposal payload exceeds five MiB.'); }
-		const proposalFingerprint = digest(JSON.stringify({ ...scope, bindingId, commitProposalId: input.commitProposalId, commitProposalRevision: input.commitProposalRevision,
+		const proposalFingerprint = digest(JSON.stringify({ projectId: scope.projectId, bindingId, sessionId: scope.sessionId, turnId: scope.turnId, commitProposalId: input.commitProposalId, commitProposalRevision: input.commitProposalRevision,
 			commitProposalFingerprint: input.commitProposalFingerprint, integrationOwnerId, sourceHead: input.sourceHead, targetHead: input.targetHead,
 			mergeBase: input.mergeBase, diffFingerprint: input.diffFingerprint, payload }));
 		return this.transaction(() => {
