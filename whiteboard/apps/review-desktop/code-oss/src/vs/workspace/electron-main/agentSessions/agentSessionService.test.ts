@@ -186,13 +186,14 @@ function createDelayedService(fixture: ReturnType<typeof createFixture>) {
 
 		override async acquire(input: AcquireAgentSessionWorkspaceInput): Promise<AcquiredAgentSessionWorkspace> {
 			const hold = this.nextHold;
+			this.nextHold = undefined;
+			const workspace = await super.acquire(input);
+			this.acquiredWorkspaces.push(workspace);
+			// Hold a real acquired lease before handing it to the service, so cancellation must release it.
 			if (hold) {
-				this.nextHold = undefined;
 				hold.entered();
 				await hold.gate;
 			}
-			const workspace = await super.acquire(input);
-			this.acquiredWorkspaces.push(workspace);
 			return workspace;
 		}
 	}
@@ -271,7 +272,7 @@ test('idle mutation lease blocks manual and workflow starts synchronously, scope
 	} finally { dispose(fixture); }
 });
 
-test('idle mutation lease rejects an in-flight same-session workspace acquisition', async () => {
+test('idle mutation lease rejects an in-flight same-session workspace handoff', async () => {
 	const fixture = createFixture();
 	try {
 		const { service, resolver } = createDelayedService(fixture);
@@ -828,7 +829,7 @@ test('an invalid workflow reservation releases the acquired writer lease without
 	}
 });
 
-test('shutdown cancellation during workflow workspace acquisition cannot create a turn or spawn a provider', async () => {
+test('shutdown cancellation during acquired workflow workspace handoff cannot create a turn or spawn a provider', async () => {
 	const fixture = createFixture();
 	try {
 		const { session, reservation } = approveWorkflowLaunch(fixture);
@@ -847,7 +848,7 @@ test('shutdown cancellation during workflow workspace acquisition cannot create 
 	}
 });
 
-test('caller abort during workflow workspace acquisition releases the workspace before creating a turn', async () => {
+test('caller abort during acquired workflow workspace handoff releases the workspace before creating a turn', async () => {
 	const fixture = createFixture();
 	try {
 		const { session, reservation } = approveWorkflowLaunch(fixture);
@@ -868,6 +869,29 @@ test('caller abort during workflow workspace acquisition releases the workspace 
 		assert.throws(() => resolver.acquiredWorkspaces[0].snapshot, /lease is unavailable/i);
 	} finally {
 		dispose(fixture);
+	}
+});
+
+test('caller abort before read-only admission issues no workspace lease and leaves admission reusable', async () => {
+	const fixture = createFixture();
+	const { service, resolver } = createDelayedService(fixture);
+	try {
+		const { session, reservation } = approveWorkflowLaunch(fixture);
+		const controller = new AbortController();
+		controller.abort();
+		await assert.rejects(service.startWorkflowNode({
+			projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY,
+			reservationId: reservation.reservationId, signal: controller.signal,
+		}), /cancelled/i);
+		assert.equal(resolver.acquiredWorkspaces.length, 0);
+		assert.equal(fixture.runtimeFactory.starts(), 0);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id), []);
+		const lease = await resolver.acquire({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY, launch: true });
+		assert.equal(lease.snapshot.sessionId, session.id);
+		resolver.release(lease);
+		assert.throws(() => lease.snapshot, /lease is unavailable/i);
+	} finally {
+		try { await service.shutdown(); } finally { dispose(fixture); }
 	}
 });
 
@@ -929,7 +953,7 @@ test('shutdown aborts and drains a delayed preview before any launch ticket can 
 	}
 });
 
-test('shutdown drains a delayed start preflight before creating a durable turn or runtime', async () => {
+test('shutdown drains a delayed acquired-workspace handoff before creating a durable turn or runtime', async () => {
 	const fixture = createFixture();
 	try {
 		const { service, resolver } = createDelayedService(fixture);
