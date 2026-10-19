@@ -435,7 +435,10 @@ export class AgentSessionControlRequestStore {
 
 	private normalizePolicy(value: AgentSessionPermissionPolicy): AgentSessionPermissionPolicy {
 		this.assertExactKeys(value, ['mode', 'approval'], [], 'permission policy');
-		if (!['read-only', 'mutating'].includes(value.mode) || !['never', 'on-request', 'always'].includes(value.approval)) { throw new Error('The start request permission policy is invalid.'); }
+		if (!value || !(value.mode === 'read-only' && value.approval === 'never')
+			&& !(value.mode === 'mutating' && value.approval === 'on-request')) {
+			throw new Error('The start request permission policy is invalid.');
+		}
 		return { mode: value.mode, approval: value.approval };
 	}
 

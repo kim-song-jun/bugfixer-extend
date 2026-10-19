@@ -70,6 +70,22 @@ test('unknown permission fields cannot silently become an apparently reviewed po
 	} finally { f.db.close(); }
 });
 
+test('start request policy accepts only the trusted host mode and approval pairs', () => {
+	const f = fixture();
+	try {
+		const invalidPolicies: readonly AgentSessionPermissionPolicy[] = [
+			{ mode: 'read-only', approval: 'on-request' },
+			{ mode: 'read-only', approval: 'always' },
+			{ mode: 'mutating', approval: 'never' },
+			{ mode: 'mutating', approval: 'always' },
+		];
+		for (const [index, permissionPolicy] of invalidPolicies.entries()) {
+			assert.throws(() => f.store.createStartRequest({ ...f.startInput, permissionPolicy, idempotencyKey: `invalid-policy-${index}` }), /permission policy/i);
+		}
+		assert.deepEqual(f.store.list(PROJECT), [], 'An unsupported permission combination must be rejected before durable insertion');
+	} finally { f.db.close(); }
+});
+
 test('start request is durable, idempotent, project scoped, and approval claims the exact revision once', () => {
 	const f = fixture();
 	try {

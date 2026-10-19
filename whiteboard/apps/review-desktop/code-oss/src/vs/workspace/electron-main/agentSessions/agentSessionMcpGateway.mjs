@@ -319,10 +319,10 @@ function writeJsonRpcError(id, code, message) { queueStdout(`${JSON.stringify({ 
 
 const TOOLS = [
 	{
-		name: 'sessions_requestStart', description: 'Save a proposed start for human review in the native app. This never launches a provider or grants permissions. The human must review the target, model, folder, rules, permissions and possible usage cost.',
+		name: 'sessions_requestStart', description: 'Save a proposed start for human review in the native app. This never launches a provider or grants permissions. Supported CLI policies are read-only with never, or mutating with on-request; both still require human app approval. The human must review the target, model, folder, rules, permissions and possible usage cost.',
 		inputSchema: { type: 'object', required: ['targetSessionId', 'expectedSessionRevision', 'permissionMode', 'approval', 'reason', 'idempotencyKey'], properties: {
 			targetSessionId: { type: 'string', format: 'uuid' }, expectedSessionRevision: { type: 'integer', minimum: 1 },
-			permissionMode: { type: 'string', enum: ['read-only', 'mutating'] }, approval: { type: 'string', enum: ['never', 'on-request', 'always'] },
+			permissionMode: { type: 'string', enum: ['read-only', 'mutating'] }, approval: { type: 'string', enum: ['never', 'on-request'] },
 			reason: { type: 'string', minLength: 1, maxLength: 8192 }, idempotencyKey: { type: 'string', minLength: 1, maxLength: 128 },
 		}, additionalProperties: false },
 		validate(args) {
@@ -334,7 +334,7 @@ const TOOLS = [
 			const bad = [targetSessionId, revision, reason, key].find(field => field.error);
 			if (bad) { return bad; }
 			if (!UUID_RE.test(targetSessionId.value) || revision.value === undefined || !reason.value.trim() || !key.value.trim()) { return { error: 'A target UUID, exact session revision, reason and retry key are required.' }; }
-			if (!['read-only', 'mutating'].includes(args.permissionMode) || !['never', 'on-request', 'always'].includes(args.approval)) { return { error: 'Invalid proposed permission policy.' }; }
+			if (!(args.permissionMode === 'read-only' && args.approval === 'never') && !(args.permissionMode === 'mutating' && args.approval === 'on-request')) { return { error: 'Use read-only with never, or mutating with on-request; app approval is still required.' }; }
 			return { value: { targetSessionId: targetSessionId.value, expectedSessionRevision: revision.value, permissionMode: args.permissionMode, approval: args.approval, reason: reason.value, idempotencyKey: key.value } };
 		},
 		method: 'sessions.requestStart',

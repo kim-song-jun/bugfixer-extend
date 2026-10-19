@@ -2657,7 +2657,7 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
     callerTurnId: turn.id,
     targetSessionId: target.id,
     expectedSessionRevision: target.revision,
-    permissionPolicy: { mode: 'read-only', approval: 'on-request' },
+    permissionPolicy: { mode: 'read-only', approval: 'never' },
     reason: 'CI fixture request for native review and rejection.',
     idempotencyKey: `native-dashboard-control-${target.id}`,
   });
@@ -2684,7 +2684,7 @@ async function verifySessionControlRequest(page, fixture, tag, screenshots, view
   await preview.waitFor();
   await preview.getByRole('heading', { name: '실행 범위를 확인해 주세요', exact: true }).waitFor();
   assert.ok((await preview.innerText()).includes(fixture.aiSession.model), 'The pending request preview must show the target session model');
-  assert.ok((await preview.innerText()).includes('필요할 때 직접 승인'), 'The request preview must show its requested approval policy');
+  assert.ok((await preview.innerText()).includes('CLI 승인 요청 없음'), 'The request preview must show its supported read-only CLI policy independently of app approval');
   assert.equal(await workspace.locator('#ai-session-preview-start').innerText(), 'macOS 확인 창에서 승인', 'A reviewed request must still require the native human approval step');
   assert.equal(await preview.locator('button').count(), 2, 'Review preview exposes only approval and cancellation; it does not launch automatically');
 

@@ -236,6 +236,9 @@ test('MCP start proposals never launch and self-stop receipts survive capability
 			targetSessionId: target.id, expectedSessionRevision: target.revision, permissionMode: 'mutating', approval: 'on-request',
 			reason: `Please inspect this reference ${secret}`, idempotencyKey: 'human-review-only',
 		} };
+		const unsupportedPolicy = await client.client.callTool({ ...proposal, arguments: { ...proposal.arguments, permissionMode: 'read-only', approval: 'on-request', idempotencyKey: 'unsupported-policy' } });
+		assert.equal((unsupportedPolicy as { isError?: boolean }).isError, true);
+		assert.equal(fixture.database.agentSessionControlRequests.list(fixture.project.id).length, 0, 'An unsupported policy must not leave a request that cannot be previewed.');
 		const first = readSuccessfulToolPayload(await client.client.callTool(proposal), 'sessions_requestStart');
 		const duplicate = readSuccessfulToolPayload(await client.client.callTool(proposal), 'duplicate sessions_requestStart');
 		assert.equal(first.id, duplicate.id);
