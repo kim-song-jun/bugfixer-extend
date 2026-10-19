@@ -380,7 +380,7 @@ jobs:
         timeout-minutes: 5
         working-directory: whiteboard/apps/review-desktop
         run: |
-          TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPrTextApplication.test.ts code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPrTextEnvironment.test.ts code-oss/src/vs/workspace/electron-main/providerRuns/providerPrTextRun.test.ts
+          TSX_TSCONFIG_PATH=tsconfig.test.json node --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPrTextApplication.test.ts code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPrTextEnvironment.test.ts code-oss/src/vs/workspace/electron-main/workspaceAgentPrTextRequests.test.ts code-oss/src/vs/workspace/electron-main/providerRuns/providerPrTextRun.test.ts
           node --test --test-concurrency=1 native/provider-group-control/provider-group-control.test.mjs
 
       - name: Upload native PTY evidence

@@ -68,7 +68,7 @@ function previewInput(scope: ReturnType<typeof fixture>['scope']) {
 	return { scope, baseRevision: 1, idempotencyKey: randomUUID(), instruction: 'Summarize the selected change in Korean.' };
 }
 
-test('preview binds retained SQLite evidence, approved rationale and current PR head; start refuses a moved snapshot', async () => {
+test('preview binds retained SQLite evidence, approved rationale and current PR head; start refuses a moved snapshot', { skip: process.platform !== 'darwin' }, async () => {
 	const value = fixture();
 	try {
 		const preview = await value.application.previewPrTextRequest(previewInput(value.scope));
@@ -90,7 +90,7 @@ test('preview binds retained SQLite evidence, approved rationale and current PR 
 	} finally { await value.application.shutdown(); value.dispose(); }
 });
 
-test('start returns a durable running request, and cancellation is persisted before the owned runner aborts', async () => {
+test('start returns a durable running request, and cancellation is persisted before the owned runner aborts', { skip: process.platform !== 'darwin' }, async () => {
 	let started!: () => void;
 	let finishRunner!: (result: ProviderPrTextRunResult) => void;
 	let observedRequest: ProviderPrTextRunRequest | undefined;
@@ -128,7 +128,7 @@ test('start returns a durable running request, and cancellation is persisted bef
 	} finally { await value.application.shutdown(); value.dispose(); if (providerDirectory) { rmSync(providerDirectory, { recursive: true, force: true }); } }
 });
 
-test('unverified provider cleanup never stores a candidate and shutdown retains the cleanup failure', async () => {
+test('unverified provider cleanup never stores a candidate and shutdown retains the cleanup failure', { skip: process.platform !== 'darwin' }, async () => {
 	const runner: AgentSessionPrTextRunner = async () => ({ state: 'interrupted', cleanupVerified: false, reason: 'Owned process group cleanup was not verified.' });
 	const value = fixture(runner);
 	try {

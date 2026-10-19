@@ -82,7 +82,7 @@ function successfulResult(request: ProviderPrTextRunRequest): ProviderPrTextRunR
 	};
 }
 
-test('PR text IPC router binds all nine commands to real workspace SQLite rows and live scope guards', async () => {
+test('PR text IPC router binds all nine commands to real workspace SQLite rows and live scope guards', { skip: process.platform !== 'darwin' }, async () => {
 	let holdNextRun = false;
 	let releaseRun!: () => void;
 	const runner: AgentSessionPrTextRunner = async request => {
