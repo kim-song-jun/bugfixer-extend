@@ -15,7 +15,7 @@ const MAX_IDENTITY_HOOK_COMMAND_LENGTH = 4096;
 export interface AgentSessionMcpServer {
 	/** App-generated stable name; caller-supplied MCP server names are not accepted at IPC boundaries. */
 	readonly name: 'bugfixer-session';
-	/** Trusted app-owned local bridge executable and arguments. */
+	/** Trusted app-owned Node executable, followed by the absolute gateway module and loopback port. */
 	readonly command: string;
 	readonly args: readonly string[];
 	/** Allowlisted variable names forwarded to the app-owned bridge; values stay out of config and argv. */
@@ -103,8 +103,10 @@ function validateInput(input: AgentSessionCommandInput): void {
 		}
 	}
 	if (input.mcpServer.name !== 'bugfixer-session' || !isAbsolute(input.mcpServer.command) || input.mcpServer.command.length > MAX_PATH_LENGTH
-		|| /[\u0000-\u001f\u007f]/.test(input.mcpServer.command) || input.mcpServer.args.length > 4
-		|| input.mcpServer.args.some(arg => !isAbsolute(arg) || arg.length > MAX_PATH_LENGTH || /[\u0000-\u001f\u007f]/.test(arg))) {
+		|| /[\u0000-\u001f\u007f]/.test(input.mcpServer.command) || input.mcpServer.args.length !== 2
+		|| !isAbsolute(input.mcpServer.args[0] ?? '')
+		|| input.mcpServer.args.some(arg => arg.length > MAX_PATH_LENGTH || /[\u0000-\u001f\u007f]/.test(arg))
+		|| !/^[1-9][0-9]{0,4}$/.test(input.mcpServer.args[1] ?? '') || Number(input.mcpServer.args[1]) > 65535) {
 		throw new Error('The app-owned session MCP bridge specification is invalid.');
 	}
 	if (input.mcpServer.envVariables.length > 8 || new Set(input.mcpServer.envVariables).size !== input.mcpServer.envVariables.length

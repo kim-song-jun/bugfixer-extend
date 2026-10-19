@@ -671,6 +671,16 @@ try {
   receipt.checks.push('both duplex inputs, xterm-observed resize, log/terminal tab reattach, session switching, and UI stop succeeded');
 } catch (error) {
   receipt.failure = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  if (browser) {
+    try {
+      const page = browser.contexts()[0]?.pages()[0];
+
+      if (page) await page.screenshot({ path: path.join(output, 'session-terminal-failure.png') });
+    } catch (screenshotError) {
+      receipt.failureScreenshotError = screenshotError instanceof Error ? screenshotError.message : String(screenshotError);
+    }
+  }
+
   process.exitCode = 1;
 } finally {
   const cleanupErrors = [];
@@ -694,10 +704,10 @@ try {
       receipt.finalSessions = sessionRows.map(session => ({ id: session.id, name: session.name, state: session.state }));
 
       if (receipt.project) {
-        receipt.finalTurns = receipt.sessions.map(session => ({
+        receipt.finalTurns = sessionRows.map(session => ({
           sessionId: session.id,
           turns: database.agentSessionTurns.listTurns(receipt.project.projectId, session.id)
-            .map(turn => ({ id: turn.id, state: turn.state, cleanupVerified: turn.cleanupVerified, providerConversationId: turn.providerConversationId })),
+            .map(turn => ({ id: turn.id, state: turn.state, cleanupVerified: turn.cleanupVerified, providerConversationId: turn.providerConversationId, errorSummary: turn.errorSummary })),
         }));
       }
 

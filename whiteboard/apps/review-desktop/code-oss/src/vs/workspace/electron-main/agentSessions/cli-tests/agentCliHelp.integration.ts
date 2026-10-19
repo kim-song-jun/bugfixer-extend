@@ -164,7 +164,7 @@ describe('pinned provider CLI help and version discovery', () => {
 				cwd: profile,
 				sessionId: '550e8400-e29b-41d4-a716-446655440000',
 				permissionPolicy: { mode: 'mutating', approval: 'on-request' },
-				mcpServer: { name: 'bugfixer-session', command: '/app/session-mcp', args: [], envVariables: ['BUGFIXER_SESSION_TOKEN'] },
+				mcpServer: { name: 'bugfixer-session', command: '/app/node', args: ['/app/session-mcp-gateway.mjs', '43210'], envVariables: ['BUGFIXER_SESSION_TOKEN'] },
 				profileEnvironment: { CODEX_HOME: profile },
 				identityHookCommand: '"/app/Node.js" "/app/helpers/capture identity.mjs"',
 			});

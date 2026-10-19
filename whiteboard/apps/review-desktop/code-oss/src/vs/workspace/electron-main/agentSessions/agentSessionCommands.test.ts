@@ -21,7 +21,7 @@ function input(overrides: Partial<AgentSessionCommandInput> = {}): AgentSessionC
 		provider: 'codex', commandSpecVersion: 1, capabilities, executable: '/opt/codex', model: 'gpt-6.1-sol',
 		profileRef: 'local-primary', profileDirectory: '/private/profile', cwd: '/work/repo', sessionId: appSessionId,
 		permissionPolicy: { mode: 'mutating', approval: 'on-request' },
-		mcpServer: { name: 'bugfixer-session', command: '/app/session-mcp', args: [], envVariables: ['BUGFIXER_SESSION_TOKEN'] },
+		mcpServer: { name: 'bugfixer-session', command: '/app/node', args: ['/app/session-mcp-gateway.mjs', '43210'], envVariables: ['BUGFIXER_SESSION_TOKEN'] },
 		profileEnvironment: { CODEX_HOME: '/private/profile' }, ...overrides,
 	};
 }
@@ -46,7 +46,7 @@ describe('interactive agent CLI command builders', () => {
 
 	it('serializes Codex MCP args and env_vars as TOML arrays with Unicode and quoted paths intact', () => {
 		const spec = createAgentSessionCommand(input({ mcpServer: {
-			name: 'bugfixer-session', command: '/app/도구 "bridge"', args: ['/app/scripts/작업 "one".mjs'],
+			name: 'bugfixer-session', command: '/app/도구 "bridge"', args: ['/app/scripts/작업 "one".mjs', '43210'],
 			envVariables: ['BUGFIXER_SESSION_TOKEN', 'BUGFIXER_TRACE_ID'],
 		} }));
 		const overrides = new Map<string, unknown>();
@@ -61,8 +61,26 @@ describe('interactive agent CLI command builders', () => {
 			index++;
 		}
 		assert.equal(overrides.get('mcp_servers.bugfixer-session.command'), '/app/도구 "bridge"');
-		assert.deepEqual(overrides.get('mcp_servers.bugfixer-session.args'), ['/app/scripts/작업 "one".mjs']);
+		assert.deepEqual(overrides.get('mcp_servers.bugfixer-session.args'), ['/app/scripts/작업 "one".mjs', '43210']);
 		assert.deepEqual(overrides.get('mcp_servers.bugfixer-session.env_vars'), ['BUGFIXER_SESSION_TOKEN', 'BUGFIXER_TRACE_ID']);
+	});
+
+	it('accepts exact gateway module and canonical loopback port arguments, rejecting malformed ports and extra arguments', () => {
+		const gateway = '/app/session-mcp-gateway.mjs';
+		for (const port of ['1', '43210', '65535']) {
+			const spec = createAgentSessionCommand(input({ mcpServer: { ...input().mcpServer, args: [gateway, port] } }));
+			const key = 'mcp_servers.bugfixer-session.args=';
+			const configIndex = spec.args.findIndex((argument, index) => argument === '-c' && spec.args[index + 1]?.startsWith(key));
+			assert.notEqual(configIndex, -1);
+			const assignment = spec.args[configIndex + 1];
+			assert.ok(assignment);
+			assert.deepEqual(JSON.parse(assignment.slice(key.length)), [gateway, port]);
+		}
+		for (const args of [[], [gateway], [gateway, '43210', '--host=example.com'], ['relative.mjs', '43210'],
+			['/app/invalid\n.mjs', '43210'], [gateway, '/43210'], [gateway, '0'], [gateway, '65536'], [gateway, '043210'],
+			[gateway, '+43210'], [gateway, ' 43210'], [gateway, '43210\n'], [gateway, '43210;echo invalid']]) {
+			assert.throws(() => createAgentSessionCommand(input({ mcpServer: { ...input().mcpServer, args } })), /bridge specification is invalid/);
+		}
 	});
 
 	it('adds one static invocation-scoped UserPromptSubmit command hook without changing MCP, model, permissions, or resume behavior', () => {

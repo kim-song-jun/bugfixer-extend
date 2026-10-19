@@ -4410,6 +4410,7 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
 
   assert.equal(await turnSelector.locator('option').count(), 2, 'The selector must expose both persisted CI fixture turns');
   assert.equal(await turnSelector.inputValue(), fixture.logHistory.turnIds[1], 'The latest turn must be selected by default');
+  assert.match(await turnSelector.locator('option:checked').innerText(), /^실행 2 · 종료 · /, 'Retained turn status must be shown in Korean');
   await logs.getByText(`CI fixture terminal ${tag} run 2 entry 1`, { exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry').length === 100);
   assert.ok((await logs.innerText()).includes('기록 누락: 순번 17–17'), 'The explicit sequence hole must be called out as missing history');
@@ -4483,7 +4484,18 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   assert.ok((await logs.locator('.ai-session-logs__status').innerText()).includes('불러온'), 'Search status must explain it only covers loaded records');
   await search.fill('');
 
+  const historyPausedFollow = logs.getByRole('button', { name: '따라가기 일시 정지', exact: true });
+  await historyPausedFollow.waitFor();
+
+  assert.equal(await historyPausedFollow.getAttribute('aria-pressed'), 'false', 'Reading the first history page must pause following until the user resumes it');
+  await historyPausedFollow.focus();
+  await page.keyboard.press('Space');
+
   const follow = logs.getByRole('button', { name: '따라가기 켜짐', exact: true });
+  await follow.waitFor();
+
+  assert.equal(await follow.getAttribute('aria-pressed'), 'true', 'Keyboard resume must enable following before the pause check');
+
   const initialCount = await entries.count();
   await follow.focus();
   await page.keyboard.press('Space');

@@ -511,9 +511,20 @@ try {
   failedTranscriptDatabase.close();
   await failedTranscriptHost.write(failedTranscriptHandle, 'echo:must-not-publish\n');
   await until(() => failedTranscriptHost.getSnapshot(failedTranscriptHandle).transcriptPersistenceFailed, 'durable output failure blocks publication');
-  assert.equal((await failedTranscriptHost.stop(failedTranscriptHandle)).cleanupVerified, true, 'Transcript write failure must still clean the exact owned PTY.');
+  let failedTranscriptStop = await failedTranscriptHost.stop(failedTranscriptHandle);
+  receipt.transcriptFailureCleanup = [{ ...failedTranscriptStop, snapshot: failedTranscriptHost.getSnapshot(failedTranscriptHandle) }];
   assert.equal(withheldOutput.length, 0, 'Unpersisted terminal output must not reach attached renderers.');
   failedTranscriptAttachment.dispose();
+
+  for (let attempt = 0; !failedTranscriptStop.cleanupVerified && attempt < 2; attempt++) {
+    await assert.rejects(failedTranscriptHost.release(failedTranscriptHandle), /verified stop/i, 'Unverified transcript-failure cleanup must retain the exact owned handle');
+    failedTranscriptStop = await failedTranscriptHost.stop(failedTranscriptHandle);
+    receipt.transcriptFailureCleanup.push({ ...failedTranscriptStop, snapshot: failedTranscriptHost.getSnapshot(failedTranscriptHandle) });
+  }
+
+  assert.equal(failedTranscriptStop.state, 'stopped', 'Transcript write failure must stop the exact owned PTY before release.');
+  assert.equal(failedTranscriptStop.cleanupVerified, true, 'Transcript write failure must still clean the exact owned PTY.');
+  assert.equal(retained(failedTranscriptHost, failedTranscriptHandle).includes('must-not-publish'), false, 'Cleanup retries must not expose output that failed durable persistence.');
   await failedTranscriptHost.release(failedTranscriptHandle);
   failedTranscriptDatabase = WorkspaceDatabase.open(failedTranscriptDatabasePath);
   const failedTranscriptPage = failedTranscriptDatabase.agentSessionTranscripts.readPage(failedTranscriptProject.id, failedTranscriptSession.id, failedTranscriptTurn.id);

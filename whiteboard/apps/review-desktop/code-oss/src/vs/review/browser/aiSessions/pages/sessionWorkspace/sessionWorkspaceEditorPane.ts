@@ -407,7 +407,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			this.notice = turn.state === 'running' || turn.state === 'starting'
 				? '새 실행을 시작했습니다.'
 				: turn.state === 'exited' ? `실행이 종료되었습니다${turn.exitCode === null ? '.' : ` · 종료 코드 ${turn.exitCode}.`}`
-				: `실행 상태 · ${turn.state}`;
+				: `실행 상태 · ${agentSessionTurnStateLabel[turn.state]}`;
 		} catch (error) { this.error = this.errorMessage(error, '세션 실행을 시작하지 못했습니다.'); }
 		finally { this.operation = false; this.render(); }
 	}
@@ -655,7 +655,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			for (const turn of [...turns].reverse()) {
 				const option = document.createElement('option');
 				option.value = turn.id;
-				option.textContent = `실행 ${turn.ordinal} · ${turn.state} · ${new Date(turn.createdAt).toLocaleString('ko-KR')}`;
+				option.textContent = `실행 ${turn.ordinal} · ${agentSessionTurnStateLabel[turn.state]} · ${new Date(turn.createdAt).toLocaleString('ko-KR')}`;
 				selector.appendChild(option);
 			}
 		}
