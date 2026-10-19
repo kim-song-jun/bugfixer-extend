@@ -174,26 +174,27 @@ test('SQLite content-store DTOs retain optional executable metadata without chan
 		database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
 		const evidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
 		const changed = database.agentSessionContents.getFile({ scope, evidenceVersion: evidence.version, path: 'script.sh' })!;
-		assert.equal(changed.before.state, 'text');
-		assert.equal(changed.before.state === 'text' ? changed.before.file.executable : null, false);
-		assert.equal(changed.after.state, 'text');
-		assert.equal(changed.after.state === 'text' ? changed.after.file.executable : null, true);
+		assert.ok(changed.before.state === 'text' && changed.after.state === 'text');
+		assert.equal(changed.before.file.executable, false);
+		assert.equal(changed.after.file.executable, true);
 		assert.equal(computeAgentSessionChangeHunks(changed).status, 'hunks');
 		const unchanged = database.agentSessionContents.getFile({ scope, evidenceVersion: evidence.version, path: 'stable.txt' })!;
 		assert.equal(unchanged.before.state === 'text' ? unchanged.before.file.executable : null, false);
 		assert.equal(unchanged.after.state === 'text' ? unchanged.after.file.executable : null, false);
 		assert.equal(computeAgentSessionChangeHunks(unchanged).status, 'noTextChange');
 		const binary = database.agentSessionContents.getFile({ scope, evidenceVersion: evidence.version, path: 'tool.bin' })!;
-		assert.equal(binary.after.state, 'unavailable');
-		assert.equal(binary.after.state === 'unavailable' ? binary.after.file?.executable : null, true);
+		assert.ok(binary.after.state === 'unavailable' && binary.after.file);
+		assert.equal(binary.after.file.executable, true);
 		assert.equal(computeAgentSessionChangeHunks(binary).unavailableReason, 'binary');
-		const invalidUnavailableExecutable = { ...binary, after: { ...binary.after, file: { ...(binary.after.state === 'unavailable' ? binary.after.file : {}), executable: 'true' } } } as AgentSessionContentFileDTO;
+		const invalidUnavailableExecutable = { ...binary, after: { ...binary.after, file: { ...binary.after.file, executable: 'true' } } };
+		// @ts-expect-error Exercise the runtime DTO validator with a deliberately invalid optional boolean.
 		assert.equal(computeAgentSessionChangeHunks(invalidUnavailableExecutable).unavailableReason, 'invalidHash');
-		const unknownUnavailableFileKey = { ...binary, after: { ...binary.after, file: { ...(binary.after.state === 'unavailable' ? binary.after.file : {}), unexpected: true } } } as AgentSessionContentFileDTO;
+		const unknownUnavailableFileKey = { ...binary, after: { ...binary.after, file: { ...binary.after.file, unexpected: true } } };
 		assert.equal(computeAgentSessionChangeHunks(unknownUnavailableFileKey).unavailableReason, 'invalidHash');
-		const invalidExecutable = { ...changed, after: { ...changed.after, file: { ...(changed.after.state === 'text' ? changed.after.file : {}), executable: 'true' } } } as AgentSessionContentFileDTO;
+		const invalidExecutable = { ...changed, after: { ...changed.after, file: { ...changed.after.file, executable: 'true' } } };
+		// @ts-expect-error Exercise the runtime DTO validator with a deliberately invalid optional boolean.
 		assert.throws(() => computeAgentSessionChangeHunks(invalidExecutable), /malformed retained text metadata/u);
-		const unknownFileKey = { ...changed, after: { ...changed.after, file: { ...(changed.after.state === 'text' ? changed.after.file : {}), unexpected: true } } } as AgentSessionContentFileDTO;
+		const unknownFileKey = { ...changed, after: { ...changed.after, file: { ...changed.after.file, unexpected: true } } };
 		assert.throws(() => computeAgentSessionChangeHunks(unknownFileKey), /malformed retained text metadata/u);
 	} finally {
 		database.close();
