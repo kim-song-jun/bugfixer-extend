@@ -101,7 +101,7 @@ WHEN NEW.id != OLD.id OR NEW.proposal_id != OLD.proposal_id OR NEW.proposal_fing
 				AND branch.revision > (SELECT MAX(revision) FROM agent_session_publication_events WHERE operation_id = OLD.id AND event_type = 'recoveryRequired')
 				AND EXISTS (SELECT 1 FROM agent_session_publication_events pr WHERE pr.operation_id = OLD.id AND pr.revision = (SELECT MAX(revision) FROM agent_session_publication_events WHERE operation_id = OLD.id AND event_type IN ('pullRequestObserved', 'pullRequestReobserved'))
 					AND pr.event_type = 'pullRequestReobserved' AND json_extract(pr.event_json, '$.outcome') = 'absent'
-					AND pr.revision > (SELECT MAX(revision) FROM agent_session_publication_events WHERE operation_id = OLD.id AND event_type = 'recoveryRequired')))
+					AND pr.revision > (SELECT MAX(revision) FROM agent_session_publication_events WHERE operation_id = OLD.id AND event_type = 'recoveryRequired'))))
 		AND json_extract(outcome.event_json, '$.pullRequestId') IS (SELECT json_extract(event_json, '$.id') FROM agent_session_publication_events WHERE operation_id = OLD.id AND event_type IN ('pullRequestObserved', 'pullRequestReobserved') ORDER BY revision DESC LIMIT 1)
 		AND NOT EXISTS (SELECT 1 FROM agent_session_publication_events known WHERE known.operation_id = OLD.id AND known.event_type IN ('pullRequestObserved', 'pullRequestReobserved')
 			AND json_extract(known.event_json, '$.id') IS NOT NULL)
