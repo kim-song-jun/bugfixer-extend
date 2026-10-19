@@ -18,7 +18,17 @@
 .ai-session-changes__file-info code { overflow-wrap: anywhere; color: var(--vscode-foreground); }
 .ai-session-changes__file-info span { color: var(--vscode-descriptionForeground); }
 .ai-session-changes__file-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-session-changes__commit-select { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; color: var(--vscode-foreground); white-space: nowrap; }
+.ai-session-changes__commit-select input { accent-color: var(--vscode-focusBorder); }
 .ai-session-changes__detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__commit-review { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__commit-review h3, .ai-session-changes__commit-review h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
+.ai-session-changes__commit-paths, .ai-session-changes__proposal-list { display: flex; flex-direction: column; gap: 0; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.ai-session-changes__commit-path { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding-block: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__commit-path > code { overflow-wrap: anywhere; color: var(--vscode-foreground); }
+.ai-session-changes__commit-path .ai-session-changes__field { max-width: 520px; }
+.ai-session-changes__proposal-list .ai-session-changes__button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.ai-session-changes__proposal-list .ai-session-changes__button[aria-pressed="true"] { border-color: var(--vscode-focusBorder); }
 .ai-session-changes__detail h3, .ai-session-changes__detail h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
 .ai-session-changes__field { display: flex; flex-direction: column; gap: 5px; color: var(--vscode-foreground); }
 .ai-session-changes__field select, .ai-session-changes__field textarea { width: 100%; min-width: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }

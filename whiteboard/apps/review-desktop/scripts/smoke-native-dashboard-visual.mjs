@@ -1407,6 +1407,8 @@ try {
 
   const { computeAgentSessionChangeHunks } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionChangeHunks.js')).href);
 
+  const { ManagedWorktreeService } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/managedWorktrees.js')).href);
+
   const screenshots = [];
 
   const viewports = [];
@@ -1638,6 +1640,8 @@ try {
 
       fixture.changeEvidence = changeEvidence.receipt;
 
+      fixture.reviewedCommit = await seedReviewedCommit(logFixtureDatabase, fixture, projectFolder, userData, tag, ManagedWorktreeService);
+
       assert.equal(seeded.receipt.turnIds.length, 2, 'The isolated history fixture must contain two real persisted turns');
 
       for (const turnId of seeded.receipt.turnIds) {
@@ -1662,6 +1666,8 @@ try {
       await verifyAiSessionTranscriptLogs(session.page, fixture, tag, screenshots, viewports);
 
       await verifyAiSessionChangeEvidence(session.page, fixture, tag, screenshots, viewports);
+
+      await verifyReviewedCommitProposal(session.page, fixture, tag, screenshots, viewports);
     } catch (error) {
       await captureFailure(session.page, path.join(output, `ai-session-logs-${tag}-failure.png`), diagnostics);
 
@@ -1695,6 +1701,25 @@ try {
 
       assert.equal(explanationHistory.revisions.at(-1)?.verification, 'unverified');
 
+      const commitFixture = fixture.reviewedCommit;
+
+      const proposals = verifiedHistoryDatabase.agentSessionIntegrations.listProposals(fixture.projectId, commitFixture.sessionId, commitFixture.turnId, { limit: 2 });
+
+      assert.equal(proposals.proposals.length, 1, 'The real UI must persist exactly one explicit commit proposal');
+
+      const proposal = proposals.proposals[0];
+
+      assert.equal(proposal.approval, null, 'Creating and reviewing a proposal must not approve it');
+      assert.equal(proposal.state, 'pending');
+      assert.equal(proposal.commitMessage, commitFixture.commitMessage);
+      assert.equal(proposal.sourceHead, commitFixture.sourceHead);
+      assert.deepEqual(proposal.paths.map(item => item.path), ['selected.txt']);
+      assert.equal(proposal.paths[0].explanations[0].revision, commitFixture.explanationRevision);
+      commitFixture.proposalId = proposal.id;
+      commitFixture.proposalFingerprint = proposal.fingerprint;
+      verifiedHistoryDatabase.agentSessionIntegrations.recordTrustedHumanApproval(proposal.id, proposal.revision);
+      commitFixture.approvalSource = 'Synthetic test-host approval in isolated CI SQLite; the native human confirmation dialog was not exercised.';
+
       for (const turn of turns) {
         const stored = verifiedHistoryDatabase.agentSessionTranscripts.readPage(fixture.projectId, fixture.logHistory.sessionId, turn.id, { limit: 100 });
         const next = verifiedHistoryDatabase.agentSessionTranscripts.readPage(fixture.projectId, fixture.logHistory.sessionId, turn.id, { afterSequence: stored.nextSequence, limit: 100 });
@@ -1703,6 +1728,27 @@ try {
       }
     } finally {
       verifiedHistoryDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-commit-${tag}`);
+      await verifyReviewedCommitApply(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-commit-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const commitDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      await verifyReviewedCommitResult(commitDatabase, fixture);
+    } finally {
+      commitDatabase.close();
     }
 
     const mailboxFixtureDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
@@ -2236,7 +2282,7 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag, compute
 }
 
 async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
-  const names = (await Array.fromAsync(await opendir(folderPath), entry => entry.name)).sort(compareCodeUnits);
+  const names = (await Array.fromAsync(await opendir(folderPath), entry => entry.name)).filter(name => name !== '.git').sort(compareCodeUnits);
 
   const entries = [];
   let fileBytes = 0;
@@ -2255,17 +2301,17 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
     const sha256 = createHash('sha256').update(bytes).digest('hex');
 
     if (bytes.includes(0)) {
-      entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, contentUnavailableReason: 'binary' });
+      entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, executable: Boolean(info.mode & 0o111), rawBytesBase64: bytes.toString('base64'), contentUnavailableReason: 'binary' });
       hasUnavailableContent = true;
     } else {
       const content = bytes.toString('utf8');
-      entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, content });
+      entries.push({ path: name, kind: 'file', size: bytes.byteLength, sha256, executable: Boolean(info.mode & 0o111), content });
       retainedTextBytes += bytes.byteLength;
     }
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     folderIdentity: { canonicalPath: folderIdentity.canonicalPath, dev: folderIdentity.dev, ino: folderIdentity.ino },
     capturedAt: new Date().toISOString(),
     inventoryCoverage: 'complete',
@@ -2276,6 +2322,228 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
     contentReadCount,
     entries,
   };
+}
+
+async function seedReviewedCommit(database, fixture, projectFolder, userData, tag, WorktreeService) {
+  const repository = path.join(projectFolder, `ci-reviewed-commit-${tag}`);
+
+  await mkdir(repository, { recursive: true });
+
+  const git = async (...args) => (await execFileAsync('git', ['-C', repository, ...args], { maxBuffer: 1024 * 1024 })).stdout.trim();
+
+  await git('init', '-q', '-b', 'user-work');
+  await git('config', 'user.name', 'CI reviewed commit fixture');
+  await git('config', 'user.email', 'reviewed-commit@example.invalid');
+  await writeFile(path.join(repository, 'selected.txt'), `before ${tag}\n`);
+  await writeFile(path.join(repository, 'unselected.txt'), `unselected base ${tag}\n`);
+  await git('add', '--', 'selected.txt', 'unselected.txt');
+  await git('commit', '-qm', 'CI fixture source');
+
+  const sourceHead = await git('rev-parse', 'HEAD');
+
+  const originalIndexSha256 = createHash('sha256').update(await readFile(path.join(repository, '.git', 'index'))).digest('hex');
+
+  const binding = database.createFolderBinding({ projectId: fixture.projectId, path: repository, vcsKind: 'git', vcsRoot: repository });
+
+  const session = database.agentSessions.createSession({
+    projectId: fixture.projectId, bindingId: binding.id, name: `CI 커밋 검수 fixture ${tag}`,
+    provider: 'codex', model: 'ci-fixture-not-executed', profileRef: 'ci-commit-fixture-only', workspaceMode: 'gitWorktree',
+  });
+
+  const worktrees = new WorktreeService(path.join(userData, 'agent-sessions'));
+
+  const managed = await worktrees.create({ repositoryPath: repository, ownerId: session.id, kind: 'session', baseRef: 'HEAD' });
+
+  const folder = await statFolder(managed.worktreePath);
+
+  const folderIdentity = { canonicalPath: folder.canonicalPath, dev: folder.dev, ino: folder.ino };
+
+  const turn = database.agentSessionTurns.createTurn({
+    projectId: fixture.projectId, sessionId: session.id, expectedSessionRevision: session.revision,
+    snapshot: {
+      schemaVersion: 1, projectId: fixture.projectId, sessionId: session.id, sessionRevision: session.revision,
+      bindingId: binding.id, taskId: null, provider: session.provider, model: session.model, profileRef: session.profileRef,
+      cwd: managed.worktreePath, folderIdentity, managedWorktreeOwnerId: session.id,
+      permissionPolicy: { mode: 'read-only', approval: 'never' }, convention: null, references: [],
+    },
+  });
+
+  const scope = { projectId: fixture.projectId, sessionId: session.id, turnId: turn.id };
+
+  const before = await readChangeEvidenceSnapshot(managed.worktreePath, folder);
+
+  database.agentSessionContents.recordBaseline({ scope, snapshot: before, revision: sourceHead });
+
+  const startingSession = database.agentSessions.getSession(fixture.projectId, session.id);
+
+  const running = database.agentSessionTurns.transitionTurn(fixture.projectId, session.id, turn.id, turn.revision, startingSession.revision, { state: 'running' });
+
+  const retainedAfter = `reviewed after ${tag}\n`;
+
+  await writeFile(path.join(managed.worktreePath, 'selected.txt'), retainedAfter);
+  await writeFile(path.join(managed.worktreePath, 'unselected.txt'), `unselected observed ${tag}\n`);
+
+  const after = await readChangeEvidenceSnapshot(managed.worktreePath, folder);
+
+  const evidence = database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 0, revision: sourceHead, cleanupVerified: true });
+
+  database.agentSessionTurns.transitionTurn(fixture.projectId, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
+
+  const explanation = database.agentSessionReviews.recordHumanExplanation({
+    target: { ...scope, evidenceVersion: evidence.evidenceVersion, evidenceFingerprint: evidence.fingerprint, path: 'selected.txt', hunkId: null },
+    expectedLatestRevision: 0, what: '검수용 파일의 보존된 내용을 변경합니다.', why: '선택한 파일만 커밋하는 실제 앱 경로를 확인하는 CI 자료입니다.',
+    citations: [], checkClaims: [{ label: '제공자 실행', outcome: 'notRun', detail: '이 fixture는 AI 제공자를 실행하지 않습니다.' }], status: 'confirmed',
+  });
+
+  const laterSelected = `later selected filesystem edit ${tag}\n`;
+
+  const laterUnselected = `later unselected filesystem edit ${tag}\n`;
+
+  await writeFile(path.join(managed.worktreePath, 'selected.txt'), laterSelected);
+  await writeFile(path.join(managed.worktreePath, 'unselected.txt'), laterUnselected);
+
+  return {
+    fixtureOnly: true, providerExecuted: false, ptyExecuted: false, nativeHumanApprovalExercised: false,
+    proofLimit: 'Actual disposable Git and retained-file application path; any approval seeded by this fixture is synthetic and does not prove native human confirmation.',
+    ...scope, name: session.name, repository, worktreePath: managed.worktreePath, sourceHead, originalIndexSha256,
+    evidenceVersion: evidence.evidenceVersion, fingerprint: evidence.fingerprint, explanationRevision: explanation.revision,
+    retainedAfter, laterSelected, laterUnselected, unselectedBase: `unselected base ${tag}\n`, commitMessage: `CI reviewed selected content ${tag}`,
+  };
+}
+
+async function openReviewedCommitChanges(page, fixture) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
+
+  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
+  if (!(await sidebar.isVisible())) { await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click(); }
+
+  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+
+  const workspace = page.locator('.ai-session-workspace');
+
+  await workspace.locator('.ai-session__session-row').filter({ hasText: fixture.reviewedCommit.name }).click();
+  await workspace.getByRole('heading', { name: fixture.reviewedCommit.name, exact: true }).waitFor();
+  await workspace.getByRole('tab', { name: '변경', exact: true }).click();
+
+  const panel = workspace.locator('.ai-session__changes-panel');
+
+  assert.equal(await panel.getByRole('combobox', { name: '변경을 확인할 실행 기록', exact: true }).inputValue(), fixture.reviewedCommit.turnId);
+
+  const changes = panel.locator('.ai-session-changes');
+
+  await changes.getByText(`v${fixture.reviewedCommit.evidenceVersion} · ${fixture.reviewedCommit.fingerprint}`, { exact: true }).waitFor();
+
+  return changes;
+}
+
+async function verifyReviewedCommitProposal(page, fixture, tag, screenshots, viewports) {
+  const changes = await openReviewedCommitChanges(page, fixture);
+
+  const selected = changes.getByRole('checkbox', { name: 'selected.txt 커밋 검토에 포함', exact: true });
+
+  const unselected = changes.getByRole('checkbox', { name: 'unselected.txt 커밋 검토에 포함', exact: true });
+
+  assert.equal(await selected.isChecked(), false, 'Commit file selection must be explicit');
+  assert.equal(await unselected.isChecked(), false);
+  await selected.check();
+
+  const explanations = changes.getByRole('combobox', { name: 'selected.txt에 연결할 파일 설명 기록', exact: true });
+
+  await explanations.waitFor();
+  await explanations.selectOption(String(fixture.reviewedCommit.explanationRevision));
+  await changes.getByRole('textbox', { name: '커밋 메시지', exact: true }).fill(fixture.reviewedCommit.commitMessage);
+  await changes.getByRole('button', { name: '커밋 제안 만들기', exact: true }).click();
+  await changes.getByRole('heading', { name: '제안 v1 검토', exact: true }).waitFor();
+
+  const pinned = changes.getByRole('list', { name: '제안에 고정된 파일과 설명', exact: true });
+
+  assert.ok((await pinned.innerText()).includes('selected.txt'));
+  assert.ok(!(await pinned.innerText()).includes('unselected.txt'), 'The proposal must include only the explicitly selected path');
+  assert.equal(await changes.getByRole('button', { name: '승인한 커밋 적용', exact: true }).isDisabled(), true, 'Reviewing a proposal must not grant approval');
+  await changes.getByRole('button', { name: '커밋 제안 승인', exact: true }).scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-commit-proposal-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'commit-proposal-before-approval', width: 1440, height: 900, screenshot });
+  fixture.reviewedCommit.proposalCreatedThroughUi = true;
+}
+
+async function verifyReviewedCommitApply(page, fixture, tag, screenshots, viewports) {
+  const changes = await openReviewedCommitChanges(page, fixture);
+
+  await changes.getByRole('heading', { name: '제안 v1 검토', exact: true }).waitFor();
+  await changes.getByText(`제안 ID ${fixture.reviewedCommit.proposalId} · 지문 ${fixture.reviewedCommit.proposalFingerprint}`, { exact: true }).waitFor();
+
+  const apply = changes.getByRole('button', { name: '승인한 커밋 적용', exact: true });
+
+  assert.equal(await apply.isDisabled(), false, 'The restarted app must load the isolated fixture approval');
+  await apply.click();
+  await changes.getByText('보관된 제안이 적용되었습니다. 병합이나 PR은 생성되지 않았습니다.', { exact: true }).waitFor();
+  assert.equal(await apply.isDisabled(), true, 'A successful proposal must not offer another apply');
+  await apply.scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-commit-applied-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'commit-applied-with-fixture-only-approval', width: 1440, height: 900, screenshot });
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  await apply.scrollIntoViewIfNeeded();
+
+  const layout = await changes.evaluate(element => {
+    const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 커밋 적용');
+    const bounds = action?.getBoundingClientRect();
+
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(layout.overflow, false, `Commit review must not overflow horizontally at ${tag}/760`);
+  assert.equal(layout.actionReachable, true, `The commit action must remain reachable at ${tag}/760`);
+
+  const narrow = path.join(output, `ai-session-commit-applied-${tag}-760.png`);
+
+  await capturePage(page, narrow);
+  screenshots.push(narrow);
+  viewports.push({ theme: tag, state: 'commit-applied-narrow', width: 760, height: 820, screenshot: narrow, layout });
+}
+
+async function verifyReviewedCommitResult(database, fixture) {
+  const receipt = fixture.reviewedCommit;
+
+  const proposal = database.agentSessionIntegrations.getProposal(receipt.proposalId);
+
+  assert.equal(proposal.state, 'succeeded', 'The actual app apply must persist successful Git receipt');
+  assert.equal(proposal.fingerprint, receipt.proposalFingerprint);
+
+  const outcome = proposal.outcomes.at(-1);
+
+  assert.equal(outcome.state, 'succeeded');
+  assert.equal(outcome.receipt.resultingHead, outcome.receipt.candidateHead);
+  assert.deepEqual(outcome.receipt.changedPaths, ['selected.txt']);
+
+  const git = async (cwd, ...args) => (await execFileAsync('git', ['-C', cwd, ...args], { maxBuffer: 1024 * 1024 })).stdout;
+
+  const candidate = outcome.receipt.candidateHead;
+
+  assert.equal((await git(receipt.worktreePath, 'rev-parse', 'HEAD')).trim(), candidate);
+  assert.equal((await git(receipt.worktreePath, 'rev-parse', `${candidate}^`)).trim(), receipt.sourceHead);
+  assert.equal(await git(receipt.worktreePath, 'show', `${candidate}:selected.txt`), receipt.retainedAfter, 'The commit must use retained bytes, never later filesystem bytes');
+  assert.equal(await git(receipt.worktreePath, 'show', `${candidate}:unselected.txt`), receipt.unselectedBase);
+  assert.equal(await readFile(path.join(receipt.worktreePath, 'selected.txt'), 'utf8'), receipt.laterSelected);
+  assert.equal(await readFile(path.join(receipt.worktreePath, 'unselected.txt'), 'utf8'), receipt.laterUnselected);
+  assert.equal((await git(receipt.repository, 'rev-parse', 'HEAD')).trim(), receipt.sourceHead);
+  assert.equal(createHash('sha256').update(await readFile(path.join(receipt.repository, '.git', 'index'))).digest('hex'), receipt.originalIndexSha256);
+  receipt.resultingHead = candidate;
+  receipt.appliedThroughUi = true;
 }
 
 function compareCodeUnits(left, right) {

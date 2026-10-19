@@ -17,6 +17,7 @@ import { AgentSessionPreparationError } from './agentSessionPreparationError.js'
 import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
+import { AgentSessionCommitApplication } from './agentSessionCommitApplication.js';
 import { AgentSessionContentCaptureCleanupError, captureAgentSessionContentSnapshot, type AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
 import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
@@ -41,6 +42,7 @@ export class AgentSessionApplication {
 	private readonly providerIdentityReceiver: AgentProviderIdentityReceiver;
 	readonly workspaceResolver: AgentSessionWorkspaceResolver;
 	readonly service: AgentSessionService;
+	readonly commitApplication: AgentSessionCommitApplication;
 	readonly workflowScheduler: AgentWorkflowScheduler;
 	private recoveryReady = false;
 	private readonly worktrees: ManagedWorktreeService;
@@ -82,6 +84,7 @@ export class AgentSessionApplication {
 		});
 		this.service.recoverStartup();
 		database.agentSessionContents.reconcileInterruptedCaptures();
+		this.commitApplication = new AgentSessionCommitApplication(database, this.worktrees, this.workspaceResolver, this.service);
 		workflowScheduler = this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}

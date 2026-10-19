@@ -38,6 +38,7 @@ import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTranscr
 import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO, CreateAgentWorkflowInput } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
 import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO, WorkspaceAgentChangeHunksDTO, WorkspaceAgentExplanationDTO, WorkspaceAgentExplanationPageDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
+import type { AgentSessionIntegrationProposalDTO, WorkspaceAgentCommitPrepareInput, WorkspaceAgentCommitProposalInput, WorkspaceAgentCommitRecoveryInput } from '../../../../../workspace/common/workspaceAgentIntegrationProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import type { WorkspaceKnowledgeDTO } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
@@ -615,6 +616,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			explanation: target => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getLatestChangeExplanation', target) as Promise<WorkspaceAgentExplanationDTO | null>,
 			explanationRevisions: (target, afterRevision, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listChangeExplanationRevisions', { ...target, afterRevision, limit }) as Promise<WorkspaceAgentExplanationPageDTO>,
 			saveExplanation: (target, expectedLatestRevision, what, why, citations, checkClaims, status) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'recordHumanChangeExplanation', { ...target, expectedLatestRevision, what, why, citations, checkClaims, status }) as Promise<WorkspaceAgentExplanationDTO>,
+			listCommitProposals: (afterRevision, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listCommitProposals', { ...ipcScope, afterRevision, limit }) as Promise<{ readonly proposals: readonly AgentSessionIntegrationProposalDTO[]; readonly nextRevision: number; readonly hasMore: boolean }>,
+			prepareCommitProposal: (input: WorkspaceAgentCommitPrepareInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'prepareCommitProposal', input) as Promise<AgentSessionIntegrationProposalDTO>,
+			approveCommitProposal: (input: WorkspaceAgentCommitProposalInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'approveCommitProposal', input) as Promise<{ readonly approved: boolean; readonly proposal: AgentSessionIntegrationProposalDTO }>,
+			applyCommitProposal: (input: WorkspaceAgentCommitProposalInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'applyCommitProposal', input) as Promise<AgentSessionIntegrationProposalDTO>,
+			recoverCommitProposal: (input: WorkspaceAgentCommitRecoveryInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'recoverCommitProposal', input) as Promise<AgentSessionIntegrationProposalDTO>,
 			openDiff: (evidence, path, before, after, isCurrent) => this.openChangeDiff(context, evidence, path, before, after, isCurrent),
 		};
 		if (!this.sessionChangesController) {

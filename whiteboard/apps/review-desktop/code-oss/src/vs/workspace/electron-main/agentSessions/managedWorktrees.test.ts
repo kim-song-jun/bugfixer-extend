@@ -5,13 +5,14 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 
-import { ManagedWorktreeService, type ManagedWorktreeLease } from './managedWorktrees.js';
+import { ManagedWorktreeService, type ManagedWorktreeLease, type ReviewedCommitApplyingRecord, type ReviewedCommitBinding } from './managedWorktrees.js';
 import { OwnerOperationCoordinator } from './ownerOperationCoordinator.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -76,6 +77,34 @@ function commit(worktree: string, path: string, contents: string, message: strin
 	writeFileSync(join(worktree, path), contents);
 	git(worktree, 'add', path);
 	git(worktree, 'commit', '-qm', message);
+}
+
+async function reviewedBinding(service: ManagedWorktreeService, ownerId: string, path: string, contents: string) {
+	const sourceHead = git((await service.inspect(ownerId)).worktreePath, 'rev-parse', 'HEAD');
+	const bytes = Buffer.from(contents);
+	const commitMessage = `review ${path}`;
+	const preview = await service.prepareReviewedCommit({
+		ownerId, sourceHead, commitMessage,
+		files: [{ path, before: { absent: true }, after: { mode: '100644', sha256: createHash('sha256').update(bytes).digest('hex'), bytes } }]
+	});
+	const candidate = await service.createReviewedCommitCandidate(preview.previewId);
+	return {
+		...candidate, ownerId, commitMessage, author: preview.author, committer: preview.committer,
+		files: preview.files
+	};
+}
+
+function applyingJournal(): {
+	readonly recordApplying: (record: ReviewedCommitApplyingRecord) => Promise<void>;
+	readonly readApplying: (operationId: string) => Promise<ReviewedCommitApplyingRecord | undefined>;
+	readonly get: () => ReviewedCommitApplyingRecord | undefined;
+} {
+	let record: ReviewedCommitApplyingRecord | undefined;
+	return {
+		recordApplying: async value => { record = value; },
+		readApplying: async operationId => record?.operationId === operationId ? record : undefined,
+		get: () => record
+	};
 }
 
 test('session worktrees use separate owned branches and leave the user checkout untouched', async () => {
@@ -164,7 +193,7 @@ test('a merge failure before Git mutation reconciles as not applied', async () =
 });
 
 test('a non-conflict commit-signing failure after merge preparation remains pending for recovery', async () => {
-	await fixture(async (root, repository, service) => {
+	await fixture(async (_root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
 		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
@@ -494,5 +523,282 @@ test('clean merged session cleanup preserves the commit in its integration branc
 		await service.remove(session.ownerId, { retainedIntegrationOwnerId: integration.ownerId });
 		assert.equal(git(integration.worktreePath, 'merge-base', '--is-ancestor', sessionHead, 'HEAD'), '');
 		assert.equal(git(integration.worktreePath, 'show', 'HEAD:merged.txt'), 'retained');
+	});
+});
+
+test('reviewed commit candidate uses retained bytes and leaves checkout, branch, and real index untouched', async () => {
+	await fixture(async (root, repository, service) => {
+		writeFileSync(join(repository, 'obsolete.txt'), 'remove me\n');
+		git(repository, 'add', 'obsolete.txt');
+		git(repository, 'commit', '-qm', 'add deletion fixture');
+		writeFileSync(join(repository, '.gitattributes'), '*.txt filter=fixture\n');
+		git(repository, 'add', '.gitattributes');
+		git(repository, 'commit', '-qm', 'add filter attribute');
+		const filterMarker = join(root, 'filter-ran');
+		const filterCommand = join(root, 'clean-filter');
+		writeFileSync(filterCommand, `#!/bin/sh\nprintf ran > '${filterMarker}'\ncat\n`);
+		chmodSync(filterCommand, 0o700);
+		git(repository, 'config', 'filter.fixture.clean', filterCommand);
+		const hookMarker = join(root, 'hook-ran');
+		const hookPath = git(repository, 'rev-parse', '--git-path', 'hooks/pre-commit');
+		const hook = hookPath.startsWith('/') ? hookPath : join(repository, hookPath);
+		writeFileSync(hook, `#!/bin/sh\nprintf ran > '${hookMarker}'\n`);
+		chmodSync(hook, 0o700);
+
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const sourceHead = git(session.worktreePath, 'rev-parse', 'HEAD');
+		const mainBranch = git(repository, 'branch', '--show-current');
+		const mainHead = git(repository, 'rev-parse', 'HEAD');
+		const refsBefore = git(repository, 'show-ref', '--heads');
+		writeFileSync(join(repository, 'local.bin'), 'user-staged\n');
+		git(repository, 'add', 'local.bin');
+		const indexPathValue = git(repository, 'rev-parse', '--git-path', 'index');
+		const realIndexPath = indexPathValue.startsWith('/') ? indexPathValue : join(repository, indexPathValue);
+		const realIndex = readFileSync(realIndexPath);
+		const sha = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
+		const retainedReadme = Buffer.from('retained content, independent of the worktree\n');
+		const createdWithNewline = Buffer.from('created from retained bytes\n');
+		const optionNamedFile = Buffer.from('literal option-like path\n');
+		const symlinkTarget = Buffer.from('target.txt');
+		const executable = Buffer.from('#!/bin/sh\nexit 0\n');
+		const preview = await service.prepareReviewedCommit({
+			ownerId: session.ownerId, sourceHead, commitMessage: 'Reviewed retained files\nwith a second paragraph',
+			files: [
+				{ path: 'README.md', before: { mode: '100644', sha256: sha(Buffer.from('base\n')) }, after: { mode: '100644', sha256: sha(retainedReadme), bytes: retainedReadme } },
+				{ path: 'obsolete.txt', before: { mode: '100644', sha256: sha(Buffer.from('remove me\n')) }, after: { absent: true } },
+				{ path: 'created\nliteral.txt', before: { absent: true }, after: { mode: '100644', sha256: sha(createdWithNewline), bytes: createdWithNewline } },
+				{ path: '-literal.txt', before: { absent: true }, after: { mode: '100644', sha256: sha(optionNamedFile), bytes: optionNamedFile } },
+				{ path: 'link', before: { absent: true }, after: { mode: '120000', sha256: sha(symlinkTarget), bytes: symlinkTarget } },
+				{ path: 'bin/tool', before: { absent: true }, after: { mode: '100755', sha256: sha(executable), bytes: executable } }
+			]
+		});
+		assert.equal(preview.sourceHead, sourceHead);
+		assert.equal(preview.files.length, 6);
+		assert.equal(Object.isFrozen(preview), true);
+		assert.equal(Object.isFrozen(preview.files[0].after), true);
+		assert.equal(Object.isFrozen(preview.author), true);
+		writeFileSync(join(session.worktreePath, 'README.md'), 'later mutable worktree content\n');
+		writeFileSync(join(session.worktreePath, 'unselected-later.txt'), 'not part of the explicit selection\n');
+
+		const candidate = await service.createReviewedCommitCandidate(preview.previewId);
+		assert.equal(candidate.state, 'candidate');
+		assert.equal(git(repository, 'show', `${candidate.candidateCommitOid}:README.md`), 'retained content, independent of the worktree');
+		assert.equal(execFileSync('git', ['-C', repository, 'show', `${candidate.candidateCommitOid}:created\nliteral.txt`], { encoding: 'utf8' }), 'created from retained bytes\n');
+		assert.equal(git(repository, 'show', `${candidate.candidateCommitOid}:-literal.txt`), 'literal option-like path');
+		assert.equal(execFileSync('git', ['-C', repository, 'show', `${candidate.candidateCommitOid}:link`], { encoding: 'utf8' }), 'target.txt');
+		assert.equal(gitExitCode(repository, 'cat-file', '-e', `${candidate.candidateCommitOid}:obsolete.txt`), 128);
+		assert.equal(gitExitCode(repository, 'cat-file', '-e', `${candidate.candidateCommitOid}:unselected-later.txt`), 128);
+		assert.match(git(repository, 'ls-tree', candidate.candidateCommitOid, '--', 'bin/tool'), /^100755 blob /);
+		const commitObject = execFileSync('git', ['-C', repository, 'cat-file', 'commit', candidate.candidateCommitOid]);
+		const headerSeparator = commitObject.indexOf(Buffer.from('\n\n'));
+		assert.ok(headerSeparator >= 0);
+		const commitHeaders = commitObject.subarray(0, headerSeparator).toString('utf8').split('\n');
+		assert.deepEqual(commitHeaders, [
+			`tree ${preview.proposedTreeOid}`,
+			`parent ${preview.sourceHead}`,
+			`author ${preview.author.name} <${preview.author.email}> ${preview.author.date}`,
+			`committer ${preview.committer.name} <${preview.committer.email}> ${preview.committer.date}`,
+		]);
+		assert.deepEqual(commitObject.subarray(headerSeparator + 2), Buffer.from(`${preview.commitMessage}\n`, 'utf8'));
+		assert.equal(existsSync(filterMarker), false, 'hash-object must not run clean filters');
+		assert.equal(existsSync(hookMarker), false, 'candidate creation must not run commit hooks');
+		assert.equal(readFileSync(join(session.worktreePath, 'README.md'), 'utf8'), 'later mutable worktree content\n');
+		assert.equal(readFileSync(join(session.worktreePath, 'unselected-later.txt'), 'utf8'), 'not part of the explicit selection\n');
+		assert.equal(git(session.worktreePath, 'rev-parse', 'HEAD'), sourceHead);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), sourceHead);
+		assert.equal(git(repository, 'branch', '--show-current'), mainBranch);
+		assert.equal(git(repository, 'rev-parse', 'HEAD'), mainHead);
+		assert.equal(git(repository, 'show-ref', '--heads'), refsBefore);
+		assert.deepEqual(readFileSync(realIndexPath), realIndex);
+		assert.equal(readFileSync(join(repository, 'local.bin'), 'utf8'), 'user-staged\n');
+		assert.deepEqual(candidate.selectedPaths, ['README.md', 'obsolete.txt', 'created\nliteral.txt', '-literal.txt', 'link', 'bin/tool']);
+	});
+});
+
+test('reviewed commit preparation rejects stale source and malformed retained file claims', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: 'HEAD' });
+		const sourceHead = git(session.worktreePath, 'rev-parse', 'HEAD');
+		const bytes = Buffer.from('reviewed\n');
+		const input = {
+			ownerId: session.ownerId, sourceHead, commitMessage: 'reviewed',
+			files: [{ path: 'new.txt', before: { absent: true as const }, after: { mode: '100644' as const, sha256: createHash('sha256').update(bytes).digest('hex'), bytes } }]
+		};
+		const author = { name: 'Frozen Author', email: 'author@example.invalid', date: '946684800 +0000' };
+		const committer = { name: 'Frozen Committer', email: 'committer@example.invalid', date: '978307200 -0700' };
+		await assert.rejects(service.prepareReviewedCommit({ ...input, frozenIdentity: { author } as unknown as { author: typeof author; committer: typeof committer } }), /exactly one author and committer/i);
+		await assert.rejects(service.prepareReviewedCommit({ ...input, frozenIdentity: { author, committer: { ...committer, date: undefined } } as unknown as { author: typeof author; committer: typeof committer } }), /malformed or incomplete/i);
+		await assert.rejects(service.prepareReviewedCommit({ ...input, ownerId: integration.ownerId }), /active managed session lease/i);
+		await assert.rejects(service.prepareReviewedCommit({ ...input, files: [{ ...input.files[0], after: { ...input.files[0].after, sha256: '0'.repeat(64) } }] }), /SHA-256/i);
+		await assert.rejects(service.prepareReviewedCommit({ ...input, files: [{ ...input.files[0], path: '../escape.txt' }] }), /path/i);
+		const oversized = Buffer.alloc(1024 * 1024 + 1, 1);
+		await assert.rejects(service.prepareReviewedCommit({ ...input, files: [{ ...input.files[0], after: { ...input.files[0].after, sha256: createHash('sha256').update(oversized).digest('hex'), bytes: oversized } }] }), /one MiB/i);
+		const preview = await service.prepareReviewedCommit(input);
+		commit(session.worktreePath, 'advance.txt', 'new source commit\n', 'advance source');
+		await assert.rejects(service.createReviewedCommitCandidate(preview.previewId), /active managed session lease|HEAD changed|source/i);
+	});
+});
+
+test('approved reviewed candidate advances only its session ref and reconciles selected index entries', async () => {
+	await fixture(async (_root, repository, service) => {
+		const originalHead = git(repository, 'rev-parse', 'HEAD');
+		const userIndexBefore = readFileSync(join(repository, '.git', 'index'));
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		writeFileSync(join(session.worktreePath, 'unrelated-staged.txt'), 'preserve this staged entry\n');
+		git(session.worktreePath, 'add', 'unrelated-staged.txt');
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		writeFileSync(join(session.worktreePath, 'reviewed.txt'), 'approved\n');
+		const journal = applyingJournal();
+		const operationId = randomUUID();
+		const result = await service.applyReviewedCommit({ operationId, binding, ...journal });
+		assert.equal(result.state, 'applied');
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), binding.candidateCommitOid);
+		assert.equal(git(session.worktreePath, 'rev-parse', 'HEAD'), binding.candidateCommitOid);
+		assert.match(git(session.worktreePath, 'ls-files', '--stage', '--', 'reviewed.txt'), /^100644 [0-9a-f]+ 0\treviewed\.txt$/);
+		assert.match(git(session.worktreePath, 'ls-files', '--stage', '--', 'unrelated-staged.txt'), /^100644 [0-9a-f]+ 0\tunrelated-staged\.txt$/);
+		assert.equal(git(session.worktreePath, 'status', '--porcelain=v1'), 'A  unrelated-staged.txt');
+		assert.equal(git(repository, 'branch', '--show-current'), 'user-work');
+		assert.equal(git(repository, 'rev-parse', 'HEAD'), originalHead);
+		assert.deepEqual(readFileSync(join(repository, '.git', 'index')), userIndexBefore);
+		assert.equal(journal.get()?.operationId, operationId);
+		assert.equal((await service.inspect(session.ownerId)).head, binding.candidateCommitOid);
+	});
+});
+
+test('the owned real index lock prevents an ordinary Git stage during the journal callback', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		writeFileSync(join(session.worktreePath, 'reviewed.txt'), 'approved\n');
+		let applying: ReviewedCommitApplyingRecord | undefined;
+		const operationId = randomUUID();
+		const result = await service.applyReviewedCommit({
+			operationId, binding,
+			recordApplying: async record => {
+				applying = record;
+				assert.throws(() => git(session.worktreePath, 'add', 'reviewed.txt'), /index\.lock|Unable to create|File exists/i);
+			},
+			readApplying: async id => applying?.operationId === id ? applying : undefined
+		});
+		assert.equal(result.state, 'applied');
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), binding.candidateCommitOid);
+	});
+});
+
+test('direct real-index mutation during journaling is detected before the session ref CAS', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		const indexPath = resolve(session.worktreePath, git(session.worktreePath, 'rev-parse', '--git-path', 'index'));
+		const indexBefore = readFileSync(indexPath);
+		const operationId = randomUUID();
+		let applying: ReviewedCommitApplyingRecord | undefined;
+		const result = await service.applyReviewedCommit({
+			operationId, binding,
+			recordApplying: async record => {
+				applying = record;
+				writeFileSync(indexPath, Buffer.concat([indexBefore, Buffer.from('fixture external mutation')]));
+			},
+			readApplying: async id => applying?.operationId === id ? applying : undefined
+		});
+		assert.equal(result.state, 'recoveryRequired');
+		assert.equal(result.currentRef, binding.sourceHead);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), binding.sourceHead);
+		assert.notDeepEqual(readFileSync(indexPath), indexBefore);
+		writeFileSync(indexPath, indexBefore);
+	});
+});
+
+test('selected staged content blocks apply before journaling while unrelated index entries remain untouched', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		writeFileSync(join(session.worktreePath, 'reviewed.txt'), 'a different staged version\n');
+		git(session.worktreePath, 'add', 'reviewed.txt');
+		const refBefore = git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`);
+		const indexBefore = readFileSync(resolve(session.worktreePath, git(session.worktreePath, 'rev-parse', '--git-path', 'index')));
+		const journal = applyingJournal();
+		await assert.rejects(service.applyReviewedCommit({ operationId: randomUUID(), binding, ...journal }), /unique staged version/i);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), refBefore);
+		assert.deepEqual(readFileSync(resolve(session.worktreePath, git(session.worktreePath, 'rev-parse', '--git-path', 'index'))), indexBefore);
+		assert.equal(journal.get(), undefined);
+	});
+});
+
+test('journal write failure leaves the session ref and real index unchanged', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		const refBefore = git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`);
+		const indexPath = resolve(session.worktreePath, git(session.worktreePath, 'rev-parse', '--git-path', 'index'));
+		const indexBefore = readFileSync(indexPath);
+		await assert.rejects(service.applyReviewedCommit({
+			operationId: randomUUID(), binding, recordApplying: async () => { throw new Error('database unavailable'); },
+			readApplying: async () => undefined
+		}), /database unavailable/i);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), refBefore);
+		assert.deepEqual(readFileSync(indexPath), indexBefore);
+	});
+});
+
+test('a stale session ref is rejected before a new applying receipt is written', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		commit(session.worktreePath, 'external.txt', 'advance\n', 'advance session branch');
+		const currentRef = git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`);
+		const journal = applyingJournal();
+		await assert.rejects(service.applyReviewedCommit({ operationId: randomUUID(), binding, ...journal }), /source ref changed|active managed session lease/i);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), currentRef);
+		assert.equal(journal.get(), undefined);
+	});
+});
+
+test('recovery with an exact durable journal repairs candidate index after an interrupted ref apply', async () => {
+	await fixture(async (root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		const journal = applyingJournal();
+		const operationId = randomUUID();
+		const internals = service as unknown as {
+			assertIndexMatchesReviewedCommit(lease: ManagedWorktreeLease, proposal: ReviewedCommitBinding, expectedBytes: Buffer): Promise<void>;
+		};
+		const originalCheck = internals.assertIndexMatchesReviewedCommit.bind(service);
+		let injectFailure = true;
+		internals.assertIndexMatchesReviewedCommit = async (lease, proposal, expectedBytes) => {
+			if (injectFailure) { injectFailure = false; throw new Error('fixture post-rename index verification failure'); }
+			return originalCheck(lease, proposal, expectedBytes);
+		};
+		const result = await service.applyReviewedCommit({ operationId, binding, ...journal });
+		assert.equal(result.state, 'recoveryRequired');
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), binding.candidateCommitOid);
+		assert.match(git(session.worktreePath, 'ls-files', '--stage', '--', 'reviewed.txt'), /^100644 [0-9a-f]+ 0\treviewed\.txt$/);
+		const reopened = new ManagedWorktreeService(join(root, 'profile'));
+		const recovered = await reopened.reconcileReviewedCommit({ operationId, binding, readApplying: journal.readApplying });
+		assert.equal(recovered.state, 'alreadyApplied');
+		assert.match(git(session.worktreePath, 'ls-files', '--stage', '--', 'reviewed.txt'), /^100644 [0-9a-f]+ 0\treviewed\.txt$/);
+		assert.equal((await reopened.inspect(session.ownerId)).head, binding.candidateCommitOid);
+	});
+});
+
+test('recovery refuses to move a session ref still at source or at another commit', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const binding = await reviewedBinding(service, session.ownerId, 'reviewed.txt', 'approved\n');
+		const journal = applyingJournal();
+		const operationId = randomUUID();
+		const record = { operationId, binding };
+		await journal.recordApplying(record);
+		const atSource = await service.reconcileReviewedCommit({ operationId, binding, readApplying: journal.readApplying });
+		assert.equal(atSource.state, 'recoveryRequired');
+		assert.equal(atSource.currentRef, binding.sourceHead);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), binding.sourceHead);
+		commit(session.worktreePath, 'external.txt', 'external\n', 'external advance');
+		const other = git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`);
+		const atOther = await service.reconcileReviewedCommit({ operationId, binding, readApplying: journal.readApplying });
+		assert.equal(atOther.state, 'recoveryRequired');
+		assert.equal(atOther.currentRef, other);
+		assert.equal(git(session.worktreePath, 'rev-parse', `refs/heads/${session.branch}`), other);
 	});
 });

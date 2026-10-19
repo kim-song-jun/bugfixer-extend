@@ -87,6 +87,17 @@ test('change evidence binds to the exact turn and folder and retains observed fi
 	} finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
+test('schema-v2 executable-only observations are valid immutable metadata', () => {
+	withFixture(({ database, base }) => {
+		const metadata = { kind: 'file' as const, size: 3, sha256: 'a'.repeat(64) };
+		const evidence = database.agentSessionChangeEvidence.recordSnapshot({
+			...base, files: [fileObservation('bin/tool', 'modified', { ...metadata, executable: false }, { ...metadata, executable: true })],
+		});
+		assert.equal(evidence.files[0]?.before?.executable, false);
+		assert.equal(evidence.files[0]?.after?.executable, true);
+	});
+});
+
 test('append cursor makes exact retries idempotent, preserves A-B-A observations, and rejects stale delayed writes', () => {
 	withFixture(({ database, project, session, turn, base }) => {
 		const store = database.agentSessionChangeEvidence;

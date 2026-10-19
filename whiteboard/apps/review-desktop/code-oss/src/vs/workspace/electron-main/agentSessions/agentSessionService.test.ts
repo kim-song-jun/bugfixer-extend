@@ -206,6 +206,87 @@ function dispose(fixture: ReturnType<typeof createFixture>): void {
 	rmSync(fixture.root, { recursive: true, force: true });
 }
 
+test('idle mutation lease blocks manual and workflow starts synchronously, scopes across sessions, and release permits launch', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory();
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const manualPreview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const { session, reservation } = approveWorkflowLaunch(fixture);
+		const lease = service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: session.id });
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: session.id }), /already holds/u);
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: randomUUID(), sessionId: session.id }), /session|project/u);
+		const otherSessionLease = service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.gitSession.id });
+		otherSessionLease.release();
+		await assert.rejects(service.start({ projectId: fixture.project.id, sessionId: session.id, ticketId: manualPreview.ticketId }), /mutation.*lease/u);
+		await assert.rejects(service.startWorkflowNode({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: WORKFLOW_READ_ONLY, reservationId: reservation.reservationId }), /mutation.*lease/u);
+		assert.deepEqual(fixture.database.agentSessionTurns.listTurns(fixture.project.id, session.id), []);
+		assert.equal(runtime.starts().length, 0);
+		lease.release(); lease.release();
+		const retryPreview = await service.preview({ projectId: fixture.project.id, sessionId: session.id, permissionPolicy: READ_ONLY });
+		const turn = await service.start({ projectId: fixture.project.id, sessionId: session.id, ticketId: retryPreview.ticketId });
+		assert.equal(turn.state, 'running');
+		assert.deepEqual(runtime.starts(), [turn.id]);
+		await service.shutdown();
+	} finally { dispose(fixture); }
+});
+
+test('idle mutation lease rejects an in-flight same-session workspace acquisition', async () => {
+	const fixture = createFixture();
+	try {
+		const { service, resolver } = createDelayedService(fixture);
+		const hold = resolver.holdNextAcquire();
+		const preview = service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		await hold.entered;
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id }), /workspace operation/u);
+		hold.release();
+		await preview;
+		const lease = service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id });
+		lease.release();
+		const retryPreview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const startHold = resolver.holdNextAcquire();
+		const start = service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: retryPreview.ticketId });
+		await startHold.entered;
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id }), /provider start is pending/u);
+		const shutdown = service.shutdown();
+		startHold.release();
+		await assert.rejects(start, /shutting down/u);
+		await shutdown;
+	} finally { dispose(fixture); }
+});
+
+test('idle mutation lease rejects active and cleanup-unverified turns but does not block another session', async () => {
+	const fixture = createFixture();
+	const runtime = createRunningRuntimeFactory({ state: 'cleanupUnverified', cleanupVerified: false, error: 'fixture cleanup uncertainty' });
+	const service = new AgentSessionService(fixture.database, fixture.resolver, runtime.factory);
+	try {
+		const preview = await service.preview({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, permissionPolicy: READ_ONLY });
+		const turn = await service.start({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id, ticketId: preview.ticketId });
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id }), /active turn/u);
+		const otherSession = service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.gitSession.id });
+		otherSession.release();
+		const terminal = await service.stop(fixture.project.id, fixture.sharedSession.id, turn.id);
+		assert.equal(terminal.cleanupVerified, false);
+		assert.throws(() => service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id }), /active turn|unverified cleanup|unreleased turn/u);
+		await service.shutdown();
+	} finally { dispose(fixture); }
+});
+
+test('shutdown waits for held idle mutation lease before resolving', async () => {
+	const fixture = createFixture();
+	try {
+		const lease = fixture.service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.sharedSession.id });
+		let settled = false;
+		const shutdown = fixture.service.shutdown().then(receipts => { settled = true; return receipts; });
+		await Promise.resolve();
+		assert.equal(settled, false);
+		assert.throws(() => fixture.service.acquireIdleMutationLease({ projectId: fixture.project.id, sessionId: fixture.gitSession.id }), /shutting down/u);
+		lease.release();
+		assert.deepEqual(await shutdown, []);
+		assert.equal(settled, true);
+	} finally { dispose(fixture); }
+});
+
 test('launch tickets are opaque, single-use, and scoped to their persisted project/session', async () => {
 	const fixture = createFixture();
 	try {

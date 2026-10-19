@@ -18,13 +18,14 @@ import type { IDisposable } from '../../base/common/lifecycle.js';
 import type { AgentSessionTranscriptPageDTO, AgentSessionTurnSnapshot, SessionNotificationDTO } from '../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO } from '../common/workspaceAgentWorkflowProtocol.js';
+import type { AgentSessionIntegrationProposalDTO } from '../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './agentSessions/managedWorktrees.js';
 import { TaskFolderWriterLock } from './providerRuns/taskFolderWriterLock.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
-import { WorkspaceAgentSessionsChannel, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
+import { WorkspaceAgentSessionsChannel, type WorkspaceAgentCommitHost, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
 
 function deferred() {
 	let resolve!: () => void;
@@ -327,6 +328,132 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		assert.equal(await channel.call(sender, 'getMessage', { ...targetRequest, messageId: randomUUID() }), null);
 		await assert.rejects(channel.call(forgedSender, 'getMessage', targetRequest), /open project window/u);
 		await assert.rejects(channel.call(sender, 'getMessage', { ...targetRequest, projectId: otherProject.project.id }), /does not match this window/u);
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('commit approval IPC requires the exact scoped proposal and native confirmation, then leaves apply separate', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-agent-commit-channel-'));
+	const database = WorkspaceDatabase.open(':memory:');
+	try {
+		const descriptorUri = URI.file(join(directory, 'project.code-workspace')).toString();
+		const foreignUri = URI.file(join(directory, 'foreign.code-workspace')).toString();
+		const project = database.createProjectWorkspace('Commit project', directory, descriptorUri);
+		const foreignProject = database.createProjectWorkspace('Foreign commit project', directory, foreignUri);
+		const openedWorkspace = { id: 'commit-workspace', configPath: URI.parse(descriptorUri) };
+		const codeWindow = { config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } }, openedWorkspace } as unknown as ICodeWindow;
+		const sender = Object.assign(new EventEmitter(), { id: 66, isDestroyed: () => false }) as unknown as WebContents;
+		const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
+		const session = database.agentSessions.createSession({ projectId: project.project.id, bindingId: project.binding.id, name: 'Commit session', provider: 'codex', model: 'fixture-model', workspaceMode: 'gitWorktree' });
+		const cwd = realpathSync(directory);
+		const stat = statSync(cwd, { bigint: true });
+		const folderIdentity = { canonicalPath: cwd, dev: stat.dev.toString(), ino: stat.ino.toString() };
+		const turnSnapshot: AgentSessionTurnSnapshot = {
+			schemaVersion: 1, projectId: project.project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: session.bindingId, taskId: null,
+			provider: session.provider, model: session.model, profileRef: session.profileRef, cwd, folderIdentity,
+			managedWorktreeOwnerId: session.id, permissionPolicy: { mode: 'read-only', approval: 'never' }, convention: null, references: [],
+		};
+		const turn = database.agentSessionTurns.createTurn({ projectId: project.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot: turnSnapshot });
+		const runningSession = database.agentSessions.getSession(project.project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
+		const sourceHead = 'a'.repeat(40);
+		const contents = (value: string, capturedAt: string) => {
+			const bytes = Buffer.from(value, 'utf8');
+			return {
+				schemaVersion: 2 as const, folderIdentity, capturedAt, inventoryCoverage: 'complete' as const, contentCoverage: 'complete' as const,
+				entryCount: 1, fileBytes: bytes.byteLength, retainedTextBytes: bytes.byteLength, contentReadCount: 1,
+				entries: [{ path: 'src/change.ts', kind: 'file' as const, size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex'), content: value, executable: false }],
+			};
+		};
+		const scope = { projectId: project.project.id, sessionId: session.id, turnId: turn.id };
+		database.agentSessionContents.recordBaseline({ scope, snapshot: contents('before\n', '2026-10-19T00:00:00.000Z'), revision: sourceHead });
+		database.agentSessionContents.recordAfter({ scope, snapshot: contents('after\n', '2026-10-19T00:00:01.000Z'), expectedLatestVersion: 0, revision: sourceHead, cleanupVerified: true });
+		const currentSession = database.agentSessions.getSession(project.project.id, session.id)!;
+		database.agentSessionTurns.transitionTurn(project.project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
+		const evidence = database.agentSessionChangeEvidence.getLatest(project.project.id, session.id, turn.id)!;
+		const target = { ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: 'src/change.ts', hunkId: null };
+		const explanation = database.agentSessionReviews.recordHumanExplanation({ target, expectedLatestRevision: 0, what: 'Changed the retained file.', why: 'The reviewed update is needed.', citations: [], checkClaims: [], status: 'confirmed' });
+		const proposal = database.agentSessionIntegrations.createProposal({
+			...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, sourceHead, proposedGitTreeHash: 'b'.repeat(40), diffFingerprint: 'c'.repeat(64),
+			commitMessage: 'Reviewed source update', author: { name: 'Fixture Author', email: 'author@example.invalid', date: '1700000000 +0000' },
+			committer: { name: 'Fixture Committer', email: 'committer@example.invalid', date: '1700000000 +0000' },
+			paths: [{ path: 'src/change.ts', explanationTargets: [{ path: 'src/change.ts', hunkId: null, revision: explanation.revision }] }], expectedLatestRevision: 0,
+		});
+		const proposalInput = { ...scope, proposalId: proposal.id, expectedRevision: proposal.revision, expectedFingerprint: proposal.fingerprint };
+		let accept = false;
+		let applyCalls = 0;
+		let prepareCalls = 0;
+		let gate: ReturnType<typeof deferred> | undefined;
+		const host: WorkspaceAgentCommitHost = {
+			prepare: async input => {
+				prepareCalls++;
+				assert.equal(input.projectId, project.project.id);
+				assert.equal(input.sessionId, session.id);
+				assert.equal(input.turnId, turn.id);
+				return proposal;
+			},
+			approve: input => database.agentSessionIntegrations.recordTrustedHumanApproval(input.proposalId, input.expectedRevision),
+			apply: async input => { applyCalls++; return database.agentSessionIntegrations.getProposal(input.proposalId)!; },
+			recover: async input => database.agentSessionIntegrations.getProposal(input.proposalId)!,
+			confirmProposal: async dialogSender => {
+				assert.equal(dialogSender, sender);
+				if (gate) { const current = gate; gate = undefined; current.entered(); await current.promise; }
+				return accept;
+			},
+		};
+		const channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, undefined, host);
+		const proposalPage = await channel.call<{ proposals: readonly AgentSessionIntegrationProposalDTO[] }>(sender, 'listCommitProposals', scope);
+		assert.deepEqual(proposalPage.proposals.map(item => item.id), [proposal.id]);
+		const prepared = await channel.call<AgentSessionIntegrationProposalDTO>(sender, 'prepareCommitProposal', {
+			...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint,
+			paths: [{ path: 'src/change.ts', explanationTargets: [{ path: 'src/change.ts', hunkId: null, revision: explanation.revision }] }],
+			commitMessage: 'Reviewed source update', expectedLatestRevision: 0,
+		});
+		assert.equal(prepared.id, proposal.id);
+		assert.equal(prepareCalls, 1);
+		await assert.rejects(channel.call(sender, 'prepareCommitProposal', {
+			...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, paths: [], commitMessage: 'forged', expectedLatestRevision: 0, approved: true,
+		}), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'approveCommitProposal', { ...proposalInput, approved: true }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'approveCommitProposal', { ...proposalInput, projectId: foreignProject.project.id }), /does not match this window/u);
+		await assert.rejects(channel.call(sender, 'approveCommitProposal', { ...proposalInput, expectedFingerprint: '0'.repeat(64) }), /changed/u);
+		const cancelled = await channel.call<{ approved: boolean; proposal: AgentSessionIntegrationProposalDTO }>(sender, 'approveCommitProposal', proposalInput);
+		assert.equal(cancelled.approved, false);
+		assert.equal(cancelled.proposal.approval, null);
+		assert.equal(applyCalls, 0);
+
+		accept = true;
+		gate = deferred();
+		const pendingApproval = channel.call(sender, 'approveCommitProposal', proposalInput);
+		await gate.entered;
+		openedWorkspace.configPath = URI.parse(foreignUri);
+		gate.resolve();
+		await assert.rejects(pendingApproval, /project window changed/u);
+		openedWorkspace.configPath = URI.parse(descriptorUri);
+		assert.equal(database.agentSessionIntegrations.getProposal(proposal.id)!.approval, null);
+
+		gate = deferred();
+		const staleApproval = channel.call(sender, 'approveCommitProposal', proposalInput);
+		await gate.entered;
+		const newerProposal = database.agentSessionIntegrations.createProposal({
+			...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, sourceHead,
+			proposedGitTreeHash: 'd'.repeat(40), diffFingerprint: 'e'.repeat(64), commitMessage: 'New exact proposal',
+			author: proposal.author, committer: proposal.committer,
+			paths: [{ path: 'src/change.ts', explanationTargets: [{ path: 'src/change.ts', hunkId: null, revision: explanation.revision }] }],
+			expectedLatestRevision: proposal.revision,
+		});
+		gate.resolve();
+		await assert.rejects(staleApproval, /newer commit proposal/u);
+		assert.equal(database.agentSessionIntegrations.getProposal(proposal.id)!.approval, null);
+		const newerInput = { ...scope, proposalId: newerProposal.id, expectedRevision: newerProposal.revision, expectedFingerprint: newerProposal.fingerprint };
+		const approved = await channel.call<{ approved: boolean; proposal: AgentSessionIntegrationProposalDTO }>(sender, 'approveCommitProposal', newerInput);
+		assert.equal(approved.approved, true);
+		assert.equal(approved.proposal.approval?.actor, 'human');
+		assert.equal(applyCalls, 0, 'approval records authority but never applies the commit');
+		await channel.call(sender, 'applyCommitProposal', newerInput);
+		assert.equal(applyCalls, 1, 'apply requires its separate explicit command');
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

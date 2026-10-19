@@ -30,6 +30,8 @@ export interface AgentSessionChangeFileMetadata {
 	readonly size?: number;
 	readonly sha256?: string;
 	readonly targetSha256?: string;
+	/** Omitted for immutable legacy snapshots whose executable mode was not captured. */
+	readonly executable?: boolean;
 }
 
 export interface AgentSessionChangeFileObservation {
@@ -274,8 +276,8 @@ export class AgentSessionChangeEvidenceStore {
 		if (input.change === 'deleted' && (before === null || after !== null)) { throw new Error('Deleted file evidence requires only a before observation.'); }
 		if (input.change === 'renamed' && (before === null || after === null)) { throw new Error('Renamed file evidence requires before and after observations.'); }
 		if (input.change === 'typeChanged' && (before === null || after === null || before.kind === after.kind)) { throw new Error('Type-change evidence requires different before and after kinds.'); }
-		if (input.change === 'modified' && (before?.kind !== 'file' || after?.kind !== 'file' || (before.sha256 === after.sha256 && before.size === after.size))) {
-			throw new Error('Modified file evidence requires a changed file hash or size.');
+		if (input.change === 'modified' && (before?.kind !== 'file' || after?.kind !== 'file' || (before.sha256 === after.sha256 && before.size === after.size && (before.executable === undefined || after.executable === undefined || before.executable === after.executable)))) {
+			throw new Error('Modified file evidence requires a changed file hash, size, or known executable mode.');
 		}
 		if (input.change === 'symlinkChanged' && (before?.kind !== 'symlink' || after?.kind !== 'symlink' || before.targetSha256 === after.targetSha256)) {
 			throw new Error('Changed symlink evidence requires different target hashes.');
@@ -286,9 +288,10 @@ export class AgentSessionChangeEvidenceStore {
 	private normalizeMetadata(input: AgentSessionChangeFileMetadata): AgentSessionChangeFileMetadata {
 		if (!input || typeof input !== 'object' || Array.isArray(input)) { throw new Error('Change evidence file metadata is invalid.'); }
 		if (input.kind === 'file') {
-			this.assertExactKeys(input, ['kind', 'size', 'sha256'], 'file metadata');
+			this.assertAllowedKeys(input, ['kind', 'size', 'sha256'], ['executable'], 'file metadata');
 			if (!Number.isSafeInteger(input.size) || input.size! < 0 || typeof input.sha256 !== 'string' || !SHA256_PATTERN.test(input.sha256)) { throw new Error('File evidence size or content hash is invalid.'); }
-			return { kind: 'file', size: input.size, sha256: input.sha256 };
+			if (Object.hasOwn(input, 'executable') && typeof input.executable !== 'boolean') { throw new Error('File executable-mode evidence is invalid.'); }
+			return { kind: 'file', size: input.size, sha256: input.sha256, ...(Object.hasOwn(input, 'executable') ? { executable: input.executable } : {}) };
 		}
 		if (input.kind === 'symlink') {
 			this.assertExactKeys(input, ['kind', 'targetSha256'], 'symlink metadata');

@@ -10,8 +10,8 @@ export interface WorkspaceAgentChangeFileObservation {
 	readonly path: string;
 	readonly change: WorkspaceAgentChangeKind;
 	readonly previousPath?: string;
-	readonly before: { readonly kind: 'file' | 'directory' | 'symlink' | 'special'; readonly size?: number; readonly sha256?: string; readonly targetSha256?: string } | null;
-	readonly after: { readonly kind: 'file' | 'directory' | 'symlink' | 'special'; readonly size?: number; readonly sha256?: string; readonly targetSha256?: string } | null;
+	readonly before: { readonly kind: 'file' | 'directory' | 'symlink' | 'special'; readonly size?: number; readonly sha256?: string; readonly targetSha256?: string; readonly executable?: boolean } | null;
+	readonly after: { readonly kind: 'file' | 'directory' | 'symlink' | 'special'; readonly size?: number; readonly sha256?: string; readonly targetSha256?: string; readonly executable?: boolean } | null;
 }
 
 export interface WorkspaceAgentChangeEvidenceDTO {
@@ -63,6 +63,7 @@ export interface WorkspaceAgentChangeFileMetadataDTO {
 	readonly kind: 'file' | 'directory' | 'symlink' | 'special';
 	readonly size: number;
 	readonly sha256: string;
+	readonly executable?: boolean;
 	readonly contentUnavailableReason?: 'fileTooLarge' | 'contentFileLimit' | 'retainedTextLimit' | 'binary' | 'invalidUtf8';
 }
 

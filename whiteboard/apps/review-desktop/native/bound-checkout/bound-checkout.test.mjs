@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -133,6 +134,173 @@ test("inventory hashes files, records symlinks without following them, and rejec
   const identityFailure = await runHelper(helper, args);
   assert.notEqual(identityFailure.code, 0);
   assert.match(identityFailure.stderr, /root identity mismatch/u);
+});
+
+test("agent-session v2 reads exact bounded bytes and executable metadata while legacy contracts stay unchanged", { skip: !nativeTest }, async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "bound-checkout-agent-v2-test-"));
+  temporaryRoots.push(temporaryRoot);
+  const root = path.join(await realpath(temporaryRoot), "root");
+  const outside = path.join(await realpath(temporaryRoot), "outside.bin");
+  const helper = path.join(temporaryRoot, "bound-checkout");
+  await mkdir(root);
+  const binary = Buffer.from([0x00, 0xff, 0x41, 0x00, 0x80]);
+  const utf8 = Buffer.from("한글 and UTF-8\n", "utf8");
+  const executable = Buffer.from("#!/bin/sh\nexit 0\n", "utf8");
+  await writeFile(path.join(root, "binary.bin"), binary);
+  await writeFile(path.join(root, "utf8.txt"), utf8);
+  await writeFile(path.join(root, "empty"), Buffer.alloc(0));
+  await writeFile(path.join(root, "tool"), executable);
+  await chmod(path.join(root, "tool"), 0o755);
+  await writeFile(path.join(root, "maximum.bin"), Buffer.alloc(1024 * 1024, 0x6d));
+  await writeFile(path.join(root, "oversized.bin"), Buffer.alloc(1024 * 1024 + 1, 0x5a));
+  await writeFile(outside, "must not be followed\n");
+  await symlink(outside, path.join(root, "outside-link"));
+  const rootStat = await stat(root, { bigint: true });
+  const source = new URL("./bound-checkout.c", import.meta.url);
+  await execFileAsync("clang", ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-DREVIEW_BOUND_CHECKOUT_TESTING", source.pathname, "-o", helper]);
+  const common = ["--root", root, "--dev", rootStat.dev.toString(), "--ino", rootStat.ino.toString()];
+
+  const legacyInventoryResult = await runHelper(helper, [...common, "inventory"]);
+  assert.equal(legacyInventoryResult.code, 0, legacyInventoryResult.stderr);
+  const legacyInventory = JSON.parse(legacyInventoryResult.stdout);
+  assert.deepEqual(Object.keys(legacyInventory), ["entries", "entryCount", "fileBytes"]);
+  assert.equal("schemaVersion" in legacyInventory, false);
+  assert.equal("executable" in legacyInventory.entries.find((entry) => entry.path === "tool"), false);
+  const legacyRead = await runHelper(helper, [...common, "read", "utf8.txt"]);
+  assert.equal(legacyRead.code, 0, legacyRead.stderr);
+  assert.equal(legacyRead.stdout, "한글 and UTF-8\n");
+
+  const v2InventoryResult = await runHelper(helper, [...common, "inventory-agent-v2"]);
+  assert.equal(v2InventoryResult.code, 0, v2InventoryResult.stderr);
+  const v2Inventory = JSON.parse(v2InventoryResult.stdout);
+  assert.deepEqual(Object.keys(v2Inventory), ["schemaVersion", "entries", "entryCount", "fileBytes"]);
+  assert.equal(v2Inventory.schemaVersion, 2);
+  assert.equal(v2Inventory.entries.find((entry) => entry.path === "tool").executable, true);
+  assert.equal(v2Inventory.entries.find((entry) => entry.path === "utf8.txt").executable, false);
+  assert.deepEqual(v2Inventory.entries.find((entry) => entry.path === "outside-link"), { path: "outside-link", kind: "symlink", target: outside });
+
+  for (const [relativePath, expected, executableBit] of [
+    ["binary.bin", binary, false],
+    ["utf8.txt", utf8, false],
+    ["empty", Buffer.alloc(0), false],
+    ["tool", executable, true],
+  ]) {
+    const result = await runHelper(helper, [...common, "read-agent-v2", relativePath]);
+    assert.equal(result.code, 0, result.stderr);
+    const record = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(record), ["schemaVersion", "path", "size", "sha256", "executable", "rawBytesBase64"]);
+    assert.equal(record.schemaVersion, 2);
+    assert.equal(record.path, relativePath);
+    assert.equal(record.size, expected.byteLength);
+    assert.equal(record.sha256, createHash("sha256").update(expected).digest("hex"));
+    assert.equal(record.executable, executableBit);
+    const decoded = Buffer.from(record.rawBytesBase64, "base64");
+    assert.deepEqual(decoded, expected);
+    assert.equal(decoded.toString("base64"), record.rawBytesBase64);
+  }
+
+  const symlinkRead = await runHelper(helper, [...common, "read-agent-v2", "outside-link"]);
+  assert.notEqual(symlinkRead.code, 0);
+  assert.equal(symlinkRead.stdout, "");
+  const traversalRead = await runHelper(helper, [...common, "read-agent-v2", "../outside.bin"]);
+  assert.notEqual(traversalRead.code, 0);
+  assert.equal(traversalRead.stdout, "");
+  const oversizedRead = await runHelper(helper, [...common, "read-agent-v2", "oversized.bin"]);
+  assert.notEqual(oversizedRead.code, 0);
+  assert.equal(oversizedRead.stdout, "");
+
+  const maximumRead = await runHelper(helper, [...common, "read-agent-v2", "maximum.bin"]);
+  assert.equal(maximumRead.code, 0, maximumRead.stderr);
+  assert.ok(Buffer.byteLength(maximumRead.stdout, "utf8") <= 2 * 1024 * 1024);
+  assert.equal(JSON.parse(maximumRead.stdout).size, 1024 * 1024);
+
+  await replacementRace({
+    temporaryRoot,
+    helper,
+    caseName: "agent-v2-read",
+    async prepare(registeredRoot, rogueRoot) {
+      await writeFile(path.join(registeredRoot, "payload.bin"), Buffer.from([0, 0xff, 0x41]));
+      await writeFile(path.join(rogueRoot, "payload.bin"), Buffer.from("rogue"));
+    },
+    command(registeredRoot, identity) {
+      return ["--root", registeredRoot, "--dev", identity.dev, "--ino", identity.ino, "read-agent-v2", "payload.bin"];
+    },
+    async verify(result) {
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(Buffer.from(JSON.parse(result.stdout).rawBytesBase64, "base64"), Buffer.from([0, 0xff, 0x41]));
+    },
+  });
+});
+
+test("agent-session v2 emits no snapshot when the opened file changes during its bounded read", { skip: !nativeTest }, async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "bound-checkout-agent-v2-race-test-"));
+  temporaryRoots.push(temporaryRoot);
+  const canonicalTemporaryRoot = await realpath(temporaryRoot);
+  const root = path.join(canonicalTemporaryRoot, "root");
+  const helper = path.join(temporaryRoot, "bound-checkout");
+  await mkdir(root);
+  const file = path.join(root, "changing.txt");
+  await writeFile(file, "before\n");
+  const rootStat = await stat(root, { bigint: true });
+  const source = new URL("./bound-checkout.c", import.meta.url);
+  await execFileAsync("clang", ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-DREVIEW_BOUND_CHECKOUT_TESTING", source.pathname, "-o", helper]);
+  const ready = path.join(canonicalTemporaryRoot, "opened-ready");
+  const release = path.join(canonicalTemporaryRoot, "opened-release");
+  const child = spawn(helper, ["--root", root, "--dev", rootStat.dev.toString(), "--ino", rootStat.ino.toString(), "read-agent-v2", "changing.txt"], {
+    env: { ...process.env, REVIEW_BOUND_CHECKOUT_BARRIER_READY: ready, REVIEW_BOUND_CHECKOUT_BARRIER_RELEASE: release },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", (chunk) => stdout.push(chunk));
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  const completed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }));
+  });
+  try {
+    await waitForFile(ready, child);
+    await writeFile(file, "after!\n");
+    await writeFile(release, "release\n");
+    const result = await completed;
+    assert.notEqual(result.code, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /changed while reading/u);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await writeFile(release, "release\n").catch(() => {});
+  }
+
+  const modeRoot = path.join(canonicalTemporaryRoot, "mode-root");
+  await mkdir(modeRoot);
+  const modeFile = path.join(modeRoot, "mode.txt");
+  await writeFile(modeFile, "stable bytes\n");
+  const modeStat = await stat(modeRoot, { bigint: true });
+  const modeReady = path.join(canonicalTemporaryRoot, "mode-ready");
+  const modeRelease = path.join(canonicalTemporaryRoot, "mode-release");
+  const inventoryChild = spawn(helper, ["--root", modeRoot, "--dev", modeStat.dev.toString(), "--ino", modeStat.ino.toString(), "inventory-agent-v2"], {
+    env: { ...process.env, REVIEW_BOUND_CHECKOUT_BARRIER_READY: modeReady, REVIEW_BOUND_CHECKOUT_BARRIER_RELEASE: modeRelease },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const inventoryStdout = [];
+  const inventoryStderr = [];
+  inventoryChild.stdout.on("data", (chunk) => inventoryStdout.push(chunk));
+  inventoryChild.stderr.on("data", (chunk) => inventoryStderr.push(chunk));
+  const inventoryCompleted = new Promise((resolve, reject) => {
+    inventoryChild.once("error", reject);
+    inventoryChild.once("close", (code) => resolve({ code, stdout: Buffer.concat(inventoryStdout).toString(), stderr: Buffer.concat(inventoryStderr).toString() }));
+  });
+  try {
+    await waitForFile(modeReady, inventoryChild);
+    await chmod(modeFile, 0o755);
+    await writeFile(modeRelease, "release\n");
+    const result = await inventoryCompleted;
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /changed while hashing/u);
+  } finally {
+    if (inventoryChild.exitCode === null) inventoryChild.kill("SIGTERM");
+    await writeFile(modeRelease, "release\n").catch(() => {});
+  }
 });
 
 test("provider execution preserves the bound cwd and stdio and rejects unsafe executables", { skip: !nativeTest }, async () => {

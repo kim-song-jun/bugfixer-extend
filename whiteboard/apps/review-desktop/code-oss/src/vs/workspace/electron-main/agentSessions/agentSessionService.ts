@@ -130,7 +130,15 @@ interface ScopedAttachment {
 }
 
 interface PendingWorkspaceOperation {
+	readonly projectId: string;
+	readonly sessionId: string;
 	readonly controller: AbortController;
+	readonly settled: Promise<void>;
+	complete(): void;
+}
+
+interface IdleMutationLeaseRecord {
+	readonly token: symbol;
 	readonly settled: Promise<void>;
 	complete(): void;
 }
@@ -141,6 +149,8 @@ export class AgentSessionService {
 	private readonly turns = new Map<string, LiveTurn>();
 	private readonly attachments = new Map<string, ScopedAttachment>();
 	private readonly pendingWorkspaceOperations = new Set<PendingWorkspaceOperation>();
+	private readonly pendingStartsBySession = new Map<string, symbol>();
+	private readonly idleMutationLeases = new Map<string, IdleMutationLeaseRecord>();
 	private shuttingDown = false;
 	private pendingPreviewReservations = 0;
 	private pendingStartReservations = 0;
@@ -152,12 +162,56 @@ export class AgentSessionService {
 		private readonly changeObserver?: AgentSessionChangeObserver,
 	) { }
 
+	/** Synchronously reserves this session while trusted host code prepares a Git mutation. */
+	acquireIdleMutationLease(input: { readonly projectId: string; readonly sessionId: string }): { release(): void } {
+		this.assertAcceptingLaunches();
+		if (!input || typeof input !== 'object' || Object.keys(input).sort().join(',') !== 'projectId,sessionId') {
+			throw new Error('The mutation lease requires exact project and session scope.');
+		}
+		const key = sessionKey(input.projectId, input.sessionId);
+		const session = this.database.agentSessions.getSession(input.projectId, input.sessionId);
+		if (!session) { throw new Error('The mutation lease session does not belong to this project.'); }
+		if (['starting', 'running', 'waitingForInput', 'waitingForApproval', 'stopping'].includes(session.state)) {
+			throw new Error('A session mutation lease requires an idle session.');
+		}
+		if (this.idleMutationLeases.has(key)) { throw new Error('A trusted mutation already holds this session lease.'); }
+		if (this.pendingStartsBySession.has(key)) { throw new Error('A provider start is pending for this session.'); }
+		if ([...this.pendingWorkspaceOperations].some(operation => operation.projectId === input.projectId && operation.sessionId === input.sessionId)) {
+			throw new Error('A workspace operation is pending for this session.');
+		}
+		for (const turn of this.database.agentSessionTurns.listTurns(input.projectId, input.sessionId)) {
+			if (!isTerminal(turn.state) || !turn.cleanupVerified) { throw new Error('An active turn or unverified cleanup prevents this session mutation.'); }
+		}
+		for (const live of this.turns.values()) {
+			if (live.projectId === input.projectId && live.sessionId === input.sessionId
+				&& (live.launchPending || !isTerminal(live.turn.state) || !live.turn.cleanupVerified || !live.workspaceReleased || !live.changeEvidenceFinalized)) {
+				throw new Error('A live or unreleased turn prevents this session mutation.');
+			}
+		}
+		const token = Symbol('agent-session-idle-mutation-lease');
+		let complete!: () => void;
+		const record: IdleMutationLeaseRecord = { token, settled: new Promise<void>(resolve => { complete = resolve; }), complete: () => complete() };
+		this.idleMutationLeases.set(key, record);
+		let released = false;
+		return Object.freeze({
+			release: () => {
+				if (released) { return; }
+				released = true;
+				if (this.idleMutationLeases.get(key)?.token === token) {
+					this.idleMutationLeases.delete(key);
+					record.complete();
+				}
+			},
+		});
+	}
+
 	async preview(input: { readonly projectId: string; readonly sessionId: string; readonly permissionPolicy: AgentSessionPermissionPolicy }): Promise<AgentSessionLaunchPreview> {
 		this.assertAcceptingLaunches();
+		this.assertNoIdleMutationLease(input.projectId, input.sessionId);
 		this.expireTickets();
 		if (this.tickets.size + this.pendingPreviewReservations >= MAX_LAUNCH_TICKETS) { throw new Error('Too many unconsumed session launch previews are active.'); }
 		this.pendingPreviewReservations++;
-		const pending = this.beginWorkspaceOperation();
+		const pending = this.beginWorkspaceOperation(input);
 		let workspace: AcquiredAgentSessionWorkspace | undefined;
 		try {
 			workspace = await this.workspaceResolver.acquire({ ...input, signal: pending.controller.signal });
@@ -233,8 +287,13 @@ export class AgentSessionService {
 		createTurn: (snapshot: AgentSessionTurnSnapshot) => AgentSessionTurnDTO,
 		signal?: AbortSignal,
 	): Promise<AgentSessionTurnDTO> {
+		const sessionKeyValue = sessionKey(input.projectId, input.sessionId);
+		this.assertNoIdleMutationLease(input.projectId, input.sessionId);
+		if (this.pendingStartsBySession.has(sessionKeyValue)) { throw new Error('A provider start is already pending for this session.'); }
+		const startToken = Symbol('agent-session-start-reservation');
+		this.pendingStartsBySession.set(sessionKeyValue, startToken);
 		this.pendingStartReservations++;
-		const pending = this.beginWorkspaceOperation();
+		const pending = this.beginWorkspaceOperation(input);
 		const abortPending = () => pending.controller.abort();
 		if (signal?.aborted) { abortPending(); }
 		else { signal?.addEventListener('abort', abortPending, { once: true }); }
@@ -293,6 +352,7 @@ export class AgentSessionService {
 		} finally {
 			signal?.removeEventListener('abort', abortPending);
 			if (turn === undefined) { this.pendingStartReservations--; }
+			if (this.pendingStartsBySession.get(sessionKeyValue) === startToken) { this.pendingStartsBySession.delete(sessionKeyValue); }
 			this.finishWorkspaceOperation(pending);
 		}
 
@@ -410,6 +470,7 @@ export class AgentSessionService {
 		const pendingOperations = [...this.pendingWorkspaceOperations];
 		for (const pending of pendingOperations) { pending.controller.abort(); }
 		await Promise.all(pendingOperations.map(pending => pending.settled));
+		await Promise.all([...this.idleMutationLeases.values()].map(lease => lease.settled));
 		const receipts: AgentSessionShutdownReceipt[] = [];
 		await Promise.all([...this.turns.values()].map(async live => {
 			let turn = live.turn;
@@ -728,15 +789,21 @@ export class AgentSessionService {
 		return tracked;
 	}
 
-	private beginWorkspaceOperation(): PendingWorkspaceOperation {
+	private beginWorkspaceOperation(scope: { readonly projectId: string; readonly sessionId: string }): PendingWorkspaceOperation {
 		let complete!: () => void;
 		const pending: PendingWorkspaceOperation = {
+			projectId: scope.projectId,
+			sessionId: scope.sessionId,
 			controller: new AbortController(),
 			settled: new Promise<void>(resolve => { complete = resolve; }),
 			complete: () => complete(),
 		};
 		this.pendingWorkspaceOperations.add(pending);
 		return pending;
+	}
+
+	private assertNoIdleMutationLease(projectId: string, sessionId: string): void {
+		if (this.idleMutationLeases.has(sessionKey(projectId, sessionId))) { throw new Error('A trusted mutation currently holds this session lease.'); }
 	}
 
 	private finishWorkspaceOperation(pending: PendingWorkspaceOperation): void {
@@ -775,6 +842,8 @@ export class AgentSessionRuntimeStartError extends Error {
 function digestSnapshot(snapshot: AgentSessionTurnSnapshot): string {
 	return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 }
+
+function sessionKey(projectId: string, sessionId: string): string { return `${projectId}:${sessionId}`; }
 
 function isTerminal(state: AgentSessionTurnDTO['state']): boolean {
 	return state === 'exited' || state === 'interrupted' || state === 'failed';

@@ -12,6 +12,7 @@ import {
 	compareAgentSessionContentSnapshots,
 	validateAgentSessionContentSnapshot,
 	type AgentSessionContentFile,
+	type AgentSessionContentMetadata,
 	type AgentSessionContentRootIdentity,
 	type AgentSessionContentSnapshot,
 } from './agentSessionContentCapture.js';
@@ -63,8 +64,25 @@ export interface AgentSessionContentFileDTO {
 	readonly evidenceVersion: number;
 	readonly path: string;
 	readonly evidenceFingerprint: string;
-	readonly before: { readonly state: 'absent' } | { readonly state: 'text'; readonly file: AgentSessionContentFile } | { readonly state: 'unavailable'; readonly file?: AgentSessionContentFile; readonly reason: string };
-	readonly after: { readonly state: 'absent' } | { readonly state: 'text'; readonly file: AgentSessionContentFile } | { readonly state: 'unavailable'; readonly file?: AgentSessionContentFile; readonly reason: string };
+	readonly before: AgentSessionContentFileSideDTO;
+	readonly after: AgentSessionContentFileSideDTO;
+}
+
+export type AgentSessionContentFileSideDTO = { readonly state: 'absent' } | { readonly state: 'text'; readonly file: AgentSessionContentPublicFile } | { readonly state: 'unavailable'; readonly file?: AgentSessionContentPublicFile; readonly reason: string };
+export type AgentSessionContentPublicFile = Omit<AgentSessionContentFile, 'rawBytesBase64'>;
+
+export type AgentSessionRawContentFileSide =
+	| { readonly state: 'absent' }
+	| { readonly state: 'unavailable'; readonly reason: string }
+	| { readonly state: 'retained'; readonly mode: '100644' | '100755' | '120000'; readonly size: number; readonly sha256: string; readonly bytes: Uint8Array };
+
+export interface AgentSessionRawContentFileDTO {
+	readonly scope: AgentSessionContentScope;
+	readonly evidenceVersion: number;
+	readonly path: string;
+	readonly evidenceFingerprint: string;
+	readonly before: AgentSessionRawContentFileSide;
+	readonly after: AgentSessionRawContentFileSide;
 }
 
 interface SnapshotRow {
@@ -291,6 +309,22 @@ export class AgentSessionContentStore {
 		};
 	}
 
+	/** Main-process-only retained bytes for Git preview. Never used to read the live filesystem. */
+	getRawEntry(input: { readonly scope: AgentSessionContentScope; readonly evidenceVersion: number; readonly path: string; readonly evidenceFingerprint: string }): AgentSessionRawContentFileDTO | undefined {
+		this.assertOpen();
+		this.assertExactKeys(input, ['scope', 'evidenceVersion', 'path', 'evidenceFingerprint'], 'raw file query');
+		const result = this.getFile({ scope: input.scope, evidenceVersion: input.evidenceVersion, path: input.path });
+		if (!result) { return undefined; }
+		if (result.evidenceFingerprint !== input.evidenceFingerprint) { throw new Error('Raw content evidence fingerprint does not match the selected immutable version.'); }
+		const beforeSnapshot = this.snapshotForSide(input.scope, input.evidenceVersion, true);
+		const afterSnapshot = this.snapshotForSide(input.scope, input.evidenceVersion, false);
+		return Object.freeze({
+			scope: result.scope, evidenceVersion: result.evidenceVersion, path: result.path, evidenceFingerprint: result.evidenceFingerprint,
+			before: beforeSnapshot ? this.rawFileState(beforeSnapshot.entries.find(entry => entry.path === input.path)) : result.before.state === 'unavailable' ? { state: 'unavailable' as const, reason: result.before.reason } : { state: 'absent' as const },
+			after: afterSnapshot ? this.rawFileState(afterSnapshot.entries.find(entry => entry.path === input.path)) : result.after.state === 'unavailable' ? { state: 'unavailable' as const, reason: result.after.reason } : { state: 'absent' as const },
+		});
+	}
+
 	private normalizeScope(value: AgentSessionContentScope): AgentSessionContentScope {
 		if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'projectId,sessionId,turnId'
 			|| !UUID_PATTERN.test(value.projectId) || !UUID_PATTERN.test(value.sessionId) || !UUID_PATTERN.test(value.turnId)) {
@@ -360,18 +394,58 @@ export class AgentSessionContentStore {
 		return validateAgentSessionContentSnapshot(JSON.parse(json));
 	}
 
-	private metadata(file: Omit<AgentSessionContentFile, 'content'> | null): AgentSessionChangeFileObservation['before'] {
+	private metadata(file: AgentSessionContentMetadata | null): AgentSessionChangeFileObservation['before'] {
 		if (!file) { return null; }
 		if (file.kind === 'symlink') { return { kind: 'symlink', targetSha256: digest(file.target ?? '') }; }
-		if (file.kind === 'file') { return { kind: 'file', size: file.size, sha256: file.sha256 }; }
+		if (file.kind === 'file') { return { kind: 'file', size: file.size, sha256: file.sha256, ...(file.executable !== undefined ? { executable: file.executable } : {}) }; }
 		return { kind: file.kind };
 	}
 
-	private fileState(file: AgentSessionContentFile | undefined): AgentSessionContentFileDTO['before'] {
+	private fileState(file: AgentSessionContentFile | undefined): AgentSessionContentFileSideDTO {
 		if (!file) { return { state: 'absent' }; }
 		if (file.kind !== 'file') { return { state: 'unavailable', reason: 'Entry is not a retained text file.' }; }
-		if (file.content !== undefined) { return { state: 'text', file }; }
-		return { state: 'unavailable', file, reason: file.contentUnavailableReason ?? 'Text content is unavailable.' };
+		const publicFile = this.publicFile(file);
+		if (file.content !== undefined) { return { state: 'text', file: publicFile }; }
+		return { state: 'unavailable', file: publicFile, reason: file.contentUnavailableReason ?? 'Text content is unavailable.' };
+	}
+
+	private publicFile(file: AgentSessionContentFile): AgentSessionContentPublicFile {
+		return Object.freeze({
+			path: file.path, kind: file.kind,
+			...(file.size !== undefined ? { size: file.size } : {}), ...(file.sha256 !== undefined ? { sha256: file.sha256 } : {}),
+			...(file.target !== undefined ? { target: file.target } : {}), ...(file.content !== undefined ? { content: file.content } : {}),
+			...(file.contentUnavailableReason !== undefined ? { contentUnavailableReason: file.contentUnavailableReason } : {}),
+			...(file.executable !== undefined ? { executable: file.executable } : {}),
+		});
+	}
+
+	private snapshotForSide(scopeInput: AgentSessionContentScope, version: number, before: boolean): AgentSessionContentSnapshot | undefined {
+		const scope = this.normalizeScope(scopeInput);
+		const final = this.getFinalRow(scope, version);
+		const metadataOnly = final ? undefined : this.db.prepare(`SELECT evidence_json FROM agent_session_change_evidence WHERE project_id = ? AND session_id = ? AND turn_id = ? AND version = ?`).get(scope.projectId, scope.sessionId, scope.turnId, version) as { readonly evidence_json: SQLOutputValue } | undefined;
+		if (!final && !metadataOnly) { return undefined; }
+		if (!before) { return final?.snapshot_json === null || !final ? undefined : this.readSnapshot(String(final.snapshot_json)); }
+		const baseline = this.getBaselineRow(scope);
+		if (!baseline) { return undefined; }
+		const metadataCapturedAt = metadataOnly ? (JSON.parse(String(metadataOnly.evidence_json)) as { readonly capturedAt?: unknown }).capturedAt : undefined;
+		if (!final && (typeof metadataCapturedAt !== 'string' || String(baseline.captured_at) >= metadataCapturedAt)) { return undefined; }
+		return this.readSnapshot(String(baseline.snapshot_json));
+	}
+
+	private rawFileState(file: AgentSessionContentFile | undefined): AgentSessionRawContentFileSide {
+		if (!file) { return { state: 'absent' }; }
+		if (file.kind === 'symlink') {
+			const bytes = Buffer.from(file.target ?? '', 'utf8');
+			return { state: 'retained', mode: '120000', size: bytes.byteLength, sha256: digestBytes(bytes), bytes: Uint8Array.from(bytes) };
+		}
+		if (file.kind !== 'file') { return { state: 'unavailable', reason: 'Entry is not a regular file or symlink.' }; }
+		if (file.executable === undefined) { return { state: 'unavailable', reason: 'Executable mode is unknown in this legacy snapshot.' }; }
+		let bytes: Buffer;
+		if (file.content !== undefined) { bytes = Buffer.from(file.content, 'utf8'); }
+		else if (file.rawBytesBase64 !== undefined) { bytes = Buffer.from(file.rawBytesBase64, 'base64'); }
+		else { return { state: 'unavailable', reason: file.contentUnavailableReason ?? 'Raw bytes were not retained.' }; }
+		if (bytes.byteLength !== file.size || digestBytes(bytes) !== file.sha256) { throw new Error('Retained raw file bytes failed immutable metadata verification.'); }
+		return { state: 'retained', mode: file.executable ? '100755' : '100644', size: bytes.byteLength, sha256: file.sha256, bytes: Uint8Array.from(bytes) };
 	}
 
 	private validateTimestamp(value: string): void {
@@ -410,6 +484,7 @@ export class AgentSessionContentStore {
 }
 
 function digest(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
+function digestBytes(value: Uint8Array): string { return createHash('sha256').update(value).digest('hex'); }
 function isSafeRelativePath(value: string): boolean {
 	return value.length > 0 && Buffer.byteLength(value, 'utf8') <= MAX_PATH_BYTES && !isAbsolute(value) && !value.includes('\\') && !value.includes('\0') && !value.split('/').some(segment => segment === '' || segment === '.' || segment === '..');
 }

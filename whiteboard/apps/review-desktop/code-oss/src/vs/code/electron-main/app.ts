@@ -156,6 +156,7 @@ import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspac
 import { TaskFolderWriterLock } from '../../workspace/electron-main/providerRuns/taskFolderWriterLock.js';
 import { AgentSessionApplication } from '../../workspace/electron-main/agentSessions/agentSessionApplication.js';
 import { WorkspaceAgentSessionsChannel } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
+import { formatCommitDialogValue } from '../../workspace/electron-main/agentSessions/agentSessionCommitDialog.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../workspace/common/workspaceAgentSessionProtocol.js';
 import { WorkspaceKnowledgeChannel } from '../../workspace/electron-main/workspaceKnowledgeChannel.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../workspace/common/workspaceKnowledgeProtocol.js';
@@ -1579,6 +1580,42 @@ export class CodeApplication extends Disposable {
 							].join('\n\n'),
 							buttons: ['취소', '이 계획 승인'], cancelId: 0, defaultId: 0, noLink: true,
 						});
+						return result.response === 1;
+					},
+				},
+				{
+					prepare: input => agentSessions.commitApplication.prepareProposal(input),
+					approve: input => agentSessions.commitApplication.approveProposal({ proposalId: input.proposalId, expectedRevision: input.expectedRevision, expectedFingerprint: input.expectedFingerprint }),
+					apply: input => agentSessions.commitApplication.applyApprovedProposal({ proposalId: input.proposalId, expectedRevision: input.expectedRevision, expectedFingerprint: input.expectedFingerprint }),
+					recover: input => agentSessions.commitApplication.recoverApplying({ proposalId: input.proposalId, expectedRevision: input.expectedRevision, expectedFingerprint: input.expectedFingerprint, ...(input.operationId ? { operationId: input.operationId } : {}) }),
+					confirmProposal: async (sender, proposal) => {
+						const window = BrowserWindow.fromWebContents(sender);
+						if (!window || window.isDestroyed() || sender.isDestroyed()) { throw new Error('The project window closed before commit approval.'); }
+						const identity = (label: string, value: typeof proposal.author) => `${label}: ${formatCommitDialogValue(value.name)} <${formatCommitDialogValue(value.email)}> ${formatCommitDialogValue(value.date)}`;
+						const paths = proposal.paths.map(path => [
+							`경로: ${formatCommitDialogValue(path.path)}`,
+							`이전 경로: ${path.previousPath ? formatCommitDialogValue(path.previousPath) : '없음'}`,
+							`이전 메타데이터 SHA-256: ${path.beforeMetadataSha256 ?? '없음'}`,
+							`이후 메타데이터 SHA-256: ${path.afterMetadataSha256 ?? '없음'}`,
+							...path.explanations.map(explanation => `설명 ID ${formatCommitDialogValue(explanation.id)} · revision ${explanation.revision} · ${explanation.actor}/${explanation.status} · 경로 ${formatCommitDialogValue(explanation.path)} · ${explanation.hunkId ? `구간 ${formatCommitDialogValue(explanation.hunkId)}` : '파일 전체'}`),
+						].join('\n'));
+						const detail = [
+							`세션 worktree 브랜치에 커밋만 만듭니다. 병합이나 PR은 수행하지 않습니다.`,
+							`프로젝트: ${formatCommitDialogValue(proposal.projectId)}`, `세션: ${formatCommitDialogValue(proposal.sessionId)}`, `실행: ${formatCommitDialogValue(proposal.turnId)}`,
+							`Evidence ${proposal.evidenceVersion} · ${proposal.evidenceFingerprint}`,
+							`Source HEAD: ${proposal.sourceHead}`, `제안 트리: ${proposal.proposedGitTreeHash}`, `변경 지문: ${proposal.diffFingerprint}`,
+							`커밋 메시지: ${formatCommitDialogValue(proposal.commitMessage)}`, identity('작성자', proposal.author), identity('커미터', proposal.committer),
+							`선택 경로 ${proposal.paths.length}개:`, ...paths,
+							`제안 revision ${proposal.revision} · 만료 ${proposal.expiresAt}`,
+							`제안 지문: ${proposal.fingerprint}`,
+						].join('\n\n');
+						if (Buffer.byteLength(detail, 'utf8') > 48 * 1024) { throw new Error('Commit proposal is too large for a complete native approval review.'); }
+						const result = await dialog.showMessageBox(window, {
+							type: 'question', title: '검토한 변경 커밋 승인',
+							message: `세션 브랜치에 ${proposal.paths.length}개 경로를 커밋할까요?`, detail,
+							buttons: ['취소', '커밋 승인'], cancelId: 0, defaultId: 0, noLink: true,
+						});
+						if (window.isDestroyed() || sender.isDestroyed()) { throw new Error('The project window closed before commit approval completed.'); }
 						return result.response === 1;
 					},
 				},

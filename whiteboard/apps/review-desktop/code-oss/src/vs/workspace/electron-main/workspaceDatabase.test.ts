@@ -71,7 +71,7 @@ test('projects, bindings, tasks, review links and project view persist across da
 	});
 });
 
-function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
+function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28): void {
 	const directory = mkdtempSync(join(tmpdir(), `bugfixer-workspace-db-v${version}-migration-`));
 	const sourcePath = join(directory, 'source.db');
 	const path = join(directory, `frozen-v${version}.db`);
@@ -108,6 +108,10 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
 		database.agentSessionContents.recordAfter({ scope, snapshot: retainedSnapshot('after migration', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: null, cleanupVerified: true });
 		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
 		const changeEvidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
+		const explanation = database.agentSessionReviews.recordHumanExplanation({
+			target: { ...scope, evidenceVersion: changeEvidence.version, evidenceFingerprint: changeEvidence.fingerprint, path: 'migration.txt', hunkId: null },
+			expectedLatestRevision: 0, what: 'Kept the retained change.', why: 'Migration must preserve its exact explanation.', citations: [], checkClaims: [], status: 'draft',
+		});
 		const plan: AgentWorkflowPlanInput = {
 			projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
 			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: 'codex', model: 'gpt-5-codex', taskId: task.id, bindingId: binding.id, referenceIds: [], permissionPolicy: { mode: 'read-only', approval: 'on-request' }, dependsOn: [] }],
@@ -123,18 +127,19 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
 		const frozenV24 = readFileSync(new URL('./agentSessions/fixtures/schema-v24.sql', import.meta.url), 'utf8');
 		const frozenV25Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v25.sql', import.meta.url), 'utf8');
 		const frozenV26Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v26.sql', import.meta.url), 'utf8');
-		const frozenV27Delta = version === 27 ? readFileSync(new URL('./agentSessions/fixtures/schema-v27.sql', import.meta.url), 'utf8') : '';
+		const frozenV28Delta = version === 28 ? readFileSync(new URL('./agentSessions/fixtures/schema-v28.sql', import.meta.url), 'utf8') : '';
 		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence',
-			...(version === 27 ? ['agent_session_content_baselines', 'agent_session_content_finals'] : []),
+			...(version >= 27 ? ['agent_session_content_baselines', 'agent_session_content_finals'] : []),
+			...(version >= 28 ? ['agent_session_explanations'] : []),
 			'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
-		const v27 = new DatabaseSync(path);
+		const frozenDatabase = new DatabaseSync(path);
 		try {
-			v27.exec('PRAGMA foreign_keys = ON;');
-			v27.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}\n${frozenV27Delta}`);
-			const turnOwnerTrigger = v27.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
+			frozenDatabase.exec('PRAGMA foreign_keys = ON;');
+			frozenDatabase.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}\n${version >= 27 ? readFileSync(new URL('./agentSessions/fixtures/schema-v27.sql', import.meta.url), 'utf8') : ''}\n${frozenV28Delta}`);
+			const turnOwnerTrigger = frozenDatabase.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
 			if (typeof turnOwnerTrigger !== 'string') { throw new Error(`Frozen v${version} fixture omitted the session turn ownership trigger.`); }
 			// The source rows have already passed the public store's snapshot guard. Temporarily remove only its insert-time guard while copying the later session revision, then restore its exact frozen SQL before migration.
-			v27.exec('DROP TRIGGER agent_session_turn_owner_insert;');
+			frozenDatabase.exec('DROP TRIGGER agent_session_turn_owner_insert;');
 			try {
 				const source = new DatabaseSync(sourcePath);
 				try {
@@ -143,12 +148,12 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
 						const rows = source.prepare(`SELECT * FROM ${table}`).all();
 						if (!rows.length) { continue; }
 						const quotedColumns = columns.map(column => `\"${column}\"`).join(', ');
-						const insert = v27.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
+						const insert = frozenDatabase.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
 						for (const row of rows) { insert.run(...columns.map(column => Reflect.get(row, column))); }
 					}
 				} finally { source.close(); }
-			} finally { v27.exec(turnOwnerTrigger); }
-		} finally { v27.close(); }
+			} finally { frozenDatabase.exec(turnOwnerTrigger); }
+		} finally { frozenDatabase.close(); }
 
 		const snapshotRows = (connection: DatabaseSync) => Object.fromEntries(relevantTables.map(table => {
 			const columns = connection.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name));
@@ -167,8 +172,11 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
 		assert.equal(database.getTask(task.id)?.title, 'Retain task');
 		assert.equal(database.agentSessionTurns.getTurn(project.id, session.id, turn.id)?.id, turn.id);
 		assert.deepEqual(database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id), changeEvidence);
+		if (version === 28) {
+			assert.deepEqual(database.agentSessionReviews.getLatest(explanation.target), explanation);
+		}
 		const retainedMigrationFile = database.agentSessionContents.getFile({ scope, evidenceVersion: 1, path: 'migration.txt' });
-		if (version === 27) {
+		if (version >= 27) {
 			assert.equal(retainedMigrationFile?.before.state, 'text');
 			if (retainedMigrationFile?.before.state === 'text') { assert.equal(retainedMigrationFile.before.file.content, 'before migration'); }
 			assert.equal(retainedMigrationFile?.after.state, 'text');
@@ -181,7 +189,7 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
 		assert.equal(database.agentWorkflows.getWorkflow(project.id, workflow.id)?.id, workflow.id);
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
-		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 28); }
+		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 29); }
 		finally { migratedSchema.close(); }
 	} finally {
 		database.close();
@@ -189,8 +197,9 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27): void {
 	}
 }
 
-test('frozen v26 database upgrades to v28 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
-test('frozen v27 database upgrades to v28 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
+test('frozen v26 database upgrades to v29 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
+test('frozen v27 database upgrades to v29 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
+test('frozen v28 database upgrades to v29 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
 
 test('agent-session content baselines and final bytes remain turn-scoped and durable across reopen', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-agent-session-content-'));

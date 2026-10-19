@@ -22,6 +22,10 @@ import type { WorkspaceAgentSessionMailboxMessage, WorkspaceAgentSessionMailboxP
 import type {
 	AgentWorkflowDTO, AgentWorkflowNodePlan, AgentWorkflowPlan, AgentWorkflowPlanInput, AgentWorkflowRunDTO, AgentWorkflowStatusDTO,
 } from '../common/workspaceAgentWorkflowProtocol.js';
+import type {
+	AgentSessionIntegrationProposalDTO, WorkspaceAgentCommitPrepareInput, WorkspaceAgentCommitProposalInput,
+	WorkspaceAgentCommitProposalPageInput, WorkspaceAgentCommitRecoveryInput,
+} from '../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionAttachResult, AgentSessionService } from './agentSessions/agentSessionService.js';
 import { computeAgentSessionChangeHunks } from './agentSessions/agentSessionChangeHunks.js';
 import type { AgentSessionExplanationTarget } from './agentSessions/agentSessionReviewStore.js';
@@ -77,6 +81,15 @@ export interface WorkspaceAgentWorkflowHost {
 	confirmPlan(sender: WebContents, plan: AgentWorkflowPlan): Promise<boolean>;
 }
 
+/** Host-only commit proposal operations. Human confirmation remains a native dialog capability. */
+export interface WorkspaceAgentCommitHost {
+	prepare(input: WorkspaceAgentCommitPrepareInput): Promise<AgentSessionIntegrationProposalDTO>;
+	approve(input: WorkspaceAgentCommitProposalInput): AgentSessionIntegrationProposalDTO['approval'];
+	apply(input: WorkspaceAgentCommitProposalInput): Promise<AgentSessionIntegrationProposalDTO>;
+	recover(input: WorkspaceAgentCommitRecoveryInput): Promise<AgentSessionIntegrationProposalDTO>;
+	confirmProposal(sender: WebContents, proposal: AgentSessionIntegrationProposalDTO): Promise<boolean>;
+}
+
 /** Project-scoped IPC for durable sessions and host-owned PTY capabilities. */
 export class WorkspaceAgentSessionsChannel {
 	private readonly attachments = new Map<string, ScopedAttachment>();
@@ -92,6 +105,7 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly workspacePreparation?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
 		private readonly prepareWorkspace?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
 		private readonly workflowHost?: WorkspaceAgentWorkflowHost,
+		private readonly commitHost?: WorkspaceAgentCommitHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -288,6 +302,67 @@ export class WorkspaceAgentSessionsChannel {
 				});
 				if (!sameExplanationTarget(result.target, target) || result.actor !== 'human' || result.authorTurnId !== null || result.verification !== 'unverified') { throw new Error('Human explanation response contains invalid authority or scope.'); }
 				return result as T;
+			}
+			case 'listCommitProposals': {
+				const request = this.parseCommitProposalPage(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const page = this.database.agentSessionIntegrations.listProposals(projectId, request.sessionId, request.turnId, {
+					...(request.afterRevision !== undefined ? { afterRevision: request.afterRevision } : {}),
+					...(request.limit !== undefined ? { limit: request.limit } : {}),
+				});
+				if (page.proposals.some(proposal => !this.sameCommitScope(proposal, request))) { throw new Error('Commit proposal page contains an out-of-scope proposal.'); }
+				return page as T;
+			}
+			case 'prepareCommitProposal': {
+				const request = this.parseCommitPrepare(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requireCommitHost().prepare(request);
+					this.assertScopeCurrent(scope);
+					if (!this.sameCommitScope(proposal, request) || proposal.evidenceVersion !== request.evidenceVersion || proposal.evidenceFingerprint !== request.evidenceFingerprint) { throw new Error('Prepared commit proposal does not match its requested evidence scope.'); }
+					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'approveCommitProposal': {
+				const request = this.parseCommitProposalMutation(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const before = this.requireCommitProposal(request);
+				this.assertCommitProposalCurrent(before);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const approved = await this.requireCommitHost().confirmProposal(sender, before);
+					this.assertScopeCurrent(scope);
+					const current = this.requireCommitProposal(request);
+					if (current.revision !== request.expectedRevision || current.fingerprint !== request.expectedFingerprint || current.id !== before.id) { throw new Error('The commit proposal changed while its approval dialog was open.'); }
+					this.assertCommitProposalCurrent(current);
+					if (approved) { this.requireCommitHost().approve(this.commitProposalInput(request)); }
+					return { approved, proposal: this.requireCommitProposal(request) } as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'applyCommitProposal': {
+				const request = this.parseCommitProposalMutation(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				this.requireCommitProposal(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requireCommitHost().apply(this.commitProposalInput(request));
+					this.assertScopeCurrent(scope);
+					if (!this.sameCommitScope(proposal, request)) { throw new Error('Commit result scope does not match the approved proposal.'); }
+					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'recoverCommitProposal': {
+				const request = this.parseCommitRecovery(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				this.requireCommitProposal(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requireCommitHost().recover(request);
+					this.assertScopeCurrent(scope);
+					if (!this.sameCommitScope(proposal, request)) { throw new Error('Commit recovery scope does not match the approved proposal.'); }
+					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
 			}
 			case 'listNotifications': {
 				const request = this.record(arg);
@@ -670,6 +745,106 @@ export class WorkspaceAgentSessionsChannel {
 		return { workflow, plan, run, hostError: this.workflowHost?.getHostError(projectId, workflowId, run?.id) ?? null };
 	}
 
+	private requireCommitProposal(request: WorkspaceAgentCommitProposalInput): AgentSessionIntegrationProposalDTO {
+		const proposal = this.database.agentSessionIntegrations.getProposal(request.proposalId);
+		if (!proposal || !this.sameCommitScope(proposal, request) || proposal.revision !== request.expectedRevision || proposal.fingerprint !== request.expectedFingerprint) {
+			throw new Error('Commit proposal is unavailable or changed; review its latest exact revision.');
+		}
+		return proposal;
+	}
+
+	private assertCommitProposalCurrent(proposal: AgentSessionIntegrationProposalDTO): void {
+		if (Date.parse(proposal.expiresAt) <= Date.now()) { throw new Error('Commit proposal approval has expired. Prepare and review a fresh proposal.'); }
+		const latestEvidence = this.database.agentSessionChangeEvidence.getLatest(proposal.projectId, proposal.sessionId, proposal.turnId);
+		if (!latestEvidence || latestEvidence.version !== proposal.evidenceVersion || latestEvidence.fingerprint !== proposal.evidenceFingerprint) { throw new Error('Commit proposal evidence changed; review its current version.'); }
+		const newer = this.database.agentSessionIntegrations.listProposals(proposal.projectId, proposal.sessionId, proposal.turnId, { afterRevision: proposal.revision, limit: 1 });
+		if (newer.proposals.length) { throw new Error('A newer commit proposal exists; review that exact revision instead.'); }
+	}
+
+	private sameCommitScope(proposal: Pick<AgentSessionIntegrationProposalDTO, 'projectId' | 'sessionId' | 'turnId'>, request: Pick<WorkspaceAgentCommitProposalInput, 'projectId' | 'sessionId' | 'turnId'>): boolean {
+		return proposal.projectId === request.projectId && proposal.sessionId === request.sessionId && proposal.turnId === request.turnId;
+	}
+
+	private commitProposalInput(request: WorkspaceAgentCommitProposalInput): WorkspaceAgentCommitProposalInput {
+		return { projectId: request.projectId, sessionId: request.sessionId, turnId: request.turnId, proposalId: request.proposalId, expectedRevision: request.expectedRevision, expectedFingerprint: request.expectedFingerprint };
+	}
+
+	private requireCommitHost(): WorkspaceAgentCommitHost {
+		if (!this.commitHost) { throw new Error('Reviewed commit operations are unavailable because no trusted host is registered.'); }
+		return this.commitHost;
+	}
+
+	private parseCommitProposalPage(value: unknown, authorizedProjectId: string): WorkspaceAgentCommitProposalPageInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId'], ['afterRevision', 'limit'], 'commit proposal page');
+		this.assertProjectId(raw.projectId, authorizedProjectId);
+		return {
+			projectId: authorizedProjectId,
+			sessionId: this.uuid(raw.sessionId, 'commit session ID'),
+			turnId: this.uuid(raw.turnId, 'commit turn ID'),
+			...(raw.afterRevision === undefined ? {} : { afterRevision: this.integer(raw.afterRevision, 0, MAX_SEQUENCE, 'commit proposal cursor') }),
+			...(raw.limit === undefined ? {} : { limit: this.integer(raw.limit, 1, 100, 'commit proposal page limit') }),
+		};
+	}
+
+	private parseCommitPrepare(value: unknown, authorizedProjectId: string): WorkspaceAgentCommitPrepareInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'evidenceVersion', 'evidenceFingerprint', 'paths', 'commitMessage', 'expectedLatestRevision'], [], 'commit preparation');
+		this.assertProjectId(raw.projectId, authorizedProjectId);
+		if (!Array.isArray(raw.paths) || raw.paths.length < 1 || raw.paths.length > 300) { throw new Error('A commit proposal needs 1 to 300 selected evidence paths.'); }
+		let targetCount = 0;
+		const paths = raw.paths.map((value, pathIndex) => {
+			const path = this.record(value);
+			this.assertExactKeys(path, ['path', 'explanationTargets'], [], `commit path ${pathIndex + 1}`);
+			const pathValue = this.safeChangePath(path.path);
+			if (!Array.isArray(path.explanationTargets) || path.explanationTargets.length < 1) { throw new Error('Every selected commit path needs an explanation revision.'); }
+			targetCount += path.explanationTargets.length;
+			if (targetCount > 600) { throw new Error('A commit proposal selects too many explanation revisions.'); }
+			return {
+				path: pathValue,
+				explanationTargets: path.explanationTargets.map((value, targetIndex) => {
+					const target = this.record(value);
+					this.assertExactKeys(target, ['path', 'hunkId', 'revision'], [], `commit explanation target ${targetIndex + 1}`);
+					const targetPath = this.safeChangePath(target.path);
+					if (targetPath !== pathValue || (target.hunkId !== null && (typeof target.hunkId !== 'string' || !/^[0-9a-f]{64}$/iu.test(target.hunkId)))) { throw new Error('Commit explanation target must match its selected path and valid hunk.'); }
+					return { path: targetPath, hunkId: target.hunkId as string | null, revision: this.integer(target.revision, 1, MAX_SEQUENCE, 'explanation revision') };
+				}),
+			};
+		});
+		const evidenceFingerprint = this.string(raw.evidenceFingerprint, 'change evidence fingerprint', 64);
+		if (!/^[0-9a-f]{64}$/iu.test(evidenceFingerprint)) { throw new Error('A valid change evidence fingerprint is required.'); }
+		return {
+			projectId: authorizedProjectId, sessionId: this.uuid(raw.sessionId, 'commit session ID'), turnId: this.uuid(raw.turnId, 'commit turn ID'),
+			evidenceVersion: this.integer(raw.evidenceVersion, 1, MAX_SEQUENCE, 'change evidence version'), evidenceFingerprint,
+			paths, commitMessage: this.string(raw.commitMessage, 'commit message', 1024),
+			expectedLatestRevision: this.integer(raw.expectedLatestRevision, 0, MAX_SEQUENCE, 'commit proposal revision'),
+		};
+	}
+
+	private parseCommitProposalMutation(value: unknown, authorizedProjectId: string): WorkspaceAgentCommitProposalInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'proposalId', 'expectedRevision', 'expectedFingerprint'], [], 'commit proposal mutation');
+		return {
+			projectId: this.assertProjectAndReturn(raw.projectId, authorizedProjectId),
+			sessionId: this.uuid(raw.sessionId, 'commit session ID'), turnId: this.uuid(raw.turnId, 'commit turn ID'),
+			proposalId: this.uuid(raw.proposalId, 'commit proposal ID'),
+			expectedRevision: this.integer(raw.expectedRevision, 1, MAX_SEQUENCE, 'commit proposal revision'),
+			expectedFingerprint: this.changeFingerprint(raw.expectedFingerprint),
+		};
+	}
+
+	private parseCommitRecovery(value: unknown, authorizedProjectId: string): WorkspaceAgentCommitRecoveryInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'proposalId', 'expectedRevision', 'expectedFingerprint'], ['operationId'], 'commit recovery');
+		return {
+			...this.parseCommitProposalMutation({
+				projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId, proposalId: raw.proposalId,
+				expectedRevision: raw.expectedRevision, expectedFingerprint: raw.expectedFingerprint,
+			}, authorizedProjectId),
+			...(raw.operationId === undefined ? {} : { operationId: this.uuid(raw.operationId, 'commit operation ID') }),
+		};
+	}
+
 	private requireWorkflowHost(): WorkspaceAgentWorkflowHost {
 		if (!this.workflowHost) { throw new Error('The workflow execution host is unavailable.'); }
 		return this.workflowHost;
@@ -848,9 +1023,20 @@ export class WorkspaceAgentSessionsChannel {
 		if (this.uuid(value, 'project ID') !== authorizedProjectId) { throw new Error('The requested project does not match this window.'); }
 	}
 
+	private assertProjectAndReturn(value: unknown, authorizedProjectId: string): string {
+		this.assertProjectId(value, authorizedProjectId);
+		return authorizedProjectId;
+	}
+
 	private record(value: unknown): Record<string, unknown> {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) { throw new Error('A structured session request is required.'); }
 		return value as Record<string, unknown>;
+	}
+
+	private assertExactKeys(value: unknown, required: readonly string[], optional: readonly string[], label: string): void {
+		const object = this.record(value);
+		const allowed = new Set([...required, ...optional]);
+		if (required.some(key => !Object.hasOwn(object, key)) || Object.keys(object).some(key => !allowed.has(key))) { throw new Error(`The ${label} request contains missing or unknown fields.`); }
 	}
 
 	private uuid(value: unknown, label: string): string {

@@ -17,10 +17,17 @@
 
 extern char **environ;
 
+#define AGENT_V2_MAX_FILE_BYTES (1024U * 1024U)
+#define AGENT_V2_MAX_OUTPUT_BYTES (2U * 1024U * 1024U)
+
+static void json_string(const char *value);
+
 static void usage(void) {
   fprintf(stderr,
     "usage: bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO read RELATIVE_PATH\n"
     "       bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO inventory\n"
+    "       bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO read-agent-v2 RELATIVE_PATH\n"
+    "       bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO inventory-agent-v2\n"
     "       bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO exec git|jj [ARG ...]\n"
     "       bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO provider claude ABSOLUTE_CLAUDE_PATH [ARG ...]\n"
     "       bound-checkout --root CANONICAL_ROOT --dev DEV --ino INO provider codex-node ABSOLUTE_NODE ABSOLUTE_CODEX_JS [ARG ...]\n");
@@ -77,16 +84,16 @@ static int valid_relative_path(const char *path) {
   return 1;
 }
 
-static int read_relative_file(int root_fd, const char *path) {
+static int open_relative_file(int root_fd, const char *path, int barrier_before_open) {
   if (!valid_relative_path(path)) {
     fprintf(stderr, "bound-checkout: unsafe relative path\n");
-    return 1;
+    return -1;
   }
-  if (test_barrier() != 0) return 1;
+  if (barrier_before_open && test_barrier() != 0) return -1;
   char *copy = strdup(path);
-  if (!copy) return fail("allocate path");
+  if (!copy) { fail("allocate path"); return -1; }
   int directory_fd = dup(root_fd);
-  if (directory_fd < 0) { free(copy); return fail("duplicate root descriptor"); }
+  if (directory_fd < 0) { free(copy); fail("duplicate root descriptor"); return -1; }
   char *part = copy;
   for (;;) {
     char *slash = strchr(part, '/');
@@ -96,7 +103,7 @@ static int read_relative_file(int root_fd, const char *path) {
     int next_fd = openat(directory_fd, part, flags);
     if (next_fd < 0) {
       int saved = errno; close(directory_fd); free(copy); errno = saved;
-      return fail("open relative path");
+      fail("open relative path"); return -1;
     }
     close(directory_fd);
     directory_fd = next_fd;
@@ -105,12 +112,18 @@ static int read_relative_file(int root_fd, const char *path) {
   }
   free(copy);
   struct stat file_stat;
-  if (fstat(directory_fd, &file_stat) != 0) { close(directory_fd); return fail("stat file"); }
+  if (fstat(directory_fd, &file_stat) != 0) { close(directory_fd); fail("stat file"); return -1; }
   if (!S_ISREG(file_stat.st_mode)) {
     close(directory_fd);
     fprintf(stderr, "bound-checkout: path is not a regular file\n");
-    return 1;
+    return -1;
   }
+  return directory_fd;
+}
+
+static int read_relative_file(int root_fd, const char *path) {
+  int directory_fd = open_relative_file(root_fd, path, 1);
+  if (directory_fd < 0) return 1;
   char buffer[16384];
   int result = 0;
   for (;;) {
@@ -129,6 +142,92 @@ static int read_relative_file(int root_fd, const char *path) {
   return result;
 }
 
+static void sha256_hex(const unsigned char digest[CC_SHA256_DIGEST_LENGTH], char hex[CC_SHA256_DIGEST_LENGTH * 2 + 1]) {
+  for (size_t index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) snprintf(hex + index * 2, 3, "%02x", digest[index]);
+}
+
+static void print_base64(const unsigned char *bytes, size_t length) {
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (size_t index = 0; index < length; index += 3) {
+    uint32_t value = (uint32_t)bytes[index] << 16;
+    if (index + 1 < length) value |= (uint32_t)bytes[index + 1] << 8;
+    if (index + 2 < length) value |= bytes[index + 2];
+    putchar(alphabet[(value >> 18) & 63]);
+    putchar(alphabet[(value >> 12) & 63]);
+    putchar(index + 1 < length ? alphabet[(value >> 6) & 63] : '=');
+    putchar(index + 2 < length ? alphabet[value & 63] : '=');
+  }
+}
+
+static size_t json_quoted_length(const char *value) {
+  size_t length = 2;
+  for (const unsigned char *cursor = (const unsigned char *)value; *cursor; cursor++) {
+    size_t extra = (*cursor == '"' || *cursor == '\\') ? 2 : (*cursor < 0x20 ? 6 : 1);
+    if (length > SIZE_MAX - extra) return SIZE_MAX;
+    length += extra;
+  }
+  return length;
+}
+
+static int read_agent_v2(int root_fd, const char *path) {
+  if (!path || strlen(path) > 4096) {
+    fprintf(stderr, "bound-checkout: v2 path exceeds its 4096-byte limit\n");
+    return 1;
+  }
+  int file = open_relative_file(root_fd, path, 0);
+  if (file < 0) return 1;
+  struct stat opened;
+  if (fstat(file, &opened) != 0) { close(file); return fail("stat v2 file"); }
+  if (opened.st_size < 0 || (uintmax_t)opened.st_size > AGENT_V2_MAX_FILE_BYTES) {
+    close(file); errno = EFBIG; return fail("v2 file size limit");
+  }
+  size_t encoded_bytes = 4U * (((size_t)opened.st_size + 2U) / 3U);
+  size_t path_bytes = json_quoted_length(path);
+  if (path_bytes == SIZE_MAX || path_bytes > AGENT_V2_MAX_OUTPUT_BYTES ||
+      encoded_bytes > AGENT_V2_MAX_OUTPUT_BYTES - path_bytes ||
+      AGENT_V2_MAX_OUTPUT_BYTES - path_bytes - encoded_bytes < 256U) {
+    close(file); errno = EFBIG; return fail("v2 JSON output size limit");
+  }
+  if (test_barrier() != 0) { close(file); return 1; }
+  unsigned char *bytes = malloc(AGENT_V2_MAX_FILE_BYTES + 1U);
+  if (!bytes) { close(file); return fail("allocate v2 file buffer"); }
+  size_t size = 0;
+  int result = 0;
+  for (;;) {
+    ssize_t count = read(file, bytes + size, AGENT_V2_MAX_FILE_BYTES + 1U - size);
+    if (count == 0) break;
+    if (count < 0) { if (errno == EINTR) continue; result = fail("read v2 file"); break; }
+    size += (size_t)count;
+    if (size > AGENT_V2_MAX_FILE_BYTES) { errno = EFBIG; result = fail("v2 file size limit"); break; }
+  }
+  struct stat finished;
+  if (!result && (fstat(file, &finished) != 0 || size != (uintmax_t)opened.st_size ||
+      finished.st_dev != opened.st_dev || finished.st_ino != opened.st_ino ||
+      finished.st_size != opened.st_size || finished.st_mode != opened.st_mode ||
+      finished.st_mtimespec.tv_sec != opened.st_mtimespec.tv_sec || finished.st_mtimespec.tv_nsec != opened.st_mtimespec.tv_nsec ||
+      finished.st_ctimespec.tv_sec != opened.st_ctimespec.tv_sec || finished.st_ctimespec.tv_nsec != opened.st_ctimespec.tv_nsec)) {
+    errno = ESTALE; result = fail("v2 file changed while reading");
+  }
+  if (close(file) != 0 && !result) result = fail("close v2 file");
+  if (!result) {
+    CC_SHA256_CTX hash;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    char hex[CC_SHA256_DIGEST_LENGTH * 2 + 1];
+    CC_SHA256_Init(&hash);
+    CC_SHA256_Update(&hash, bytes, (CC_LONG)size);
+    CC_SHA256_Final(digest, &hash);
+    sha256_hex(digest, hex);
+    printf("{\"schemaVersion\":2,\"path\":"); json_string(path);
+    printf(",\"size\":%zu,\"sha256\":\"%s\",\"executable\":%s,\"rawBytesBase64\":\"", size, hex,
+      (opened.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) ? "true" : "false");
+    print_base64(bytes, size);
+    puts("\"}");
+    if (fflush(stdout) != 0 || ferror(stdout)) result = fail("write v2 JSON");
+  }
+  free(bytes);
+  return result;
+}
+
 /* Descriptor-relative inventory; symlink targets are recorded without following them. */
 static size_t inventory_entries;
 static uintmax_t inventory_bytes;
@@ -142,7 +241,7 @@ static void json_string(const char *value) {
   }
   putchar('"');
 }
-static int inventory_directory(int directory_fd, const char *prefix, unsigned depth) {
+static int inventory_directory(int directory_fd, const char *prefix, unsigned depth, int schema_v2) {
   if (depth > 128) { errno = ELOOP; return fail("inventory nesting limit"); }
   int scan_fd = dup(directory_fd);
   if (scan_fd < 0) return fail("duplicate inventory directory");
@@ -171,13 +270,16 @@ static int inventory_directory(int directory_fd, const char *prefix, unsigned de
       if (child < 0) { result = fail("open inventory directory"); break; }
       struct stat opened;
       if (fstat(child, &opened) != 0 || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino) { close(child); errno = ESTALE; result = fail("inventory directory changed"); break; }
-      result = inventory_directory(child, relative, depth + 1); close(child); if (result) break;
+      result = inventory_directory(child, relative, depth + 1, schema_v2); close(child); if (result) break;
     } else if (S_ISREG(st.st_mode)) {
       if (st.st_size < 0 || (uintmax_t)st.st_size > 128U * 1024U * 1024U || inventory_bytes + (uintmax_t)st.st_size > 2U * 1024U * 1024U * 1024U) { errno = EFBIG; result = fail("inventory file size limit"); break; }
       int file = openat(dirfd(directory), entry->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
       if (file < 0) { result = fail("open inventory file"); break; }
       struct stat opened; CC_SHA256_CTX hash; CC_SHA256_Init(&hash); unsigned char buffer[32768]; ssize_t count;
-      if (fstat(file, &opened) != 0 || !S_ISREG(opened.st_mode) || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino) { close(file); errno = ESTALE; result = fail("inventory file changed"); break; }
+      if (fstat(file, &opened) != 0 || !S_ISREG(opened.st_mode) || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino ||
+          (schema_v2 && opened.st_mode != st.st_mode)) { close(file); errno = ESTALE; result = fail("inventory file changed"); break; }
+      int executable = (opened.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+      if (schema_v2 && test_barrier() != 0) { close(file); result = 1; break; }
       uintmax_t size = 0;
       while ((count = read(file, buffer, sizeof(buffer))) != 0) {
         if (count < 0) { if (errno == EINTR) continue; result = fail("read inventory file"); break; }
@@ -185,21 +287,25 @@ static int inventory_directory(int directory_fd, const char *prefix, unsigned de
         CC_SHA256_Update(&hash, buffer, (CC_LONG)count);
       }
       struct stat finished;
-      if (!result && (fstat(file, &finished) != 0 || size != (uintmax_t)opened.st_size || finished.st_dev != opened.st_dev || finished.st_ino != opened.st_ino || finished.st_size != opened.st_size || finished.st_mtimespec.tv_sec != opened.st_mtimespec.tv_sec || finished.st_mtimespec.tv_nsec != opened.st_mtimespec.tv_nsec || finished.st_ctimespec.tv_sec != opened.st_ctimespec.tv_sec || finished.st_ctimespec.tv_nsec != opened.st_ctimespec.tv_nsec)) { errno = ESTALE; result = fail("inventory file changed while hashing"); }
+      if (!result && (fstat(file, &finished) != 0 || size != (uintmax_t)opened.st_size || finished.st_dev != opened.st_dev || finished.st_ino != opened.st_ino || finished.st_size != opened.st_size || finished.st_mtimespec.tv_sec != opened.st_mtimespec.tv_sec || finished.st_mtimespec.tv_nsec != opened.st_mtimespec.tv_nsec || finished.st_ctimespec.tv_sec != opened.st_ctimespec.tv_sec || finished.st_ctimespec.tv_nsec != opened.st_ctimespec.tv_nsec ||
+          (schema_v2 && finished.st_mode != opened.st_mode))) { errno = ESTALE; result = fail("inventory file changed while hashing"); }
       if (close(file) != 0 && !result) result = fail("close inventory file");
       if (result) break;
       unsigned char digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(digest, &hash); char hex[CC_SHA256_DIGEST_LENGTH * 2 + 1];
       for (size_t i = 0; i < sizeof(digest); i++) snprintf(hex + i * 2, 3, "%02x", digest[i]);
       inventory_bytes += size;
-      printf(",\"kind\":\"file\",\"size\":%" PRIuMAX ",\"sha256\":\"%s\"}", size, hex);
+      printf(",\"kind\":\"file\",\"size\":%" PRIuMAX ",\"sha256\":\"%s\"", size, hex);
+      if (schema_v2) printf(",\"executable\":%s", executable ? "true" : "false");
+      putchar('}');
     } else { puts(",\"kind\":\"special\"}"); }
   }
   closedir(directory);
   return result;
 }
-static int inventory_root(int root_fd) {
-  fputs("{\"entries\":[", stdout);
-  int result = inventory_directory(root_fd, "", 0);
+static int inventory_root(int root_fd, int schema_v2) {
+  if (schema_v2) fputs("{\"schemaVersion\":2,\"entries\":[", stdout);
+  else fputs("{\"entries\":[", stdout);
+  int result = inventory_directory(root_fd, "", 0, schema_v2);
   if (result) return result;
   printf("],\"entryCount\":%zu,\"fileBytes\":%" PRIuMAX "}\n", inventory_entries, inventory_bytes);
   return 0;
@@ -688,8 +794,12 @@ int main(int argc, char **argv) {
   int result;
   if (strcmp(argv[index], "read") == 0 && index + 2 == argc) {
     result = read_relative_file(root_fd, argv[index + 1]);
+  } else if (strcmp(argv[index], "read-agent-v2") == 0 && index + 2 == argc) {
+    result = read_agent_v2(root_fd, argv[index + 1]);
   } else if (strcmp(argv[index], "inventory") == 0 && index + 1 == argc) {
-    result = inventory_root(root_fd);
+    result = inventory_root(root_fd, 0);
+  } else if (strcmp(argv[index], "inventory-agent-v2") == 0 && index + 1 == argc) {
+    result = inventory_root(root_fd, 1);
   } else if (strcmp(argv[index], "exec") == 0 && index + 2 < argc) {
     result = execute_tool(root_fd, argv[index + 1], &argv[index + 1]);
   } else if (strcmp(argv[index], "provider") == 0 && index + 2 < argc &&

@@ -34,10 +34,14 @@ export interface AgentSessionContentFile {
 	/** Strict UTF-8 text copied from native-helper output before the provider starts. */
 	readonly content?: string;
 	readonly contentUnavailableReason?: AgentSessionContentUnavailableReason;
+	/** Present only in schema v2; absent means legacy mode is unknown. */
+	readonly executable?: boolean;
+	/** Private schema-v2 raw bytes for binary/invalid-UTF8 files. Never include in public DTOs. */
+	readonly rawBytesBase64?: string;
 }
 
 export interface AgentSessionContentSnapshot {
-	readonly schemaVersion: 1;
+	readonly schemaVersion: 1 | 2;
 	readonly folderIdentity: AgentSessionContentRootIdentity;
 	readonly capturedAt: string;
 	readonly inventoryCoverage: 'complete';
@@ -45,6 +49,8 @@ export interface AgentSessionContentSnapshot {
 	readonly entryCount: number;
 	readonly fileBytes: number;
 	readonly retainedTextBytes: number;
+	/** Present only in schema v2. */
+	readonly retainedBinaryBytes?: number;
 	readonly contentReadCount: number;
 	readonly entries: readonly AgentSessionContentFile[];
 }
@@ -74,9 +80,11 @@ export type AgentSessionContentChangeKind = 'created' | 'modified' | 'deleted' |
 export interface AgentSessionContentChange {
 	readonly path: string;
 	readonly change: AgentSessionContentChangeKind;
-	readonly before: Omit<AgentSessionContentFile, 'content'> | null;
-	readonly after: Omit<AgentSessionContentFile, 'content'> | null;
+	readonly before: AgentSessionContentMetadata | null;
+	readonly after: AgentSessionContentMetadata | null;
 }
+
+export type AgentSessionContentMetadata = Omit<AgentSessionContentFile, 'content' | 'rawBytesBase64'>;
 
 export interface AgentSessionContentChangeResult {
 	readonly status: 'observed';
@@ -93,27 +101,30 @@ interface NativeInventoryEntry {
 	readonly size?: number;
 	readonly sha256?: string;
 	readonly target?: string;
+	readonly executable?: boolean;
 }
 
 interface NativeInventory {
 	readonly entries: readonly NativeInventoryEntry[];
 	readonly entryCount: number;
 	readonly fileBytes: number;
+	readonly schemaVersion: 2;
 }
 
-/** Captures metadata and bounded text through the root-bound native helper only. */
+/** Captures metadata, bounded UTF-8 text, and private bounded raw bytes through the root-bound native helper only. */
 export async function captureAgentSessionContentSnapshot(helper: string, folderIdentity: AgentSessionContentRootIdentity, options: AgentSessionContentCaptureOptions): Promise<AgentSessionContentSnapshot> {
 	validateFolderIdentity(folderIdentity);
 	const rootIdentity = Object.freeze({ ...folderIdentity });
 	const deadline = Date.now() + normalizeTimeout(options.timeoutMs);
 	const args = ['--root', rootIdentity.canonicalPath, '--dev', rootIdentity.dev, '--ino', rootIdentity.ino];
-	const inventoryOutput = await runBoundedHelper(helper, [...args, 'inventory'], options, deadline, maximumInventoryOutputBytes);
+	const inventoryOutput = await runBoundedHelper(helper, [...args, 'inventory-agent-v2'], options, deadline, maximumInventoryOutputBytes);
 	let inventoryText: string;
 	try { inventoryText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(inventoryOutput); }
 	catch { throw new Error('Native folder inventory was not valid UTF-8.'); }
 	const inventory = parseNativeInventory(inventoryText);
 	let contentReadCount = 0;
 	let retainedTextBytes = 0;
+	let retainedBinaryBytes = 0;
 	let hasMissingContent = false;
 	const entries: AgentSessionContentFile[] = [];
 
@@ -132,20 +143,25 @@ export async function captureAgentSessionContentSnapshot(helper: string, folderI
 			entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'contentFileLimit' }));
 			continue;
 		}
-		if (retainedTextBytes >= AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) {
+		if (retainedTextBytes + retainedBinaryBytes >= AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) {
 			hasMissingContent = true;
 			entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'retainedTextLimit' }));
 			continue;
 		}
 
 		contentReadCount++;
-		const bytes = await runBoundedHelper(helper, [...args, 'read', entry.path], options, deadline, AGENT_SESSION_MAX_FILE_BYTES + 1);
-		if (sha256(bytes) !== entry.sha256 || bytes.byteLength !== entry.size) {
+		const rawOutput = await runBoundedHelper(helper, [...args, 'read-agent-v2', entry.path], options, deadline, 2 * 1024 * 1024);
+		const raw = parseNativeRawFile(rawOutput, entry);
+		const bytes = raw.bytes;
+		if (sha256(bytes) !== entry.sha256 || bytes.byteLength !== entry.size || raw.executable !== entry.executable) {
 			throw new Error(`Native content for ${entry.path} did not match its inventory metadata.`);
 		}
 		if (bytes.includes(0)) {
 			hasMissingContent = true;
-			entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'binary' }));
+			if (retainedTextBytes + retainedBinaryBytes + bytes.byteLength <= AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) {
+				retainedBinaryBytes += bytes.byteLength;
+				entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'binary', rawBytesBase64: bytes.toString('base64') }));
+			} else { hasMissingContent = true; entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'retainedTextLimit' })); }
 			continue;
 		}
 		let content: string;
@@ -153,11 +169,14 @@ export async function captureAgentSessionContentSnapshot(helper: string, folderI
 		catch (error) {
 			if (!(error instanceof TypeError)) { throw error; }
 			hasMissingContent = true;
-			entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'invalidUtf8' }));
+			if (retainedTextBytes + retainedBinaryBytes + bytes.byteLength <= AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) {
+				retainedBinaryBytes += bytes.byteLength;
+				entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'invalidUtf8', rawBytesBase64: bytes.toString('base64') }));
+			} else { hasMissingContent = true; entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'retainedTextLimit' })); }
 			continue;
 		}
 		const textBytes = Buffer.byteLength(content, 'utf8');
-		if (retainedTextBytes + textBytes > AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) {
+		if (retainedTextBytes + retainedBinaryBytes + textBytes > AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) {
 			hasMissingContent = true;
 			entries.push(Object.freeze({ ...entry, contentUnavailableReason: 'retainedTextLimit' }));
 			continue;
@@ -167,7 +186,7 @@ export async function captureAgentSessionContentSnapshot(helper: string, folderI
 	}
 
 	return validateAgentSessionContentSnapshot({
-		schemaVersion: 1,
+		schemaVersion: 2,
 		folderIdentity: rootIdentity,
 		capturedAt: new Date().toISOString(),
 		inventoryCoverage: 'complete',
@@ -175,6 +194,7 @@ export async function captureAgentSessionContentSnapshot(helper: string, folderI
 		entryCount: inventory.entryCount,
 		fileBytes: inventory.fileBytes,
 		retainedTextBytes,
+		retainedBinaryBytes,
 		contentReadCount,
 		entries,
 	});
@@ -182,8 +202,10 @@ export async function captureAgentSessionContentSnapshot(helper: string, folderI
 
 /** Validates and freezes a serialized snapshot before persistence or after a database read. */
 export function validateAgentSessionContentSnapshot(value: unknown): AgentSessionContentSnapshot {
-	if (!isRecord(value) || !hasExactKeys(value, ['schemaVersion', 'folderIdentity', 'capturedAt', 'inventoryCoverage', 'contentCoverage', 'entryCount', 'fileBytes', 'retainedTextBytes', 'contentReadCount', 'entries'])
-		|| value.schemaVersion !== 1 || value.inventoryCoverage !== 'complete' || (value.contentCoverage !== 'complete' && value.contentCoverage !== 'partial')
+	const isV2 = isRecord(value) && value.schemaVersion === 2;
+	const snapshotKeys = ['schemaVersion', 'folderIdentity', 'capturedAt', 'inventoryCoverage', 'contentCoverage', 'entryCount', 'fileBytes', 'retainedTextBytes', 'contentReadCount', 'entries'];
+	if (!isRecord(value) || (isV2 ? !hasExactKeys(value, [...snapshotKeys, 'retainedBinaryBytes']) : !hasExactKeys(value, snapshotKeys))
+		|| (value.schemaVersion !== 1 && value.schemaVersion !== 2) || value.inventoryCoverage !== 'complete' || (value.contentCoverage !== 'complete' && value.contentCoverage !== 'partial')
 		|| typeof value.capturedAt !== 'string' || !isCanonicalTimestamp(value.capturedAt) || !isRecord(value.folderIdentity)
 		|| !hasExactKeys(value.folderIdentity, ['canonicalPath', 'dev', 'ino']) || typeof value.folderIdentity.canonicalPath !== 'string'
 		|| typeof value.folderIdentity.dev !== 'string' || typeof value.folderIdentity.ino !== 'string' || !Array.isArray(value.entries)) {
@@ -194,11 +216,13 @@ export function validateAgentSessionContentSnapshot(value: unknown): AgentSessio
 	if (folderIdentity.canonicalPath.length > maximumPathBytes || !Number.isSafeInteger(value.entryCount) || (value.entryCount as number) < 0 || (value.entryCount as number) > AGENT_SESSION_MAX_INVENTORY_ENTRIES
 		|| value.entries.length !== value.entryCount || !Number.isSafeInteger(value.fileBytes) || (value.fileBytes as number) < 0 || (value.fileBytes as number) > 2 * 1024 * 1024 * 1024
 		|| !Number.isSafeInteger(value.retainedTextBytes) || (value.retainedTextBytes as number) < 0 || (value.retainedTextBytes as number) > AGENT_SESSION_MAX_RETAINED_TEXT_BYTES
+		|| (isV2 && (!Number.isSafeInteger(value.retainedBinaryBytes) || (value.retainedBinaryBytes as number) < 0 || (value.retainedTextBytes as number) + (value.retainedBinaryBytes as number) > AGENT_SESSION_MAX_RETAINED_TEXT_BYTES))
 		|| !Number.isSafeInteger(value.contentReadCount) || (value.contentReadCount as number) < 0 || (value.contentReadCount as number) > AGENT_SESSION_MAX_CONTENT_FILES) {
 		throw new Error('Agent-session content snapshot exceeds its inventory or retention bounds.');
 	}
 	let fileBytes = 0;
 	let retainedTextBytes = 0;
+	let retainedBinaryBytes = 0;
 	let hasMissingContent = false;
 	let contentFiles = 0;
 	let minimumContentReads = 0;
@@ -222,7 +246,9 @@ export function validateAgentSessionContentSnapshot(value: unknown): AgentSessio
 			fileBytes += candidate.size;
 			if (!Number.isSafeInteger(fileBytes) || fileBytes > 2 * 1024 * 1024 * 1024) { throw new Error('Agent-session content byte total exceeds its bound.'); }
 			if (candidate.size <= AGENT_SESSION_MAX_FILE_BYTES && candidate.contentUnavailableReason !== 'contentFileLimit') { eligibleContentFiles++; }
-			if (typeof candidate.content === 'string' && !Object.hasOwn(candidate, 'contentUnavailableReason') && hasExactKeys(candidate, ['path', 'kind', 'size', 'sha256', 'content'])) {
+			const executableKey = isV2 ? ['executable'] : [];
+			if (isV2 && typeof candidate.executable !== 'boolean') { throw new Error(`Agent-session executable metadata is invalid for ${candidate.path}.`); }
+			if (typeof candidate.content === 'string' && !Object.hasOwn(candidate, 'contentUnavailableReason') && hasExactKeys(candidate, ['path', 'kind', 'size', 'sha256', 'content', ...executableKey])) {
 				const textBytes = Buffer.byteLength(candidate.content, 'utf8');
 				if (textBytes > AGENT_SESSION_MAX_FILE_BYTES || candidate.content.includes('\0') || !isRoundTripUtf8(candidate.content) || textBytes !== candidate.size
 					|| sha256(Buffer.from(candidate.content, 'utf8')) !== candidate.sha256) {
@@ -231,14 +257,29 @@ export function validateAgentSessionContentSnapshot(value: unknown): AgentSessio
 				retainedTextBytes += textBytes;
 				if (retainedTextBytes > AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) { throw new Error('Agent-session retained text exceeds its bound.'); }
 				minimumContentReads++;
-				entry = { path: candidate.path, kind: 'file', size: candidate.size, sha256: candidate.sha256, content: candidate.content };
+				entry = { path: candidate.path, kind: 'file', size: candidate.size, sha256: candidate.sha256, ...(isV2 ? { executable: candidate.executable as boolean } : {}), content: candidate.content };
 			} else if (typeof candidate.contentUnavailableReason === 'string' && Object.hasOwn(candidate, 'contentUnavailableReason') && !Object.hasOwn(candidate, 'content')
-				&& hasExactKeys(candidate, ['path', 'kind', 'size', 'sha256', 'contentUnavailableReason']) && isContentUnavailableReason(candidate.contentUnavailableReason)) {
+				&& hasExactKeys(candidate, ['path', 'kind', 'size', 'sha256', 'contentUnavailableReason', ...executableKey, ...(isV2 && Object.hasOwn(candidate, 'rawBytesBase64') ? ['rawBytesBase64'] : [])]) && isContentUnavailableReason(candidate.contentUnavailableReason)) {
 				if (candidate.contentUnavailableReason === 'fileTooLarge' && candidate.size <= AGENT_SESSION_MAX_FILE_BYTES) { throw new Error(`Agent-session file-size reason is inconsistent for ${candidate.path}.`); }
 				if (candidate.contentUnavailableReason !== 'fileTooLarge' && candidate.size > AGENT_SESSION_MAX_FILE_BYTES) { throw new Error(`Agent-session text reason is inconsistent for ${candidate.path}.`); }
 				if (candidate.contentUnavailableReason === 'binary' || candidate.contentUnavailableReason === 'invalidUtf8') { minimumContentReads++; }
 				hasMissingContent = true;
-				entry = { path: candidate.path, kind: 'file', size: candidate.size, sha256: candidate.sha256, contentUnavailableReason: candidate.contentUnavailableReason };
+				let rawBytesBase64: string | undefined;
+				if (Object.hasOwn(candidate, 'rawBytesBase64')) {
+					if (!isV2 || (candidate.contentUnavailableReason !== 'binary' && candidate.contentUnavailableReason !== 'invalidUtf8') || typeof candidate.rawBytesBase64 !== 'string') { throw new Error(`Agent-session raw bytes are invalid for ${candidate.path}.`); }
+					const bytes = decodeCanonicalBase64(candidate.rawBytesBase64);
+					if (bytes.byteLength !== candidate.size || bytes.byteLength > AGENT_SESSION_MAX_FILE_BYTES || sha256(bytes) !== candidate.sha256 || (candidate.contentUnavailableReason === 'binary') !== bytes.includes(0)) { throw new Error(`Agent-session raw bytes do not match metadata for ${candidate.path}.`); }
+					if (candidate.contentUnavailableReason === 'invalidUtf8') {
+						let validUtf8 = false;
+						try { new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); validUtf8 = true; }
+						catch (error) { if (!(error instanceof TypeError)) { throw error; } }
+						if (validUtf8) { throw new Error(`Agent-session raw byte encoding reason is inconsistent for ${candidate.path}.`); }
+					}
+					retainedBinaryBytes += bytes.byteLength;
+					if (retainedTextBytes + retainedBinaryBytes > AGENT_SESSION_MAX_RETAINED_TEXT_BYTES) { throw new Error('Agent-session retained bytes exceed their bound.'); }
+					rawBytesBase64 = candidate.rawBytesBase64;
+				}
+				entry = { path: candidate.path, kind: 'file', size: candidate.size, sha256: candidate.sha256, ...(isV2 ? { executable: candidate.executable as boolean } : {}), contentUnavailableReason: candidate.contentUnavailableReason, ...(rawBytesBase64 !== undefined ? { rawBytesBase64 } : {}) };
 			} else { throw new Error(`Agent-session content state is invalid for ${candidate.path}.`); }
 		} else if (candidate.kind === 'symlink' && typeof candidate.target === 'string' && Buffer.byteLength(candidate.target, 'utf8') <= maximumPathBytes && hasExactKeys(candidate, ['path', 'kind', 'target'])) {
 			entry = { path: candidate.path, kind: 'symlink', target: candidate.target };
@@ -249,16 +290,16 @@ export function validateAgentSessionContentSnapshot(value: unknown): AgentSessio
 		if (serializedBytes > 64 * 1024 * 1024) { throw new Error('Agent-session content snapshot exceeds 64 MiB serialized.'); }
 		entries.push(Object.freeze(entry));
 	}
-	if (fileBytes !== value.fileBytes || retainedTextBytes !== value.retainedTextBytes
+	if (fileBytes !== value.fileBytes || retainedTextBytes !== value.retainedTextBytes || (isV2 && retainedBinaryBytes !== value.retainedBinaryBytes)
 		|| (hasMissingContent ? 'partial' : 'complete') !== value.contentCoverage
 		|| contentFiles < (value.contentReadCount as number) || eligibleContentFiles < (value.contentReadCount as number)
 		|| minimumContentReads > (value.contentReadCount as number) || minimumContentReads > AGENT_SESSION_MAX_CONTENT_FILES) {
 		throw new Error('Agent-session content snapshot accounting does not match its entries.');
 	}
 	const snapshot: AgentSessionContentSnapshot = {
-		schemaVersion: 1, folderIdentity: Object.freeze(folderIdentity), capturedAt: value.capturedAt,
+		schemaVersion: isV2 ? 2 : 1, folderIdentity: Object.freeze(folderIdentity), capturedAt: value.capturedAt,
 		inventoryCoverage: 'complete', contentCoverage: value.contentCoverage, entryCount: value.entryCount as number,
-		fileBytes, retainedTextBytes, contentReadCount: value.contentReadCount as number, entries: Object.freeze(entries),
+		fileBytes, retainedTextBytes, ...(isV2 ? { retainedBinaryBytes } : {}), contentReadCount: value.contentReadCount as number, entries: Object.freeze(entries),
 	};
 	if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > 64 * 1024 * 1024) { throw new Error('Agent-session content snapshot exceeds 64 MiB serialized.'); }
 	return Object.freeze(snapshot);
@@ -279,8 +320,9 @@ export function compareAgentSessionContentSnapshots(before: AgentSessionContentS
 		if (!previous) { change = 'created'; }
 		else if (!current) { change = 'deleted'; }
 		else if (previous.kind !== current.kind) { change = 'typeChanged'; }
-		else if (previous.kind === 'file' && (previous.size !== current.size || previous.sha256 !== current.sha256)) { change = 'modified'; }
-		else if (previous.kind === 'symlink' && previous.target !== current.target) { change = 'symlinkChanged'; }
+		else if (previous.kind === 'file') {
+			if (previous.size !== current.size || previous.sha256 !== current.sha256 || (previous.executable !== undefined && current.executable !== undefined && previous.executable !== current.executable)) { change = 'modified'; }
+		} else if (previous.kind === 'symlink' && previous.target !== current.target) { change = 'symlinkChanged'; }
 		if (!change) { continue; }
 		changedCount++;
 		if (changes.length < AGENT_SESSION_MAX_CHANGED_FILES) {
@@ -301,7 +343,7 @@ function parseNativeInventory(text: string): NativeInventory {
 	let value: unknown;
 	try { value = JSON.parse(text); }
 	catch { throw new Error('Native folder inventory returned invalid JSON.'); }
-	if (!isRecord(value) || !hasExactKeys(value, ['entries', 'entryCount', 'fileBytes']) || typeof value.entryCount !== 'number' || !Number.isSafeInteger(value.entryCount) || value.entryCount < 0 || value.entryCount > AGENT_SESSION_MAX_INVENTORY_ENTRIES
+	if (!isRecord(value) || !hasExactKeys(value, ['schemaVersion', 'entries', 'entryCount', 'fileBytes']) || value.schemaVersion !== 2 || typeof value.entryCount !== 'number' || !Number.isSafeInteger(value.entryCount) || value.entryCount < 0 || value.entryCount > AGENT_SESSION_MAX_INVENTORY_ENTRIES
 		|| typeof value.fileBytes !== 'number' || !Number.isSafeInteger(value.fileBytes) || value.fileBytes < 0 || value.fileBytes > 2 * 1024 * 1024 * 1024 || !Array.isArray(value.entries) || value.entries.length !== value.entryCount) {
 		throw new Error('Native folder inventory failed count or size validation.');
 	}
@@ -314,12 +356,12 @@ function parseNativeInventory(text: string): NativeInventory {
 		}
 		seen.add(candidate.path);
 		if (candidate.kind === 'file') {
-			if (!hasExactKeys(candidate, ['path', 'kind', 'size', 'sha256']) || typeof candidate.size !== 'number' || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || candidate.size > 128 * 1024 * 1024 || typeof candidate.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(candidate.sha256)) {
+			if (!hasExactKeys(candidate, ['path', 'kind', 'size', 'sha256', 'executable']) || typeof candidate.executable !== 'boolean' || typeof candidate.size !== 'number' || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || candidate.size > 128 * 1024 * 1024 || typeof candidate.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(candidate.sha256)) {
 				throw new Error(`Native folder inventory metadata is invalid for ${candidate.path}.`);
 			}
 			fileBytes += candidate.size;
 			if (!Number.isSafeInteger(fileBytes)) { throw new Error('Native folder inventory byte total is invalid.'); }
-			entries.push({ path: candidate.path, kind: 'file', size: candidate.size, sha256: candidate.sha256 });
+			entries.push({ path: candidate.path, kind: 'file', size: candidate.size, sha256: candidate.sha256, executable: candidate.executable });
 		} else if (candidate.kind === 'symlink') {
 			if (!hasExactKeys(candidate, ['path', 'kind', 'target']) || typeof candidate.target !== 'string' || Buffer.byteLength(candidate.target, 'utf8') > maximumPathBytes) { throw new Error(`Native symlink metadata is invalid for ${candidate.path}.`); }
 			entries.push({ path: candidate.path, kind: 'symlink', target: candidate.target });
@@ -330,7 +372,32 @@ function parseNativeInventory(text: string): NativeInventory {
 	}
 	if (fileBytes !== value.fileBytes) { throw new Error('Native folder inventory byte total does not match its entries.'); }
 	entries.sort((left, right) => compareCodeUnits(left.path, right.path));
-	return { entries, entryCount: value.entryCount, fileBytes };
+	return { schemaVersion: 2, entries, entryCount: value.entryCount, fileBytes };
+}
+
+function parseNativeRawFile(output: Buffer, inventory: NativeInventoryEntry): { readonly bytes: Buffer; readonly executable: boolean } {
+	let value: unknown;
+	try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(output)); }
+	catch { throw new Error(`Native raw content for ${inventory.path} was not valid UTF-8 JSON.`); }
+	if (!isRecord(value) || !hasExactKeys(value, ['schemaVersion', 'path', 'size', 'sha256', 'executable', 'rawBytesBase64']) || value.schemaVersion !== 2
+		|| value.path !== inventory.path || value.size !== inventory.size || value.sha256 !== inventory.sha256 || value.executable !== inventory.executable
+		|| typeof value.rawBytesBase64 !== 'string') {
+		throw new Error(`Native raw content metadata did not match inventory for ${inventory.path}.`);
+	}
+	const bytes = decodeCanonicalBase64(value.rawBytesBase64);
+	if (bytes.byteLength !== inventory.size || bytes.byteLength > AGENT_SESSION_MAX_FILE_BYTES || sha256(bytes) !== inventory.sha256) {
+		throw new Error(`Native raw content bytes did not match inventory for ${inventory.path}.`);
+	}
+	return { bytes, executable: value.executable as boolean };
+}
+
+function decodeCanonicalBase64(value: string): Buffer {
+	if (value.length > Math.ceil(AGENT_SESSION_MAX_FILE_BYTES / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+		throw new Error('Retained raw file bytes are not canonical bounded base64.');
+	}
+	const bytes = Buffer.from(value, 'base64');
+	if (bytes.toString('base64') !== value) { throw new Error('Retained raw file bytes are not canonical base64.'); }
+	return bytes;
 }
 
 function runBoundedHelper(helper: string, args: readonly string[], options: AgentSessionContentCaptureOptions, deadline: number, outputLimit: number): Promise<Buffer> {
@@ -459,9 +526,9 @@ function sameFolderIdentity(left: AgentSessionContentRootIdentity, right: AgentS
 	return left.canonicalPath === right.canonicalPath && left.dev === right.dev && left.ino === right.ino;
 }
 
-function metadataOnly(file: AgentSessionContentFile | undefined): Omit<AgentSessionContentFile, 'content'> | null {
+function metadataOnly(file: AgentSessionContentFile | undefined): AgentSessionContentMetadata | null {
 	if (!file) { return null; }
-	const { content: _content, ...metadata } = file;
+	const { content: _content, rawBytesBase64: _rawBytesBase64, ...metadata } = file;
 	return Object.freeze(metadata);
 }
 

@@ -53,6 +53,7 @@ test('serialized snapshots require canonical timestamps and retain an immutable 
 		entries: [{ path: 'note.txt', kind: 'file', size: 6, sha256: createHash('sha256').update(content).digest('hex'), content }],
 	};
 	const snapshot = validateAgentSessionContentSnapshot(input);
+	assert.equal(JSON.stringify(snapshot), JSON.stringify(input));
 	assert.equal(Object.isFrozen(snapshot.entries[0]), true);
 	assert.equal(Object.isFrozen(snapshot.folderIdentity), true);
 	assert.throws(() => validateAgentSessionContentSnapshot({ ...input, capturedAt: '2026-10-19' }), /invalid shape/i);
@@ -64,10 +65,25 @@ test('serialized snapshots require canonical timestamps and retain an immutable 
 	assert.throws(() => validateAgentSessionContentSnapshot(input), /text content is invalid/i);
 });
 
+test('schema-v2 snapshots retain canonical binary bytes privately and detect executable-only changes', () => {
+	const bytes = Buffer.from([0x00, 0x7f, 0xff]);
+	const hash = createHash('sha256').update(bytes).digest('hex');
+	const common = {
+		schemaVersion: 2 as const, folderIdentity: { canonicalPath: '/bound/project', dev: '1', ino: '2' },
+		capturedAt: '2026-10-19T00:00:00.000Z', inventoryCoverage: 'complete' as const, contentCoverage: 'partial' as const,
+		entryCount: 1, fileBytes: bytes.byteLength, retainedTextBytes: 0, retainedBinaryBytes: bytes.byteLength, contentReadCount: 1,
+	};
+	const before = validateAgentSessionContentSnapshot({ ...common, entries: [{ path: 'tool.bin', kind: 'file', size: bytes.byteLength, sha256: hash, executable: false, contentUnavailableReason: 'binary', rawBytesBase64: bytes.toString('base64') }] });
+	const after = validateAgentSessionContentSnapshot({ ...common, entries: [{ path: 'tool.bin', kind: 'file', size: bytes.byteLength, sha256: hash, executable: true, contentUnavailableReason: 'binary', rawBytesBase64: bytes.toString('base64') }] });
+	assert.deepEqual(compareAgentSessionContentSnapshots(before, after).changes.map(change => change.change), ['modified']);
+	assert.throws(() => validateAgentSessionContentSnapshot({ ...common, entries: [{ path: 'tool.bin', kind: 'file', size: bytes.byteLength, sha256: hash, executable: false, contentUnavailableReason: 'binary', rawBytesBase64: `${bytes.toString('base64')}A` }] }), /canonical|raw bytes/u);
+});
+
 test('native before and after snapshots retain bytes and report filesystem changes without following symlinks', { skip: !nativeTest }, async () => {
 	const fixture = await createFixture();
 	const outside = path.join(fixture.directory, 'outside.txt');
 	await writeFile(path.join(fixture.root, 'modified.txt'), 'before');
+	await writeFile(path.join(fixture.root, 'mode-only.txt'), 'unchanged');
 	await writeFile(path.join(fixture.root, 'deleted.txt'), 'gone');
 	await writeFile(path.join(fixture.root, 'kind.txt'), 'file first');
 	await writeFile(outside, 'must never be read');
@@ -78,6 +94,7 @@ test('native before and after snapshots retain bytes and report filesystem chang
 	await assert.rejects(captureAgentSessionContentSnapshot(fixture.helper, { ...fixture.identity, ino: `${BigInt(fixture.identity.ino) + 1n}` }, { signal: new AbortController().signal }), /root identity mismatch/u);
 
 	await writeFile(path.join(fixture.root, 'modified.txt'), 'after');
+	await chmod(path.join(fixture.root, 'mode-only.txt'), 0o755);
 	await rm(path.join(fixture.root, 'deleted.txt'));
 	await writeFile(path.join(fixture.root, 'created.txt'), 'created');
 	await rm(path.join(fixture.root, 'kind.txt'));
@@ -90,7 +107,7 @@ test('native before and after snapshots retain bytes and report filesystem chang
 	assert.equal(before.entries.some(entry => entry.path === 'outside.txt'), false);
 	assert.equal(after.entries.find(entry => entry.path === 'link')?.target, 'modified.txt');
 	assert.deepEqual(compareAgentSessionContentSnapshots(before, after).changes.map(item => [item.path, item.change]), [
-		['created.txt', 'created'], ['deleted.txt', 'deleted'], ['kind.txt', 'typeChanged'], ['link', 'symlinkChanged'], ['modified.txt', 'modified'],
+		['created.txt', 'created'], ['deleted.txt', 'deleted'], ['kind.txt', 'typeChanged'], ['link', 'symlinkChanged'], ['mode-only.txt', 'modified'], ['modified.txt', 'modified'],
 	]);
 });
 
@@ -108,8 +125,10 @@ test('native snapshots expose binary, invalid UTF-8, per-file and retained-text 
 	assert.equal(snapshot.entries.find(entry => entry.path === 'binary.dat')?.contentUnavailableReason, 'binary');
 	assert.equal(snapshot.entries.find(entry => entry.path === 'invalid.txt')?.contentUnavailableReason, 'invalidUtf8');
 	assert.equal(snapshot.entries.find(entry => entry.path === 'oversized.txt')?.contentUnavailableReason, 'fileTooLarge');
-	assert.equal(snapshot.retainedTextBytes, 8 * 1024 * 1024);
-	assert.equal(snapshot.entries.filter(entry => entry.contentUnavailableReason === 'retainedTextLimit').length, 1);
+	assert.ok(snapshot.retainedTextBytes + (snapshot.retainedBinaryBytes ?? 0) <= 8 * 1024 * 1024);
+	assert.equal(snapshot.entries.find(entry => entry.path === 'binary.dat')?.rawBytesBase64, Buffer.from([0xff, 0x00, 0x80]).toString('base64'));
+	assert.equal(snapshot.entries.find(entry => entry.path === 'invalid.txt')?.rawBytesBase64, Buffer.from([0xc3, 0x28]).toString('base64'));
+	assert.ok(snapshot.entries.some(entry => entry.contentUnavailableReason === 'retainedTextLimit'));
 });
 
 test('content reads stop at the bounded file count and a cancelled helper is reaped', { skip: !nativeTest }, async () => {
