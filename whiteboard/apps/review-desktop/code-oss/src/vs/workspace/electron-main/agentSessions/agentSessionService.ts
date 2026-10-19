@@ -317,6 +317,7 @@ export class AgentSessionService {
 				sessionId: input.sessionId,
 				permissionPolicy,
 				signal: pending.controller.signal,
+				launch: true,
 			});
 			this.assertAcceptingLaunches();
 			if (pending.controller.signal.aborted) { throw new Error('The session launch was cancelled before a turn was created.'); }
@@ -367,20 +368,24 @@ export class AgentSessionService {
 			this.finishWorkspaceOperation(pending);
 		}
 
-		await live!.startPromise;
-		if (live!.stopRequested) {
-			if (live!.stopPromise) { return live!.stopPromise; }
+		try {
+			await live!.startPromise;
+			if (live!.stopRequested) {
+				if (live!.stopPromise) { return await live!.stopPromise; }
+				return this.requireTurn(live!).turn;
+			}
+			if (live!.launchFailed) {
+				await this.finishFailedLaunch(live!);
+				throw new Error('The session provider failed to start; inspect the durable turn for cleanup status.');
+			}
+			if (live!.pendingExit) {
+				live!.stopPromise ??= this.trackStopOperation(live!, this.finishNaturalExit(live!, live!.pendingExit));
+				return await live!.stopPromise;
+			}
 			return this.requireTurn(live!).turn;
+		} finally {
+			this.workspaceResolver.finishLaunch(live!.workspace);
 		}
-		if (live!.launchFailed) {
-			await this.finishFailedLaunch(live!);
-			throw new Error('The session provider failed to start; inspect the durable turn for cleanup status.');
-		}
-		if (live!.pendingExit) {
-			live!.stopPromise ??= this.trackStopOperation(live!, this.finishNaturalExit(live!, live!.pendingExit));
-			return live!.stopPromise;
-		}
-		return this.requireTurn(live!).turn;
 	}
 
 	async stop(projectId: string, sessionId: string, turnId: string): Promise<AgentSessionTurnDTO> {

@@ -23,6 +23,8 @@ export interface AcquireAgentSessionWorkspaceInput {
 	readonly sessionId: string;
 	readonly permissionPolicy: AgentSessionPermissionPolicy;
 	readonly signal?: AbortSignal;
+	/** Host launch admission is held through startup; previews do not reserve it. */
+	readonly launch?: true;
 }
 
 interface WorkspaceIdentity {
@@ -44,6 +46,7 @@ interface AcquiredState {
 	readonly identity: WorkspaceIdentity;
 	readonly writerLease?: TaskFolderWriterLease;
 	readonly onLostListeners: Set<() => void>;
+	launchAdmissionRelease?: () => void;
 	leaseLossSubscription?: { dispose(): void };
 	invalidated: boolean;
 	released: boolean;
@@ -90,6 +93,8 @@ export class AcquiredAgentSessionWorkspace {
 
 /** Resolves trusted launch workspace state from persisted session and folder records. */
 export class AgentSessionWorkspaceResolver {
+	private readonly readOnlyLaunchAdmissions = new Map<string, Promise<void>>();
+
 	constructor(
 		private readonly database: WorkspaceDatabase,
 		private readonly worktrees: ManagedWorktreeService,
@@ -104,9 +109,14 @@ export class AgentSessionWorkspaceResolver {
 		const session = this.requireSession(input.projectId, input.sessionId);
 		const binding = this.requireBinding(session);
 		let writerLease: TaskFolderWriterLease | undefined;
+		let launchAdmissionRelease: (() => void) | undefined;
 		let launchSession = session;
 		try {
 			let identity = await this.resolveIdentity(session, binding, permissionPolicy);
+			if (input.launch && permissionPolicy.mode === 'read-only') {
+				launchAdmissionRelease = await this.acquireReadOnlyLaunch(identity.folderIdentity, input.signal);
+				this.assertRecoveryReady();
+			}
 			if (session.workspaceMode === 'sharedFolder' && permissionPolicy.mode === 'mutating') {
 				const identityBeforeWaiting = identity;
 				writerLease = await this.writerLock.acquire(writerLockRootForFolder(binding, identity.folderIdentity.canonicalPath), input.signal);
@@ -139,7 +149,7 @@ export class AgentSessionWorkspaceResolver {
 			}
 			this.assertNoUnresolvedCleanup(launchSession, identity, permissionPolicy);
 			const snapshot = this.snapshot(launchSession, identity);
-			const state: AcquiredState = { resolver: this, snapshot, identity, writerLease, onLostListeners: new Set(), invalidated: false, released: false };
+			const state: AcquiredState = { resolver: this, snapshot, identity, writerLease, launchAdmissionRelease, onLostListeners: new Set(), invalidated: false, released: false };
 			const lease = createAcquiredLease(state);
 			if (writerLease) {
 				state.leaseLossSubscription = writerLease.onLost(() => {
@@ -155,6 +165,7 @@ export class AgentSessionWorkspaceResolver {
 			return lease;
 		} catch (error) {
 			writerLease?.release();
+			launchAdmissionRelease?.();
 			throw error;
 		}
 	}
@@ -190,6 +201,15 @@ export class AgentSessionWorkspaceResolver {
 		return snapshot;
 	}
 
+	/** Ends startup admission without releasing the turn's workspace or writer ownership. */
+	finishLaunch(lease: AcquiredAgentSessionWorkspace): void {
+		const state = acquiredStates.get(lease);
+		if (!state || state.resolver !== this) { return; }
+		const release = state.launchAdmissionRelease;
+		state.launchAdmissionRelease = undefined;
+		release?.();
+	}
+
 	release(lease: AcquiredAgentSessionWorkspace): void {
 		const state = acquiredStates.get(lease);
 		if (!state || state.resolver !== this || state.released) { return; }
@@ -198,6 +218,37 @@ export class AgentSessionWorkspaceResolver {
 		state.leaseLossSubscription = undefined;
 		state.onLostListeners.clear();
 		state.writerLease?.release();
+		this.finishLaunch(lease);
+	}
+
+	private async acquireReadOnlyLaunch(identity: AgentSessionFolderIdentity, signal?: AbortSignal): Promise<() => void> {
+		const key = JSON.stringify([identity.dev, identity.ino]);
+		for (;;) {
+			if (signal?.aborted) { throw new Error('The read-only session launch admission was cancelled.'); }
+			const active = this.readOnlyLaunchAdmissions.get(key);
+			if (!active) { break; }
+			await new Promise<void>((resolve, reject) => {
+				const onAbort = () => {
+					signal?.removeEventListener('abort', onAbort);
+					reject(new Error('The read-only session launch admission was cancelled.'));
+				};
+				signal?.addEventListener('abort', onAbort, { once: true });
+				active.then(() => {
+					signal?.removeEventListener('abort', onAbort);
+					resolve();
+				});
+			});
+		}
+		let finish!: () => void;
+		const active = new Promise<void>(resolve => { finish = resolve; });
+		this.readOnlyLaunchAdmissions.set(key, active);
+		let released = false;
+		return () => {
+			if (released) { return; }
+			released = true;
+			this.readOnlyLaunchAdmissions.delete(key);
+			finish();
+		};
 	}
 
 	private requireSession(projectId: string, sessionId: string): AgentSessionDTO {

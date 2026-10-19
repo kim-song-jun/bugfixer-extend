@@ -21,7 +21,7 @@ import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 
 const POLICY: AgentSessionPermissionPolicy = { mode: 'read-only', approval: 'never' };
 
-function fixture(nodeCount = 2, options: { independent?: boolean; delayedAcquire?: boolean; failedStop?: boolean; durationMs?: number } = {}) {
+function fixture(nodeCount = 2, options: { independent?: boolean; delayedAcquire?: boolean; failedStop?: boolean; durationMs?: number; maxConcurrentNodes?: number; holdFirstStart?: boolean; failFirstStart?: boolean } = {}) {
 	const root = mkdtempSync(join(tmpdir(), 'agent-workflow-scheduler-'));
 	const folder = join(root, 'folder');
 	mkdirSync(folder);
@@ -34,24 +34,46 @@ function fixture(nodeCount = 2, options: { independent?: boolean; delayedAcquire
 	}));
 	const snapshots = new Map<string, AgentPtySnapshot>();
 	const listeners = new Map<string, (snapshot: AgentPtySnapshot) => void>();
-	const runtimeHandle = Object.freeze({}) as AgentSessionRuntimeHandle;
+	const runtimeTurns = new Map<AgentSessionRuntimeHandle, string>();
+	const requireRuntimeTurn = (handle: AgentSessionRuntimeHandle) => {
+		const turnId = runtimeTurns.get(handle);
+		if (!turnId) { throw new Error('The fixture runtime handle is not owned.'); }
+		return turnId;
+	};
 	const started: string[] = [];
+	let releaseStart!: () => void;
+	const startGate = new Promise<void>(resolve => { releaseStart = resolve; });
 	let stopCalls = 0;
 	const runtimeFactory: AgentSessionRuntimeFactory = {
-		async start(_snapshot, turnId) {
+		async start(_snapshot, turnId, signal) {
 			started.push(turnId);
+			if (options.holdFirstStart && started.length === 1) {
+				await new Promise<void>((resolve, reject) => {
+					if (signal.aborted) { reject(new Error('The fixture runtime start was cancelled.')); return; }
+					const onAbort = () => reject(new Error('The fixture runtime start was cancelled.'));
+					signal.addEventListener('abort', onAbort, { once: true });
+					startGate.then(() => {
+						signal.removeEventListener('abort', onAbort);
+						resolve();
+					});
+				});
+			}
+			if (options.failFirstStart && started.length === 1) { throw new Error('The fixture runtime start has unknown cleanup.'); }
+			const runtimeHandle = Object.freeze({}) as AgentSessionRuntimeHandle;
+			runtimeTurns.set(runtimeHandle, turnId);
 			const snapshot: AgentPtySnapshot = { state: 'running', latestSequence: 0, outputSanitizerFailed: false, failedOutputListeners: 0, failedExitListeners: 0, accessRevocationFailed: false };
 			snapshots.set(turnId, snapshot);
 			return runtimeHandle;
 		},
-		watchExit(_handle, listener) {
-			const turnId = started.at(-1)!;
+		watchExit(handle, listener) {
+			const turnId = requireRuntimeTurn(handle);
 			listeners.set(turnId, listener);
 			return { dispose() { listeners.delete(turnId); } };
 		},
-		getSnapshot(_handle) { return snapshots.get(started.at(-1)!)!; },
+		getSnapshot(handle) { return snapshots.get(requireRuntimeTurn(handle))!; },
 		async write() { }, async resize() { }, async attach() { throw new Error('Not used.'); },
-		async stop() { stopCalls++; return options.failedStop ? { state: 'cleanupUnverified', cleanupVerified: false } : { state: 'stopped', cleanupVerified: true }; }, async release() { },
+		async stop() { stopCalls++; return options.failedStop ? { state: 'cleanupUnverified', cleanupVerified: false } : { state: 'stopped', cleanupVerified: true }; },
+		async release(handle) { runtimeTurns.delete(handle); },
 	};
 	let releaseAcquire!: () => void;
 	let markAcquireEntered!: () => void;
@@ -71,20 +93,21 @@ function fixture(nodeCount = 2, options: { independent?: boolean; delayedAcquire
 			return super.acquire(input);
 		}
 	}
-	const resolver = new ControlledResolver(database, new ManagedWorktreeService(join(root, 'worktrees')), new TaskFolderWriterLock(), () => true);
-	const service = new AgentSessionService(database, resolver, runtimeFactory);
+	let service: AgentSessionService;
+	const resolver = new ControlledResolver(database, new ManagedWorktreeService(join(root, 'worktrees')), new TaskFolderWriterLock(), () => true, turn => service.ownsRunningReadOnlyTurn(turn));
+	service = new AgentSessionService(database, resolver, runtimeFactory);
 	const planNodes = sessions.map((session, index) => ({
 		nodeId: `node-${index}`, sessionId: session.id, role: 'implementer' as const, provider: session.provider, model: session.model,
 		taskId: task.id, bindingId: binding.id, referenceIds: [], permissionPolicy: POLICY, dependsOn: index === 0 || options.independent ? [] : [`node-${index - 1}`],
 	}));
 	const workflow = database.agentWorkflows.createWorkflow(project.id, {
-		projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: 1, maxTotalTurns: nodeCount, maxDurationMs: options.durationMs ?? 60_000,
+		projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: options.maxConcurrentNodes ?? 1, maxTotalTurns: nodeCount, maxDurationMs: options.durationMs ?? 60_000,
 		nodes: planNodes, idempotencyKey: randomUUID(),
 	});
 	const plan = database.agentWorkflows.getPlan(project.id, workflow.id)!;
 	database.agentWorkflows.recordTrustedUiApproval(project.id, workflow.id, plan.version, plan.fingerprint, randomUUID());
 	const scheduler = new AgentWorkflowScheduler(database, service, Date.now, 10);
-	return { root, database, project, task, workflow, plan, scheduler, service, started, snapshots, listeners, acquireEntered, releaseAcquire, get stopCalls() { return stopCalls; } };
+	return { root, database, project, task, sessions, workflow, plan, scheduler, service, started, snapshots, listeners, acquireEntered, releaseAcquire, releaseStart, get stopCalls() { return stopCalls; } };
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -191,6 +214,63 @@ test('independent ready nodes obey one reserved concurrency slot', async () => {
 		assert.deepEqual(run.nodes.map(node => node.state).sort(), ['ready', 'running']);
 	} finally { cleanup(f); }
 });
+
+test('two ready readers serialize startup in one physical folder, then keep both runtimes running', async () => {
+	const f = fixture(2, { independent: true, maxConcurrentNodes: 2, holdFirstStart: true });
+	try {
+		const run = f.scheduler.start(f.project.id, f.workflow.id, f.database.agentWorkflows.getWorkflow(f.project.id, f.workflow.id)!.revision, randomUUID());
+		await waitFor(() => f.started.length === 1);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		const pending = f.database.agentWorkflows.getRun(f.project.id, f.workflow.id, run.id)!;
+		assert.deepEqual(pending.nodes.map(node => node.state), ['launching', 'launching']);
+		assert.equal(f.database.agentSessionTurns.listTurns(f.project.id, f.sessions[0].id)[0].state, 'starting');
+		assert.equal(f.database.agentSessionTurns.listTurns(f.project.id, f.sessions[1].id).length, 0);
+		f.releaseStart();
+		await waitFor(() => f.database.agentWorkflows.getRun(f.project.id, f.workflow.id, run.id)!.nodes.every(node => node.state === 'running'));
+		assert.equal(new Set(f.started).size, 2);
+		for (const session of f.sessions) {
+			const turn = f.database.agentSessionTurns.listTurns(f.project.id, session.id)[0];
+			assert.equal(f.service.ownsRunningReadOnlyTurn(turn), true);
+		}
+		for (const turnId of f.started) { finishTurn(f, turnId, 0); }
+		await waitFor(() => f.database.agentWorkflows.getRun(f.project.id, f.workflow.id, run.id)!.state === 'succeeded');
+	} finally {
+		f.scheduler.stopScheduling();
+		f.releaseStart();
+		try { await f.service.shutdown(); } finally { cleanup(f); }
+	}
+});
+
+for (const interruption of ['failed start', 'stop', 'shutdown'] as const) {
+	test(`a queued reader cannot bypass ${interruption} or unresolved startup cleanup`, async () => {
+		const f = fixture(2, { independent: true, maxConcurrentNodes: 2, holdFirstStart: true, failFirstStart: interruption === 'failed start' });
+		try {
+			const run = f.scheduler.start(f.project.id, f.workflow.id, f.database.agentWorkflows.getWorkflow(f.project.id, f.workflow.id)!.revision, randomUUID());
+			await waitFor(() => f.started.length === 1);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(f.database.agentSessionTurns.listTurns(f.project.id, f.sessions[1].id).length, 0);
+			if (interruption === 'failed start') {
+				f.releaseStart();
+			} else if (interruption === 'stop') {
+				await f.service.stop(f.project.id, f.sessions[0].id, f.started[0]);
+			} else {
+				f.scheduler.requestShutdownCancellation();
+				f.scheduler.stopScheduling();
+				await f.service.shutdown();
+				f.scheduler.reconcileAfterShutdown();
+			}
+			await waitFor(() => f.database.agentWorkflows.getRun(f.project.id, f.workflow.id, run.id)!.nodes.every(node => !['launching', 'running', 'cancelRequested'].includes(node.state)));
+			assert.equal(f.started.length, 1);
+			assert.equal(f.database.agentSessionTurns.listTurns(f.project.id, f.sessions[1].id).length, 0);
+			assert.equal(f.database.agentSessionTurns.listTurns(f.project.id, f.sessions[0].id)[0].cleanupVerified, false);
+			assert.equal(f.database.getTask(f.task.id)!.state, 'ready');
+		} finally {
+			f.scheduler.stopScheduling();
+			f.releaseStart();
+			try { await f.service.shutdown(); } finally { cleanup(f); }
+		}
+	});
+}
 
 test('an unverified stop becomes durable recovery without retrying or releasing its slot', async () => {
 	const f = fixture(2, { independent: true, failedStop: true });
