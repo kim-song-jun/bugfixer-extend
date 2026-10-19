@@ -47,7 +47,27 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Lint before session contracts
+        id: session_lint
         run: pnpm lint
+      - name: Prepare owned session lint repair in CI
+        if: ${{ failure() && steps.session_lint.outcome == 'failure' }}
+        run: |
+          set +e
+          pnpm exec oxlint --disable-nested-config --threads=1 --fix --format=json . > "$RUNNER_TEMP/agent-session-lint-repair.json"
+          repair_status=$?
+          set -e
+          git diff --binary -- apps/review-desktop packages/review-protocol/src/contracts.ts packages/review/app/src/settings-page.tsx > "$RUNNER_TEMP/agent-session-lint-repair.patch"
+          printf 'CI repair command exit status: %s\n' "$repair_status"
+      - name: Upload owned session lint repair
+        if: ${{ failure() && steps.session_lint.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-session-lint-repair
+          path: |
+            ${{ runner.temp }}/agent-session-lint-repair.json
+            ${{ runner.temp }}/agent-session-lint-repair.patch
+          if-no-files-found: error
+          retention-days: 1
       - name: Record runner resources before session contracts
         run: |
           uptime

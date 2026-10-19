@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { lstatSync, readlinkSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';

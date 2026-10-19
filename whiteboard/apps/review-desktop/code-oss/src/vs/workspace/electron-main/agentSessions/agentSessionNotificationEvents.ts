@@ -107,9 +107,6 @@ export function subscribeToCommittedAgentSessionNotifications(
 	listener: NotificationListener,
 	onObserverError: ObserverErrorHandler,
 ): { dispose(): void } {
-	if (typeof onObserverError !== 'function') {
-		throw new TypeError('A notification observer error handler is required.');
-	}
 	const listeners = stateFor(db).listeners;
 	const observer = { listener, onError: onObserverError };
 	listeners.add(observer);
