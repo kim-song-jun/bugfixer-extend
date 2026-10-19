@@ -176,9 +176,17 @@ function readCompleteTranscript(readPage) {
   let afterSequence = 0;
   let highestSequence = 0;
   let pageCount = 0;
+  let previousSequence = 0;
 
   while (pageCount < 400) {
     const page = readPage({ afterSequence, limit: 50 });
+    assert.deepEqual(page.gaps, [], 'The small natural-exit fixture must retain every durable transcript entry.');
+
+    for (const entry of page.entries) {
+      assert.ok(entry.sequence > previousSequence, 'Durable transcript pages must preserve strict sequence order without duplicates.');
+      previousSequence = entry.sequence;
+    }
+
     pageCount++;
     entries.push(...page.entries);
     highestSequence = page.highestSequence;
@@ -762,15 +770,22 @@ try {
     serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id, options));
 
   const finalTranscript = finalTranscriptPage.entries;
+  const terminalEntries = finalTranscript.filter(entry => entry.kind === 'terminal');
+
+  const durableTerminalOutput = terminalEntries
+    .map(entry => entry.text)
+    .join('');
 
   receipt.finalTranscript = {
     pageCount: finalTranscriptPage.pageCount,
     entryCount: finalTranscript.length,
     highestSequence: finalTranscriptPage.highestSequence,
     nextSequence: finalTranscriptPage.nextSequence,
-    finalChunkPresent: finalTranscript.some(entry => entry.kind === 'terminal' && entry.text.endsWith('FINAL_WITHOUT_NEWLINE')),
+    terminalEntryCount: terminalEntries.length,
+    orderedTerminalSequences: terminalEntries.map(entry => entry.sequence),
+    finalOutputSuffixDurable: durableTerminalOutput.endsWith('FINAL_WITHOUT_NEWLINE'),
   };
-  assert.ok(finalTranscript.some(entry => entry.kind === 'terminal' && entry.text.endsWith('FINAL_WITHOUT_NEWLINE')),
+  assert.ok(durableTerminalOutput.endsWith('FINAL_WITHOUT_NEWLINE'),
     'The final sanitizer flush must be durable before the provider turn is finalized.');
   assert.equal(resourceEvents.get(naturalTurn.id).join(','), 'access-revoked,private-config-released');
   assert.equal(naturalTerminal.state, 'exited');

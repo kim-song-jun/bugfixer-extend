@@ -143,7 +143,7 @@ function validateState(value: Record<string, unknown>, path: string): AgentSessi
 	if (value.state === 'absent' && exactKeys(value, ['state'])) { return Object.freeze({ state: 'absent', sha256: null }); }
 	if (value.state === 'text' && exactKeys(value, ['state', 'file'])) {
 		const file = value.file;
-		if (!isRecord(file) || !exactKeys(file, ['path', 'kind', 'size', 'sha256', 'content']) || file.path !== path || file.kind !== 'file'
+		if (!isRecord(file) || !exactKeysWithOptionalExecutable(file, ['path', 'kind', 'size', 'sha256', 'content']) || file.path !== path || file.kind !== 'file'
 			|| !Number.isSafeInteger(file.size) || (file.size as number) < 0 || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(file.sha256) || typeof file.content !== 'string') {
 			throw new Error('Agent-session hunk input has malformed retained text metadata.');
 		}
@@ -159,7 +159,7 @@ function validateState(value: Record<string, unknown>, path: string): AgentSessi
 	}
 	if (value.state === 'unavailable' && (exactKeys(value, ['state', 'reason']) || exactKeys(value, ['state', 'file', 'reason']))) {
 		const file = value.file;
-		if (typeof value.reason !== 'string' || value.reason.length > 1024 || /[\r\n\0]/u.test(value.reason) || (file !== undefined && (!isRecord(file) || !exactKeys(file, ['path', 'kind', 'size', 'sha256', 'contentUnavailableReason']) || file.path !== path || file.kind !== 'file'
+		if (typeof value.reason !== 'string' || value.reason.length > 1024 || /[\r\n\0]/u.test(value.reason) || (file !== undefined && (!isRecord(file) || !exactKeysWithOptionalExecutable(file, ['path', 'kind', 'size', 'sha256', 'contentUnavailableReason']) || file.path !== path || file.kind !== 'file'
 			|| !Number.isSafeInteger(file.size) || (file.size as number) < 0 || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(file.sha256)
 			|| !isUnavailableReason(file.contentUnavailableReason)))) {
 			return Object.freeze({ state: 'unavailable', sha256: null, reason: 'invalidHash' });
@@ -186,6 +186,9 @@ function freezeResult(value: AgentSessionChangeHunksDTO): AgentSessionChangeHunk
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean { return Object.keys(value).sort().join('\0') === [...keys].sort().join('\0'); }
+function exactKeysWithOptionalExecutable(value: Record<string, unknown>, keys: readonly string[]): boolean {
+	return exactKeys(value, keys) || (exactKeys(value, [...keys, 'executable']) && typeof value.executable === 'boolean');
+}
 function sameLines(left: readonly string[], right: readonly string[]): boolean { return left.length === right.length && left.every((line, index) => line === right[index]); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function isUnavailableReason(value: unknown): value is AgentSessionContentUnavailableReason { return value === 'binary' || value === 'invalidUtf8' || value === 'fileTooLarge' || value === 'contentFileLimit' || value === 'retainedTextLimit'; }
