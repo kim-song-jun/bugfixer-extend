@@ -909,6 +909,7 @@ export class ManagedWorktreeService {
 		let totalBytes = 0;
 		for (const file of files) {
 			if (!file.bytes) { continue; }
+			if (!('sha256' in file.after)) { throw new Error('Absent reviewed file cannot contain retained bytes.'); }
 			totalBytes += file.bytes.byteLength;
 			if (file.bytes.byteLength > MAX_REVIEWED_FILE_BYTES || totalBytes > MAX_REVIEWED_TOTAL_BYTES) { throw new Error('Reviewed retained bytes exceed configured file or total limits.'); }
 			if (createHash('sha256').update(file.bytes).digest('hex') !== file.after.sha256) { throw new Error('Reviewed retained bytes changed while being captured.'); }
