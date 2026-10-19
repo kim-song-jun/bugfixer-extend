@@ -10,7 +10,7 @@ import type { AgentSessionProvider, AgentSessionTurnDTO, WorkspaceAgentSessionWo
 import { AGENT_CLI_COMMAND_SPEC_VERSION, discoverAgentCliCapabilities, type AgentCliCapabilities } from './agentCliCapabilities.js';
 import { AgentSessionCollaborationService } from './agentSessionCollaborationService.js';
 import { createAgentSessionCommand } from './agentSessionCommands.js';
-import { AgentProviderIdentityReceiver, type AgentProviderIdentityAccess } from './agentProviderIdentity.js';
+import { AGENT_PROVIDER_IDENTITY_PORT_ENV, AGENT_PROVIDER_IDENTITY_NONCE_ENV, AgentProviderIdentityReceiver, type AgentProviderIdentityAccess } from './agentProviderIdentity.js';
 import { AgentSessionMcpBridge, AGENT_SESSION_MCP_GATEWAY_MODULE, AGENT_SESSION_MCP_TOKEN_ENV } from './agentSessionMcpBridge.js';
 import { AgentSessionPtyRuntimeFactory } from './agentSessionPtyRuntime.js';
 import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
@@ -438,8 +438,8 @@ export class AgentSessionApplication {
 			const launchEnv: Record<string, string> = {
 				...command.env, ...runtimeEnv, ...access.gatewayEnvironment,
 				...(identityAccess ? {
-					BUGFIXER_PROVIDER_IDENTITY_PORT: String(identityAccess.port),
-					BUGFIXER_PROVIDER_IDENTITY_NONCE: identityAccess.nonce,
+					[AGENT_PROVIDER_IDENTITY_PORT_ENV]: String(identityAccess.port),
+					[AGENT_PROVIDER_IDENTITY_NONCE_ENV]: identityAccess.nonce,
 				} : {}),
 			};
 			return {

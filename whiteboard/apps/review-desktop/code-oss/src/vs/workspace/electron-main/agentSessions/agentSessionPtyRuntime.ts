@@ -13,6 +13,7 @@ import type { AgentSessionCommandSpec } from './agentSessionCommands.js';
 import { AgentSessionRuntimeStartError, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessionService.js';
 import { AgentSessionPreparationError } from './agentSessionPreparationError.js';
 import type { AgentSessionJournal } from './agentSessionJournal.js';
+import { providerIdentityEnvironmentNames } from './agentProviderIdentity.js';
 
 export interface PreparedAgentSessionPtyLaunch {
 	readonly command: AgentSessionCommandSpec;
@@ -272,7 +273,8 @@ function validatePreparedLaunch(snapshot: AgentSessionTurnSnapshot, prepared: Pr
 	}
 	const profileSelector = snapshot.provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
 	const forwarded = new Set(command.forwardedMcpEnvironmentVariableNames);
-	const allowedNames = new Set([profileSelector, 'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', ...forwarded]);
+	const identityNames = providerIdentityEnvironmentNames(snapshot.provider, launch.env, prepared.knownSecrets, command.forwardedMcpEnvironmentVariableNames);
+	const allowedNames = new Set([profileSelector, 'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'USER', 'LOGNAME', ...forwarded, ...identityNames]);
 	if (Object.keys(command.env).length !== 1 || command.env[profileSelector] !== prepared.profileDirectory
 		|| forwarded.size !== command.forwardedMcpEnvironmentVariableNames.length
 		|| Object.keys(launch.env).some(name => !allowedNames.has(name))

@@ -14,7 +14,7 @@ import net from 'node:net';
 import test from 'node:test';
 import type { AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
-import { AgentProviderIdentityReceiver } from './agentProviderIdentity.js';
+import { AGENT_PROVIDER_IDENTITY_PORT_ENV, AGENT_PROVIDER_IDENTITY_NONCE_ENV, AgentProviderIdentityReceiver, providerIdentityEnvironmentNames } from './agentProviderIdentity.js';
 
 const helperPath = fileURLToPath(new URL('./agentProviderIdentityHook.mjs', import.meta.url));
 
@@ -46,7 +46,7 @@ function fixture() {
 function runHook(port: number, nonce: string, input: unknown): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [helperPath], {
-			env: { ...process.env, BUGFIXER_PROVIDER_IDENTITY_PORT: String(port), BUGFIXER_PROVIDER_IDENTITY_NONCE: nonce },
+			env: { ...process.env, [AGENT_PROVIDER_IDENTITY_PORT_ENV]: String(port), [AGENT_PROVIDER_IDENTITY_NONCE_ENV]: nonce },
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
 		let stdout = '';
@@ -82,6 +82,36 @@ function closeFixture(value: ReturnType<typeof fixture>): void {
 	value.database.close();
 	rmSync(value.directory, { recursive: true, force: true });
 }
+
+test('only a complete Codex receiver environment with its registered secret is allowed into a PTY', async () => {
+	const value = fixture();
+	let access: Awaited<ReturnType<typeof value.receiver.issue>> | undefined;
+	try {
+		access = await value.receiver.issue({ projectId: value.project.id, sessionId: value.session.id, turnId: value.turn.id, expectedConversationId: null, onIdentityMismatch: () => assert.fail('No identity event is sent by this test') });
+		const nonce = access.nonce;
+		const environment = { [AGENT_PROVIDER_IDENTITY_PORT_ENV]: String(access.port), [AGENT_PROVIDER_IDENTITY_NONCE_ENV]: nonce };
+		assert.deepEqual(providerIdentityEnvironmentNames('codex', environment, [nonce], []), Object.keys(environment));
+		assert.deepEqual(providerIdentityEnvironmentNames('codex', {}, [], []), []);
+		assert.deepEqual(providerIdentityEnvironmentNames('claude', {}, [], []), []);
+		assert.throws(() => providerIdentityEnvironmentNames('claude', environment, [nonce], []), /provider identity environment/);
+		assert.throws(() => providerIdentityEnvironmentNames('codex', environment, [], []), /provider identity environment/);
+		for (const name of [AGENT_PROVIDER_IDENTITY_PORT_ENV, AGENT_PROVIDER_IDENTITY_NONCE_ENV]) {
+			assert.throws(() => providerIdentityEnvironmentNames('codex', environment, [nonce], [name]), /provider identity environment/);
+			assert.throws(() => providerIdentityEnvironmentNames('codex', {}, [], [name]), /provider identity environment/);
+		}
+		for (const invalid of [
+			{ [AGENT_PROVIDER_IDENTITY_PORT_ENV]: String(access.port) }, { [AGENT_PROVIDER_IDENTITY_NONCE_ENV]: nonce },
+			{ [AGENT_PROVIDER_IDENTITY_PORT_ENV]: undefined, [AGENT_PROVIDER_IDENTITY_NONCE_ENV]: undefined },
+			...['0', '65536', '043210', '+43210', '43210\n'].map(port => ({ ...environment, [AGENT_PROVIDER_IDENTITY_PORT_ENV]: port })),
+			{ ...environment, [AGENT_PROVIDER_IDENTITY_NONCE_ENV]: 'invalid' },
+		]) {
+			assert.throws(() => providerIdentityEnvironmentNames('codex', invalid, [nonce], []), /provider identity environment/);
+		}
+	} finally {
+		if (access) { assert.equal((await access.close()).complete, true); }
+		closeFixture(value);
+	}
+});
 
 test('root UserPromptSubmit persists only the UUID; child events are ignored and duplicate identity is idempotent', async () => {
 	const value = fixture();

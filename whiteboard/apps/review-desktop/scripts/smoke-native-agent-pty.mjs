@@ -212,6 +212,103 @@ function alive(pid) {
   }
 }
 
+function processBirth(pid) {
+  const output = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'pid=,ppid=,pgid=,lstart=,command='], { encoding: 'utf8' }).trim();
+  const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(.{24})\s+(.+)$/.exec(output);
+
+  if (!match) { throw new Error(`Unable to parse one-row process birth identity for PID ${pid}.`); }
+
+  return { pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), started: match[4], command: match[5] };
+}
+
+function sameProcessBirth(current, record) {
+  return current.pid === record.pid && current.pgid === record.pgid && current.started === record.started && current.command === record.command;
+}
+
+function processPidWasReused(current, record) {
+  return current.pid === record.pid && current.started !== record.started;
+}
+
+function fixtureProcessAlive(record) {
+  if (!alive(record.pid)) { return false; }
+
+  let current;
+
+  try { current = processBirth(record.pid); }
+  catch (error) {
+    if (!alive(record.pid)) { return false; }
+
+    throw error;
+  }
+
+  if (sameProcessBirth(current, record)) { return true; }
+  if (processPidWasReused(current, record)) { return false; }
+
+  throw new Error(`Live PID ${record.pid} no longer matches its captured process identity.`);
+}
+
+function fixtureIdentityRecords(identity) {
+  const roles = ['guardian', 'provider', 'descendant'];
+
+  assert.deepEqual(Object.keys(identity).sort(), [...roles].sort(), 'The fixture identity must contain exactly the three owned process roles.');
+
+  const records = roles.map(role => {
+    const record = identity[role];
+
+    assert.deepEqual(Object.keys(record ?? {}).sort(), ['command', 'pgid', 'pid', 'ppid', 'started'], `The ${role} record must have exactly the supported birth fields.`);
+    assert.ok(record && Number.isSafeInteger(record.pid) && record.pid > 0, `The ${role} birth record must contain a valid PID.`);
+    assert.ok(Number.isSafeInteger(record.ppid) && record.ppid > 0, `The ${role} birth record must contain a valid PPID.`);
+    assert.ok(Number.isSafeInteger(record.pgid) && record.pgid > 0, `The ${role} birth record must contain a valid PGID.`);
+    assert.ok(typeof record.started === 'string' && record.started.length > 0, `The ${role} birth record must contain a start identity.`);
+    assert.ok(typeof record.command === 'string' && record.command.length > 0, `The ${role} birth record must contain a command identity.`);
+
+    return { role, ...record };
+  });
+
+  const guardian = identity.guardian;
+  const provider = identity.provider;
+  const descendant = identity.descendant;
+
+  assert.equal(guardian.pgid, guardian.pid, 'The guardian must own its process group.');
+  assert.equal(provider.ppid, guardian.pid, 'The provider must be a child of the recorded guardian.');
+  assert.equal(provider.pgid, guardian.pid, 'The provider must share the guardian-owned process group.');
+  assert.equal(descendant.ppid, provider.pid, 'The descendant must be a child of the recorded provider.');
+  assert.equal(descendant.pgid, guardian.pid, 'The descendant must share the guardian-owned process group.');
+
+  const currentByRole = new Map();
+
+  for (const record of records) {
+    if (!alive(record.pid)) { continue; }
+
+    let current;
+
+    try { current = processBirth(record.pid); }
+    catch (error) {
+      if (!alive(record.pid)) { continue; }
+
+      throw error;
+    }
+
+    if (sameProcessBirth(current, record)) {
+      currentByRole.set(record.role, current);
+    } else if (!processPidWasReused(current, record)) {
+      throw new Error(`Live ${record.role} PID ${record.pid} no longer matches its captured process identity.`);
+    }
+  }
+
+  for (const record of records) {
+    const parentRole = record.role === 'provider' ? 'guardian' : record.role === 'descendant' ? 'provider' : undefined;
+    const current = currentByRole.get(record.role);
+    const currentParent = parentRole ? currentByRole.get(parentRole) : undefined;
+
+    if (current && currentParent) {
+      assert.equal(current.ppid, identity[parentRole].pid, `The live ${record.role} must retain its parent while that exact recorded parent is alive.`);
+    }
+  }
+
+  return records;
+}
+
 function retained(host, handle) {
   return host.read(handle, 0, 500).chunks.map(chunk => chunk.text).join('');
 }
@@ -219,9 +316,10 @@ function retained(host, handle) {
 const fixturePath = path.join(root, 'interactive-fixture.mjs');
 
 const fixtureSource = `
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 if (!process.stdin.isTTY || !process.stdout.isTTY) process.exit(31);
+${processBirth.toString()}
 process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.resume();
@@ -232,7 +330,8 @@ process.on('SIGTERM', () => {
 });
 const descendant = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});process.send({ready:true});setInterval(()=>{},1000)'], { stdio:['ignore','ignore','ignore','ipc'], detached:false, env:{PATH:process.env.PATH} });
 descendant.once('message',()=>{
-  writeFileSync(process.argv[2], JSON.stringify({provider:process.pid,guardian:process.ppid,descendant:descendant.pid}));
+  const identity = {provider:processBirth(process.pid),guardian:processBirth(process.ppid),descendant:processBirth(descendant.pid)};
+  writeFileSync(process.argv[2], JSON.stringify(identity));
   if (process.argv[3]==='immediate') process.stdout.write('IMMEDIATE_WITHOUT_NEWLINE',()=>process.exit(0));
   else process.stdout.write('READY\\n');
 });
@@ -276,14 +375,7 @@ async function launchFixture(host, label) {
 
   const identity = JSON.parse(await readFile(identityFile, 'utf8'));
 
-  for (const [role, pid] of Object.entries(identity)) {
-    assert.ok(Number.isSafeInteger(pid) && pid > 0);
-
-    const pgid = Number(execFileSync('/bin/ps', ['-p', String(pid), '-o', 'pgid='], { encoding: 'utf8' }).trim());
-
-    assert.equal(pgid, identity.guardian, 'Provider and descendant must share the real guardian-owned process group');
-    identities.push({ label, role, pid, pgid });
-  }
+  for (const record of fixtureIdentityRecords(identity)) { identities.push({ label, ...record }); }
 
   return handle;
 }
@@ -632,8 +724,8 @@ try {
           try {
             const identity = JSON.parse(await readFile(identityFile, 'utf8'));
 
-            for (const [role, pid] of Object.entries(identity)) {
-              assert.equal(alive(pid), false, `The ${role} process must be gone before private configuration release.`);
+            for (const { role, pid } of fixtureIdentityRecords(identity)) {
+              assert.equal(fixtureProcessAlive({ pid, ...identity[role] }), false, `The ${role} process must be gone before private configuration release.`);
             }
           } catch (error) {
             if (error.code !== 'ENOENT') { throw error; }
@@ -679,12 +771,7 @@ try {
       }
     }, `${label} provider identity`);
 
-    for (const [role, pid] of Object.entries(identity)) {
-      assert.ok(Number.isSafeInteger(pid) && pid > 0);
-      const pgid = Number(execFileSync('/bin/ps', ['-p', String(pid), '-o', 'pgid='], { encoding: 'utf8' }).trim());
-      assert.equal(pgid, identity.guardian, 'Service provider and descendant must share the guardian-owned process group');
-      identities.push({ label, role, pid, pgid });
-    }
+    for (const record of fixtureIdentityRecords(identity)) { identities.push({ label, ...record }); }
   }
 
   const verifiedPreparationSession = await createSession('Verified provider preflight failure retry');
@@ -1006,7 +1093,7 @@ try {
   }
 
   try {
-    await until(() => identities.every(identity => !alive(identity.pid)), 'all recorded owned fixture processes gone', 15_000, true);
+    await until(() => identities.every(identity => !fixtureProcessAlive(identity)), 'all recorded owned fixture process identities gone', 15_000, true);
     receipt.ownedProcessesGone = true;
   } catch {
     receipt.ownedProcessesGone = false;

@@ -4667,7 +4667,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
 
   await changes.getByText('무엇: Human review: the retained file changes the fixture line.', { exact: true }).waitFor();
 
-  await changes.getByText(/사람 작성 · 초안 · 실행 결과 미검증 · revision 52/u).waitFor();
+  await changes.getByText(/사람 작성 · 초안 · 실행 결과 미검증 · 설명 버전 52/u).waitFor();
 
   await whatInput.fill('Human confirmed explanation: the fixture line changed.');
 
@@ -4679,7 +4679,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
 
   await changes.getByText('무엇: Human confirmed explanation: the fixture line changed.', { exact: true }).waitFor();
 
-  await changes.getByText(/사람 작성 · 설명만 확인됨 · 실행 결과 미검증 · revision 53/u).waitFor();
+  await changes.getByText(/사람 작성 · 설명만 확인됨 · 실행 결과 미검증 · 설명 버전 53/u).waitFor();
 
   await changes.getByRole('heading', { name: '설명 기록 4–53', exact: true }).waitFor();
 
@@ -4755,7 +4755,7 @@ async function verifyAiSessionChangeEvidence(page, fixture, tag, screenshots, vi
 
   assert.equal(narrowExplanationLayout.actionReachable, true, `The explanation-only confirmation action must remain reachable at ${tag}/760`);
 
-  assert.ok((await changes.innerText()).includes('사람 작성 · 설명만 확인됨 · 실행 결과 미검증 · revision 53'), 'The narrow view must retain the confirmed explanation and unverified status');
+  assert.ok((await changes.innerText()).includes('사람 작성 · 설명만 확인됨 · 실행 결과 미검증 · 설명 버전 53'), 'The narrow view must retain the confirmed explanation and unverified status');
 
   const narrowExplanationScreenshot = path.join(output, `ai-session-change-explanation-${tag}-760.png`);
 

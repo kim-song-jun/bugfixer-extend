@@ -14,6 +14,24 @@ const MAX_FRAME_BYTES = 4096;
 const MAX_PENDING_CONNECTIONS = 4;
 const CONNECTION_TIMEOUT_MS = 3000;
 
+export const AGENT_PROVIDER_IDENTITY_PORT_ENV = 'BUGFIXER_PROVIDER_IDENTITY_PORT';
+export const AGENT_PROVIDER_IDENTITY_NONCE_ENV = 'BUGFIXER_PROVIDER_IDENTITY_NONCE';
+
+/** Allows only the Codex receiver's paired, secret-registered per-launch environment. */
+export function providerIdentityEnvironmentNames(provider: string, environment: Readonly<Record<string, unknown>>, knownSecrets: readonly string[], forwardedMcpNames: readonly string[]): readonly string[] {
+	const hasPort = Object.hasOwn(environment, AGENT_PROVIDER_IDENTITY_PORT_ENV);
+	const hasNonce = Object.hasOwn(environment, AGENT_PROVIDER_IDENTITY_NONCE_ENV);
+	const identityForwardedToMcp = forwardedMcpNames.includes(AGENT_PROVIDER_IDENTITY_PORT_ENV) || forwardedMcpNames.includes(AGENT_PROVIDER_IDENTITY_NONCE_ENV);
+	const port = environment[AGENT_PROVIDER_IDENTITY_PORT_ENV];
+	const nonce = environment[AGENT_PROVIDER_IDENTITY_NONCE_ENV];
+	if (!hasPort && !hasNonce && !identityForwardedToMcp) { return []; }
+	if (identityForwardedToMcp || provider !== 'codex' || !hasPort || !hasNonce || typeof port !== 'string' || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535
+		|| typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(nonce) || !knownSecrets.includes(nonce)) {
+		throw new Error('The provider identity environment must contain a valid Codex receiver port and a known-secret nonce.');
+	}
+	return [AGENT_PROVIDER_IDENTITY_PORT_ENV, AGENT_PROVIDER_IDENTITY_NONCE_ENV];
+}
+
 export type AgentProviderIdentityDatabase = {
 	readonly agentSessions: Pick<AgentSessionStore, 'getSession'>;
 	readonly agentSessionTurns: Pick<AgentSessionTurnStore, 'getTurn' | 'recordProviderConversationId'>;
