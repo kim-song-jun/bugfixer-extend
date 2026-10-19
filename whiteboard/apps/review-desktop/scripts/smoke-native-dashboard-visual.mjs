@@ -3677,6 +3677,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
       const parent = element.closest('.ai-session-changes');
       const statusBar = document.querySelector('.part.statusbar')?.getBoundingClientRect();
       const visibleBottom = statusBar && statusBar.height > 0 ? Math.min(window.innerHeight, statusBar.top) : window.innerHeight;
+
       return {
         horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
         changesHorizontalOverflow: !!parent && parent.scrollWidth > parent.clientWidth + 1,
@@ -3688,19 +3689,23 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
         sectionBottom: bounds.bottom,
       };
     });
+
     assert.equal(textLayout.horizontalOverflow, false, `PR text editor must not overflow at ${tag}/${width}`);
     assert.equal(textLayout.changesHorizontalOverflow, false, `PR text panel must not overflow at ${tag}/${width}`);
     assert.equal(textLayout.documentHorizontalOverflow, false, `The native window must not overflow at ${tag}/${width}`);
     assert.ok(textLayout.titleWidth > 0 && textLayout.bodyWidth > 0, `Both editable fields must have visible width at ${tag}/${width}`);
     assert.equal(textLayout.endReachable, true, `The end of the PR text editor must scroll into view at ${tag}/${width}`);
     await prText.evaluate(element => element.scrollIntoView({ block: 'start' }));
+
     const screenshot = path.join(output, `ai-session-pr-text-${tag}-${width}x${height}.png`);
+
     await capturePage(page, screenshot);
     screenshots.push(screenshot);
     viewports.push({ theme: tag, state: 'pr-text-editor-flat-layout', width, height, screenshot,
       layout: textLayout, focus: textKeyboardFocus, detailsFolded: true, fixtureOnly: true, providerExecuted: false,
       accountDiscoveryExecuted: false, networkWritesExecuted: false, nativeHumanApprovalExercised: false });
   };
+
   await capturePrTextAtViewport(1440, 760);
   await capturePrTextAtViewport(760, 820);
 

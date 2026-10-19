@@ -256,24 +256,33 @@ test('TERM-ignoring provider is killed after bounded grace period', async t => {
 
 test('owner-lifetime EOF terminates the helper process group after bounded grace', async t => {
   const marker = path.join(os.tmpdir(), `bfx-provider-owner-lifetime-${process.pid}`);
+
   await rm(marker, { force: true });
+
   const run = await startHelper({ ownerLifetime: true, providerCode: `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' }); child.unref(); require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(child.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);` });
+
   t.after(async () => { await rm(marker, { force: true }); await cleanup(run); });
   await waitForSocket(run.socketPath, run.child);
+
   let descendantPid;
+
   for (let i = 0; i < 100; i++) {
     try { descendantPid = Number(await readFile(marker, 'utf8')); break; }
     catch (error) { if (error.code !== 'ENOENT' || i === 99) throw error; await delay(10); }
   }
+
   assert.ok(descendantPid > 0);
   run.ownerLifetimeInput.destroy();
   await once(run.child, 'exit');
   assert.equal(await waitForGroupGone(run.child.pid), true);
+
   for (let i = 0; i < 100; i++) {
     try { process.kill(descendantPid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; }
+
     if (i === 99) assert.fail(`provider descendant ${descendantPid} still exists`);
     await delay(10);
   }
+
   assert.throws(() => process.kill(descendantPid, 0), { code: 'ESRCH' }, 'provider descendant must not survive owner-lifetime EOF');
 });
 
