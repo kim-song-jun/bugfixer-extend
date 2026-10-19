@@ -830,7 +830,11 @@ try {
     assert.equal(failedOutput.length, 0, 'The next terminal write is withheld regardless of output chunk boundaries.');
     assert.equal(serviceDatabase.agentSessionTranscripts.readPage(project.id, persistenceFailureSession.id, persistenceFailureTurn.id).entries
       .filter(entry => entry.kind === 'terminal').length, terminalEntriesBeforeFailure, 'The scoped trigger must reject the next terminal write regardless of its chunk contents.');
-    service.detach(project.id, persistenceFailureSession.id, persistenceFailureTurn.id, persistenceFailureAttachment.attachmentId);
+    assert.throws(
+      () => service.detach(project.id, persistenceFailureSession.id, persistenceFailureTurn.id, persistenceFailureAttachment.attachmentId),
+      /not owned/i,
+      'A verified failed-turn cleanup must revoke its output attachment before returning.',
+    );
   } finally {
     try {
       if (triggerCreated) sqlite.exec('DROP TRIGGER fail_selected_transcript_entry;');
