@@ -671,6 +671,7 @@ try {
   receipt.checks.push('both duplex inputs, xterm-observed resize, log/terminal tab reattach, session switching, and UI stop succeeded');
 } catch (error) {
   receipt.failure = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+
   if (browser) {
     try {
       const page = browser.contexts()[0]?.pages()[0];
