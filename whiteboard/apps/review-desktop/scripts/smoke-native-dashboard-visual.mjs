@@ -2020,6 +2020,8 @@ try {
     const mailboxFixtureDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
 
     try {
+      fixture.historicalProposalAlerts = seedHistoricalProposalAlertFixtures(mailboxFixtureDatabase, fixture);
+
       const seededMailbox = await seedMailboxNotificationHistory(mailboxFixtureDatabase, fixture, projectFolder, tag, AgentSessionCollaborationService);
 
       fixture.mailbox = seededMailbox.receipt;
@@ -2091,17 +2093,79 @@ try {
 
       assert.equal(targetMessage.readAt, null, 'Opening a human mailbox view must not acknowledge the message for the AI');
 
+      const historicalAlerts = fixture.historicalProposalAlerts;
+      const persistedSiblingIds = Object.values(historicalAlerts.newerSiblingIds);
+
+      assert.ok(persistedSiblingIds.every(id => id), 'Each historical target must have a persisted newer same-turn sibling');
+      assert.equal(verifiedMailboxDatabase.agentSessionIntegrations.getProposal(historicalAlerts.newerSiblingIds.integration)?.revision,
+        historicalAlerts.newerSiblingRevisions.integration, 'The newer integration sibling must survive the native journey');
+      assert.equal(verifiedMailboxDatabase.agentSessionMerges.getProposal(historicalAlerts.newerSiblingIds.merge)?.revision,
+        historicalAlerts.newerSiblingRevisions.merge, 'The newer merge sibling must survive the native journey');
+      assert.equal(verifiedMailboxDatabase.agentSessionPublications.getProposal(historicalAlerts.newerSiblingIds.publication)?.revision,
+        historicalAlerts.newerSiblingRevisions.publication, 'The newer publication sibling must survive the native journey');
+
+      const oldIntegrationTarget = verifiedMailboxDatabase.agentSessionIntegrations.getProposal(historicalAlerts.targets.integration.id);
+      const oldMergeTarget = verifiedMailboxDatabase.agentSessionMerges.getProposal(historicalAlerts.targets.merge.id);
+      const oldPublicationTarget = verifiedMailboxDatabase.agentSessionPublications.getProposal(historicalAlerts.targets.publication.id);
+      const oldMergeCommitParent = verifiedMailboxDatabase.agentSessionIntegrations.getProposal(historicalAlerts.parentIds.mergeCommit);
+      const oldPublicationMergeParent = verifiedMailboxDatabase.agentSessionMerges.getProposal(historicalAlerts.parentIds.publicationMerge);
+      const oldPublicationCommitParent = verifiedMailboxDatabase.agentSessionIntegrations.getProposal(historicalAlerts.parentIds.publicationCommit);
+
+      assert.equal(oldIntegrationTarget?.fingerprint, historicalAlerts.targetFingerprints.integration, 'The original integration target and evidence binding must survive exact navigation');
+      assert.equal(oldIntegrationTarget?.sessionId, historicalAlerts.destinations.integration.sessionId);
+      assert.equal(oldIntegrationTarget?.turnId, historicalAlerts.destinations.integration.turnId);
+      assert.equal(oldIntegrationTarget?.evidenceVersion, historicalAlerts.evidenceVersions.integration);
+      assert.equal(oldIntegrationTarget?.evidenceFingerprint, historicalAlerts.targetEvidenceFingerprints.integration);
+      assert.equal(oldMergeTarget?.fingerprint, historicalAlerts.targetFingerprints.merge, 'The original merge target must survive exact navigation');
+      assert.equal(oldMergeTarget?.sessionId, historicalAlerts.destinations.merge.sessionId);
+      assert.equal(oldMergeTarget?.turnId, historicalAlerts.destinations.merge.turnId);
+      assert.equal(oldMergeTarget?.commitProposalId, historicalAlerts.parentIds.mergeCommit);
+      assert.equal(oldMergeTarget?.commitProposalRevision, historicalAlerts.parentRevisions.mergeCommit);
+      assert.equal(oldMergeTarget?.commitProposalFingerprint, historicalAlerts.parentFingerprints.mergeCommit);
+      assert.equal(oldMergeCommitParent?.revision, historicalAlerts.parentRevisions.mergeCommit);
+      assert.equal(oldMergeCommitParent?.fingerprint, historicalAlerts.parentFingerprints.mergeCommit);
+      assert.equal(oldMergeCommitParent?.evidenceVersion, historicalAlerts.evidenceVersions.merge);
+      assert.equal(oldMergeCommitParent?.evidenceFingerprint, historicalAlerts.targetEvidenceFingerprints.merge);
+      assert.equal(oldPublicationTarget?.fingerprint, historicalAlerts.targetFingerprints.publication, 'The original publication target and text pin must survive exact navigation');
+      assert.equal(oldPublicationTarget?.sessionId, historicalAlerts.destinations.publication.sessionId);
+      assert.equal(oldPublicationTarget?.turnId, historicalAlerts.destinations.publication.turnId);
+      assert.deepEqual(oldPublicationTarget?.textRevision, historicalAlerts.publicationTextPins.original);
+      assert.equal(oldPublicationTarget?.sourceMergeId, historicalAlerts.parentIds.publicationMerge);
+      assert.equal(oldPublicationTarget?.sourceMergeRevision, historicalAlerts.parentRevisions.publicationMerge);
+      assert.equal(oldPublicationTarget?.sourceMergeFingerprint, historicalAlerts.parentFingerprints.publicationMerge);
+      assert.equal(oldPublicationTarget?.resultCommit, oldPublicationMergeParent?.outcomes.at(-1)?.receipt.resultingHead);
+      assert.equal(oldPublicationMergeParent?.state, 'merged');
+      assert.equal(oldPublicationMergeParent?.fingerprint, historicalAlerts.parentFingerprints.publicationMerge);
+      assert.equal(oldPublicationCommitParent?.revision, historicalAlerts.parentRevisions.publicationCommit);
+      assert.equal(oldPublicationCommitParent?.fingerprint, historicalAlerts.parentFingerprints.publicationCommit);
+      assert.equal(oldPublicationCommitParent?.evidenceVersion, historicalAlerts.evidenceVersions.publication);
+      assert.equal(oldPublicationCommitParent?.evidenceFingerprint, historicalAlerts.targetEvidenceFingerprints.publication);
+
+      const originalTextPin = historicalAlerts.publicationTextPins.original;
+      const siblingTextPin = historicalAlerts.publicationTextPins.sibling;
+
+      assert.equal(verifiedMailboxDatabase.agentSessionPrTexts.getRevision(originalTextPin.scope, originalTextPin.revision)?.content.contentHash,
+        originalTextPin.contentHash, 'The original publication target must retain its pinned generated PR text');
+      assert.equal(verifiedMailboxDatabase.agentSessionPrTexts.getRevision(siblingTextPin.scope, siblingTextPin.revision)?.content.contentHash,
+        siblingTextPin.contentHash, 'The newer publication sibling must retain its pinned generated PR text');
+
       const readNotificationIds = new Set(notifications.filter(notification => notification.readAt).map(notification => notification.id));
 
-      const expectedReadIds = new Set([...fixture.mailbox.initialReadIds, fixture.mailbox.completionNotificationId, fixture.mailbox.targetNotificationId]);
+      const historicalProposalNotifications = fixture.historicalProposalAlerts.notificationIds;
+      const expectedReadIds = new Set([...fixture.mailbox.initialReadIds, fixture.mailbox.completionNotificationId, fixture.mailbox.targetNotificationId,
+        ...Object.values(historicalProposalNotifications)]);
 
       assert.ok(targetNotification?.readAt, 'Opening the message notification must mark that exact notification as read');
 
       assert.ok(notifications.find(notification => notification.id === fixture.mailbox.completionNotificationId)?.readAt, 'Opening the completion notification must mark that exact notification as read');
 
-      assert.deepEqual([...readNotificationIds].sort(), [...expectedReadIds].sort(), 'Only the two clicked notifications may be added to the persisted read set');
+      for (const [kind, notificationId] of Object.entries(historicalProposalNotifications)) {
+        assert.ok(notifications.find(notification => notification.id === notificationId)?.readAt, `Successful exact ${kind} proposal navigation must acknowledge only its own alert`);
+      }
 
-      assert.equal(notificationStatus.unreadCount, fixture.mailbox.unreadCount - 2, 'Only the two opened notifications must leave the project unread count');
+      assert.deepEqual([...readNotificationIds].sort(), [...expectedReadIds].sort(), 'Only the five successfully opened notifications may be added to the persisted read set');
+
+      assert.equal(notificationStatus.unreadCount, fixture.mailbox.unreadCount - 5, 'Only the five successfully opened notifications must leave the project unread count');
 
       assert.equal(notificationStatus.latestSequence, fixture.mailbox.latestSequence, 'The project notification high-water mark must remain unchanged');
 
@@ -3611,6 +3675,170 @@ async function seedReviewedPublication(database, fixture) {
   };
 }
 
+function seedHistoricalProposalAlertFixtures(database, fixture) {
+  const oldCommit = database.agentSessionIntegrations.getProposal(fixture.reviewedCommit.proposalId);
+
+  assert.ok(oldCommit, 'The historical integration target must be a persisted proposal');
+  const commitPage = database.agentSessionIntegrations.listProposals(oldCommit.projectId, oldCommit.sessionId, oldCommit.turnId, { limit: 2 });
+  assert.equal(commitPage.proposals.at(-1)?.id, oldCommit.id, 'The original commit proposal must be the current same-turn tip before adding its sibling');
+  const newerCommit = database.agentSessionIntegrations.createProposal({
+    projectId: oldCommit.projectId,
+    sessionId: oldCommit.sessionId,
+    turnId: oldCommit.turnId,
+    evidenceVersion: oldCommit.evidenceVersion,
+    evidenceFingerprint: oldCommit.evidenceFingerprint,
+    sourceHead: oldCommit.sourceHead,
+    proposedGitTreeHash: oldCommit.proposedGitTreeHash,
+    diffFingerprint: oldCommit.diffFingerprint,
+    commitMessage: `${oldCommit.commitMessage} (CI newer sibling)`,
+    author: oldCommit.author,
+    committer: oldCommit.committer,
+    paths: oldCommit.paths.map(item => ({ path: item.path, explanationTargets: item.explanations.map(({ path, hunkId, revision }) => ({ path, hunkId, revision })) })),
+    expectedLatestRevision: commitPage.nextRevision,
+  });
+
+  assert.equal(newerCommit.revision, oldCommit.revision + 1, 'The integration sibling must advance the actual same-turn store revision');
+  assert.equal(newerCommit.evidenceVersion, oldCommit.evidenceVersion, 'The sibling must remain bound to the real observed evidence');
+  assert.notEqual(newerCommit.id, oldCommit.id, 'The newer integration sibling must have its own persisted identity');
+  assert.equal(newerCommit.approval, null, 'The historical fixture must not synthesize approval for the newer proposal');
+
+  const oldMerge = database.agentSessionMerges.getProposal(fixture.reviewedConflictMerge.proposalId);
+  const newerMerge = database.agentSessionMerges.getProposal(fixture.reviewedResolutionMerge.proposalId);
+
+  assert.ok(oldMerge && newerMerge, 'Both merge targets must exist in the durable merge store');
+  const mergeCommit = database.agentSessionIntegrations.getProposal(oldMerge.commitProposalId);
+
+  assert.ok(mergeCommit, 'The historical merge target must retain its exact persisted commit proposal');
+  assert.equal(newerMerge.projectId, oldMerge.projectId, 'The newer merge sibling must remain in the same project');
+  assert.equal(newerMerge.sessionId, oldMerge.sessionId, 'The newer merge sibling must remain in the same session');
+  assert.equal(newerMerge.turnId, oldMerge.turnId, 'The newer merge sibling must remain in the same turn');
+  assert.equal(newerMerge.revision, oldMerge.revision + 1, 'The real conflict resolution must be a newer sibling in the same turn');
+  assert.equal(newerMerge.resolution?.proposalId, oldMerge.id, 'The newer merge sibling must preserve its actual conflict parent');
+  assert.equal(newerMerge.commitProposalId, oldMerge.commitProposalId, 'Both merge proposals must retain the exact persisted source commit proposal');
+  assert.equal(newerMerge.commitProposalRevision, mergeCommit.revision, 'Both merge proposals must pin the exact same source commit revision');
+  assert.equal(newerMerge.commitProposalFingerprint, mergeCommit.fingerprint, 'Both merge proposals must pin the exact same source commit fingerprint');
+
+  const oldPublication = database.agentSessionPublications.getProposal(fixture.reviewedPublication.proposalId);
+
+  assert.ok(oldPublication, 'The historical publication target must be a persisted proposal');
+  const publicationMerge = database.agentSessionMerges.getProposal(oldPublication.sourceMergeId);
+
+  assert.ok(publicationMerge && publicationMerge.state === 'merged', 'The historical publication target must retain its exact successful merge parent');
+  assert.equal(publicationMerge.turnId, oldPublication.turnId, 'The publication merge parent must remain in the exact target turn');
+  const publicationCommit = database.agentSessionIntegrations.getProposal(publicationMerge.commitProposalId);
+
+  assert.ok(publicationCommit, 'The historical publication target must retain its exact persisted commit proposal');
+  const publicationPage = database.agentSessionPublications.listProposals(oldPublication.projectId, oldPublication.sessionId, oldPublication.turnId, { limit: 2 });
+  assert.equal(publicationPage.proposals.at(-1)?.id, oldPublication.id, 'The original publication proposal must be the same-turn tip before adding its sibling');
+  const siblingTitle = `${oldPublication.title} (CI newer sibling)`;
+  const siblingBody = `${oldPublication.body}\n\nCI fixture: newer same-turn sibling proposal.`;
+  const publicationTextScope = { projectId: oldPublication.projectId, sessionId: oldPublication.sessionId, targetTurnId: oldPublication.turnId };
+  const currentPublicationTextHead = database.agentSessionPrTexts.getHead(publicationTextScope);
+
+  assert.ok(currentPublicationTextHead && oldPublication.textRevision && currentPublicationTextHead.revision >= oldPublication.textRevision.revision,
+    'The historical publication sibling must append after the durable current PR-text head while preserving its original pin');
+  const publicationTextRevision = database.agentSessionPrTexts.appendGeneratedRevision({
+    scope: publicationTextScope,
+    expectedRevision: currentPublicationTextHead.revision,
+    idempotencyKey: `ci-publication-text-sibling-${oldPublication.sessionId}`,
+    source: { kind: 'liveAgentTurn', turnId: oldPublication.turnId },
+    sanitizedCompleteAgentText: { title: siblingTitle, body: siblingBody },
+    knownSecrets: [],
+  });
+  const siblingTextPin = { scope: publicationTextScope, revision: publicationTextRevision.revision, contentHash: publicationTextRevision.content.contentHash };
+  const newerPublication = database.agentSessionPublications.createProposal({
+    projectId: oldPublication.projectId,
+    sessionId: oldPublication.sessionId,
+    turnId: oldPublication.turnId,
+    sourceMergeId: oldPublication.sourceMergeId,
+    remoteName: oldPublication.remote.name,
+    baseRef: oldPublication.baseRef,
+    accountRef: oldPublication.account.accountRef,
+    title: siblingTitle,
+    body: siblingBody,
+    expectedRevision: publicationPage.nextRevision,
+    textRevision: siblingTextPin,
+    sourceMerge: {
+      projectId: oldPublication.projectId,
+      bindingId: oldPublication.bindingId,
+      sessionId: oldPublication.sessionId,
+      turnId: oldPublication.turnId,
+      mergeProposalId: oldPublication.sourceMergeId,
+      mergeRevision: oldPublication.sourceMergeRevision,
+      mergeFingerprint: oldPublication.sourceMergeFingerprint,
+      mergeOperationId: oldPublication.sourceMergeOperationId,
+      integrationOwnerId: oldPublication.integrationOwnerId,
+      resultCommit: oldPublication.resultCommit,
+    },
+    remote: oldPublication.remote,
+    account: oldPublication.account,
+    base: { ref: oldPublication.baseRef, oid: oldPublication.baseOid },
+    diff: oldPublication.diff,
+  });
+
+  assert.equal(newerPublication.revision, oldPublication.revision + 1, 'The publication sibling must advance the actual same-turn store revision');
+  assert.equal(newerPublication.sourceMergeId, oldPublication.sourceMergeId, 'The publication sibling must retain the exact successful merge parent');
+  assert.equal(newerPublication.resultCommit, oldPublication.resultCommit, 'The publication sibling must retain the exact persisted merge result');
+  assert.deepEqual(newerPublication.textRevision, siblingTextPin, 'The newer publication sibling must pin its exact durable PR-text revision');
+  assert.equal(database.agentSessionPrTexts.getRevision(publicationTextScope, siblingTextPin.revision)?.content.contentHash, siblingTextPin.contentHash,
+    'The newer publication sibling must reference the durable generated text revision and content hash');
+  assert.equal(newerPublication.approval, null, 'The historical fixture must not synthesize approval for the newer publication');
+  assert.deepEqual(oldPublication.textRevision, fixture.reviewedPublication.prText && {
+    scope: fixture.reviewedPublication.prText.scope,
+    revision: fixture.reviewedPublication.prText.revision,
+    contentHash: fixture.reviewedPublication.prText.contentHash,
+  }, 'Adding a newer sibling must preserve the original publication text pin');
+
+  const notifications = listAllProjectNotifications(database, fixture.projectId);
+  const notificationFor = (kind, id) => notifications.find(item => item.target.kind === kind && item.target.id === id);
+  const targets = {
+    integration: { kind: 'integrationProposal', id: oldCommit.id, turnId: oldCommit.turnId },
+    merge: { kind: 'mergeProposal', id: oldMerge.id, turnId: oldMerge.turnId },
+    publication: { kind: 'publicationProposal', id: oldPublication.id, turnId: oldPublication.turnId },
+  };
+  const notificationIds = {
+    integration: notificationFor(targets.integration.kind, targets.integration.id)?.id,
+    merge: notificationFor(targets.merge.kind, targets.merge.id)?.id,
+    publication: notificationFor(targets.publication.kind, targets.publication.id)?.id,
+  };
+
+  for (const kind of Object.keys(targets)) {
+    assert.ok(notificationIds[kind], `The historical ${kind} target must have its original durable notification`);
+    const notification = notifications.find(item => item.id === notificationIds[kind]);
+
+    const targetSessionId = kind === 'integration' ? oldCommit.sessionId : kind === 'merge' ? oldMerge.sessionId : oldPublication.sessionId;
+
+    assert.equal(notification.sessionId, targetSessionId, `The historical ${kind} alert must retain its target session`);
+    assert.equal(notification.target.turnId, targets[kind].turnId, `The historical ${kind} alert must retain its exact parent turn`);
+    assert.equal(notification.readAt, null, `The historical ${kind} target alert must start unread`);
+  }
+
+  return {
+    fixtureOnly: true,
+    source: 'Persisted proposal and notification stores; no raw SQLite rows, provider, or external writes.',
+    targets,
+    notificationIds,
+    targetFingerprints: { integration: oldCommit.fingerprint, merge: oldMerge.fingerprint, publication: oldPublication.fingerprint },
+    targetEvidenceFingerprints: { integration: oldCommit.evidenceFingerprint, merge: mergeCommit.evidenceFingerprint, publication: publicationCommit.evidenceFingerprint },
+    evidenceVersions: {
+      integration: oldCommit.evidenceVersion,
+      merge: mergeCommit.evidenceVersion,
+      publication: publicationCommit.evidenceVersion,
+    },
+    parentIds: { mergeCommit: oldMerge.commitProposalId, publicationMerge: publicationMerge.id, publicationCommit: publicationMerge.commitProposalId },
+    parentRevisions: { mergeCommit: mergeCommit.revision, publicationMerge: publicationMerge.revision, publicationCommit: publicationCommit.revision },
+    parentFingerprints: { mergeCommit: mergeCommit.fingerprint, publicationMerge: publicationMerge.fingerprint, publicationCommit: publicationCommit.fingerprint },
+    destinations: {
+      integration: { sessionId: oldCommit.sessionId, sessionName: fixture.reviewedCommit.name, turnId: oldCommit.turnId },
+      merge: { sessionId: oldMerge.sessionId, sessionName: fixture.reviewedConflictCommit.name, turnId: oldMerge.turnId },
+      publication: { sessionId: oldPublication.sessionId, sessionName: fixture.reviewedCommit.name, turnId: oldPublication.turnId },
+    },
+    newerSiblingIds: { integration: newerCommit.id, merge: newerMerge.id, publication: newerPublication.id },
+    newerSiblingRevisions: { integration: newerCommit.revision, merge: newerMerge.revision, publication: newerPublication.revision },
+    publicationTextPins: { original: oldPublication.textRevision, sibling: newerPublication.textRevision },
+  };
+}
+
 async function verifyPublicationReview(page, fixture, tag, screenshots, viewports) {
   const changes = await openReviewedCommitChanges(page, fixture);
   const prText = changes.getByRole('region', { name: 'GitHub PR 제목과 설명', exact: true });
@@ -4738,6 +4966,88 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
   await capturePage(page, narrowShot);
   screenshots.push(narrowShot);
   viewports.push({ theme: tag, state: 'ai-session-mailbox-narrow-760', width: 760, height: 820, screenshot: narrowShot, layout: narrowLayout });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440 && window.innerHeight === 900);
+  const historicalAlerts = fixture.historicalProposalAlerts;
+  const historicalReadIds = [];
+
+  for (const kind of ['integration', 'merge', 'publication']) {
+    const unreadBeforeOpen = fixture.mailbox.unreadCount - 2 - historicalReadIds.length;
+    const triggerForHistory = notifications.getByRole('button', { name: `알림, 전체 읽지 않은 ${unreadBeforeOpen}개`, exact: true });
+
+    await triggerForHistory.waitFor({ state: 'visible' });
+    await triggerForHistory.click();
+    await popover.waitFor({ state: 'visible' });
+    await firstNotificationPage.click();
+    await page.waitForFunction(count => document.querySelectorAll('.ai-session-notifications__item').length === count, firstNotificationPageCount);
+
+    const historicalNotificationId = historicalAlerts.notificationIds[kind];
+    const historicalNotification = notificationList.locator(`[data-notification-id="${historicalNotificationId}"]`);
+    let loadedCount = firstNotificationPageCount;
+
+    while (!(await historicalNotification.count())) {
+      assert.ok(loadedCount < fixture.mailbox.notificationCount, `The exact historical ${kind} alert must exist in persisted notification history`);
+      assert.equal(await nextNotificationPage.isEnabled(), true, `The ${kind} alert must remain reachable through bounded notification paging`);
+      const expectedLoadedCount = Math.min(fixture.mailbox.notificationCount, loadedCount + 50);
+      const previousFirstId = await notificationList.locator('.ai-session-notifications__item').first().getAttribute('data-notification-id');
+
+      await nextNotificationPage.click();
+      await page.waitForFunction(({ notificationId, previousFirst, expectedCount }) => {
+        const items = [...document.querySelectorAll('.ai-session-notifications__item')];
+
+        return items.some(item => item.dataset.notificationId === notificationId)
+          || (items.length >= Math.min(200, expectedCount) && (items.length < 200 || items[0]?.dataset.notificationId !== previousFirst));
+      }, { notificationId: historicalNotificationId, previousFirst: previousFirstId, expectedCount: expectedLoadedCount });
+      loadedCount = expectedLoadedCount;
+    }
+
+    const target = historicalAlerts.targets[kind];
+    const destination = historicalAlerts.destinations[kind];
+
+    assert.equal(await historicalNotification.getAttribute('data-notification-id'), historicalNotificationId, `The ${kind} alert control must carry its exact persisted notification ID`);
+    assert.ok((await historicalNotification.innerText()).includes(destination.sessionName), `The ${kind} alert must name its exact destination session`);
+    await historicalNotification.click();
+    await workspace.getByRole('heading', { name: destination.sessionName, exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector('#ai-session-tab-changes')?.getAttribute('aria-selected') === 'true');
+    await page.waitForFunction(() => document.activeElement?.id === 'ai-session-tab-changes');
+    await page.waitForFunction(turnId => document.querySelector('.ai-session__changes-panel select[aria-label="변경을 확인할 실행 기록"]')?.value === turnId, destination.turnId);
+
+    const changes = workspace.locator('.ai-session__changes-panel .ai-session-changes');
+    const exactSelector = kind === 'integration' ? `[data-focus-key="proposal:${target.id}"][aria-pressed="true"]`
+      : kind === 'merge' ? `[data-focus-key="merge-proposal:${target.id}"][aria-pressed="true"]`
+        : `[data-focus-key="publication-proposal:${target.id}"][aria-pressed="true"]`;
+    const exactProposal = changes.locator(exactSelector);
+
+    await exactProposal.waitFor({ state: 'visible' });
+    const evidenceVersion = historicalAlerts.evidenceVersions[kind];
+    const exactEvidence = changes.locator(`[data-focus-key="version:${evidenceVersion}"][aria-pressed="true"]`);
+
+    await exactEvidence.waitFor({ state: 'visible' });
+
+    if (kind === 'merge') {
+      await changes.locator(`[data-focus-key="proposal:${historicalAlerts.parentIds.mergeCommit}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
+    }
+    if (kind === 'publication') {
+      await changes.locator(`[data-focus-key="merge-proposal:${historicalAlerts.parentIds.publicationMerge}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
+      await changes.locator(`[data-focus-key="proposal:${historicalAlerts.parentIds.publicationCommit}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
+    }
+
+    historicalReadIds.push(historicalNotificationId);
+    const unreadAfterOpen = fixture.mailbox.unreadCount - 2 - historicalReadIds.length;
+
+    await notifications.getByRole('button', { name: `알림, 전체 읽지 않은 ${unreadAfterOpen}개`, exact: true }).waitFor({ state: 'visible' });
+    const screenshot = path.join(output, `ai-session-mailbox-${tag}-historical-${kind}-exact-target.png`);
+
+    await capturePage(page, screenshot);
+    screenshots.push(screenshot);
+    viewports.push({ theme: tag, state: `historical-${kind}-proposal-exact-target`, width: 1440, height: 900, screenshot,
+      destination: { ...destination, proposalId: target.id, evidenceVersion, parentIds: historicalAlerts.parentIds,
+        selectedProposal: await exactProposal.getAttribute('data-focus-key'), selectedEvidence: await exactEvidence.getAttribute('data-focus-key') },
+      fixtureOnly: true, providerExecuted: false, externalWritesExecuted: false });
+  }
+
+  fixture.mailbox.historicalProposalNotificationIds = historicalReadIds;
 }
 
 async function verifyAiSessionWorkflow(page, fixture, tag, screenshots, viewports) {
