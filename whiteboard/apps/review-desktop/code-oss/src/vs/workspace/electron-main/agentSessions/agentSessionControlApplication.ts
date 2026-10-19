@@ -5,7 +5,7 @@
 
 import { createHash } from 'node:crypto';
 import type { AgentSessionControlRequestDTO } from '../../common/workspaceAgentSessionControlProtocol.js';
-import type { AgentSessionDTO, AgentSessionPermissionPolicy, AgentSessionTurnDTO, AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO, AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import type { AgentSessionLaunchPreview, AgentSessionService } from './agentSessionService.js';
 import type { AgentSessionControlRequestStore } from './agentSessionControlRequestStore.js';

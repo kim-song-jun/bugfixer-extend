@@ -382,7 +382,7 @@ export class AgentSessionControlRequestStore {
 		if (row.request_fingerprint !== this.fingerprint(body)) { throw new Error('The idempotency key was already used for different request content.'); }
 	}
 
-	private updateState(row: RequestRow, state: AgentSessionControlRequestState, fields: { readonly resultTurnId?: string; readonly targetTurnState?: string; readonly error: string | null }, eventType = state): AgentSessionControlRequestDTO {
+	private updateState(row: RequestRow, state: AgentSessionControlRequestState, fields: { readonly resultTurnId?: string; readonly targetTurnState?: string; readonly error: string | null }, eventType: string = state): AgentSessionControlRequestDTO {
 		this.db.prepare(`UPDATE agent_session_control_requests SET state = ?, revision = revision + 1, result_turn_id = COALESCE(?, result_turn_id), target_turn_state = ?, error = ?, updated_at = ? WHERE id = ? AND revision = ?`).run(
 			state, fields.resultTurnId ?? null, fields.targetTurnState ?? null, fields.error, this.now(), row.id, row.revision,
 		);
