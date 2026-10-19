@@ -71,7 +71,7 @@ test('projects, bindings, tasks, review links and project view persist across da
 	});
 });
 
-function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
+function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): void {
 	const directory = mkdtempSync(join(tmpdir(), `bugfixer-workspace-db-v${version}-migration-`));
 	const sourcePath = join(directory, 'source.db');
 	const path = join(directory, `frozen-v${version}.db`);
@@ -80,16 +80,16 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 	let database = WorkspaceDatabase.open(sourcePath);
 	try {
 		const project = database.createProject('Migration preservation');
-		const binding = database.createFolderBinding({ projectId: project.id, path: folder, ...(version === 29 ? { vcsKind: 'git' as const, vcsRoot: folder } : {}) });
+		const binding = database.createFolderBinding({ projectId: project.id, path: folder, ...(version >= 29 ? { vcsKind: 'git' as const, vcsRoot: folder } : {}) });
 		const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Retain task' });
-		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: task.id, name: 'Retain turn', provider: 'codex', model: 'gpt-5-codex', workspaceMode: version === 29 ? 'gitWorktree' : 'sharedFolder' });
+		const session = database.agentSessions.createSession({ projectId: project.id, bindingId: binding.id, taskId: task.id, name: 'Retain turn', provider: 'codex', model: 'gpt-5-codex', workspaceMode: version >= 29 ? 'gitWorktree' : 'sharedFolder' });
 		const canonicalFolder = realpathSync(folder);
 		const identity = statSync(canonicalFolder, { bigint: true });
 		const snapshot: AgentSessionTurnSnapshot = {
 			schemaVersion: 1, projectId: project.id, sessionId: session.id, sessionRevision: session.revision, bindingId: binding.id, taskId: task.id,
 			provider: session.provider, model: session.model, profileRef: null, cwd: canonicalFolder,
 			folderIdentity: { canonicalPath: canonicalFolder, dev: identity.dev.toString(), ino: identity.ino.toString() },
-			managedWorktreeOwnerId: version === 29 ? session.id : null, permissionPolicy: { mode: version === 29 ? 'mutating' : 'read-only', approval: 'on-request' }, convention: null, references: [],
+			managedWorktreeOwnerId: version >= 29 ? session.id : null, permissionPolicy: { mode: version >= 29 ? 'mutating' : 'read-only', approval: 'on-request' }, convention: null, references: [],
 		};
 		let turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
 		const scope = { projectId: project.id, sessionId: session.id, turnId: turn.id };
@@ -99,13 +99,14 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 				fileBytes: Buffer.byteLength(content, 'utf8'), retainedTextBytes: Buffer.byteLength(content, 'utf8'), contentReadCount: 1,
 				entries: [{ path: 'migration.txt', kind: 'file', size: Buffer.byteLength(content, 'utf8'), sha256, content }] };
 		};
-		database.agentSessionContents.recordBaseline({ scope, snapshot: retainedSnapshot('before migration', '2026-10-19T00:00:00.000Z'), revision: null });
+		database.agentSessionContents.recordBaseline({ scope, snapshot: retainedSnapshot('before migration', '2026-10-19T00:00:00.000Z'), revision: version >= 29 ? 'a'.repeat(40) : null });
 		database.agentSessionTranscripts.appendSanitizedTerminalChunk({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 1, sanitizedTextFromTrustedPtyHost: 'preserved output' });
 		const identified = database.agentSessionTurns.recordProviderConversationId(project.id, session.id, turn.id, turn.revision, '00000000-0000-4000-8000-000000000031');
 		let currentSession = database.agentSessions.getSession(project.id, session.id)!;
 		const running = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, identified.revision, currentSession.revision, { state: 'running' });
 		currentSession = running.session;
-		database.agentSessionContents.recordAfter({ scope, snapshot: retainedSnapshot('after migration', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: null, cleanupVerified: true });
+		database.agentSessionContents.recordAfter({ scope, snapshot: retainedSnapshot('after migration', '2026-10-19T00:01:00.000Z'), expectedLatestVersion: 0, revision: version >= 29 ? 'a'.repeat(40) : null, cleanupVerified: true });
+		currentSession = database.agentSessions.getSession(project.id, session.id)!;
 		turn = database.agentSessionTurns.transitionTurn(project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true }).turn;
 		const changeEvidence = database.agentSessionChangeEvidence.getLatest(project.id, session.id, turn.id)!;
 		const explanation = database.agentSessionReviews.recordHumanExplanation({
@@ -114,7 +115,9 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 		});
 		let mergeSourceCommitProposalId: string | undefined;
 		let mergeSourceCommitProposalFingerprint: string | undefined;
-		if (version === 29) {
+		let mergeProposalId: string | undefined;
+		let mergeProposalFingerprint: string | undefined;
+		if (version >= 29) {
 			const sourceProposal = database.agentSessionIntegrations.createProposal({
 				...scope, evidenceVersion: changeEvidence.version, evidenceFingerprint: changeEvidence.fingerprint,
 				sourceHead: 'a'.repeat(40), proposedGitTreeHash: 'b'.repeat(40), diffFingerprint: 'c'.repeat(64), commitMessage: 'Migration retained commit',
@@ -132,6 +135,36 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 			mergeSourceCommitProposalId = sourceProposal.id;
 			mergeSourceCommitProposalFingerprint = sourceProposal.fingerprint;
 		}
+		if (version === 30) {
+			const integrationOwnerId = database.agentSessionMerges.getOrCreateIntegrationOwner(project.id, binding.id);
+			const mergeText = 'diff --git a/migration.txt b/migration.txt\n+after migration\n';
+			const merge = database.agentSessionMerges.createProposal({ ...scope, commitProposalId: mergeSourceCommitProposalId!, commitProposalRevision: 1,
+				commitProposalFingerprint: mergeSourceCommitProposalFingerprint!, integrationOwnerId, sourceHead: 'd'.repeat(40), targetHead: 'e'.repeat(40), mergeBase: 'a'.repeat(40),
+				diffFingerprint: createHash('sha256').update(mergeText).digest('hex'), diffText: mergeText, commitMessage: `Merge reviewed session ${session.id}`,
+				author: { name: 'Merge Author', email: 'author@example.test', date: '1792416000 +0900' },
+				committer: { name: 'Merge Committer', email: 'committer@example.test', date: '1792416060 +0900' }, changedPaths: ['migration.txt'], expectedLatestRevision: 0 });
+			database.agentSessionMerges.recordTrustedHumanApproval(merge.id, merge.revision, merge.fingerprint);
+			const mergeOperationId = '00000000-0000-4000-8000-000000000030';
+			const mergeReceipt = { operationId: mergeOperationId, proposalId: merge.id, proposalFingerprint: merge.fingerprint, integrationOwnerId,
+				sessionOwnerId: session.id, sourceHead: merge.sourceHead, targetHead: merge.targetHead, mergeBase: merge.mergeBase, diffFingerprint: merge.diffFingerprint,
+				commitMessage: merge.commitMessage, author: merge.author, committer: merge.committer, resultingHead: null, changedPaths: [], conflictedPaths: [], failureCode: null };
+			const applyingMerge = database.agentSessionMerges.recordOutcome({ proposalId: merge.id, expectedOutcomeRevision: 0, state: 'applying', receipt: mergeReceipt });
+			const generationId = '00000000-0000-4000-8000-000000000032';
+			const generationPath = `integration/generations/${generationId}`;
+			const registrationId = '00000000-0000-4000-8000-000000000033';
+			const artifacts = [
+				{ phase: 'intent' as const, generationId, generationPath, registrationId, priorGeneration: null },
+				{ phase: 'candidatePrepared' as const, candidateTreeOid: 'b'.repeat(40), candidateCommitOid: 'f'.repeat(40), outcome: 'clean' as const, conflicts: [] },
+				{ phase: 'generationRegistered' as const, generationPath, registrationId },
+				{ phase: 'generationMaterialized' as const, head: 'f'.repeat(40), indexDigest: 'c'.repeat(64), treeDigest: 'd'.repeat(64), conflictDigest: null },
+				{ phase: 'published' as const, targetRef: `refs/heads/bugfixer/integration/${integrationOwnerId}`, resultingHead: 'f'.repeat(40), currentGenerationId: generationId, priorGenerationId: null },
+			];
+			artifacts.forEach((event, revision) => database.agentSessionMerges.recordArtifact(mergeOperationId, revision, event));
+			database.agentSessionMerges.recordOutcome({ proposalId: merge.id, expectedOutcomeRevision: 1, state: 'merged',
+				receipt: { ...mergeReceipt, resultingHead: 'f'.repeat(40), changedPaths: ['migration.txt'] }, retryOfOutcomeId: applyingMerge.id });
+			mergeProposalId = merge.id;
+			mergeProposalFingerprint = merge.fingerprint;
+		}
 		const plan: AgentWorkflowPlanInput = {
 			projectId: project.id, bindingId: binding.id, taskId: task.id, maxConcurrentNodes: 1, maxTotalTurns: 1, maxDurationMs: 60_000,
 			nodes: [{ nodeId: 'implement', sessionId: session.id, role: 'implementer', provider: 'codex', model: 'gpt-5-codex', taskId: task.id, bindingId: binding.id, referenceIds: [], permissionPolicy: { mode: 'read-only', approval: 'on-request' }, dependsOn: [] }],
@@ -147,16 +180,18 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 		const frozenV24 = readFileSync(new URL('./agentSessions/fixtures/schema-v24.sql', import.meta.url), 'utf8');
 		const frozenV25Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v25.sql', import.meta.url), 'utf8');
 		const frozenV26Delta = readFileSync(new URL('./agentSessions/fixtures/schema-v26.sql', import.meta.url), 'utf8');
-		const frozenV29Delta = version === 29 ? readFileSync(new URL('./agentSessions/fixtures/schema-v29.sql', import.meta.url), 'utf8') : '';
+		const frozenV29Delta = version >= 29 ? readFileSync(new URL('./agentSessions/fixtures/schema-v29.sql', import.meta.url), 'utf8') : '';
+		const frozenV30Delta = version === 30 ? readFileSync(new URL('./agentSessions/fixtures/schema-v30.sql', import.meta.url), 'utf8') : '';
 		const relevantTables = ['projects', 'folder_bindings', 'tasks', 'agent_sessions', 'agent_session_turns', 'agent_session_change_evidence',
 			...(version >= 27 ? ['agent_session_content_baselines', 'agent_session_content_finals'] : []),
 			...(version >= 28 ? ['agent_session_explanations'] : []),
 			...(version >= 29 ? ['agent_session_integration_proposals', 'agent_session_integration_approvals', 'agent_session_integration_outcomes'] : []),
+			...(version >= 30 ? ['agent_session_merge_workspaces', 'agent_session_merge_proposals', 'agent_session_merge_approvals', 'agent_session_merge_outcomes', 'agent_session_merge_artifacts'] : []),
 			'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
 		const frozenDatabase = new DatabaseSync(path);
 		try {
 			frozenDatabase.exec('PRAGMA foreign_keys = ON;');
-			frozenDatabase.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}\n${version >= 27 ? readFileSync(new URL('./agentSessions/fixtures/schema-v27.sql', import.meta.url), 'utf8') : ''}\n${version >= 28 ? readFileSync(new URL('./agentSessions/fixtures/schema-v28.sql', import.meta.url), 'utf8') : ''}\n${frozenV29Delta}`);
+			frozenDatabase.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}\n${version >= 27 ? readFileSync(new URL('./agentSessions/fixtures/schema-v27.sql', import.meta.url), 'utf8') : ''}\n${version >= 28 ? readFileSync(new URL('./agentSessions/fixtures/schema-v28.sql', import.meta.url), 'utf8') : ''}\n${frozenV29Delta}\n${frozenV30Delta}`);
 			const turnOwnerTrigger = frozenDatabase.prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'agent_session_turn_owner_insert'`).get()?.sql;
 			if (typeof turnOwnerTrigger !== 'string') { throw new Error(`Frozen v${version} fixture omitted the session turn ownership trigger.`); }
 			// The source rows have already passed the public store's snapshot guard. Temporarily remove only its insert-time guard while copying the later session revision, then restore its exact frozen SQL before migration.
@@ -211,9 +246,11 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
 		try {
-			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 30);
+			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 31);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_merge_artifacts'").get());
-			assert.equal(Number(migratedSchema.prepare('SELECT count(*) AS count FROM agent_session_merge_artifacts').get()?.count), 0);
+			assert.equal(Number(migratedSchema.prepare('SELECT count(*) AS count FROM agent_session_merge_artifacts').get()?.count), version === 30 ? 5 : 0);
+			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_publication_proposals'").get());
+			assert.equal(Number(migratedSchema.prepare('SELECT count(*) AS count FROM agent_session_publication_proposals').get()?.count), 0);
 		}
 		finally { migratedSchema.close(); }
 		if (mergeSourceCommitProposalId && mergeSourceCommitProposalFingerprint) {
@@ -222,16 +259,24 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29): void {
 			assert.equal(retainedCommitProposal?.state, 'succeeded');
 			assert.equal(retainedCommitProposal?.outcomes.at(-1)?.receipt.resultingHead, 'd'.repeat(40));
 		}
+		if (mergeProposalId && mergeProposalFingerprint) {
+			const retainedMergeProposal = database.agentSessionMerges.getProposal(mergeProposalId);
+			assert.equal(retainedMergeProposal?.fingerprint, mergeProposalFingerprint);
+			assert.equal(retainedMergeProposal?.state, 'merged');
+			assert.equal(retainedMergeProposal?.outcomes.at(-1)?.receipt.resultingHead, 'f'.repeat(40));
+			assert.equal(retainedMergeProposal?.artifacts.at(-1)?.event.phase, 'published');
+		}
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
 	}
 }
 
-test('frozen v26 database upgrades to v30 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
-test('frozen v27 database upgrades to v30 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
-test('frozen v28 database upgrades to v30 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
-test('frozen v29 database upgrades to v30 without changing durable commit proposal, approval, or outcome rows', () => assertFrozenChangeEvidenceMigration(29));
+test('frozen v26 database upgrades to v31 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
+test('frozen v27 database upgrades to v31 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
+test('frozen v28 database upgrades to v31 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
+test('frozen v29 database upgrades to v31 without changing durable commit proposal, approval, or outcome rows', () => assertFrozenChangeEvidenceMigration(29));
+test('frozen v30 database upgrades to v31 without changing successful merge rows, receipts, or artifacts', () => assertFrozenChangeEvidenceMigration(30));
 
 test('agent-session content baselines and final bytes remain turn-scoped and durable across reopen', () => {
 	const directory = mkdtempSync(join(tmpdir(), 'bugfixer-agent-session-content-'));

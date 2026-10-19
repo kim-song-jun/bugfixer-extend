@@ -21,6 +21,8 @@ import { AgentSessionContentStore } from './agentSessions/agentSessionContentSto
 import { AgentSessionReviewStore } from './agentSessions/agentSessionReviewStore.js';
 import { AgentSessionIntegrationStore } from './agentSessions/agentSessionIntegrationStore.js';
 import { AgentSessionMergeStore } from './agentSessions/agentSessionMergeStore.js';
+import { AGENT_SESSION_PUBLICATION_MIGRATION_SQL } from './agentSessions/agentSessionPublicationMigration.js';
+import { AgentSessionPublicationStore } from './agentSessions/agentSessionPublicationStore.js';
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -308,7 +310,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 30;
+const schemaVersion = 31;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -327,6 +329,7 @@ export class WorkspaceDatabase {
 	readonly agentSessionReviews: AgentSessionReviewStore;
 	readonly agentSessionIntegrations: AgentSessionIntegrationStore;
 	readonly agentSessionMerges: AgentSessionMergeStore;
+	readonly agentSessionPublications: AgentSessionPublicationStore;
 
 	private constructor(private readonly db: DatabaseSync) {
 		this.knowledge = new WorkspaceKnowledgeStore(db, () => this.assertOpen());
@@ -351,6 +354,7 @@ export class WorkspaceDatabase {
 			(projectId, bindingId) => this.listFolderBindings(projectId).find(binding => binding.id === bindingId),
 			(projectId, sessionId, turnId) => this.agentSessionTurns.getTurn(projectId, sessionId, turnId),
 			proposalId => this.agentSessionIntegrations.getProposal(proposalId));
+		this.agentSessionPublications = new AgentSessionPublicationStore(db, proposalId => this.agentSessionMerges.getProposal(proposalId));
 	}
 
 	static open(path: string): WorkspaceDatabase {
@@ -407,6 +411,7 @@ export class WorkspaceDatabase {
 				if (version < 28) { WorkspaceDatabase.migrateV28(db); }
 				if (version < 29) { WorkspaceDatabase.migrateV29(db); }
 				if (version < 30) { WorkspaceDatabase.migrateV30(db); }
+				if (version < 31) { WorkspaceDatabase.migrateV31(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -1423,6 +1428,10 @@ export class WorkspaceDatabase {
 			BEGIN SELECT RAISE(ABORT, 'agent session merge outcomes are immutable'); END;
 			PRAGMA user_version = 30;
 		`);
+	}
+
+	private static migrateV31(db: DatabaseSync): void {
+		db.exec(AGENT_SESSION_PUBLICATION_MIGRATION_SQL);
 	}
 
 	private static migrateV4(db: DatabaseSync): void {
