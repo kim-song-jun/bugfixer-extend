@@ -199,7 +199,7 @@ export class AgentSessionControlRequestStore {
 			if (Number(updated.changes) !== 1) { throw new Error('The start request changed before it could be claimed.'); }
 			const claimed = this.requireRequestById(requestId);
 			this.recordEvent(claimed, 'startApproved', { snapshotFingerprint, idempotencyKey: key });
-			return { request: claimed, claimed: true };
+			return { request: this.fromRow(claimed), claimed: true };
 		});
 	}
 
@@ -320,7 +320,7 @@ export class AgentSessionControlRequestStore {
 			this.db.prepare(`UPDATE agent_session_control_requests SET state = ?, revision = revision + 1, decision_key = ?, decision_fingerprint = ?, updated_at = ? WHERE id = ? AND revision = ? AND state = 'pendingReview'`).run(state, key, fingerprint, this.now(), requestId, expectedRevision);
 			const updated = this.requireRequestById(requestId);
 			this.recordEvent(updated, state, { idempotencyKey: key });
-			return updated;
+			return this.fromRow(updated);
 		});
 	}
 
@@ -388,7 +388,7 @@ export class AgentSessionControlRequestStore {
 		);
 		const updated = this.requireRequestById(String(row.id));
 		this.recordEvent(updated, eventType, { state, targetTurnState: fields.targetTurnState ?? null, error: fields.error });
-		return updated;
+		return this.fromRow(updated);
 	}
 
 	private recordEvent(row: RequestRow, type: string, payload: unknown): void {

@@ -192,7 +192,9 @@ test('MCP start proposals never launch and self-stop receipts survive capability
 	const fixture = createFixture(directory);
 	const caller = createSession(fixture, 'codex');
 	const target = createSession(fixture, 'claude');
-	const callerTurn = createTurn(fixture, caller, READ_ONLY);
+	const callerStarting = createTurn(fixture, caller, READ_ONLY);
+	const callerSession = fixture.database.agentSessions.getSession(fixture.project.id, caller.id)!;
+	const callerTurn = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, caller.id, callerStarting.id, callerStarting.revision, callerSession.revision, { state: 'running' }).turn;
 	const otherTurnSession = createSession(fixture, 'claude');
 	const otherTurn = createTurn(fixture, otherTurnSession, READ_ONLY);
 	const secret = 'fixture-control-reference-secret-314159265358979';

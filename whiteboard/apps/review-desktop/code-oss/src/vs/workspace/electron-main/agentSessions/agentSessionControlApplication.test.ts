@@ -208,8 +208,7 @@ test('start approval rejects forged or reused tickets and a target revision chan
 test('stop returns persisted receipt before runtime work and records actual cleanup only after deferred stop', async () => {
 	const f = fixture();
 	try {
-		const turnId = randomUUID();
-		f.db.prepare('INSERT INTO agent_session_turns(id, project_id, session_id, state, snapshot_sha256) VALUES (?, ?, ?, ?, ?)').run(turnId, PROJECT, f.callerSessionId, 'running', 'b'.repeat(64));
+		const turnId = f.callerTurnId;
 		const stop = f.ledger.createStopRequest({
 			projectId: PROJECT, callerSessionId: f.callerSessionId, callerTurnId: turnId, targetSessionId: f.callerSessionId,
 			targetTurnId: turnId, idempotencyKey: 'stop-own-turn',
@@ -233,8 +232,7 @@ test('stop returns persisted receipt before runtime work and records actual clea
 test('a failed stop-result transaction is retained and surfaced after its queued job settles', async () => {
 	const f = fixture();
 	try {
-		const turnId = randomUUID();
-		f.db.prepare('INSERT INTO agent_session_turns(id, project_id, session_id, state, snapshot_sha256) VALUES (?, ?, ?, ?, ?)').run(turnId, PROJECT, f.callerSessionId, 'running', 'c'.repeat(64));
+		const turnId = f.callerTurnId;
 		const request = f.ledger.createStopRequest({
 			projectId: PROJECT, callerSessionId: f.callerSessionId, callerTurnId: turnId, targetSessionId: f.callerSessionId,
 			targetTurnId: turnId, idempotencyKey: 'stop-ledger-failure',

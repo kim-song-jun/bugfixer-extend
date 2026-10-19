@@ -2606,10 +2606,14 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
 }
 
 async function seedSessionControlRequest(database, fixture, projectFolder, targetSession) {
+  const callerFolder = path.join(path.dirname(projectFolder), 'control-caller-folder');
+
+  await mkdir(callerFolder, { recursive: true });
+
+  const callerBinding = database.createFolderBinding({ projectId: fixture.projectId, path: callerFolder });
   const caller = database.agentSessions.createSession({
     projectId: fixture.projectId,
-    bindingId: fixture.bindingId,
-    taskId: fixture.taskId,
+    bindingId: callerBinding.id,
     name: `CI 요청 호출자 ${targetSession.name}`,
     provider: 'codex',
     model: 'ci-control-fixture-not-executed',
@@ -2617,7 +2621,7 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
     workspaceMode: 'sharedFolder',
   });
 
-  const folder = await statFolder(projectFolder);
+  const folder = await statFolder(callerFolder);
   const current = database.agentSessions.getSession(fixture.projectId, caller.id);
 
   const snapshot = {
@@ -2625,8 +2629,8 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
     projectId: fixture.projectId,
     sessionId: caller.id,
     sessionRevision: current.revision,
-    bindingId: fixture.bindingId,
-    taskId: fixture.taskId,
+    bindingId: caller.bindingId,
+    taskId: caller.taskId,
     provider: 'codex',
     model: caller.model,
     profileRef: caller.profileRef,

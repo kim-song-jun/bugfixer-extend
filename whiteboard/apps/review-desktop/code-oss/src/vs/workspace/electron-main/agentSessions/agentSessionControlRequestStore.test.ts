@@ -81,6 +81,7 @@ test('start request is durable, idempotent, project scoped, and approval claims 
 		assert.throws(() => f.store.createStartRequest({ ...f.startInput, expectedSessionRevision: 3, idempotencyKey: 'stale-revision' }), /changed since/);
 		const approval = f.store.beginStart(request.id, request.revision, 'b'.repeat(64), 'approval-1');
 		assert.equal(approval.claimed, true);
+		assert.deepEqual(approval.request, f.store.get(PROJECT, request.id), 'The claimed start receipt must be the complete current DTO');
 		assert.equal(f.store.beginStart(request.id, request.revision, 'b'.repeat(64), 'approval-1').claimed, false);
 		assert.throws(() => f.store.beginStart(request.id, request.revision + 1, 'b'.repeat(64), 'approval-1'), /different approval content/);
 		assert.throws(() => f.store.beginStart(request.id, request.revision, 'c'.repeat(64), 'approval-2'), /different approval content/);
@@ -89,6 +90,7 @@ test('start request is durable, idempotent, project scoped, and approval claims 
 		const started = f.store.markStarted(request.id, turnId);
 		assert.equal(started.state, 'started');
 		assert.equal(started.resultTurnId, turnId);
+		assert.deepEqual(started, f.store.get(PROJECT, request.id), 'The start receipt must be the complete current DTO, including revision and timestamps');
 		assert.deepEqual(f.store.listEvents(PROJECT, request.id).map(event => event.type), ['startRequested', 'startApproved', 'started']);
 	} finally { f.db.close(); }
 });
@@ -102,11 +104,14 @@ test('start approval rejects an active target and pending decisions are revision
 		assert.throws(() => f.store.beginStart(request.id, request.revision, 'b'.repeat(64), 'approval-1'), /changed or became active/);
 		const rejected = f.store.rejectPending(request.id, request.revision, 'decision-1');
 		assert.equal(rejected.state, 'rejected');
+		assert.deepEqual(rejected, f.store.get(PROJECT, request.id), 'The reject receipt must be the complete current DTO');
 		assert.equal(f.store.rejectPending(request.id, request.revision, 'decision-1').id, rejected.id);
 		assert.throws(() => f.store.cancelPending(request.id, request.revision, 'decision-1'), /pending start request/);
 		f.db.prepare("UPDATE agent_session_turns SET state = 'exited' WHERE session_id = ? AND state = 'running'").run(f.targetSessionId);
 		const cancellable = f.store.createStartRequest({ ...f.startInput, idempotencyKey: 'request-cancel' });
-		assert.equal(f.store.cancelPending(cancellable.id, cancellable.revision, 'decision-cancel').state, 'cancelled');
+		const cancelled = f.store.cancelPending(cancellable.id, cancellable.revision, 'decision-cancel');
+		assert.equal(cancelled.state, 'cancelled');
+		assert.deepEqual(cancelled, f.store.get(PROJECT, cancellable.id), 'The cancel receipt must be the complete current DTO');
 	} finally { f.db.close(); }
 });
 
@@ -128,10 +133,12 @@ test('stop receipt distinguishes acceptance from verified process cleanup and re
 		const unverified = f.store.markStopResult(request.id);
 		assert.equal(unverified.state, 'stopUnverified');
 		assert.equal(unverified.targetTurnState, 'exited');
+		assert.deepEqual(unverified, f.store.get(PROJECT, request.id), 'The unverified stop receipt must reflect the durable current DTO');
 		f.db.prepare('UPDATE agent_session_turns SET cleanup_verified = 1 WHERE id = ?').run(targetTurnId);
 		const completed = f.store.markStopResult(request.id);
 		assert.equal(completed.state, 'stopCompleted');
 		assert.equal(completed.targetTurnState, 'exited');
+		assert.deepEqual(completed, f.store.get(PROJECT, request.id), 'The verified stop receipt must reflect the durable current DTO');
 	} finally { f.db.close(); }
 });
 
