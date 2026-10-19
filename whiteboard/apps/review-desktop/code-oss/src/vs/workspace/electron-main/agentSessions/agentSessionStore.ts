@@ -15,6 +15,8 @@ import type {
 	SendSessionMessageInput,
 	SessionMessageDTO,
 	SessionNotificationDTO,
+	SessionNotificationKind,
+	SessionNotificationTarget,
 	SessionPageOptions,
 } from '../../common/workspaceAgentSessionProtocol.js';
 import { canTransitionAgentSessionState, isAgentSessionState } from './agentSessionTransitions.js';
@@ -88,7 +90,7 @@ export class AgentSessionStore {
 	}
 
 	/** Atomically applies the session transition policy for the turn store while it owns this same SQLite transaction. */
-	transitionSessionWithinTransaction(projectId: string, sessionId: string, expectedRevision: number, nextState: AgentSessionState): AgentSessionDTO {
+	transitionSessionWithinTransaction(projectId: string, sessionId: string, expectedRevision: number, nextState: AgentSessionState, notificationTarget?: SessionNotificationTarget): AgentSessionDTO {
 		this.assertOpen();
 		if (!this.db.isTransaction) { throw new Error('A turn-owned session transition requires an active SQLite transaction.'); }
 		this.validateUuid(projectId, 'project ID');
@@ -103,7 +105,13 @@ export class AgentSessionStore {
 		const result = this.db.prepare(`UPDATE agent_sessions SET state = ?, revision = revision + 1, updated_at = ?
 			WHERE id = ? AND project_id = ? AND revision = ?`).run(nextState, now, sessionId, projectId, expectedRevision);
 		if (Number(result.changes) !== 1) { throw new Error('The session revision is stale.'); }
-		return this.getSessionInternal(projectId, sessionId)!;
+		const updated = this.getSessionInternal(projectId, sessionId)!;
+		const kind: SessionNotificationKind | undefined = nextState === 'waitingForInput' ? 'input' : nextState === 'waitingForApproval' ? 'approval' : nextState === 'failed' && !notificationTarget ? 'error' : undefined;
+		if (kind) {
+			const target = notificationTarget ?? { kind: 'session' as const, id: sessionId };
+			this.recordNotificationWithinTransaction({ eventId: `session:${sessionId}:revision:${updated.revision}:state:${nextState}`, projectId, sessionId, kind, target, createdAt: now });
+		}
+		return updated;
 	}
 
 	/** Resumes a stopped session only for its exact newly-created manual turn after verified prior-turn cleanup. */
@@ -184,17 +192,16 @@ export class AgentSessionStore {
 			}
 			const sequence = Number(this.db.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM agent_session_messages WHERE project_id = ? AND recipient_session_id = ?').get(projectId, input.recipientSessionId)?.next_sequence ?? 1);
 			const messageId = randomUUID();
-			const notificationId = randomUUID();
 			const now = new Date().toISOString();
 			this.db.prepare(`INSERT INTO agent_session_messages (
 				id, project_id, sender_session_id, recipient_session_id, sequence, idempotency_key, body, created_at, read_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
 				messageId, projectId, senderSessionId, input.recipientSessionId, sequence, input.idempotencyKey, input.body, now,
 			);
-			const notificationSequence = Number(this.db.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM agent_session_notifications WHERE project_id = ?').get(projectId)?.next_sequence ?? 1);
-			this.db.prepare(`INSERT INTO agent_session_notifications (
-				id, project_id, session_id, sequence, kind, message_id, created_at, read_at
-			) VALUES (?, ?, ?, ?, 'message', ?, ?, NULL)`).run(notificationId, projectId, input.recipientSessionId, notificationSequence, messageId, now);
+			this.recordNotificationWithinTransaction({
+				eventId: `message:${messageId}`, projectId, sessionId: input.recipientSessionId,
+				kind: 'message', target: { kind: 'message', id: messageId }, createdAt: now,
+			});
 			return this.getMessageInternal(projectId, messageId)!;
 		});
 	}
@@ -234,8 +241,52 @@ export class AgentSessionStore {
 		this.assertOpen();
 		this.validateUuid(projectId, 'project ID');
 		const { afterSequence, limit } = this.pageValues(options);
-		return this.db.prepare(`SELECT id, project_id, session_id, sequence, kind, message_id, created_at, read_at
+		return this.db.prepare(`SELECT id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at
 			FROM agent_session_notifications WHERE project_id = ? AND sequence > ? ORDER BY sequence LIMIT ?`).all(projectId, afterSequence, limit).map(row => this.notificationFromRow(row));
+	}
+
+	/** Records a typed alert in the caller's lifecycle/proposal transaction so state and its receipt cannot diverge. */
+	recordNotificationWithinTransaction(input: {
+		readonly eventId: string;
+		readonly projectId: string;
+		readonly sessionId: string;
+		readonly kind: SessionNotificationKind;
+		readonly target: SessionNotificationTarget;
+		readonly createdAt?: string;
+	}): SessionNotificationDTO {
+		this.assertOpen();
+		if (!this.db.isTransaction) { throw new Error('A durable session notification must share its source event transaction.'); }
+		this.validateUuid(input.projectId, 'project ID');
+		this.validateUuid(input.sessionId, 'session ID');
+		if (typeof input.eventId !== 'string' || Buffer.byteLength(input.eventId, 'utf8') < 1 || Buffer.byteLength(input.eventId, 'utf8') > 512) { throw new Error('The notification event ID must contain 1 to 512 bytes.'); }
+		if (!['input', 'approval', 'error', 'completion', 'message', 'prReady'].includes(input.kind)) { throw new Error('The notification kind is invalid.'); }
+		const target = input.target;
+		if (!target || !['session', 'turn', 'message', 'integrationProposal', 'mergeProposal', 'publicationProposal'].includes(target.kind)) { throw new Error('The notification target kind is invalid.'); }
+		this.validateUuid(target.id, 'notification target ID');
+		const targetTurnId = target.kind === 'turn' ? target.id : target.kind === 'integrationProposal' || target.kind === 'mergeProposal' || target.kind === 'publicationProposal' ? target.turnId : null;
+		if (targetTurnId && target.kind !== 'turn') { this.validateUuid(targetTurnId, 'notification proposal turn ID'); }
+		const targetKind = target.kind;
+		const prior = this.db.prepare(`SELECT id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at
+			FROM agent_session_notifications WHERE event_id = ?`).get(input.eventId);
+		if (prior) {
+			const existing = this.notificationFromRow(prior);
+			const existingTurnId = existing.target.kind === 'turn' ? existing.target.id : 'turnId' in existing.target ? existing.target.turnId : null;
+			if (existing.projectId !== input.projectId || existing.sessionId !== input.sessionId || existing.kind !== input.kind
+				|| existing.target.kind !== targetKind || existing.target.id !== target.id || existingTurnId !== targetTurnId
+				|| (input.createdAt !== undefined && existing.createdAt !== input.createdAt)) {
+				throw new Error('The notification event ID was already used for different event content.');
+			}
+			return existing;
+		}
+		const notificationSequence = Number(this.db.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM agent_session_notifications WHERE project_id = ?').get(input.projectId)?.next_sequence ?? 1);
+		const id = randomUUID();
+		const createdAt = input.createdAt ?? new Date().toISOString();
+		this.db.prepare(`INSERT INTO agent_session_notifications
+			(id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`)
+			.run(id, input.eventId, input.projectId, input.sessionId, notificationSequence, input.kind, targetKind, target.id, targetTurnId, createdAt);
+		return this.notificationFromRow(this.db.prepare(`SELECT id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at
+			FROM agent_session_notifications WHERE id = ?`).get(id)!);
 	}
 
 	notificationStatus(projectId: string): { readonly unreadCount: number; readonly latestSequence: number } {
@@ -323,9 +374,14 @@ export class AgentSessionStore {
 	}
 
 	private notificationFromRow(row: Record<string, SQLOutputValue>): SessionNotificationDTO {
+		const kind = String(row.target_kind) as SessionNotificationTarget['kind'];
+		const id = String(row.target_id);
+		const target: SessionNotificationTarget = kind === 'session' || kind === 'turn' || kind === 'message'
+			? { kind, id }
+			: { kind, id, turnId: String(row.turn_id) };
 		return {
-			id: String(row.id), projectId: String(row.project_id), sessionId: String(row.session_id), sequence: Number(row.sequence),
-			kind: 'message', messageId: String(row.message_id), createdAt: String(row.created_at), readAt: row.read_at === null ? null : String(row.read_at),
+			id: String(row.id), eventId: String(row.event_id), projectId: String(row.project_id), sessionId: String(row.session_id), sequence: Number(row.sequence),
+			kind: String(row.kind) as SessionNotificationKind, target, createdAt: String(row.created_at), readAt: row.read_at === null ? null : String(row.read_at),
 		};
 	}
 

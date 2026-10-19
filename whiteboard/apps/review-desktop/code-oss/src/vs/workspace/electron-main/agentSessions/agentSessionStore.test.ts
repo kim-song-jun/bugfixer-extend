@@ -73,6 +73,8 @@ test('session identities and mailbox persist across database reopen', () => {
 		recipientSessionId: receiver.id, idempotencyKey: 'request-1', body: 'Review the database migration.',
 	});
 	const notification = database.agentSessions.listNotifications(project.id, { limit: 10 })[0];
+	assert.deepEqual(notification.target, { kind: 'message', id: message.id });
+	assert.equal(notification.eventId, `message:${message.id}`);
 	database.close();
 	try {
 		database = WorkspaceDatabase.open(path);
@@ -115,7 +117,7 @@ test('schema v21 migrates in place and preserves existing project tasks', () => 
 			revision: 4,
 		});
 		assert.deepEqual(database.agentSessions.listSessions('00000000-0000-4000-8000-000000000021'), []);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 32);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 33);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
@@ -135,7 +137,7 @@ test('frozen schema v22 migrates through v32 and preserves existing project and 
 		assert.equal(database.getProject('00000000-0000-4000-8000-000000000021')?.name, 'Frozen v21 project');
 		assert.equal(database.getTask('00000000-0000-4000-8000-000000000023')?.title, 'Preserved v21 task');
 		assert.deepEqual(database.agentSessions.listSessions('00000000-0000-4000-8000-000000000021'), []);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 32);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 33);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });
@@ -160,6 +162,34 @@ test('all Codex and Claude session pairings exchange and acknowledge messages', 
 	});
 });
 
+test('durable message notifications retain the legacy message reference restriction while allowing read acknowledgements', () => {
+	withDatabase(database => {
+		const { project, binding } = projectFixture(database);
+		const sender = database.agentSessions.createSession(sessionInput(project.id, binding.id));
+		const recipient = database.agentSessions.createSession(sessionInput(project.id, binding.id, { provider: 'claude', model: 'sonnet' }));
+		const message = database.agentSessions.sendMessage(project.id, sender.id, { recipientSessionId: recipient.id, idempotencyKey: 'reference-guard', body: 'Keep my durable reference.' });
+		const notification = database.agentSessions.listNotifications(project.id, { limit: 10 })[0];
+		const db = Reflect.get(database, 'db') as DatabaseSync;
+		assert.throws(() => db.prepare('DELETE FROM agent_session_messages WHERE id = ?').run(message.id), /referenced by a durable session notification/u);
+		assert.throws(() => db.prepare('UPDATE agent_session_messages SET id = ? WHERE id = ?').run(randomUUID(), message.id), /identity or recipient is still referenced by a durable session notification/u);
+		assert.throws(() => db.prepare('UPDATE agent_session_messages SET recipient_session_id = ? WHERE id = ?').run(sender.id, message.id), /identity or recipient is still referenced by a durable session notification/u);
+		const otherProject = database.createProject('Other notification scope');
+		assert.throws(() => db.prepare('UPDATE agent_session_messages SET project_id = ? WHERE id = ?').run(otherProject.id, message.id), /identity or recipient is still referenced by a durable session notification/u);
+		database.agentSessions.acknowledgeMessage(project.id, recipient.id, message.id);
+		assert.ok(database.agentSessions.getInboxMessage(project.id, recipient.id, message.id)?.readAt);
+		database.agentSessions.markNotificationRead(project.id, notification.id);
+		assert.ok(database.agentSessions.listNotifications(project.id, { limit: 10 })[0].readAt);
+		const unreferencedMessageId = randomUUID();
+		db.prepare(`INSERT INTO agent_session_messages
+			(id, project_id, sender_session_id, recipient_session_id, sequence, idempotency_key, body, created_at, read_at)
+			VALUES (?, ?, ?, ?, 2, ?, ?, ?, NULL)`).run(unreferencedMessageId, project.id, sender.id, recipient.id, 'unreferenced-message', 'No notification references this message.', new Date().toISOString());
+		assert.equal(Number(db.prepare('UPDATE agent_session_messages SET recipient_session_id = ? WHERE id = ?').run(sender.id, unreferencedMessageId).changes), 1,
+			'An unrelated message without a notification reference keeps the legacy update behavior.');
+		assert.equal(Number(db.prepare('DELETE FROM agent_session_messages WHERE id = ?').run(unreferencedMessageId).changes), 1,
+			'An unrelated message without a notification reference keeps the legacy delete behavior.');
+	});
+});
+
 test('same idempotency key and same body returns one message and one notification; changed request rejects', () => {
 	withDatabase(database => {
 		const { project, binding } = projectFixture(database);
@@ -171,6 +201,53 @@ test('same idempotency key and same body returns one message and one notificatio
 		assert.throws(() => database.agentSessions.sendMessage(project.id, sender.id, { ...request, body: 'Changed bytes.' }), /idempotency/i);
 		assert.throws(() => database.agentSessions.sendMessage(project.id, sender.id, { ...request, recipientSessionId: sender.id }), /idempotency/i);
 		assert.equal(database.agentSessions.listInbox(project.id, recipient.id, { limit: 10 }).length, 1);
+		assert.equal(database.agentSessions.listNotifications(project.id, { limit: 10 }).length, 1);
+	});
+});
+
+test('waiting session states create durable typed alerts from state transitions', () => {
+	withDatabase(database => {
+		const { project, binding } = projectFixture(database);
+		let session = database.agentSessions.createSession(sessionInput(project.id, binding.id));
+		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'starting');
+		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'waitingForInput');
+		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'running');
+		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'waitingForApproval');
+		const alerts = database.agentSessions.listNotifications(project.id, { limit: 10 });
+		assert.deepEqual(alerts.map(item => item.kind), ['input', 'approval']);
+		assert.deepEqual(alerts.map(item => item.target), [{ kind: 'session', id: session.id }, { kind: 'session', id: session.id }]);
+	});
+});
+
+test('notification retries preserve generated timestamps but reject changed explicit timestamps', () => {
+	withDatabase(database => {
+		const { project, binding } = projectFixture(database);
+		const session = database.agentSessions.createSession(sessionInput(project.id, binding.id));
+		const event = { eventId: `session:${session.id}:manual-time`, projectId: project.id, sessionId: session.id, kind: 'input' as const,
+			target: { kind: 'session' as const, id: session.id } };
+		const db = Reflect.get(database, 'db') as DatabaseSync;
+		db.exec('BEGIN IMMEDIATE;');
+		const recorded = database.agentSessions.recordNotificationWithinTransaction({ ...event, createdAt: '2026-10-19T00:00:00.000Z' });
+		db.exec('COMMIT;');
+		db.exec('BEGIN IMMEDIATE;');
+		assert.deepEqual(database.agentSessions.recordNotificationWithinTransaction(event), recorded, 'An omitted timestamp retry is idempotent and keeps the generated record timestamp.');
+		assert.throws(() => database.agentSessions.recordNotificationWithinTransaction({ ...event, createdAt: '2026-10-19T00:00:01.000Z' }), /different event content/i);
+		db.exec('COMMIT;');
+	});
+});
+
+test('a notification identity conflict rolls back the source session transition', () => {
+	withDatabase(database => {
+		const { project, binding } = projectFixture(database);
+		let session = database.agentSessions.createSession(sessionInput(project.id, binding.id));
+		session = database.agentSessions.transitionSession(project.id, session.id, session.revision, 'starting');
+		const eventId = `session:${session.id}:revision:${session.revision + 1}:state:waitingForInput`;
+		const db = Reflect.get(database, 'db') as DatabaseSync;
+		db.exec('BEGIN IMMEDIATE;');
+		database.agentSessions.recordNotificationWithinTransaction({ eventId, projectId: project.id, sessionId: session.id, kind: 'error', target: { kind: 'session', id: session.id } });
+		db.exec('COMMIT;');
+		assert.throws(() => database.agentSessions.transitionSession(project.id, session.id, session.revision, 'waitingForInput'), /different event content/i);
+		assert.equal(database.agentSessions.getSession(project.id, session.id)?.state, 'starting');
 		assert.equal(database.agentSessions.listNotifications(project.id, { limit: 10 }).length, 1);
 	});
 });
@@ -349,7 +426,7 @@ test('notification cursors, per-project sequences, idempotent read, and session 
 		const second = database.agentSessions.sendMessage(project.id, sender.id, { recipientSessionId: recipient.id, idempotencyKey: 'n2', body: 'Two.' });
 		const notifications = database.agentSessions.listNotifications(project.id, { limit: 10 });
 		assert.deepEqual(notifications.map(notification => notification.sequence), [1, 2]);
-		assert.deepEqual(database.agentSessions.listNotifications(project.id, { afterSequence: 1, limit: 10 }).map(notification => notification.messageId), [second.id]);
+		assert.deepEqual(database.agentSessions.listNotifications(project.id, { afterSequence: 1, limit: 10 }).map(notification => notification.target), [{ kind: 'message', id: second.id }]);
 		database.agentSessions.markNotificationRead(project.id, notifications[0].id);
 		const readAt = database.agentSessions.listNotifications(project.id, { limit: 10 })[0].readAt;
 		database.agentSessions.markNotificationRead(project.id, notifications[0].id);

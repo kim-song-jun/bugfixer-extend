@@ -164,6 +164,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	private notificationsMount: HTMLElement | undefined;
 	private sessionNotifications: SessionNotificationsController | undefined;
 	private pendingNotificationMessage: PendingNotificationMessage | undefined;
+	private notificationNavigationGeneration = 0;
 	private onboardingMount: HTMLElement | undefined;
 	private sessionOnboarding: SessionOnboardingController | undefined;
 	private onboardingProjectId: string | undefined;
@@ -217,6 +218,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	}
 
 	override async setInput(input: AgentSessionWorkspaceEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this.notificationNavigationGeneration++;
 		await super.setInput(input, options, context, token);
 		if (this.environment.reviewWindowLaunch.kind !== 'project' || this.environment.reviewWindowLaunch.projectId !== input.projectId) {
 			this.error = '현재 프로젝트 창과 세션 편집기의 프로젝트가 일치하지 않습니다.';
@@ -287,9 +289,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		} finally { this.loading = false; this.render(); }
 	}
 
-	private async loadTurns(sessionId: string): Promise<void> {
+	private async loadTurns(sessionId: string, isCurrent: () => boolean = () => true): Promise<void> {
 		if (!this.projectId) return;
-		this.turns.set(sessionId, await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listTurns', { projectId: this.projectId, sessionId }) as readonly AgentSessionTurnDTO[]);
+		const projectId = this.projectId;
+		const turns = await ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listTurns', { projectId, sessionId }) as readonly AgentSessionTurnDTO[];
+		if (isCurrent() && this.projectId === projectId && this.sessions.some(session => session.id === sessionId && session.projectId === projectId)) { this.turns.set(sessionId, turns); }
 	}
 
 	private async loadWorkspacePreparation(sessionId: string): Promise<void> {
@@ -301,6 +305,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private selectSession(sessionId: string): void {
 		if (sessionId === this.selectedSessionId || !this.projectId) return;
+		this.notificationNavigationGeneration++;
 		if (this.pendingNotificationMessage?.sessionId !== sessionId) { this.pendingNotificationMessage = undefined; }
 		if (this.previewSessionId !== sessionId) { this.preview = undefined; this.previewSessionId = undefined; }
 		this.terminalController?.hide();
@@ -481,6 +486,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			},
 			openTab: (sessionId, tab) => {
 				if (!this.sessions.some(session => session.projectId === this.projectId && session.id === sessionId)) { return; }
+				this.notificationNavigationGeneration++;
 				this.activeTab = tab;
 				localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, tab);
 				if (this.selectedSessionId !== sessionId) { this.selectSession(sessionId); }
@@ -925,11 +931,48 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		return this.notificationsMount;
 	}
 
-	private openNotification(notification: SessionNotificationDTO): void {
-		if (!this.projectId || notification.projectId !== this.projectId) { this.showError('현재 프로젝트의 알림이 아닙니다.'); return; }
+	private async openNotification(notification: SessionNotificationDTO): Promise<boolean> {
+		const generation = ++this.notificationNavigationGeneration;
+		const isCurrent = (): boolean => generation === this.notificationNavigationGeneration && this.projectId === notification.projectId;
+		if (!this.projectId || notification.projectId !== this.projectId) { this.showError('현재 프로젝트의 알림이 아닙니다.'); return false; }
 		const recipient = this.sessions.find(session => session.id === notification.sessionId);
-		if (!recipient) { this.showError(`받는 세션을 찾을 수 없습니다. 세션 ID ${notification.sessionId}`); return; }
+		if (!recipient) { this.showError(`받는 세션을 찾을 수 없습니다. 세션 ID ${notification.sessionId}`); return false; }
+		const requestedProjectId = this.projectId;
+		const targetTurnId = notification.target.kind === 'turn' ? notification.target.id
+			: 'turnId' in notification.target ? notification.target.turnId : undefined;
+		if (targetTurnId) {
+			try { await this.loadTurns(recipient.id, isCurrent); }
+			catch (error) { if (isCurrent()) { this.showError(`알림의 실행 기록을 불러오지 못했습니다: ${this.errorMessage(error, '세션 기록을 불러오지 못했습니다.')}`); } return false; }
+			if (!isCurrent() || this.projectId !== requestedProjectId) { return false; }
+			if (!this.turns.get(recipient.id)?.some(turn => turn.id === targetTurnId && turn.projectId === requestedProjectId && turn.sessionId === recipient.id)) {
+				this.showError('알림이 가리키는 실행 기록을 찾을 수 없습니다. 알림은 보존되었으며 다른 실행을 대신 열지 않았습니다.');
+				return false;
+			}
+		}
 
+		const previousNavigation = {
+			selectedSessionId: this.selectedSessionId,
+			activeTab: this.activeTab,
+			pendingMessage: this.pendingNotificationMessage,
+			selectedChangeTurn: this.selectedChangeTurns.get(recipient.id),
+			creating: this.creating,
+			preview: this.preview,
+			previewSessionId: this.previewSessionId,
+		};
+		const restoreNavigation = (): void => {
+			if (!isCurrent()) { return; }
+			this.selectedSessionId = previousNavigation.selectedSessionId;
+			this.activeTab = previousNavigation.activeTab;
+			this.pendingNotificationMessage = previousNavigation.pendingMessage;
+			this.creating = previousNavigation.creating;
+			this.preview = previousNavigation.preview;
+			this.previewSessionId = previousNavigation.previewSessionId;
+			if (previousNavigation.selectedChangeTurn) { this.selectedChangeTurns.set(recipient.id, previousNavigation.selectedChangeTurn); }
+			else { this.selectedChangeTurns.delete(recipient.id); }
+			if (previousNavigation.selectedSessionId) { persistSessionSelection(this.projectId!, previousNavigation.selectedSessionId); }
+			localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, previousNavigation.activeTab);
+			this.render();
+		};
 		this.terminalController?.hide();
 		this.sessionLogs?.invalidateContext();
 		this.sessionMessages?.setVisible(false);
@@ -938,17 +981,38 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		this.creating = false;
 		this.selectedSessionId = recipient.id;
 		persistSessionSelection(this.projectId, recipient.id);
-		this.pendingNotificationMessage = { sessionId: recipient.id, messageId: notification.messageId };
-		this.activeTab = 'messages';
-		localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, 'messages');
+		this.pendingNotificationMessage = notification.target.kind === 'message' ? { sessionId: recipient.id, messageId: notification.target.id } : undefined;
+		if (notification.target.kind === 'message') {
+			this.activeTab = 'messages';
+		} else if ('turnId' in notification.target) {
+			this.activeTab = 'changes';
+			this.selectedChangeTurns.set(recipient.id, notification.target.turnId);
+		} else if (notification.target.kind === 'turn') {
+			this.activeTab = 'logs';
+			localStorage.setItem(this.logsTurnStorageKey(recipient.id), notification.target.id);
+		} else {
+			this.activeTab = 'terminal';
+		}
+		localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, this.activeTab);
 		this.notice = undefined;
 		this.error = undefined;
 		this.render();
-		requestAnimationFrame(() => this.root?.querySelector<HTMLElement>('#ai-session-tab-messages')?.focus({ preventScroll: true }));
-		this.sessionMessages?.revealMessage(notification.messageId);
-		void this.loadTurns(recipient.id).then(() => {
-			if (this.projectId === notification.projectId && this.selectedSessionId === recipient.id) { this.render(); }
-		}).catch(error => this.showError(this.errorMessage(error, '세션 메시지를 불러오지 못했습니다.')));
+		requestAnimationFrame(() => { if (isCurrent()) { this.root?.querySelector<HTMLElement>(`#ai-session-tab-${this.activeTab}`)?.focus({ preventScroll: true }); } });
+		if (notification.target.kind === 'message') { this.sessionMessages?.revealMessage(notification.target.id); }
+		if (targetTurnId) { this.render(); }
+		if ('turnId' in notification.target) {
+			try {
+				const selectedExactTarget = await this.sessionChangesController?.revealNotificationTarget(notification.target, isCurrent);
+				if (!isCurrent()) { return false; }
+				if (selectedExactTarget === false) { return false; }
+				if (!selectedExactTarget) { restoreNavigation(); if (isCurrent()) { this.showError('알림의 정확한 제안과 보관된 변경 기록을 선택하지 못했습니다. 알림은 읽지 않은 상태로 보존했습니다.'); } return false; }
+			} catch (error) {
+				restoreNavigation();
+				if (isCurrent()) { this.showError(`알림의 제안 기록을 열지 못했습니다: ${this.errorMessage(error, '제안을 확인할 수 없습니다.')}`); }
+				return false;
+			}
+		}
+		return isCurrent();
 	}
 
 	private async exportLoadedTranscript(text: string, fileName: string, isCurrent: () => boolean): Promise<boolean> {
@@ -969,6 +1033,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 
 	private setTab(tab: AgentSessionViewTab): void {
 		if (!this.projectId || tab === this.activeTab) return;
+		this.notificationNavigationGeneration++;
 		this.activeTab = tab;
 		localStorage.setItem(`${SESSION_STORAGE_TAB}.${this.projectId}`, tab);
 		if (tab !== 'terminal') this.terminalController?.hide();
@@ -1290,6 +1355,7 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 	layout(_dimension: Dimension): void { this.terminalController?.layout(); }
 
 	override clearInput(): void {
+		this.notificationNavigationGeneration++;
 		this.terminalController?.dispose(); this.terminalController = undefined;
 		if (this.lifecycleTimer) clearInterval(this.lifecycleTimer);
 		this.lifecycleTimer = undefined; this.projectId = undefined; this.dashboard = undefined; this.sessions = []; this.turns.clear(); this.workspacePreparations.clear(); this.selectedSessionId = undefined; this.preview = undefined; this.previewSessionId = undefined; this.creating = false; this.sessionPermissionModes.clear(); this.createPermissionMode = 'read-only'; this.error = undefined; this.notice = undefined;

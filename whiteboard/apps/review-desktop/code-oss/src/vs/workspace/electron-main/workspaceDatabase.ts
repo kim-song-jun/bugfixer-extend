@@ -312,7 +312,7 @@ export class ReviewCompletionConflictError extends Error {
 	}
 }
 
-const schemaVersion = 32;
+const schemaVersion = 33;
 const providerEventTypes = new Set([
 	'session.started', 'turn.started', 'item.started', 'item.updated', 'item.completed',
 	'turn.completed', 'turn.failed', 'permission.denied', 'error', 'ordinaryFolderInventoryStarted', 'ordinaryFolderChanges',
@@ -353,12 +353,14 @@ export class WorkspaceDatabase {
 			(projectId, sessionId, turnId) => this.agentSessionTurns.getTurn(projectId, sessionId, turnId),
 			(projectId, sessionId, turnId) => this.agentSessionChangeEvidence.getLatest(projectId, sessionId, turnId),
 			(projectId, sessionId, turnId, evidenceVersion) => this.agentSessionChangeEvidence.listVersions(projectId, sessionId, turnId, { afterVersion: evidenceVersion - 1, limit: 1 }).snapshots.find(snapshot => snapshot.version === evidenceVersion),
-			(target, revision) => this.agentSessionReviews.listRevisions({ target, afterRevision: revision - 1, limit: 1 }).revisions.find(explanation => explanation.revision === revision));
+			(target, revision) => this.agentSessionReviews.listRevisions({ target, afterRevision: revision - 1, limit: 1 }).revisions.find(explanation => explanation.revision === revision),
+			this.agentSessions);
 		this.agentSessionMerges = new AgentSessionMergeStore(db, () => this.assertOpen(),
 			(projectId, bindingId) => this.listFolderBindings(projectId).find(binding => binding.id === bindingId),
 			(projectId, sessionId, turnId) => this.agentSessionTurns.getTurn(projectId, sessionId, turnId),
-			proposalId => this.agentSessionIntegrations.getProposal(proposalId));
-		this.agentSessionPublications = new AgentSessionPublicationStore(db, proposalId => this.agentSessionMerges.getProposal(proposalId));
+			proposalId => this.agentSessionIntegrations.getProposal(proposalId),
+			this.agentSessions);
+		this.agentSessionPublications = new AgentSessionPublicationStore(db, proposalId => this.agentSessionMerges.getProposal(proposalId), this.agentSessions);
 		this.agentSessionPrTexts = new AgentSessionPrTextStore(db);
 		this.agentSessionPrTextProcesses = new AgentSessionPrTextProcessStore(db);
 	}
@@ -419,6 +421,7 @@ export class WorkspaceDatabase {
 				if (version < 30) { WorkspaceDatabase.migrateV30(db); }
 				if (version < 31) { WorkspaceDatabase.migrateV31(db); }
 				if (version < 32) { WorkspaceDatabase.migrateV32(db); }
+				if (version < 33) { WorkspaceDatabase.migrateV33(db); }
 				db.exec('COMMIT;');
 			} catch (error) {
 				db.exec('ROLLBACK;');
@@ -1476,6 +1479,75 @@ export class WorkspaceDatabase {
 			BEGIN SELECT RAISE(ABORT, 'PR text cleanup receipts are immutable'); END;
 		`);
 		db.exec('PRAGMA user_version = 32;');
+	}
+
+	private static migrateV33(db: DatabaseSync): void {
+		db.exec(`
+			ALTER TABLE agent_session_notifications RENAME TO agent_session_notifications_v32;
+			CREATE TABLE agent_session_notifications (
+				id TEXT PRIMARY KEY NOT NULL,
+				event_id TEXT NOT NULL UNIQUE CHECK (length(CAST(event_id AS BLOB)) BETWEEN 1 AND 512),
+				project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+				session_id TEXT NOT NULL,
+				sequence INTEGER NOT NULL CHECK (sequence > 0),
+				kind TEXT NOT NULL CHECK (kind IN ('input', 'approval', 'error', 'completion', 'message', 'prReady')),
+				target_kind TEXT NOT NULL CHECK (target_kind IN ('session', 'turn', 'message', 'integrationProposal', 'mergeProposal', 'publicationProposal')),
+				target_id TEXT NOT NULL CHECK (length(target_id) = 36),
+				turn_id TEXT CHECK (turn_id IS NULL OR length(turn_id) = 36),
+				created_at TEXT NOT NULL,
+				read_at TEXT,
+				UNIQUE (project_id, sequence),
+				FOREIGN KEY (session_id, project_id) REFERENCES agent_sessions(id, project_id) ON DELETE RESTRICT,
+				FOREIGN KEY (turn_id, project_id, session_id) REFERENCES agent_session_turns(id, project_id, session_id) ON DELETE RESTRICT,
+				CHECK (
+					(target_kind = 'session' AND target_id = session_id AND turn_id IS NULL AND kind IN ('input', 'approval', 'error')) OR
+					(target_kind = 'turn' AND turn_id = target_id AND kind IN ('input', 'approval', 'error', 'completion')) OR
+					(target_kind = 'message' AND turn_id IS NULL AND kind = 'message') OR
+					(target_kind = 'integrationProposal' AND turn_id IS NOT NULL AND kind = 'approval') OR
+					(target_kind = 'mergeProposal' AND turn_id IS NOT NULL AND kind = 'approval') OR
+					(target_kind = 'publicationProposal' AND turn_id IS NOT NULL AND kind = 'prReady')
+				)
+			) STRICT;
+			INSERT INTO agent_session_notifications (id, event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at, read_at)
+			SELECT id, 'message:' || message_id, project_id, session_id, sequence, 'message', 'message', message_id, NULL, created_at, read_at
+			FROM agent_session_notifications_v32;
+			DROP TABLE agent_session_notifications_v32;
+			CREATE INDEX agent_session_notifications_page ON agent_session_notifications(project_id, sequence);
+			CREATE INDEX agent_session_notifications_unread ON agent_session_notifications(project_id, read_at);
+
+			CREATE TRIGGER agent_session_notifications_target_insert BEFORE INSERT ON agent_session_notifications
+			BEGIN
+				SELECT CASE
+					WHEN NEW.target_kind = 'message' AND NOT EXISTS (
+						SELECT 1 FROM agent_session_messages WHERE id = NEW.target_id AND project_id = NEW.project_id AND recipient_session_id = NEW.session_id
+					) THEN RAISE(ABORT, 'notification message target must belong to its project and recipient session')
+					WHEN NEW.target_kind = 'turn' AND NOT EXISTS (
+						SELECT 1 FROM agent_session_turns WHERE id = NEW.target_id AND project_id = NEW.project_id AND session_id = NEW.session_id
+					) THEN RAISE(ABORT, 'notification turn target must belong to its project and session')
+					WHEN NEW.target_kind = 'integrationProposal' AND NOT EXISTS (
+						SELECT 1 FROM agent_session_integration_proposals WHERE id = NEW.target_id AND project_id = NEW.project_id AND session_id = NEW.session_id AND turn_id = NEW.turn_id
+					) THEN RAISE(ABORT, 'notification integration proposal target must match its project, session, and turn')
+					WHEN NEW.target_kind = 'mergeProposal' AND NOT EXISTS (
+						SELECT 1 FROM agent_session_merge_proposals WHERE id = NEW.target_id AND project_id = NEW.project_id AND session_id = NEW.session_id AND turn_id = NEW.turn_id
+					) THEN RAISE(ABORT, 'notification merge proposal target must match its project, session, and turn')
+					WHEN NEW.target_kind = 'publicationProposal' AND NOT EXISTS (
+						SELECT 1 FROM agent_session_publication_proposals WHERE id = NEW.target_id AND project_id = NEW.project_id AND session_id = NEW.session_id AND turn_id = NEW.turn_id
+					) THEN RAISE(ABORT, 'notification publication proposal target must match its project, session, and turn')
+				END;
+			END;
+			CREATE TRIGGER agent_session_notifications_message_reference_delete BEFORE DELETE ON agent_session_messages
+			WHEN EXISTS (SELECT 1 FROM agent_session_notifications WHERE target_kind = 'message' AND target_id = OLD.id)
+			BEGIN SELECT RAISE(ABORT, 'message is still referenced by a durable session notification'); END;
+			CREATE TRIGGER agent_session_notifications_message_reference_update BEFORE UPDATE OF id, project_id, recipient_session_id ON agent_session_messages
+			WHEN (OLD.id <> NEW.id OR OLD.project_id <> NEW.project_id OR OLD.recipient_session_id <> NEW.recipient_session_id)
+				AND EXISTS (SELECT 1 FROM agent_session_notifications WHERE target_kind = 'message' AND target_id = OLD.id)
+			BEGIN SELECT RAISE(ABORT, 'message identity or recipient is still referenced by a durable session notification'); END;
+			CREATE TRIGGER agent_session_notifications_event_immutable BEFORE UPDATE OF event_id, project_id, session_id, sequence, kind, target_kind, target_id, turn_id, created_at ON agent_session_notifications
+			BEGIN SELECT RAISE(ABORT, 'agent session notification events are immutable'); END;
+			CREATE TRIGGER agent_session_notifications_immutable_delete BEFORE DELETE ON agent_session_notifications
+			BEGIN SELECT RAISE(ABORT, 'agent session notification events are immutable'); END;
+			PRAGMA user_version = 33;
+		`);
 	}
 
 	private static migrateV4(db: DatabaseSync): void {

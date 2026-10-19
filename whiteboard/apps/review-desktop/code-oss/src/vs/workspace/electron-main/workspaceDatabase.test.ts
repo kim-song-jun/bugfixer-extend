@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
@@ -41,6 +41,45 @@ function createProjectAndTask(database: WorkspaceDatabase, name = 'Project') {
 	const binding = database.createFolderBinding({ projectId: project.id, path: `/work/${name.toLowerCase()}` });
 	const task = database.createTask({ projectId: project.id, bindingId: binding.id, title: 'Review durable storage' });
 	return { project, binding, task };
+}
+
+function freezeNotificationTableAsV32(path: string, userVersion: 31 | 32): void {
+	const db = new DatabaseSync(path);
+	try {
+		db.exec(`PRAGMA foreign_keys = OFF;
+			CREATE TEMP TABLE v32_notification_rows AS
+				SELECT id, project_id, session_id, sequence, target_id AS message_id, created_at, read_at
+				FROM agent_session_notifications WHERE target_kind = 'message';
+			DROP TRIGGER IF EXISTS agent_session_notifications_target_insert;
+			DROP TRIGGER IF EXISTS agent_session_notifications_message_reference_delete;
+			DROP TRIGGER IF EXISTS agent_session_notifications_message_reference_update;
+			DROP TRIGGER IF EXISTS agent_session_notifications_event_immutable;
+			DROP TRIGGER IF EXISTS agent_session_notifications_immutable_delete;
+			DROP TABLE agent_session_notifications;`);
+		db.exec(readFileSync(new URL('./agentSessions/fixtures/notifications-v32.sql', import.meta.url), 'utf8'));
+		db.exec(`INSERT INTO agent_session_notifications (id, project_id, session_id, sequence, kind, message_id, created_at, read_at)
+			SELECT id, project_id, session_id, sequence, 'message', message_id, created_at, read_at FROM v32_notification_rows;
+			DROP TABLE v32_notification_rows;
+			PRAGMA user_version = ${userVersion};`);
+	} finally { db.close(); }
+}
+
+function seedLegacyMessageNotifications(database: WorkspaceDatabase, projectId: string, sessionId: string): readonly { readonly id: string; readonly sequence: number; readonly readAt: string | null }[] {
+	const first = database.agentSessions.sendMessage(projectId, sessionId, { recipientSessionId: sessionId, idempotencyKey: 'frozen-v32-read', body: 'read legacy notification' });
+	const second = database.agentSessions.sendMessage(projectId, sessionId, { recipientSessionId: sessionId, idempotencyKey: 'frozen-v32-unread', body: 'unread legacy notification' });
+	database.agentSessions.acknowledgeMessage(projectId, sessionId, first.id);
+	const notifications = database.agentSessions.listNotifications(projectId, { limit: 100 }).filter(item => item.target.kind === 'message');
+	const firstNotification = notifications.find(item => item.target.kind === 'message' && item.target.id === first.id)!;
+	database.agentSessions.markNotificationRead(projectId, firstNotification.id);
+	const db = Reflect.get(database, 'db') as DatabaseSync;
+	db.exec(`DROP TRIGGER agent_session_notifications_event_immutable;
+		DROP TRIGGER agent_session_notifications_immutable_delete;
+		DELETE FROM agent_session_notifications WHERE target_kind <> 'message';
+		UPDATE agent_session_notifications SET sequence = (
+			SELECT COUNT(*) FROM agent_session_notifications AS earlier
+			WHERE earlier.project_id = agent_session_notifications.project_id AND earlier.sequence <= agent_session_notifications.sequence
+		);`);
+	return database.agentSessions.listNotifications(projectId, { limit: 100 }).map(({ id, sequence, readAt }) => ({ id, sequence, readAt }));
 }
 
 test('projects, bindings, tasks, review links and project view persist across database reopen', () => {
@@ -190,6 +229,8 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 			...(version >= 30 ? ['agent_session_merge_workspaces', 'agent_session_merge_proposals', 'agent_session_merge_approvals', 'agent_session_merge_outcomes', 'agent_session_merge_artifacts'] : []),
 			'agent_session_transcript_cursors', 'agent_session_transcript_entries', 'agent_workflows', 'agent_workflow_plans', 'agent_workflow_approvals', 'agent_workflow_runs', 'agent_workflow_run_nodes', 'agent_workflow_turn_reservations', 'agent_workflow_receipts', 'agent_workflow_source_events'];
 		const frozenDatabase = new DatabaseSync(path);
+		const legacyMessageId = randomUUID();
+		const legacyNotificationId = randomUUID();
 		try {
 			frozenDatabase.exec('PRAGMA foreign_keys = ON;');
 			frozenDatabase.exec(`${frozenV24}\n${frozenV25Delta}\n${frozenV26Delta}\n${version >= 27 ? readFileSync(new URL('./agentSessions/fixtures/schema-v27.sql', import.meta.url), 'utf8') : ''}\n${version >= 28 ? readFileSync(new URL('./agentSessions/fixtures/schema-v28.sql', import.meta.url), 'utf8') : ''}\n${frozenV29Delta}\n${frozenV30Delta}`);
@@ -208,6 +249,12 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 						const insert = frozenDatabase.prepare(`INSERT INTO \"${table}\" (${quotedColumns}) VALUES (${columns.map(() => '?').join(', ')})`);
 						for (const row of rows) { insert.run(...columns.map(column => Reflect.get(row, column))); }
 					}
+					frozenDatabase.prepare(`INSERT INTO agent_session_messages
+						(id, project_id, sender_session_id, recipient_session_id, sequence, idempotency_key, body, created_at, read_at)
+						VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL)`).run(legacyMessageId, project.id, session.id, session.id, `migration-${version}`, 'legacy durable message', '2026-10-19T00:02:00.000Z');
+					frozenDatabase.prepare(`INSERT INTO agent_session_notifications
+						(id, project_id, session_id, sequence, kind, message_id, created_at, read_at)
+						VALUES (?, ?, ?, 41, 'message', ?, ?, ?)`).run(legacyNotificationId, project.id, session.id, legacyMessageId, '2026-10-19T00:03:00.000Z', '2026-10-19T00:04:00.000Z');
 				} finally { source.close(); }
 			} finally { frozenDatabase.exec(turnOwnerTrigger); }
 		} finally { frozenDatabase.close(); }
@@ -223,6 +270,16 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 		beforeMigration.close();
 
 		database = WorkspaceDatabase.open(path);
+		const retainedNotification = database.agentSessions.listNotifications(project.id, { limit: 100 }).find(item => item.id === legacyNotificationId);
+		assert.ok(retainedNotification, `Frozen v${version} migration must retain its pre-existing notification row.`);
+		assert.equal(retainedNotification.eventId, `message:${legacyMessageId}`);
+		assert.deepEqual(retainedNotification.target, { kind: 'message', id: legacyMessageId });
+		assert.equal(retainedNotification.sequence, 41);
+		assert.equal(retainedNotification.createdAt, '2026-10-19T00:03:00.000Z');
+		assert.equal(retainedNotification.readAt, '2026-10-19T00:04:00.000Z');
+		const reopenedDatabase = WorkspaceDatabase.open(path);
+		try { assert.deepEqual(reopenedDatabase.agentSessions.listNotifications(project.id, { limit: 100 }), [retainedNotification]); }
+		finally { reopenedDatabase.close(); }
 		const afterMigration = new DatabaseSync(path);
 		try { assert.deepEqual(snapshotRows(afterMigration), beforeRows); }
 		finally { afterMigration.close(); }
@@ -247,7 +304,7 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 		assert.equal(database.agentWorkflows.getRun(project.id, workflow.id, run.id)?.id, run.id);
 		const migratedSchema = new DatabaseSync(path);
 		try {
-			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 32);
+			assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 33);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_merge_artifacts'").get());
 			assert.equal(Number(migratedSchema.prepare('SELECT count(*) AS count FROM agent_session_merge_artifacts').get()?.count), version === 30 ? 5 : 0);
 			assert.ok(migratedSchema.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_publication_proposals'").get());
@@ -273,13 +330,13 @@ function assertFrozenChangeEvidenceMigration(version: 26 | 27 | 28 | 29 | 30): v
 	}
 }
 
-test('frozen v26 database upgrades to v32 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
-test('frozen v27 database upgrades to v32 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
-test('frozen v28 database upgrades to v32 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
-test('frozen v29 database upgrades to v32 without changing durable commit proposal, approval, or outcome rows', () => assertFrozenChangeEvidenceMigration(29));
-test('frozen v30 database upgrades to v32 without changing successful merge rows, receipts, or artifacts', () => assertFrozenChangeEvidenceMigration(30));
+test('frozen v26 database upgrades to v33 with its real change evidence and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(26));
+test('frozen v27 database upgrades to v33 with its retained change content and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(27));
+test('frozen v28 database upgrades to v33 with explanation history and workspace rows unchanged', () => assertFrozenChangeEvidenceMigration(28));
+test('frozen v29 database upgrades to v33 without changing durable commit proposal, approval, or outcome rows', () => assertFrozenChangeEvidenceMigration(29));
+test('frozen v30 database upgrades to v33 without changing successful merge rows, receipts, or artifacts', () => assertFrozenChangeEvidenceMigration(30));
 
-test('v31 workspace database upgrades to v32 while preserving real publication proposal, approval, and operation rows', () => {
+test('genuine v31 workspace schema upgrades through v32 and v33 while preserving publication and legacy message alerts', () => {
 	const fixture = createMergedPublicationFixture();
 	let database = WorkspaceDatabase.open(fixture.sourcePath);
 	let databaseOpen = true;
@@ -290,8 +347,10 @@ test('v31 workspace database upgrades to v32 while preserving real publication p
 		const operation = database.agentSessionPublications.appendEvent(startedOperation.id, startedOperation.revision, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
 		const proposalBefore = database.agentSessionPublications.getProposal(proposal.id)!;
 		const operationBefore = database.agentSessionPublications.readOperation(operation.id);
+		const expectedMessageNotifications = seedLegacyMessageNotifications(database, fixture.input.projectId, fixture.input.sessionId);
 		database.close();
 		databaseOpen = false;
+		freezeNotificationTableAsV32(fixture.sourcePath, 31);
 
 		const v31 = new DatabaseSync(fixture.sourcePath);
 		try {
@@ -313,11 +372,85 @@ test('v31 workspace database upgrades to v32 while preserving real publication p
 		databaseOpen = true;
 		assert.deepEqual(database.agentSessionPublications.getProposal(proposal.id), proposalBefore);
 		assert.deepEqual(database.agentSessionPublications.readOperation(operation.id), operationBefore);
+		assert.deepEqual(database.agentSessions.listNotifications(fixture.input.projectId, { limit: 100 }).map(({ id, sequence, readAt }) => ({ id, sequence, readAt })), expectedMessageNotifications);
 		const v32 = new DatabaseSync(fixture.sourcePath);
 		try {
-			assert.equal(Number(v32.prepare('PRAGMA user_version').get()?.user_version), 32);
+			assert.equal(Number(v32.prepare('PRAGMA user_version').get()?.user_version), 33);
 			assert.ok(v32.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_pr_text_revisions'").get());
 		} finally { v32.close(); }
+	} finally {
+		if (databaseOpen) { database.close(); }
+		fixture.dispose();
+	}
+});
+
+test('frozen v32 source preserves PR text revisions, requests, process cleanup, and read/unread message alerts through v33 and reopen', () => {
+	const fixture = createMergedPublicationFixture();
+	let database = WorkspaceDatabase.open(fixture.sourcePath);
+	let databaseOpen = true;
+	const projectId = fixture.input.projectId;
+	const sessionId = fixture.input.sessionId;
+	const turnId = fixture.input.turnId;
+	const scope = { projectId, sessionId, targetTurnId: turnId };
+	const retainedTables = ['agent_session_pr_text_revisions', 'agent_session_pr_text_requests', 'agent_session_pr_text_request_events',
+		'agent_session_pr_text_owned_processes', 'agent_session_pr_text_process_cleanup_receipts', 'agent_session_publication_proposals',
+		'agent_session_publication_approvals', 'agent_session_publication_operations', 'agent_session_publication_events'];
+	const tableRows = (path: string) => {
+		const db = new DatabaseSync(path);
+		try {
+			return Object.fromEntries(retainedTables.map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+		} finally { db.close(); }
+	};
+	try {
+		const publication = database.agentSessionPublications.createProposal(fixture.input);
+		database.agentSessionPublications.recordTrustedHumanApproval(publication.id, publication.revision, publication.fingerprint);
+		const publicationOperation = database.agentSessionPublications.startOperation(publication.id, publication.fingerprint);
+		database.agentSessionPublications.appendEvent(publicationOperation.id, publicationOperation.revision, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
+		const contextJSON = JSON.stringify({ changedPaths: ['src/change.ts'], checks: ['migration-preservation'] });
+		const request = database.agentSessionPrTexts.createRequest({ scope, idempotencyKey: 'frozen-v32-request', baseRevision: 0, provider: 'codex', model: 'fixture-model', profileRef: null,
+			contextDigest: createHash('sha256').update(contextJSON, 'utf8').digest('hex'), contextJSON, instruction: 'Retain a genuine historical request.' });
+		const attemptId = randomUUID();
+		const running = database.agentSessionPrTexts.startRequest({ requestId: request.id, expectedStateRevision: request.stateRevision, attemptId });
+		const processReceipt = { requestId: request.id, attemptId, pgid: 48211, nodeExecutable: '/usr/bin/node', helperScript: '/tmp/pr-text-helper.cjs',
+			socketPath: join(dirname(fixture.sourcePath), 'pr-text.sock'), nonce: 'a'.repeat(64), recordedAt: '2026-10-19T00:05:00.000Z' };
+		database.agentSessionPrTextProcesses.recordOwnedProcess(processReceipt);
+		database.agentSessionPrTextProcesses.markCleanupVerified({ requestId: request.id, attemptId, pgid: processReceipt.pgid, nonce: processReceipt.nonce });
+		const source = { kind: 'providerAttempt' as const, requestId: request.id, attemptId, provider: 'codex' as const, model: 'fixture-model', profileRef: null,
+			receiptHash: createHash('sha256').update(JSON.stringify({ requestId: request.id, attemptId, result: 'historical provider receipt' }), 'utf8').digest('hex'), cleanupVerified: true as const };
+		const completed = database.agentSessionPrTexts.completeRequest({ requestId: request.id, expectedRunningRevision: running.stateRevision, source,
+			sanitizedCompleteAgentText: { title: 'Retained draft', body: 'Historical body.' }, knownSecrets: [] });
+		assert.equal(completed.state, 'succeeded');
+		database.agentSessionPrTexts.appendHumanRevision({ scope, expectedRevision: 1, idempotencyKey: 'frozen-v32-human-revision', content: { title: 'Reviewed draft', body: 'Reviewed historical body.' } });
+		const expectedMessageNotifications = seedLegacyMessageNotifications(database, projectId, sessionId);
+		const beforeRows = tableRows(fixture.sourcePath);
+		database.close();
+		databaseOpen = false;
+		freezeNotificationTableAsV32(fixture.sourcePath, 32);
+
+		const frozenV32 = new DatabaseSync(fixture.sourcePath);
+		try {
+			assert.equal(Number(frozenV32.prepare('PRAGMA user_version').get()?.user_version), 32);
+			assert.ok(frozenV32.prepare("SELECT 1 FROM pragma_table_info('agent_session_notifications') WHERE name = 'message_id'").get());
+			assert.equal(frozenV32.prepare("SELECT 1 FROM pragma_table_info('agent_session_notifications') WHERE name = 'event_id'").get(), undefined);
+			const legacyMessageForeignKey = frozenV32.prepare("PRAGMA foreign_key_list('agent_session_notifications')").all().find(row => row.table === 'agent_session_messages');
+			assert.equal(legacyMessageForeignKey?.on_delete, 'RESTRICT');
+			assert.equal(Number(frozenV32.prepare('SELECT count(*) AS count FROM agent_session_pr_text_revisions').get()?.count), 2);
+			assert.equal(Number(frozenV32.prepare('SELECT count(*) AS count FROM agent_session_pr_text_process_cleanup_receipts').get()?.count), 1);
+		} finally { frozenV32.close(); }
+
+		database = WorkspaceDatabase.open(fixture.sourcePath);
+		databaseOpen = true;
+		assert.deepEqual(tableRows(fixture.sourcePath), beforeRows);
+		assert.deepEqual(database.agentSessions.listNotifications(projectId, { limit: 100 }).map(({ id, sequence, readAt }) => ({ id, sequence, readAt })), expectedMessageNotifications);
+		const migratedSchema = new DatabaseSync(fixture.sourcePath);
+		try { assert.equal(Number(migratedSchema.prepare('PRAGMA user_version').get()?.user_version), 33); }
+		finally { migratedSchema.close(); }
+		database.close();
+		databaseOpen = false;
+		database = WorkspaceDatabase.open(fixture.sourcePath);
+		databaseOpen = true;
+		assert.deepEqual(tableRows(fixture.sourcePath), beforeRows);
+		assert.deepEqual(database.agentSessions.listNotifications(projectId, { limit: 100 }).map(({ id, sequence, readAt }) => ({ id, sequence, readAt })), expectedMessageNotifications);
 	} finally {
 		if (databaseOpen) { database.close(); }
 		fixture.dispose();

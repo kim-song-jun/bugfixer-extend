@@ -61,6 +61,7 @@ test('a manually created next turn resumes a stopped session only after exact pr
 		const stopped = stopWithTerminalTurn(fixture, true);
 		assert.equal(stopped.session.state, 'stopped');
 		assert.equal(stopped.turn.cleanupVerified, true);
+		assert.deepEqual(fixture.database.agentSessions.listNotifications(fixture.project.id, { limit: 10 }), [], 'A signal-based stop is not a success or failure alert.');
 		assert.throws(() => fixture.database.agentSessions.transitionSession(fixture.project.id, fixture.session.id, stopped.session.revision, 'starting'), /state transition is invalid/i);
 		const next = fixture.database.agentSessionTurns.createTurn({
 			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: stopped.session.revision,
@@ -139,6 +140,9 @@ test('launch snapshots and turn ordinals survive reopen; exit does not complete 
 		assert.equal(exited.turn.providerConversationId, '00000000-0000-4000-8000-000000000042');
 		assert.equal(exited.turn.exitCode, 0);
 		assert.equal(exited.turn.cleanupVerified, true);
+		assert.deepEqual(fixture.database.agentSessions.listNotifications(fixture.project.id, { limit: 10 }).map(({ kind, target }) => ({ kind, target })), [
+			{ kind: 'completion', target: { kind: 'turn', id: turn.id } },
+		]);
 		assert.equal(fixture.database.getTask(fixture.task.id)?.state, 'ready');
 
 		fixture.database.close();
@@ -209,7 +213,40 @@ test('a provider launch failure moves a starting turn and session to failed with
 		});
 		assert.equal(failed.turn.state, 'failed');
 		assert.equal(failed.session.state, 'failed');
+		assert.deepEqual(fixture.database.agentSessions.listNotifications(fixture.project.id, { limit: 10 }).map(({ kind, target }) => ({ kind, target })), [
+			{ kind: 'error', target: { kind: 'turn', id: turn.id } },
+		], 'One failed turn creates one exact-turn alert, without a duplicate generic session failure.');
 		assert.equal(fixture.database.getTask(fixture.task.id)?.state, 'ready');
+	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('unknown exit code and interrupted turn outcomes do not become false failure or completion alerts', () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-turn-unknown-outcome-'));
+	const fixture = createFixture(directory);
+	try {
+		const turn = fixture.database.agentSessionTurns.createTurn({
+			projectId: fixture.project.id, sessionId: fixture.session.id, expectedSessionRevision: fixture.session.revision, snapshot: snapshotFor(fixture),
+		});
+		const running = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, turn.id, turn.revision, fixture.session.revision + 1, { state: 'running' });
+		const exited = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, fixture.session.id, turn.id, running.turn.revision, running.session.revision, {
+			state: 'exited', cleanupVerified: true,
+		});
+		assert.equal(exited.turn.exitCode, null);
+		assert.deepEqual(fixture.database.agentSessions.listNotifications(fixture.project.id, { limit: 10 }), []);
+
+		const interruptedSession = fixture.database.agentSessions.createSession({ projectId: fixture.project.id, bindingId: fixture.binding.id, taskId: fixture.task.id,
+			name: 'Interrupted outcome', provider: 'claude', model: 'sonnet', workspaceMode: 'sharedFolder' });
+		const interruptedFixture = { ...fixture, session: interruptedSession };
+		const interruptedTurn = fixture.database.agentSessionTurns.createTurn({ projectId: fixture.project.id, sessionId: interruptedSession.id,
+			expectedSessionRevision: interruptedSession.revision, snapshot: snapshotFor(interruptedFixture) });
+		const interruptedRunning = fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, interruptedSession.id, interruptedTurn.id,
+			interruptedTurn.revision, interruptedSession.revision + 1, { state: 'running' });
+		fixture.database.agentSessionTurns.transitionTurn(fixture.project.id, interruptedSession.id, interruptedTurn.id,
+			interruptedRunning.turn.revision, interruptedRunning.session.revision, { state: 'interrupted', errorSummary: 'Host stopped observing the process.' });
+		assert.deepEqual(fixture.database.agentSessions.listNotifications(fixture.project.id, { limit: 10 }), []);
 	} finally {
 		fixture.database.close();
 		rmSync(directory, { recursive: true, force: true });

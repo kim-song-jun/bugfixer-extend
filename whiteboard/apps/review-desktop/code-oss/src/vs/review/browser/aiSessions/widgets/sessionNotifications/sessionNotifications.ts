@@ -9,7 +9,7 @@ export interface SessionNotificationsActions {
 	readonly loadPage: (options: SessionPageOptions) => Promise<readonly SessionNotificationDTO[]>;
 	readonly loadStatus: () => Promise<WorkspaceAgentSessionNotificationStatus>;
 	readonly markRead: (notificationId: string) => Promise<void>;
-	readonly onOpen: (notification: SessionNotificationDTO) => void;
+	readonly onOpen: (notification: SessionNotificationDTO) => Promise<boolean>;
 }
 
 export interface SessionNotificationsController {
@@ -91,6 +91,7 @@ export function createSessionNotifications(parent: HTMLElement, projectId: strin
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let trimmedCount = 0;
 	let errorMessage: string | undefined;
+	let openErrorMessage: string | undefined;
 	let statusErrorMessage: string | undefined;
 	let unreadCount: number | undefined;
 	let latestSequence = 0;
@@ -147,7 +148,7 @@ export function createSessionNotifications(parent: HTMLElement, projectId: strin
 				const sessionLabel = recipient?.name ?? `이름 확인 불가 · 세션 ID ${notification.sessionId}`;
 				const itemTitle = document.createElement('span');
 				itemTitle.className = 'ai-session-notifications__item-title';
-				itemTitle.textContent = `새 메시지 · ${sessionLabel}`;
+				itemTitle.textContent = `${notificationKindLabel(notification.kind)} · ${sessionLabel}`;
 				const itemMeta = document.createElement('span');
 				itemMeta.className = 'ai-session-notifications__item-meta';
 				itemMeta.textContent = `${formatDate(notification.createdAt)} · ${notification.readAt ? '열어 본 알림' : '읽지 않은 알림'}`;
@@ -179,10 +180,11 @@ export function createSessionNotifications(parent: HTMLElement, projectId: strin
 		const errors = [
 			errorMessage ? `알림 목록: ${errorMessage}` : '',
 			statusErrorMessage ? `읽지 않은 알림 수: ${statusErrorMessage}` : '',
+			openErrorMessage ? `알림 열기: ${openErrorMessage}` : '',
 		].filter(Boolean);
 		error.hidden = errors.length === 0;
 		error.textContent = errors.join(' · ');
-		retryButton.hidden = errors.length === 0;
+		retryButton.hidden = !errorMessage && !statusErrorMessage;
 		firstButton.disabled = loading;
 		nextButton.disabled = loading || !hasMore || cursor === 0;
 	};
@@ -355,6 +357,22 @@ export function createSessionNotifications(parent: HTMLElement, projectId: strin
 
 	const openNotification = async (notification: SessionNotificationDTO): Promise<void> => {
 		const requestContext = contextGeneration;
+		loading = true;
+		openErrorMessage = undefined;
+		render();
+		let opened = false;
+		try {
+			opened = await currentActions.onOpen(notification);
+		} catch (cause) {
+			if (!disposed && requestContext === contextGeneration) { openErrorMessage = describeError(cause); }
+		} finally {
+			if (!disposed && requestContext === contextGeneration) { loading = false; render(); }
+		}
+		if (!opened) {
+			if (!disposed && requestContext === contextGeneration) { openErrorMessage = '알림의 정확한 항목을 열지 못했습니다. 읽지 않은 상태로 보존했습니다.'; render(); }
+			return;
+		}
+		if (disposed || requestContext !== contextGeneration) { return; }
 		if (notification.readAt === null) {
 			try {
 				await currentActions.markRead(notification.id);
@@ -375,7 +393,6 @@ export function createSessionNotifications(parent: HTMLElement, projectId: strin
 		}
 		if (disposed || requestContext !== contextGeneration) { return; }
 		setExpanded(false);
-		currentActions.onOpen(notification);
 	};
 
 	trigger.addEventListener('click', () => setExpanded(!expanded));
@@ -437,6 +454,7 @@ export function createSessionNotifications(parent: HTMLElement, projectId: strin
 			hasMore = true;
 			trimmedCount = 0;
 			errorMessage = undefined;
+			openErrorMessage = undefined;
 			statusErrorMessage = undefined;
 			unreadCount = undefined;
 			latestSequence = 0;
@@ -500,4 +518,8 @@ function formatDate(value: string): string {
 function describeError(cause: unknown): string {
 	if (cause instanceof Error && cause.message) { return cause.message; }
 	return '알 수 없는 오류';
+}
+
+function notificationKindLabel(kind: SessionNotificationDTO['kind']): string {
+	return ({ input: '입력 필요', approval: '승인 검토', error: '실행 실패', completion: '실행 종료', message: '새 메시지', prReady: 'PR 검토안 준비' })[kind];
 }

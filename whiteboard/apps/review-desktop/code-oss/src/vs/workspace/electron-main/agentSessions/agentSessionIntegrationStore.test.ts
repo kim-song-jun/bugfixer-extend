@@ -55,6 +55,8 @@ test('commit proposal binds exact turn evidence and explanation revisions; appro
 			paths: [{ path: 'src/change.ts', explanationTargets: [{ path: 'src/change.ts', hunkId: null, revision: explanation.revision }] }], expectedLatestRevision: 0,
 		};
 		const proposal = database.agentSessionIntegrations.createProposal(proposalInput);
+		const proposalAlert = database.agentSessions.listNotifications(project.id, { limit: 100 }).find(item => item.eventId === `integrationProposal:${proposal.id}:review`);
+		assert.deepEqual(proposalAlert?.target, { kind: 'integrationProposal', id: proposal.id, turnId: turn.id });
 		assert.equal(proposal.kind, 'commit');
 		assert.equal(proposal.sessionWorktreeOwnerId, session.id);
 		assert.equal(proposal.paths[0]?.beforeMetadataSha256?.length, 64);
@@ -64,6 +66,7 @@ test('commit proposal binds exact turn evidence and explanation revisions; appro
 		assert.deepEqual(proposal.committer, proposalInput.committer);
 		assert.equal(proposal.state, 'pending');
 		assert.equal(database.agentSessionIntegrations.createProposal(proposalInput).id, proposal.id);
+		assert.equal(database.agentSessions.listNotifications(project.id, { limit: 100 }).filter(item => item.eventId === `integrationProposal:${proposal.id}:review`).length, 1);
 		assert.throws(() => database.agentSessionIntegrations.createProposal({ ...proposalInput, paths: [{ path: 'outside.ts', explanationTargets: [{ path: 'outside.ts', hunkId: null, revision: 1 }] }] }), /not part of the exact change evidence/);
 		assert.throws(() => database.agentSessionIntegrations.createProposal({ ...proposalInput, projectId: randomUUID() }), /durable turn/);
 		assert.throws(() => database.agentSessionIntegrations.createProposal({ ...proposalInput, actor: 'human' } as never), /unknown fields/);

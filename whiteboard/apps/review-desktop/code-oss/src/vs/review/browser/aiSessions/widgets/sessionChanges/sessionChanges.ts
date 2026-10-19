@@ -11,6 +11,8 @@ import type {
 	AgentSessionMergeProposalDTO, WorkspaceAgentMergeProposalMutationInput,
 	WorkspaceAgentMergePrepareInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput,
 } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
+import type { AgentSessionPublicationProposalDTO } from '../../../../../workspace/common/workspaceAgentPublicationProtocol.js';
+import { AGENT_SESSION_PUBLICATION_HISTORY_LIMIT } from '../../../../../workspace/common/workspaceAgentPublicationProtocol.js';
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT as MERGE_PAGE_SIZE } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
 import type { IWorkspaceAgentPrTextService, WorkspaceAgentPrTextSelection } from '../../../../../workspace/common/workspaceAgentPrTextHostProtocol.js';
 import { createSessionPrText } from '../../features/sessionPrText/index.js';
@@ -19,6 +21,7 @@ import './sessionChanges.css';
 
 export interface SessionChangesKnowledgeReference extends WorkspaceAgentExplanationCitationDTO { readonly label: string; }
 export interface SessionChangesContext { readonly projectId: string; readonly sessionId: string; readonly turnId: string; readonly knowledgeReferences: readonly SessionChangesKnowledgeReference[]; }
+export type SessionChangesNotificationTarget = { readonly kind: 'integrationProposal' | 'mergeProposal' | 'publicationProposal'; readonly id: string; readonly turnId: string };
 export interface SessionChangesActions extends SessionPublicationActions, IWorkspaceAgentPrTextService {
 	readonly latest: () => Promise<WorkspaceAgentChangeEvidenceDTO | null>;
 	readonly list: (beforeVersion: number, limit: number) => Promise<WorkspaceAgentChangeEvidencePageDTO>;
@@ -41,6 +44,7 @@ export interface SessionChangesActions extends SessionPublicationActions, IWorks
 }
 export interface SessionChangesController {
 	setContext(context: SessionChangesContext, actions: SessionChangesActions): void;
+	revealNotificationTarget(target: SessionChangesNotificationTarget, isCurrent: () => boolean): Promise<boolean>;
 	setVisible(visible: boolean): void;
 	refresh(): void;
 	dispose(): void;
@@ -74,6 +78,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 	let loading = false;
 	let errorText: string | undefined;
 	let generation = 0;
+	let notificationRevealGeneration = 0;
 	let fileGeneration = 0;
 	let disposed = false;
 	let selectedPath: string | undefined;
@@ -137,8 +142,8 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 		const selectionEnd = active?.selectionEnd ?? undefined;
 		parent.replaceChildren();
 		const toolbar = document.createElement('div'); toolbar.className = 'ai-session-changes__toolbar';
-		const refresh = button('새로고침'); refresh.dataset.focusKey = 'refresh'; refresh.disabled = loading || saving || commitBusy || mergeBusy; refresh.addEventListener('click', () => void loadLatest());
-		const older = button(loading ? '기록 불러오는 중…' : '이전 기록'); older.dataset.focusKey = 'older-evidence'; older.disabled = !hasMore || loading || saving || commitBusy || mergeBusy; older.addEventListener('click', () => void loadOlder());
+		const refresh = button('새로고침'); refresh.dataset.focusKey = 'refresh'; refresh.disabled = loading || saving || commitBusy || mergeBusy; refresh.addEventListener('click', () => { notificationRevealGeneration++; void loadLatest(); });
+		const older = button(loading ? '기록 불러오는 중…' : '이전 기록'); older.dataset.focusKey = 'older-evidence'; older.disabled = !hasMore || loading || saving || commitBusy || mergeBusy; older.addEventListener('click', () => { notificationRevealGeneration++; void loadOlder(); });
 		toolbar.append(refresh, older); parent.appendChild(toolbar);
 		const status = document.createElement('p'); status.className = 'ai-session-changes__status'; status.setAttribute('role', 'status');
 		const firstVersion = snapshots.at(-1)?.version; const lastVersion = snapshots[0]?.version;
@@ -160,7 +165,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 		if (selected.noChangesConfirmed) { appendText(parent, 'ai-session-changes__note', '완전하게 관찰된 기록이며 바뀐 파일이 없습니다.'); }
 		if (snapshots.length > 1) {
 			const versionList = document.createElement('ol'); versionList.className = 'ai-session-changes__versions'; versionList.setAttribute('aria-label', '변경 기록 버전');
-			for (const evidence of snapshots) { const item = document.createElement('li'); const select = button(`v${evidence.version} · ${formatTime(evidence.capturedAt)}`); select.dataset.focusKey = `version:${evidence.version}`; select.disabled = saving || commitBusy || mergeBusy; select.setAttribute('aria-pressed', String(evidence === selected)); select.addEventListener('click', () => { if (saving || commitBusy || mergeBusy) { return; } selected = evidence; clearFileSelection(); render(); void loadProposalWindow(0); }); item.appendChild(select); versionList.appendChild(item); }
+			for (const evidence of snapshots) { const item = document.createElement('li'); const select = button(`v${evidence.version} · ${formatTime(evidence.capturedAt)}`); select.dataset.focusKey = `version:${evidence.version}`; select.disabled = saving || commitBusy || mergeBusy; select.setAttribute('aria-pressed', String(evidence === selected)); select.addEventListener('click', () => { if (saving || commitBusy || mergeBusy) { return; } notificationRevealGeneration++; selected = evidence; clearFileSelection(); render(); void loadProposalWindow(0); }); item.appendChild(select); versionList.appendChild(item); }
 			parent.appendChild(versionList);
 		}
 		const fileList = document.createElement('ul'); fileList.className = 'ai-session-changes__files'; fileList.setAttribute('aria-label', '변경 파일');
@@ -174,12 +179,12 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			const controls = document.createElement('div'); controls.className = 'ai-session-changes__file-controls';
 			const commitLabel = document.createElement('label'); commitLabel.className = 'ai-session-changes__commit-select';
 			const commitSelect = document.createElement('input'); commitSelect.type = 'checkbox'; commitSelect.checked = selectedCommitPaths.has(file.path); commitSelect.disabled = commitBusy || mergeBusy || selected.status !== 'observed' || selected.coverage !== 'complete' || file.change === 'renamed'; commitSelect.dataset.focusKey = `commit-file:${file.path}`; commitSelect.setAttribute('aria-label', `${file.path} 커밋 검토에 포함`);
-			commitSelect.addEventListener('change', () => { if (selected) { toggleCommitPath(selected, file.path, commitSelect.checked); } });
+			commitSelect.addEventListener('change', () => { notificationRevealGeneration++; if (selected) { toggleCommitPath(selected, file.path, commitSelect.checked); } });
 			const commitSelectText = document.createElement('span'); commitSelectText.textContent = '커밋 검토'; commitLabel.append(commitSelect, commitSelectText); controls.appendChild(commitLabel);
-			const choose = button(selectedPath === file.path ? '선택됨' : file.change === 'renamed' ? '경로 변경 · 설명 불가' : '파일 설명'); choose.dataset.focusKey = `file:${file.path}`; choose.setAttribute('aria-pressed', String(selectedPath === file.path)); choose.disabled = saving || commitBusy || mergeBusy || selected.status !== 'observed' || file.change === 'renamed'; choose.addEventListener('click', () => void selectFile(selected!, file.path));
+			const choose = button(selectedPath === file.path ? '선택됨' : file.change === 'renamed' ? '경로 변경 · 설명 불가' : '파일 설명'); choose.dataset.focusKey = `file:${file.path}`; choose.setAttribute('aria-pressed', String(selectedPath === file.path)); choose.disabled = saving || commitBusy || mergeBusy || selected.status !== 'observed' || file.change === 'renamed'; choose.addEventListener('click', () => { notificationRevealGeneration++; void selectFile(selected!, file.path); });
 			controls.appendChild(choose);
 			if (selectedPath === file.path && fileData) {
-				const compare = button('비교 열기'); compare.dataset.focusKey = `compare:${file.path}`; compare.disabled = !diffText(fileData); compare.addEventListener('click', () => void openDiff(selected!, file.path)); controls.appendChild(compare);
+			const compare = button('비교 열기'); compare.dataset.focusKey = `compare:${file.path}`; compare.disabled = !diffText(fileData); compare.addEventListener('click', () => { notificationRevealGeneration++; void openDiff(selected!, file.path); }); controls.appendChild(compare);
 			}
 			item.append(info, controls); fileList.appendChild(item);
 		}
@@ -216,7 +221,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 		if (hunkData.unavailableReason) { appendText(fileSection, 'ai-session-changes__note', `비교 구간을 계산할 수 없습니다: ${hunkData.unavailableReason}`); }
 		if (hunkData.timedOut) {
 			appendText(fileSection, 'ai-session-changes__message', '비교 구간 계산 시간이 초과되었습니다. 다시 계산할 수 있습니다. 시간 초과 결과에는 설명을 연결할 수 없습니다.');
-			const retry = button('다시 계산'); retry.dataset.focusKey = `file:${selectedPath}`; retry.addEventListener('click', () => { if (selected && selectedPath) { void selectFile(selected, selectedPath, true); } }); fileSection.appendChild(retry);
+			const retry = button('다시 계산'); retry.dataset.focusKey = `file:${selectedPath}`; retry.addEventListener('click', () => { notificationRevealGeneration++; if (selected && selectedPath) { void selectFile(selected, selectedPath, true); } }); fileSection.appendChild(retry);
 		} else {
 			const hunkLabel = document.createElement('label'); hunkLabel.className = 'ai-session-changes__field'; hunkLabel.append(document.createTextNode('설명 범위'));
 			const selector = document.createElement('select'); selector.dataset.focusKey = 'hunk-select'; selector.setAttribute('aria-label', '설명을 연결할 변경 구간');
@@ -229,6 +234,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			selector.value = selectedHunkId ?? '';
 			selector.disabled = saving || commitBusy || mergeBusy || hunkData.status === 'unavailable' || hunkData.timedOut;
 			selector.addEventListener('change', () => {
+				notificationRevealGeneration++;
 				const nextHunkId = selector.value || null;
 				if (saving) { selector.value = selectedHunkId ?? ''; return; }
 				if (selected && selectedPath && !activateDraft(targetFor(selected, selectedPath, nextHunkId))) { selector.value = selectedHunkId ?? ''; return; }
@@ -258,7 +264,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 		saveControls.append(saveDraft, confirm); editor.appendChild(saveControls);
 		if (explanationError) { appendText(editor, 'ai-session-changes__message', explanationError); }
 		if (explanationNotice) { appendText(editor, 'ai-session-changes__status', explanationNotice); }
-		if (reloadRevisionAvailable) { const reload = button('최신 설명 다시 확인'); reload.dataset.focusKey = 'reload-revision'; reload.disabled = explanationLoading || saving || commitBusy || mergeBusy; reload.addEventListener('click', () => void reloadRevisionCursor()); editor.appendChild(reload); }
+		if (reloadRevisionAvailable) { const reload = button('최신 설명 다시 확인'); reload.dataset.focusKey = 'reload-revision'; reload.disabled = explanationLoading || saving || commitBusy || mergeBusy; reload.addEventListener('click', () => { notificationRevealGeneration++; void reloadRevisionCursor(); }); editor.appendChild(reload); }
 		fileSection.appendChild(editor);
 		renderLatestExplanation(fileSection);
 		renderRevisionHistory(fileSection);
@@ -294,6 +300,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 					}
 					selector.value = record.selectedRevision === undefined ? '' : String(record.selectedRevision);
 					selector.addEventListener('change', () => {
+						notificationRevealGeneration++;
 						const revision = selector.value ? Number(selector.value) : undefined;
 						commitExplanations.set(file.path, revision === undefined ? { revisions: record.revisions, loading: false } : { ...record, selectedRevision: revision });
 						commitError = undefined; commitNotice = undefined; render();
@@ -336,7 +343,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 		if (proposalLoading) { appendText(parentNode, 'ai-session-changes__status', '커밋 제안 기록을 불러오는 중입니다.'); }
 		if (proposalError) { appendText(parentNode, 'ai-session-changes__message', proposalError); }
 		if (!proposalInitialized && !proposalLoading) {
-			const load = button('제안 기록 불러오기'); load.dataset.focusKey = 'load-commit-proposals'; load.disabled = commitBusy || mergeBusy; load.addEventListener('click', () => void loadProposalWindow(0)); parentNode.appendChild(load);
+				const load = button('제안 기록 불러오기'); load.dataset.focusKey = 'load-commit-proposals'; load.disabled = commitBusy || mergeBusy; load.addEventListener('click', () => { notificationRevealGeneration++; void loadProposalWindow(0); }); parentNode.appendChild(load);
 		}
 		if (proposalInitialized && !proposalWindow.length && !proposalLoading) { appendText(parentNode, 'ai-session-changes__empty', '저장된 커밋 제안이 없습니다.'); }
 		if (proposalWindow.length) {
@@ -346,11 +353,11 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			for (const proposal of proposalWindow) {
 				const item = document.createElement('li'); const select = button(`v${proposal.revision} · ${proposal.commitMessage} · ${proposalStateLabel(proposal)}`); select.dataset.focusKey = `proposal:${proposal.id}`; select.setAttribute('aria-pressed', String(proposal.id === selectedProposalId));
 				select.disabled = commitBusy || mergeBusy || proposalLoading;
-				select.addEventListener('click', () => { if (commitBusy || mergeBusy || proposalLoading) { return; } selectedProposalId = proposal.id; resetMergeReview(); proposalDetails = new Map(); proposalDetailsError = undefined; proposalDetailsLoading = false; proposalDetailsGeneration++; render(); void loadProposalExplanations(proposal); });
+				select.addEventListener('click', () => { if (commitBusy || mergeBusy || proposalLoading) { return; } notificationRevealGeneration++; selectedProposalId = proposal.id; resetMergeReview(); proposalDetails = new Map(); proposalDetailsError = undefined; proposalDetailsLoading = false; proposalDetailsGeneration++; render(); void loadProposalExplanations(proposal); });
 				item.appendChild(select); list.appendChild(item);
 			}
 			parentNode.appendChild(list);
-			if (proposalHasMore) { const more = button(proposalLoading ? '불러오는 중…' : '다음 제안 기록'); more.dataset.focusKey = 'more-commit-proposals'; more.disabled = proposalLoading || commitBusy || mergeBusy; more.addEventListener('click', () => void loadProposalWindow(proposalAfterRevision)); parentNode.appendChild(more); }
+			if (proposalHasMore) { const more = button(proposalLoading ? '불러오는 중…' : '다음 제안 기록'); more.dataset.focusKey = 'more-commit-proposals'; more.disabled = proposalLoading || commitBusy || mergeBusy; more.addEventListener('click', () => { notificationRevealGeneration++; void loadProposalWindow(proposalAfterRevision); }); parentNode.appendChild(more); }
 		}
 	};
 
@@ -409,7 +416,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			appendText(section, 'ai-session-changes__message', '선택한 변경 기록이 원본 커밋 제안과 다릅니다. 이 기록에서는 병합 검토를 진행할 수 없습니다.');
 		}
 		if (mergeLoading) { appendText(section, 'ai-session-changes__status', '병합 제안 기록을 불러오는 중입니다.'); }
-		if (mergeError && !mergeInitialized && !mergeLoading) { const retry = button('병합 제안 기록 다시 불러오기'); retry.dataset.focusKey = 'load-merge-proposals'; retry.disabled = mergeBusy || commitBusy; retry.addEventListener('click', () => void loadFirstMergeWindow()); section.appendChild(retry); }
+		if (mergeError && !mergeInitialized && !mergeLoading) { const retry = button('병합 제안 기록 다시 불러오기'); retry.dataset.focusKey = 'load-merge-proposals'; retry.disabled = mergeBusy || commitBusy; retry.addEventListener('click', () => { notificationRevealGeneration++; void loadFirstMergeWindow(); }); section.appendChild(retry); }
 		if (mergeError) { appendText(section, 'ai-session-changes__message', mergeError); }
 		if (mergeNotice) { appendText(section, 'ai-session-changes__status', mergeNotice); }
 		if (mergeInitialized && !mergeWindow.length && !mergeLoading) { appendText(section, 'ai-session-changes__empty', '저장된 병합 제안이 없습니다.'); }
@@ -421,12 +428,12 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 				const row = document.createElement('li');
 				const select = button(`v${item.revision} · ${mergeStateLabel(item.state)} · ${item.id}`); select.dataset.focusKey = `merge-proposal:${item.id}`;
 				select.setAttribute('aria-pressed', String(item.id === selectedMergeProposalId)); select.disabled = mergeBusy || mergeLoading;
-				select.addEventListener('click', () => { if (mergeBusy || mergeLoading) { return; } selectMergeProposal(item.id); mergeError = undefined; mergeNotice = undefined; render(); });
+				select.addEventListener('click', () => { if (mergeBusy || mergeLoading) { return; } notificationRevealGeneration++; selectMergeProposal(item.id); mergeError = undefined; mergeNotice = undefined; render(); });
 				row.appendChild(select); list.appendChild(row);
 			}
 			section.appendChild(list);
-			if (first > 1) { const firstPage = button('처음 병합 제안 보기'); firstPage.dataset.focusKey = 'first-merge-proposals'; firstPage.disabled = mergeBusy || mergeLoading; firstPage.addEventListener('click', () => void loadMergeWindow(0)); section.appendChild(firstPage); }
-			if (mergeHasMore) { const more = button(mergeLoading ? '불러오는 중…' : '다음 병합 제안 더 보기'); more.dataset.focusKey = 'more-merge-proposals'; more.disabled = mergeBusy || mergeLoading; more.addEventListener('click', () => void loadMergeWindow(mergeAfterRevision)); section.appendChild(more); }
+			if (first > 1) { const firstPage = button('처음 병합 제안 보기'); firstPage.dataset.focusKey = 'first-merge-proposals'; firstPage.disabled = mergeBusy || mergeLoading; firstPage.addEventListener('click', () => { notificationRevealGeneration++; void loadMergeWindow(0); }); section.appendChild(firstPage); }
+			if (mergeHasMore) { const more = button(mergeLoading ? '불러오는 중…' : '다음 병합 제안 더 보기'); more.dataset.focusKey = 'more-merge-proposals'; more.disabled = mergeBusy || mergeLoading; more.addEventListener('click', () => { notificationRevealGeneration++; void loadMergeWindow(mergeAfterRevision); }); section.appendChild(more); }
 		}
 		const selectedMerge = mergeWindow.find(item => item.id === selectedMergeProposalId);
 		if (selectedMerge) { renderMergeProposal(section, selectedMerge, commitProposal); }
@@ -523,7 +530,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			const publicationSourceIsCurrent = (): boolean => !!evidenceAtRender && !disposed && visible && selectedMergeProposalId === proposal.id && proposal.state === 'merged' && sourceMatches &&
 				isMergeCurrent(mergeRequestAtRender, commitRequestAtRender, contextAtRender, evidenceAtRender, commitProposal.id) &&
 				mergeWindow.some(item => item.id === proposal.id && item.state === 'merged' && item.fingerprint === proposal.fingerprint);
-			publication.render(detail, currentContext, currentActions, proposal, publicationSourceIsCurrent, selectedPrText, render);
+			publication.render(detail, currentContext, currentActions, proposal, publicationSourceIsCurrent, selectedPrText, render, () => { notificationRevealGeneration++; });
 		}
 		detail.appendChild(controls); parentNode.appendChild(detail);
 	};
@@ -708,6 +715,100 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			}
 		} catch (error) { if (isCurrentRequest()) { proposalDetailsError = describe(error); } }
 		finally { if (isCurrentRequest()) { proposalDetailsLoading = false; render(); } }
+	};
+
+	const revealNotificationTarget = async (target: SessionChangesNotificationTarget, externallyCurrent: () => boolean): Promise<boolean> => {
+		generation++; notificationRevealGeneration++; loading = false; proposalLoading = false; mergeLoading = false;
+		const requested = currentContext; const source = currentActions; const request = generation; const revealRequest = notificationRevealGeneration;
+		const isCurrentTarget = (): boolean => !disposed && request === generation && revealRequest === notificationRevealGeneration && requested === currentContext && externallyCurrent()
+			&& target.turnId === requested.turnId;
+		if (!isCurrentTarget() || proposalLoading || mergeLoading || mergeBusy || commitBusy) { return false; }
+		const listExactCommit = async (id: string): Promise<{ readonly proposal: AgentSessionIntegrationProposalDTO; readonly hasMore: boolean } | undefined> => {
+			let afterRevision = 0;
+			for (;;) {
+				const page = await source.listCommitProposals(afterRevision, PAGE_SIZE);
+				if (!isCurrentTarget()) { return undefined; }
+				assertProposalPage(page, requested, afterRevision);
+				const exact = page.proposals.find(item => item.id === id);
+				if (exact) { return { proposal: exact, hasMore: page.hasMore || page.proposals.some(item => item.revision > exact.revision) }; }
+				if (!page.hasMore) { return undefined; }
+				if (page.nextRevision <= afterRevision) { throw new Error('커밋 제안 기록의 페이지 위치가 진행되지 않습니다.'); }
+				afterRevision = page.nextRevision;
+			}
+		};
+		const listExactMerge = async (id: string): Promise<{ readonly proposal: AgentSessionMergeProposalDTO; readonly hasMore: boolean } | undefined> => {
+			let afterRevision = 0;
+			for (;;) {
+				const page = await source.listMergeProposals(afterRevision, MERGE_PAGE_SIZE);
+				if (!isCurrentTarget()) { return undefined; }
+				assertMergePage(page, requested, afterRevision);
+				const exact = page.proposals.find(item => item.id === id);
+				if (exact) { return { proposal: exact, hasMore: page.hasMore || page.proposals.some(item => item.revision > exact.revision) }; }
+				if (!page.hasMore) { return undefined; }
+				if (page.nextRevision <= afterRevision) { throw new Error('병합 제안 기록의 페이지 위치가 진행되지 않습니다.'); }
+				afterRevision = page.nextRevision;
+			}
+		};
+		const listExactPublication = async (id: string): Promise<AgentSessionPublicationProposalDTO | undefined> => {
+			let afterRevision = 0;
+			for (;;) {
+				const page = await source.listPublicationProposals({ ...scopeOf(requested), afterRevision, limit: AGENT_SESSION_PUBLICATION_HISTORY_LIMIT });
+				if (!isCurrentTarget()) { return undefined; }
+				if (!page || !Array.isArray(page.proposals) || page.proposals.length > AGENT_SESSION_PUBLICATION_HISTORY_LIMIT || !Number.isSafeInteger(page.nextRevision) || typeof page.hasMore !== 'boolean' || page.proposals.some((item, index) => item.projectId !== requested.projectId || item.sessionId !== requested.sessionId || item.turnId !== requested.turnId || (index > 0 && item.revision <= page.proposals[index - 1].revision)) || page.nextRevision !== (page.proposals.at(-1)?.revision ?? afterRevision)) { throw new Error('게시 제안 기록 응답의 범위가 올바르지 않습니다.'); }
+				const exact = page.proposals.find(item => item.id === id);
+				if (exact) { return exact; }
+				if (!page.hasMore) { return undefined; }
+				if (page.nextRevision <= afterRevision) { throw new Error('게시 제안 기록의 페이지 위치가 진행되지 않습니다.'); }
+				afterRevision = page.nextRevision;
+			}
+		};
+		let commit: AgentSessionIntegrationProposalDTO | undefined;
+		let commitHasMore = false;
+		let merge: AgentSessionMergeProposalDTO | undefined;
+		let mergeHasMoreAfterTarget = false;
+		let publicationTarget: AgentSessionPublicationProposalDTO | undefined;
+		if (target.kind === 'integrationProposal') { const found = await listExactCommit(target.id); commit = found?.proposal; commitHasMore = found?.hasMore ?? false; }
+		else if (target.kind === 'mergeProposal') { const found = await listExactMerge(target.id); merge = found?.proposal; mergeHasMoreAfterTarget = found?.hasMore ?? false; }
+		else { publicationTarget = await listExactPublication(target.id); }
+		if (!isCurrentTarget()) { return false; }
+		if (target.kind === 'mergeProposal' && merge && merge.turnId === requested.turnId) { const found = await listExactCommit(merge.commitProposalId); commit = found?.proposal; commitHasMore = found?.hasMore ?? false; }
+		if (target.kind === 'publicationProposal' && publicationTarget) { const found = await listExactMerge(publicationTarget.sourceMergeId); merge = found?.proposal; mergeHasMoreAfterTarget = found?.hasMore ?? false; }
+		if (target.kind === 'publicationProposal' && merge && publicationTarget?.sourceMergeId === merge.id) { const found = await listExactCommit(merge.commitProposalId); commit = found?.proposal; commitHasMore = found?.hasMore ?? false; }
+		if (!isCurrentTarget()) { return false; }
+		if (!commit || commit.projectId !== requested.projectId || commit.sessionId !== requested.sessionId || commit.turnId !== requested.turnId) { throw new Error('알림이 가리키는 원본 커밋 제안을 찾을 수 없습니다.'); }
+		if (target.kind === 'mergeProposal' && (!merge || merge.commitProposalId !== commit.id || merge.commitProposalRevision !== commit.revision || merge.commitProposalFingerprint !== commit.fingerprint)) { throw new Error('알림의 병합 제안과 원본 커밋 제안이 일치하지 않습니다.'); }
+		if (target.kind === 'publicationProposal' && (!publicationTarget || !merge || publicationTarget.sourceMergeId !== merge.id || publicationTarget.sourceMergeRevision !== merge.revision || publicationTarget.sourceMergeFingerprint !== merge.fingerprint || publicationTarget.sourceMergeOperationId !== merge.outcomes.at(-1)?.receipt.operationId || publicationTarget.integrationOwnerId !== merge.integrationOwnerId || publicationTarget.resultCommit !== merge.outcomes.at(-1)?.receipt.resultingHead || merge.commitProposalId !== commit.id)) { throw new Error('알림의 게시 제안, 병합 제안, 원본 커밋 제안이 일치하지 않습니다.'); }
+		let evidence: WorkspaceAgentChangeEvidenceDTO | undefined;
+		const latest = await source.latest();
+		if (!isCurrentTarget()) { return false; }
+		if (latest?.version === commit.evidenceVersion) { evidence = latest; }
+		else {
+			const page = await source.list(commit.evidenceVersion + 1, 1);
+			if (!isCurrentTarget()) { return false; }
+			assertEvidencePage(page, requested, commit.evidenceVersion + 1);
+			evidence = page.snapshots.find(item => item.version === commit!.evidenceVersion);
+		}
+		if (!evidence || evidence.projectId !== requested.projectId || evidence.sessionId !== requested.sessionId || evidence.turnId !== requested.turnId || evidence.fingerprint !== commit.evidenceFingerprint) { throw new Error('알림 제안이 참조하는 변경 기록이 더 이상 보관되어 있지 않거나 지문이 일치하지 않습니다.'); }
+		selected = evidence; snapshots = [evidence]; beforeVersion = evidence.version; hasMore = evidence.version > 1; latestWindow = false; clearFileSelection();
+		proposalWindow = [commit]; selectedProposalId = commit.id; proposalAfterRevision = commit.revision; proposalHasMore = commitHasMore; proposalInitialized = true; proposalError = undefined;
+		proposalDetails = new Map(); proposalDetailsError = undefined; proposalDetailsLoading = false; proposalDetailsGeneration++;
+		resetMergeReview();
+		if (merge) { mergeCommitProposalId = commit.id; mergeWindow = [merge]; selectedMergeProposalId = merge.id; mergeAfterRevision = merge.revision; mergeHasMore = mergeHasMoreAfterTarget; mergeLatestWindow = !mergeHasMoreAfterTarget; mergeInitialized = true; }
+		render();
+		await loadProposalExplanations(commit);
+		if (!isCurrentTarget()) { return false; }
+		if (target.kind === 'publicationProposal' && publicationTarget) {
+			const opened = await publication.revealProposal(publicationTarget.id, publicationTarget.revision);
+			if (!isCurrentTarget()) { return false; }
+			if (!opened) { throw new Error('게시 제안의 정확한 기록을 선택하지 못했습니다.'); }
+			render();
+		}
+		if (!isCurrentTarget()) { return false; }
+		const selector = target.kind === 'integrationProposal' ? `[data-focus-key="proposal:${target.id}"][aria-pressed="true"]`
+			: target.kind === 'mergeProposal' ? `[data-focus-key="merge-proposal:${target.id}"][aria-pressed="true"]`
+				: `[data-focus-key="publication-proposal:${target.id}"][aria-pressed="true"]`;
+		if (!parent.querySelector(selector)) { throw new Error('정확한 제안이 화면에서 선택된 상태를 확인하지 못했습니다.'); }
+		return true;
 	};
 
 	const prepareCommitProposal = async (): Promise<void> => {
@@ -978,10 +1079,11 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 	function isMergeCurrent(request: number, commitRequest: number, requested: SessionChangesContext, evidence: WorkspaceAgentChangeEvidenceDTO, sourceProposalId: string): boolean { return !disposed && request === mergeGeneration && commitRequest === commitGeneration && requested === currentContext && evidence === selected && mergeCommitProposalId === sourceProposalId; }
 
 	return {
-		setContext(next, nextActions) { if (next.projectId === currentContext.projectId && next.sessionId === currentContext.sessionId && next.turnId === currentContext.turnId) { currentActions = nextActions; currentContext = next; return; } publication.invalidate(); prText.invalidate(); selectedPrText = undefined; currentContext = next; currentActions = nextActions; generation++; loading = false; snapshots = []; selected = undefined; beforeVersion = 0; hasMore = true; latestWindow = true; errorText = undefined; clearFileSelection(); if (visible) { void loadLatest(); } else { render(); } },
-		setVisible(next) { if (visible !== next) { publication.invalidate(); if (!next) { prText.invalidate(); selectedPrText = undefined; } } visible = next; if (next) { if (!snapshots.length && !loading) { void loadLatest(); } else { render(); } } },
+		setContext(next, nextActions) { if (next.projectId === currentContext.projectId && next.sessionId === currentContext.sessionId && next.turnId === currentContext.turnId) { currentActions = nextActions; currentContext = next; return; } notificationRevealGeneration++; publication.invalidate(); prText.invalidate(); selectedPrText = undefined; currentContext = next; currentActions = nextActions; generation++; loading = false; snapshots = []; selected = undefined; beforeVersion = 0; hasMore = true; latestWindow = true; errorText = undefined; clearFileSelection(); if (visible) { void loadLatest(); } else { render(); } },
+		revealNotificationTarget,
+		setVisible(next) { if (visible !== next) { if (!next) { notificationRevealGeneration++; } publication.invalidate(); if (!next) { prText.invalidate(); selectedPrText = undefined; } } visible = next; if (next) { if (!snapshots.length && !loading) { void loadLatest(); } else { render(); } } },
 		refresh() { void loadLatest(); },
-		dispose() { disposed = true; generation++; fileGeneration++; publication.dispose(); prText.dispose(); parent.replaceChildren(); },
+		dispose() { disposed = true; generation++; notificationRevealGeneration++; fileGeneration++; publication.dispose(); prText.dispose(); parent.replaceChildren(); },
 	};
 
 }

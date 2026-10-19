@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 // eslint-disable-next-line local/code-import-patterns
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { AgentSessionMergeProposalDTO } from '../../common/workspaceAgentMergeProtocol.js';
+import type { AgentSessionStore } from './agentSessionStore.js';
 import {
 	AGENT_SESSION_PUBLICATION_DIFF_MAX_BYTES,
 	AGENT_SESSION_PUBLICATION_HISTORY_LIMIT,
@@ -71,6 +72,7 @@ export class AgentSessionPublicationStore {
 	constructor(
 		private readonly db: DatabaseSync,
 		private readonly getMergeProposal: (proposalId: string) => AgentSessionMergeProposalDTO | undefined,
+		private readonly sessions: AgentSessionStore,
 	) { }
 
 	createProposal(input: AgentSessionPublicationHostCreateInput): AgentSessionPublicationProposalDTO {
@@ -126,6 +128,10 @@ export class AgentSessionPublicationStore {
 				(id, project_id, session_id, turn_id, source_merge_id, revision, semantic_fingerprint, proposal_fingerprint, payload_json, created_at, expires_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 				.run(id, input.projectId, input.sessionId, input.turnId, input.sourceMergeId, latestRevision + 1, semanticFingerprint, fingerprint, payloadJson, createdAt, expiresAt);
+			this.sessions.recordNotificationWithinTransaction({
+				eventId: `publicationProposal:${id}:review`, projectId: input.projectId, sessionId: input.sessionId,
+				kind: 'prReady', target: { kind: 'publicationProposal', id, turnId: input.turnId }, createdAt,
+			});
 			return this.proposalFromRow(this.requireProposalRow(id));
 		});
 	}

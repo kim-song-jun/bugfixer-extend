@@ -221,7 +221,19 @@ export class AgentSessionTurnStore {
 			if (Number(changed.changes) !== 1) { throw new Error('The turn revision is stale.'); }
 			const nextSession = session.state === nextSessionState
 				? session
-				: this.sessions.transitionSessionWithinTransaction(projectId, sessionId, expectedSessionRevision, nextSessionState);
+				: this.sessions.transitionSessionWithinTransaction(projectId, sessionId, expectedSessionRevision, nextSessionState, { kind: 'turn', id: turnId });
+			if (update.state === 'failed' || update.state === 'exited' && exitCode !== null && exitCode !== 0) {
+				this.sessions.recordNotificationWithinTransaction({
+					eventId: `turn:${turnId}:error`, projectId, sessionId, kind: 'error',
+					target: { kind: 'turn', id: turnId }, createdAt: now,
+				});
+			}
+			if (update.state === 'exited' && update.exitCode === 0 && cleanupVerified) {
+				this.sessions.recordNotificationWithinTransaction({
+					eventId: `turn:${turnId}:completed`, projectId, sessionId, kind: 'completion',
+					target: { kind: 'turn', id: turnId }, createdAt: now,
+				});
+			}
 			return { turn: this.readTurnInternal(projectId, sessionId, turnId)!, session: nextSession };
 		});
 	}

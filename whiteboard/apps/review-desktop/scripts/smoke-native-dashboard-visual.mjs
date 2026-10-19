@@ -2057,7 +2057,7 @@ try {
     try {
       const messages = verifiedMailboxDatabase.agentSessions.listInbox(fixture.projectId, fixture.mailbox.recipientSessionId, { limit: 100 });
 
-      const notifications = verifiedMailboxDatabase.agentSessions.listNotifications(fixture.projectId, { limit: 100 });
+      const notifications = listAllProjectNotifications(verifiedMailboxDatabase, fixture.projectId);
 
       const notificationStatus = verifiedMailboxDatabase.agentSessions.notificationStatus(fixture.projectId);
 
@@ -2087,15 +2087,23 @@ try {
 
       assert.ok(targetMessage, 'The notification target message must remain in the recipient mailbox');
 
+      assert.equal(notifications.length, fixture.mailbox.notificationCount, 'The project alert history must retain every existing notification across the UI journey');
+
       assert.equal(targetMessage.readAt, null, 'Opening a human mailbox view must not acknowledge the message for the AI');
 
-      assert.ok(targetNotification?.readAt, 'Opening the notification must mark only that notification as read');
+      const readNotificationIds = new Set(notifications.filter(notification => notification.readAt).map(notification => notification.id));
 
-      assert.deepEqual(notifications.filter(notification => notification.readAt).map(notification => notification.id), [fixture.mailbox.targetNotificationId], 'Only the clicked notification may be marked read');
+      const expectedReadIds = new Set([...fixture.mailbox.initialReadIds, fixture.mailbox.completionNotificationId, fixture.mailbox.targetNotificationId]);
 
-      assert.equal(notificationStatus.unreadCount, fixture.mailbox.messageCount - 1, 'Only the opened notification must leave the project unread count');
+      assert.ok(targetNotification?.readAt, 'Opening the message notification must mark that exact notification as read');
 
-      assert.equal(notificationStatus.latestSequence, fixture.mailbox.messageCount, 'The project notification high-water mark must remain persisted');
+      assert.ok(notifications.find(notification => notification.id === fixture.mailbox.completionNotificationId)?.readAt, 'Opening the completion notification must mark that exact notification as read');
+
+      assert.deepEqual([...readNotificationIds].sort(), [...expectedReadIds].sort(), 'Only the two clicked notifications may be added to the persisted read set');
+
+      assert.equal(notificationStatus.unreadCount, fixture.mailbox.unreadCount - 2, 'Only the two opened notifications must leave the project unread count');
+
+      assert.equal(notificationStatus.latestSequence, fixture.mailbox.latestSequence, 'The project notification high-water mark must remain unchanged');
 
       const savedWorkflow = verifiedMailboxDatabase.agentWorkflows.getWorkflow(fixture.projectId, fixture.workflow.workflowId);
 
@@ -2685,6 +2693,14 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag, compute
   assert.equal(reopenedEdit?.after.state, 'text');
   assert.equal(reopenedEdit.after.file.content, `after ${tag}\n`, 'The persisted diff must not reread the changed fixture folder');
 
+  const immutableEvidence = database.agentSessionChangeEvidence.getLatest(fixture.projectId, session.id, turn.id);
+
+  assert.ok(immutableEvidence, 'The content-store capture must produce its immutable change-evidence record');
+
+  assert.equal(immutableEvidence.version, final.evidenceVersion, 'The immutable change evidence must match the content capture version');
+
+  assert.equal(reopenedEdit.evidenceFingerprint, immutableEvidence.fingerprint, 'The retained file metadata must bind to the immutable change-evidence fingerprint');
+
   const retainedEmptyFile = database.agentSessionContents.getFile({ scope: turnScope, evidenceVersion: final.evidenceVersion, path: 'created-empty.txt' });
   assert.equal(retainedEmptyFile?.before.state, 'absent');
   assert.equal(retainedEmptyFile?.after.state, 'text');
@@ -2714,7 +2730,7 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag, compute
   const reviewTarget = {
     ...turnScope,
     evidenceVersion: final.evidenceVersion,
-    evidenceFingerprint: final.fingerprint,
+    evidenceFingerprint: immutableEvidence.fingerprint,
     path: 'edited.txt',
     hunkId: editedHunks.hunks[0].id,
   };
@@ -2746,7 +2762,7 @@ async function seedChangeEvidence(database, fixture, projectFolder, tag, compute
       name,
       folderPath,
       evidenceVersion: final.evidenceVersion,
-      fingerprint: final.fingerprint,
+      fingerprint: immutableEvidence.fingerprint,
       changedPaths: ['binary.dat', 'created-empty.txt', 'deleted.txt', 'edited.txt'],
       editedBefore: `before ${tag}\n`,
       editedAfter: `after ${tag}\n`,
@@ -2871,12 +2887,18 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
 
   const after = await readChangeEvidenceSnapshot(managed.worktreePath, folder);
 
-  const evidence = database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 0, revision: sourceHead, cleanupVerified: true });
+  const finalContent = database.agentSessionContents.recordAfter({ scope, snapshot: after, expectedLatestVersion: 0, revision: sourceHead, cleanupVerified: true });
+
+  const immutableEvidence = database.agentSessionChangeEvidence.getLatest(fixture.projectId, session.id, turn.id);
+
+  assert.ok(immutableEvidence, 'The retained reviewed commit content must produce its immutable change-evidence record');
+
+  assert.equal(immutableEvidence.version, finalContent.evidenceVersion, 'The reviewed commit evidence must match its content capture version');
 
   database.agentSessionTurns.transitionTurn(fixture.projectId, session.id, turn.id, running.turn.revision, running.session.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
 
   const explanation = database.agentSessionReviews.recordHumanExplanation({
-    target: { ...scope, evidenceVersion: evidence.evidenceVersion, evidenceFingerprint: evidence.fingerprint, path: 'selected.txt', hunkId: null },
+    target: { ...scope, evidenceVersion: finalContent.evidenceVersion, evidenceFingerprint: immutableEvidence.fingerprint, path: 'selected.txt', hunkId: null },
     expectedLatestRevision: 0, what: '검수용 파일의 보존된 내용을 변경합니다.', why: '선택한 파일만 커밋하는 실제 앱 경로를 확인하는 CI 자료입니다.',
     citations: [], checkClaims: [{ label: '제공자 실행', outcome: 'notRun', detail: '이 fixture는 AI 제공자를 실행하지 않습니다.' }], status: 'confirmed',
   });
@@ -2893,7 +2915,7 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
     proofLimit: 'Actual disposable Git and retained-file application path; any approval seeded by this fixture is synthetic and does not prove native human confirmation.',
     ...scope, name: session.name, provider: session.provider, model: session.model, workspaceMode: session.workspaceMode,
     repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256,
-    evidenceVersion: evidence.evidenceVersion, fingerprint: evidence.fingerprint, explanationRevision: explanation.revision,
+    evidenceVersion: immutableEvidence.version, fingerprint: immutableEvidence.fingerprint, explanationRevision: explanation.revision,
     retainedAfter, laterSelected, laterUnselected, unselectedBase: `unselected base ${tag}\n`, commitMessage: `CI reviewed selected content ${tag}`,
   };
 }
@@ -3943,8 +3965,19 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
 
   const targetMessageId = messageIds.at(-1);
 
-  const targetNotification = database.agentSessions.listNotifications(fixture.projectId, { limit: 100 })
-    .find(notification => notification.messageId === targetMessageId);
+  const persistedNotifications = listAllProjectNotifications(database, fixture.projectId);
+
+  const targetNotification = persistedNotifications.find(notification => notification.kind === 'message'
+    && notification.target.kind === 'message' && notification.target.id === targetMessageId);
+
+  const completionNotification = persistedNotifications.filter(notification => notification.kind === 'completion'
+    && notification.sessionId === sender.id && notification.target.kind === 'turn' && notification.target.id === turn.id).at(-1);
+
+  const initialReadIds = persistedNotifications.filter(notification => notification.readAt !== null).map(notification => notification.id);
+
+  const notificationStatus = database.agentSessions.notificationStatus(fixture.projectId);
+
+  const firstPageUnreadCount = persistedNotifications.slice(0, 50).filter(notification => notification.readAt === null).length;
 
   const firstPageMessages = database.agentSessions.listInbox(fixture.projectId, recipient.id, { limit: 50 });
 
@@ -3966,6 +3999,16 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
 
   assert.ok(targetNotification, 'The mailbox fixture must create an associated notification');
 
+  assert.ok(completionNotification, 'The successful fixture turn must persist its exact typed completion notification');
+
+  assert.equal(completionNotification.target.kind, 'turn', 'The completion alert must target a turn');
+
+  assert.equal(completionNotification.target.id, turn.id, 'The completion alert must target the exact fixture turn');
+
+  assert.equal(messageIds.slice(0, 50).includes(targetMessageId), false, 'The target message must remain outside the first bounded mailbox page');
+
+  assert.equal(persistedNotifications.at(-1)?.sequence ?? 0, notificationStatus.latestSequence, 'The bounded SQL store pages must reach the persisted project high-water mark without omitting later notification IDs');
+
   assert.ok(firstPageResponseBytes > 450 * 1024 && firstPageResponseBytes < 512 * 1024, 'The first mailbox page must exercise near-limit byte pagination while staying inside the response budget');
 
   return {
@@ -3975,9 +4018,10 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
       providerExecuted: false,
       ptyExecuted: false,
       source: 'Isolated CI-profile WorkspaceDatabase via AgentSessionCollaborationService and AgentSessionStore APIs',
-      proofLimit: 'Synthetic SQLite mailbox records for packaged UI verification; not evidence of provider execution, real agent work, or PTY output.',
+      proofLimit: 'Typed SQLite mailbox and successful controlled-turn completion records for packaged UI verification; not evidence of provider execution, real agent work, or PTY output.',
       projectId: fixture.projectId,
       senderSessionId: sender.id,
+      senderTurnId: turn.id,
       senderName,
       senderProvider: sender.provider,
       recipientSessionId: recipient.id,
@@ -3988,6 +4032,12 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
       messageIds,
       targetMessageId,
       targetNotificationId: targetNotification.id,
+      completionNotificationId: completionNotification.id,
+      notificationCount: persistedNotifications.length,
+      unreadCount: notificationStatus.unreadCount,
+      firstPageUnreadCount,
+      latestSequence: notificationStatus.latestSequence,
+      initialReadIds,
       pageSize: 50,
       oldTargetOutsideFirstMessagePage: true,
       targetBodyLength: mailboxFixtureBody(tag, 60, secret).length,
@@ -3998,6 +4048,30 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
       clipboardAndFileExport: 'Not exercised by this native smoke.',
     },
   };
+}
+
+function listAllProjectNotifications(database, projectId) {
+  const pageSize = 100;
+
+  const notifications = [];
+
+  let afterSequence = 0;
+
+  while (true) {
+    const page = database.agentSessions.listNotifications(projectId, { afterSequence, limit: pageSize });
+
+    notifications.push(...page);
+
+    if (page.length < pageSize) { break; }
+
+    const nextSequence = page.at(-1).sequence;
+
+    assert.ok(nextSequence > afterSequence, 'The notification SQL pagination cursor must advance');
+
+    afterSequence = nextSequence;
+  }
+
+  return notifications;
 }
 
 async function statFolder(folderPath) {
@@ -4459,7 +4533,7 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
 
   const notifications = workspace.locator('.ai-session__notifications-mount');
 
-  const trigger = notifications.getByRole('button', { name: '알림, 전체 읽지 않은 60개', exact: true });
+  const trigger = notifications.getByRole('button', { name: `알림, 전체 읽지 않은 ${fixture.mailbox.unreadCount}개`, exact: true });
 
   const popover = notifications.locator('.ai-session-notifications__popover');
 
@@ -4482,9 +4556,11 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
 
   const loadedUnreadStatus = popover.locator('.ai-session-notifications__status');
 
-  await page.waitForFunction(() => document.querySelectorAll('.ai-session-notifications__item').length === 50);
+  const firstNotificationPageCount = Math.min(50, fixture.mailbox.notificationCount);
 
-  assert.ok((await loadedUnreadStatus.innerText()).includes('불러온 목록에서 50개'), 'The first notification page must report its bounded unread count separately');
+  await page.waitForFunction(count => document.querySelectorAll('.ai-session-notifications__item').length === count, firstNotificationPageCount);
+
+  assert.ok((await loadedUnreadStatus.innerText()).includes(`불러온 목록에서 ${fixture.mailbox.firstPageUnreadCount}개`), 'The first notification page must report its actual bounded unread count separately');
 
   const showLatest = notifications.getByRole('button', { name: '새 알림 보기', exact: true });
 
@@ -4492,13 +4568,81 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
   await showLatest.click();
   await page.waitForFunction(() => document.querySelectorAll('.ai-session-notifications__item').length === 1);
 
+  const completionNotification = notificationList.locator(`[data-notification-id="${fixture.mailbox.completionNotificationId}"]`);
+
+  await completionNotification.waitFor({ state: 'visible' });
+
+  assert.ok((await completionNotification.innerText()).includes('실행 종료'), 'The latest notification must be rendered as a typed completion alert');
+
+  assert.ok((await completionNotification.innerText()).includes(fixture.mailbox.senderName), 'The completion alert must name the session whose turn completed');
+
+  await completionNotification.click();
+
+  const logsTab = workspace.getByRole('tab', { name: '로그', exact: true });
+
+  await logsTab.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => document.querySelector('#ai-session-tab-logs')?.getAttribute('aria-selected') === 'true');
+  await workspace.getByRole('heading', { name: fixture.mailbox.senderName, exact: true }).waitFor();
+
+  const logPanel = workspace.locator('.ai-session__logs-panel');
+
+  const turnSelector = logPanel.locator('select[aria-label="로그를 볼 실행 선택"]');
+
+  await turnSelector.waitFor({ state: 'attached' });
+  await page.waitForFunction(turnId => document.querySelector('.ai-session__logs-panel select[aria-label="로그를 볼 실행 선택"]')?.value === turnId, fixture.mailbox.senderTurnId);
+
+  assert.equal(await turnSelector.inputValue(), fixture.mailbox.senderTurnId, 'The completion alert must select its exact sender turn in the logs panel');
+
+  await page.waitForFunction(() => document.activeElement?.id === 'ai-session-tab-logs');
+
+  assert.equal(await logsTab.evaluate(element => document.activeElement === element), true, 'The actual logs tab must receive focus after exact completion navigation settles');
+
+  const completionShot = path.join(output, `ai-session-mailbox-${tag}-completion-destination.png`);
+
+  await capturePage(page, completionShot);
+  screenshots.push(completionShot);
+  viewports.push({ theme: tag, state: 'ai-session-mailbox-exact-completion-destination', width: 1440, height: 900, screenshot: completionShot, destination: { sessionId: fixture.mailbox.senderSessionId, turnId: fixture.mailbox.senderTurnId, selectedTurnId: await turnSelector.inputValue() } });
+
+  await page.getByRole('button', { name: `알림, 전체 읽지 않은 ${fixture.mailbox.unreadCount - 1}개`, exact: true }).waitFor({ state: 'visible' });
+
+  const updatedTrigger = notifications.getByRole('button', { name: `알림, 전체 읽지 않은 ${fixture.mailbox.unreadCount - 1}개`, exact: true });
+
+  await updatedTrigger.click();
+  await popover.waitFor({ state: 'visible' });
+
+  const firstNotificationPage = popover.getByRole('button', { name: '처음 알림 다시 읽기', exact: true });
+
+  await firstNotificationPage.click();
+  await page.waitForFunction(count => document.querySelectorAll('.ai-session-notifications__item').length === count, firstNotificationPageCount);
+
   const targetNotification = notificationList.locator(`[data-notification-id="${fixture.mailbox.targetNotificationId}"]`);
 
-  await targetNotification.waitFor({ state: 'visible' });
+  const nextNotificationPage = popover.getByRole('button', { name: '다음 알림 불러오기', exact: true });
 
-  assert.equal(fixture.mailbox.messageIds.slice(0, fixture.mailbox.pageSize).includes(fixture.mailbox.targetMessageId), false, 'The exact notification target must be older than the first mailbox page');
+  let loadedNotificationCount = firstNotificationPageCount;
 
-  assert.ok((await targetNotification.innerText()).includes(fixture.mailbox.recipientName), 'The latest notification must name the actual recipient session');
+  while (!(await targetNotification.count())) {
+    assert.ok(loadedNotificationCount < fixture.mailbox.notificationCount, 'The exact message notification must exist in the persisted notification history');
+    assert.equal(await nextNotificationPage.isEnabled(), true, 'Notification history must expose another bounded page before the exact message notification');
+
+    const expectedLoadedCount = Math.min(fixture.mailbox.notificationCount, loadedNotificationCount + 50);
+
+    const firstLoadedNotificationId = await notificationList.locator('.ai-session-notifications__item').first().getAttribute('data-notification-id');
+
+    await nextNotificationPage.click();
+    await page.waitForFunction(({ count, notificationId, previousFirstId }) => {
+      const items = [...document.querySelectorAll('.ai-session-notifications__item')];
+
+      return items.some(item => item.dataset.notificationId === notificationId)
+        || (items.length >= Math.min(200, count) && (items.length < 200 || items[0].dataset.notificationId !== previousFirstId));
+    }, { count: expectedLoadedCount, notificationId: fixture.mailbox.targetNotificationId, previousFirstId: firstLoadedNotificationId });
+
+    loadedNotificationCount = expectedLoadedCount;
+  }
+
+  assert.ok((await targetNotification.innerText()).includes('새 메시지'), 'The historical target must remain a typed message alert');
+
+  assert.ok((await targetNotification.innerText()).includes(fixture.mailbox.recipientName), 'The message alert must name its recipient session');
 
   await targetNotification.click();
 
@@ -4533,7 +4677,7 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
 
   assert.ok((await targetMessage.locator('.ai-session-messages__read-state').innerText()).includes('우편함에 보관됨'), 'Opening a notification must leave the AI message unread');
 
-  await page.getByRole('button', { name: '알림, 전체 읽지 않은 59개', exact: true }).waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: `알림, 전체 읽지 않은 ${fixture.mailbox.unreadCount - 2}개`, exact: true }).waitFor({ state: 'visible' });
 
   const desktopShot = path.join(output, `ai-session-mailbox-${tag}-exact-message.png`);
 

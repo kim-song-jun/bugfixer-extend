@@ -63,6 +63,8 @@ test('durable merge proposal pins successful commit, full source delta, human ap
 			committer: { name: 'Merge Committer', email: 'committer@example.test', date: '1792416060 +0900' },
 			changedPaths: ['src/selected.ts', 'src/unselected-source-change.ts'], expectedLatestRevision: 0 };
 		const proposal = database.agentSessionMerges.createProposal(mergeInput);
+		assert.ok(database.agentSessions.listNotifications(project.id, { limit: 100 }).some(item => item.eventId === `mergeProposal:${proposal.id}:review`
+			&& item.kind === 'approval' && item.target.kind === 'mergeProposal' && item.target.id === proposal.id && item.target.turnId === turn.id));
 		assert.equal(proposal.state, 'pending'); assert.equal(proposal.diffText, diffText);
 		assert.equal(database.agentSessionMerges.listProposals(project.id, session.id, turn.id).proposals.length, 1);
 		assert.throws(() => database.agentSessionMerges.listProposals(project.id, session.id, turn.id, { limit: 6 }), /page bounds/);

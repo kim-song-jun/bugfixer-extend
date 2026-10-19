@@ -15,6 +15,7 @@ import type {
 } from '../../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionChangeEvidenceDTO } from './agentSessionChangeEvidenceStore.js';
 import type { AgentSessionExplanationDTO, AgentSessionExplanationTarget } from './agentSessionReviewStore.js';
+import type { AgentSessionStore } from './agentSessionStore.js';
 
 export type {
 	AgentSessionIntegrationAction, AgentSessionIntegrationActionReceipt, AgentSessionIntegrationApprovalDTO,
@@ -87,6 +88,7 @@ export class AgentSessionIntegrationStore {
 		private readonly getLatestEvidence: (projectId: string, sessionId: string, turnId: string) => AgentSessionChangeEvidenceDTO | undefined,
 		private readonly getEvidence: (projectId: string, sessionId: string, turnId: string, evidenceVersion: number) => AgentSessionChangeEvidenceDTO | undefined,
 		private readonly getExplanation: (target: AgentSessionExplanationTarget, revision: number) => AgentSessionExplanationDTO | undefined,
+		private readonly sessions: AgentSessionStore,
 	) { }
 
 	createProposal(input: {
@@ -153,6 +155,10 @@ export class AgentSessionIntegrationStore {
 				id, scope.projectId, scope.sessionId, scope.turnId, latestRevision + 1, evidence.version, evidence.fingerprint,
 				turn.snapshotSha256, proposalFingerprint, payloadJson, createdAt, expiresAt,
 			);
+			this.sessions.recordNotificationWithinTransaction({
+				eventId: `integrationProposal:${id}:review`, projectId: scope.projectId, sessionId: scope.sessionId,
+				kind: 'approval', target: { kind: 'integrationProposal', id, turnId: scope.turnId }, createdAt,
+			});
 			return this.getProposal(id)!;
 		});
 	}

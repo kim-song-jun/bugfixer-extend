@@ -74,13 +74,23 @@ export interface SessionMessageDTO {
 	readonly readAt: string | null;
 }
 
+export type SessionNotificationKind = 'input' | 'approval' | 'error' | 'completion' | 'message' | 'prReady';
+
+export type SessionNotificationTarget =
+	| { readonly kind: 'session'; readonly id: string }
+	| { readonly kind: 'turn'; readonly id: string }
+	| { readonly kind: 'message'; readonly id: string }
+	| { readonly kind: 'integrationProposal' | 'mergeProposal' | 'publicationProposal'; readonly id: string; readonly turnId: string };
+
 export interface SessionNotificationDTO {
 	readonly id: string;
+	/** Stable source identity used to deduplicate retries from trusted main-process events. */
+	readonly eventId: string;
 	readonly projectId: string;
 	readonly sessionId: string;
 	readonly sequence: number;
-	readonly kind: 'message';
-	readonly messageId: string;
+	readonly kind: SessionNotificationKind;
+	readonly target: SessionNotificationTarget;
 	readonly createdAt: string;
 	readonly readAt: string | null;
 }

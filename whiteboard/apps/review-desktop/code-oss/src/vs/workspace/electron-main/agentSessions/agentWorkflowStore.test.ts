@@ -122,7 +122,7 @@ test('frozen schema v24 migration retains project, task and session rows through
 		assert.equal(database.getProject(projectId)?.name, 'Preserved v24');
 		assert.equal(database.getTask(taskId)?.title, 'Implement finite workflow');
 		assert.equal(database.agentSessions.getSession(projectId, sessionId)?.id, sessionId);
-		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 32);
+		assert.equal(Number((Reflect.get(database, 'db') as DatabaseSync).prepare('PRAGMA user_version').get()?.user_version), 33);
 		assert.ok(database.agentWorkflows.getWorkflow(projectId, randomUUID()) === undefined);
 	} finally {
 		database.close();

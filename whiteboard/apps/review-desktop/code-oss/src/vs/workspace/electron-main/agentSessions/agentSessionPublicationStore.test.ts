@@ -21,6 +21,8 @@ test('publication journal binds a real merged result, is idempotent, strict, bou
 		const input = fixture.input;
 		assert.throws(() => store.createProposal({ ...input, sourceMerge: { ...input.sourceMerge, mergeFingerprint: '0'.repeat(64) } }), /actual persisted merge store/);
 		const proposal = store.createProposal(input);
+		assert.ok(database.agentSessions.listNotifications(input.projectId, { limit: 100 }).some(item => item.eventId === `publicationProposal:${proposal.id}:review`
+			&& item.kind === 'prReady' && item.target.kind === 'publicationProposal' && item.target.id === proposal.id && item.target.turnId === input.turnId));
 		assert.throws(() => sqlite!.prepare(`INSERT INTO agent_session_publication_operations
 			(id, proposal_id, proposal_fingerprint, account_stable_id, repository_id, publication_ref, expected_old_remote_oid, head_oid, state, revision, started_at)
 			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'started', 0, ?)`)
@@ -34,6 +36,7 @@ test('publication journal binds a real merged result, is idempotent, strict, bou
 		assert.equal(proposal.expectedOldRemoteOid, null);
 		assert.equal(proposal.draft, true);
 		assert.deepEqual(store.createProposal(input), proposal);
+		assert.equal(database.agentSessions.listNotifications(input.projectId, { limit: 100 }).filter(item => item.eventId === `publicationProposal:${proposal.id}:review`).length, 1);
 		assert.equal(store.listProposals(input.projectId, input.sessionId, input.turnId).proposals.length, 1);
 		assert.throws(() => store.createProposal({ ...input, projectId: randomUUID() }), /Source merge scope/);
 		assert.throws(() => store.createProposal({ ...input, account: { ...input.account, host: 'github.example' } }), /account identity is invalid/);
@@ -88,6 +91,15 @@ test('publication history retains at most five full proposals and never prunes a
 		const first = store.listProposals(fixture.input.projectId, fixture.input.sessionId, fixture.input.turnId);
 		assert.deepEqual(first.proposals.map(proposal => proposal.id), ids.slice(1));
 		assert.equal(first.hasMore, false);
+		assert.equal(store.getProposal(ids[0]), undefined, 'The original unstarted proposal is pruned by the existing retention policy.');
+		const prunedProposalAlert = database.agentSessions.listNotifications(fixture.input.projectId, { limit: 100 }).find(item => item.eventId === `publicationProposal:${ids[0]}:review`);
+		assert.deepEqual(prunedProposalAlert?.target, { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId }, 'The durable alert keeps its exact pruned target.');
+		const sqlite = Reflect.get(database, 'db') as DatabaseSync;
+		sqlite.exec('BEGIN IMMEDIATE;');
+		assert.deepEqual(database.agentSessions.recordNotificationWithinTransaction({ eventId: `publicationProposal:${ids[0]}:review`, projectId: fixture.input.projectId,
+			sessionId: fixture.input.sessionId, kind: 'prReady', target: { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId } }), prunedProposalAlert,
+		'An idempotent event retry remains valid after its proposal is pruned.');
+		sqlite.exec('COMMIT;');
 		const latest = first.proposals.at(-1)!;
 		const started = store.startOperation(latest.id, latest.fingerprint);
 		assert.throws(() => store.createProposal({ ...fixture.input, expectedRevision: 6, title: 'Change 6' }), /history is full/);

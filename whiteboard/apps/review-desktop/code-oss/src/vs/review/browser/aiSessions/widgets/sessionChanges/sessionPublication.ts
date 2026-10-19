@@ -21,7 +21,8 @@ export interface SessionPublicationActions {
 }
 
 interface SessionPublicationState {
-	readonly render: (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, sourceIsCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void) => void;
+	readonly render: (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, sourceIsCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void, onUserSelection: () => void) => void;
+	readonly revealProposal: (id: string, revision: number) => Promise<boolean>;
 	readonly invalidate: () => void;
 	readonly dispose: () => void;
 }
@@ -44,6 +45,7 @@ export function createSessionPublication(): SessionPublicationState {
 	let error = '';
 	let busy = false;
 	let proposalsLoading = false;
+	let proposalPageLoad: Promise<void> | undefined;
 	let accountsLoading = false;
 	let pageLoading = false;
 	let initialListAttempted = false;
@@ -53,12 +55,13 @@ export function createSessionPublication(): SessionPublicationState {
 	let proposalDetailsOpen = false;
 	let sourceIsCurrent: () => boolean = () => false;
 	let refreshView: (() => void) | undefined;
+	let lastRender: { readonly scope: WorkspaceAgentPublicationScope; readonly actions: SessionPublicationActions; readonly source: AgentSessionMergeProposalDTO; readonly request: number } | undefined;
 
 	const reset = (): void => {
 		generation++;
 		operationReadToken++; proposalPage = undefined; proposals = []; selectedProposalId = undefined; operation = undefined; operationReadError = false; operationRefreshNeeded = false; operationLoading = false; proposalDetailsOpen = false;
 		accountPage = undefined; selectedAccountRef = ''; remoteName = 'origin'; baseRef = 'refs/heads/main';
-		status = ''; error = ''; busy = false; proposalsLoading = false; accountsLoading = false; pageLoading = false; initialListAttempted = false;
+		status = ''; error = ''; busy = false; proposalsLoading = false; proposalPageLoad = undefined; accountsLoading = false; pageLoading = false; initialListAttempted = false;
 	};
 	const isCurrent = (request: number, proposalId?: string): boolean => !disposed && request === generation && sourceIsCurrent() && (!proposalId || selectedProposalId === proposalId);
 	const update = (): void => { if (!disposed) { refreshView?.(); } };
@@ -81,31 +84,35 @@ export function createSessionPublication(): SessionPublicationState {
 		if (readToken === operationReadToken && isCurrent(request, proposal.id)) { update(); }
 	};
 
-	const loadPage = async (scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, request: number, afterRevision: number, append: boolean): Promise<void> => {
-		if (proposalsLoading) { return; }
+	const loadPage = (scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, request: number, afterRevision: number, append: boolean): Promise<void> => {
+		if (proposalsLoading) { return proposalPageLoad ?? Promise.resolve(); }
 		proposalsLoading = true; pageLoading = append; error = ''; update();
-		try {
-			const page = await actions.listPublicationProposals({ ...scope, afterRevision, limit: PAGE_SIZE });
-			if (!isCurrent(request)) { return; }
-			if (!page || !Array.isArray(page.proposals) || page.proposals.length > PAGE_SIZE || page.proposals.some((item, index) => item.projectId !== scope.projectId || item.sessionId !== scope.sessionId || item.turnId !== scope.turnId || (index > 0 && item.revision <= page.proposals[index - 1].revision)) || (page.proposals.length > 0 && page.nextRevision !== page.proposals.at(-1)?.revision)) {
-				throw new Error('invalid publication proposal page');
+		const pending = (async (): Promise<void> => {
+			try {
+				const page = await actions.listPublicationProposals({ ...scope, afterRevision, limit: PAGE_SIZE });
+				if (!isCurrent(request)) { return; }
+				if (!page || !Array.isArray(page.proposals) || page.proposals.length > PAGE_SIZE || page.proposals.some((item, index) => item.projectId !== scope.projectId || item.sessionId !== scope.sessionId || item.turnId !== scope.turnId || (index > 0 && item.revision <= page.proposals[index - 1].revision)) || (page.proposals.length > 0 && page.nextRevision !== page.proposals.at(-1)?.revision)) {
+					throw new Error('invalid publication proposal page');
+				}
+				proposalPage = page;
+				proposals = append ? [...proposals, ...page.proposals] : [...page.proposals];
+				if (proposals.length > PAGE_SIZE) { proposals = proposals.slice(-PAGE_SIZE); }
+				if (!append && !selectedProposalId) {
+					const matching = proposals.filter(item => item.sourceMergeId === source.id);
+					selectedProposalId = matching.at(-1)?.id;
+				}
+				if (selectedProposalId && proposals.some(item => item.id === selectedProposalId)) {
+					operationRefreshNeeded = true;
+				}
+			} catch {
+				if (!isCurrent(request)) { return; }
+				error = '초안 PR 기록을 불러오지 못했습니다. 다시 시도해 주세요.';
+			} finally {
+				if (isCurrent(request)) { proposalsLoading = false; pageLoading = false; update(); }
 			}
-			proposalPage = page;
-			proposals = append ? [...proposals, ...page.proposals] : [...page.proposals];
-			if (proposals.length > PAGE_SIZE) { proposals = proposals.slice(-PAGE_SIZE); }
-			if (!append && !selectedProposalId) {
-				const matching = proposals.filter(item => item.sourceMergeId === source.id);
-				selectedProposalId = matching.at(-1)?.id;
-			}
-			if (selectedProposalId && proposals.some(item => item.id === selectedProposalId)) {
-				operationRefreshNeeded = true;
-			}
-		} catch {
-			if (!isCurrent(request)) { return; }
-			error = '초안 PR 기록을 불러오지 못했습니다. 다시 시도해 주세요.';
-		} finally {
-			if (isCurrent(request)) { proposalsLoading = false; pageLoading = false; update(); }
-		}
+		})();
+		proposalPageLoad = pending;
+		return pending.finally(() => { if (proposalPageLoad === pending) { proposalPageLoad = undefined; } });
 	};
 
 	const loadAccounts = async (scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, request: number): Promise<void> => {
@@ -170,7 +177,7 @@ export function createSessionPublication(): SessionPublicationState {
 		}
 	};
 
-	const render = (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, isSourceCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void): void => {
+	const render = (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, isSourceCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void, onUserSelection: () => void): void => {
 		const nextContextKey = `${scope.projectId}:${scope.sessionId}:${scope.turnId}`;
 		const nextSourceKey = `${source.id}:${source.fingerprint}:${source.outcomes.at(-1)?.receipt.resultingHead ?? ''}`;
 		if (contextKey !== nextContextKey || sourceKey !== nextSourceKey) {
@@ -179,6 +186,7 @@ export function createSessionPublication(): SessionPublicationState {
 		sourceIsCurrent = isSourceCurrent;
 		refreshView = refresh;
 		const request = generation;
+		lastRender = { scope, actions, source, request };
 		const section = document.createElement('section'); section.className = 'ai-session-publication'; section.setAttribute('aria-label', 'GitHub 초안 PR');
 		const heading = document.createElement('h4'); heading.textContent = 'GitHub 초안 PR'; section.appendChild(heading);
 		appendText(section, 'ai-session-publication__note', '완료된 로컬 병합 결과를 GitHub에 초안 PR로 게시합니다. PR 작성은 별도 사람 승인 뒤에 진행합니다.');
@@ -209,15 +217,15 @@ export function createSessionPublication(): SessionPublicationState {
 			prepareButton = button('초안 PR 제안 고정', 'publication-prepare'); syncPrepareDisabled(); prepareButton.addEventListener('click', () => void thisPrepare()); section.appendChild(prepareButton);
 		}
 		if (proposalsLoading && !proposalPage) { appendText(section, 'ai-session-publication__status', '저장된 초안 PR 제안을 불러오는 중입니다.'); }
-		if (initialListAttempted && !proposalPage && !proposalsLoading) { const retry = button('초안 PR 기록 다시 불러오기', 'publication-retry-list'); retry.disabled = busy; retry.addEventListener('click', () => void loadPage(scope, actions, source, request, 0, false)); section.appendChild(retry); }
+		if (initialListAttempted && !proposalPage && !proposalsLoading) { const retry = button('초안 PR 기록 다시 불러오기', 'publication-retry-list'); retry.disabled = busy; retry.addEventListener('click', () => { onUserSelection(); void loadPage(scope, actions, source, request, 0, false); }); section.appendChild(retry); }
 		if (proposalPage && !proposals.length) { appendText(section, 'ai-session-publication__empty', '저장된 초안 PR 제안이 없습니다.'); }
 		if (proposals.length) {
 			const list = document.createElement('ol'); list.className = 'ai-session-publication__history'; list.setAttribute('aria-label', '초안 PR 제안 기록');
 			for (const proposal of proposals) {
-				const item = document.createElement('li'); const select = button(`v${proposal.revision} · ${proposal.title} · ${proposal.sourceMergeId === source.id ? '현재 로컬 병합' : '다른 로컬 병합'}`, `publication-proposal:${proposal.id}`); select.setAttribute('aria-pressed', String(proposal.id === selectedProposalId)); select.disabled = busy || proposalsLoading; select.addEventListener('click', () => { selectedProposalId = proposal.id; operation = undefined; operationRefreshNeeded = false; status = ''; error = ''; void loadOperation(scope, actions, proposal, request); update(); }); item.appendChild(select); list.appendChild(item);
+				const item = document.createElement('li'); const select = button(`v${proposal.revision} · ${proposal.title} · ${proposal.sourceMergeId === source.id ? '현재 로컬 병합' : '다른 로컬 병합'}`, `publication-proposal:${proposal.id}`); select.setAttribute('aria-pressed', String(proposal.id === selectedProposalId)); select.disabled = busy || proposalsLoading; select.addEventListener('click', () => { onUserSelection(); selectedProposalId = proposal.id; operation = undefined; operationRefreshNeeded = false; status = ''; error = ''; void loadOperation(scope, actions, proposal, request); update(); }); item.appendChild(select); list.appendChild(item);
 			}
 			section.appendChild(list);
-			if (proposalPage?.hasMore) { const next = button(pageLoading ? '기록 불러오는 중…' : '다음 제안 기록', 'publication-next-page'); next.disabled = pageLoading || busy; next.addEventListener('click', () => void loadPage(scope, actions, source, request, proposalPage!.nextRevision, true)); section.appendChild(next); }
+			if (proposalPage?.hasMore) { const next = button(pageLoading ? '기록 불러오는 중…' : '다음 제안 기록', 'publication-next-page'); next.disabled = pageLoading || busy; next.addEventListener('click', () => { onUserSelection(); void loadPage(scope, actions, source, request, proposalPage!.nextRevision, true); }); section.appendChild(next); }
 			const proposal = proposals.find(item => item.id === selectedProposalId);
 			if (proposal) { renderProposal(section, proposal, source, scope, actions, request); }
 		}
@@ -362,7 +370,20 @@ export function createSessionPublication(): SessionPublicationState {
 		parent.appendChild(timeline);
 	};
 
-	return { render, invalidate, dispose: () => { disposed = true; reset(); refreshView = undefined; } };
+	const revealProposal = async (id: string, revision: number): Promise<boolean> => {
+		const current = lastRender;
+		if (!current || disposed || !Number.isSafeInteger(revision) || revision < 1 || !sourceIsCurrent()) { return false; }
+		selectedProposalId = id;
+		if (proposalsLoading) {
+			const inFlight = proposalPageLoad;
+			if (!inFlight) { return false; }
+			await inFlight;
+			if (disposed || current.request !== generation || !sourceIsCurrent()) { return false; }
+		}
+		if (!proposalPage?.proposals.some(item => item.id === id)) { await loadPage(current.scope, current.actions, current.source, current.request, revision - 1, false); }
+		return !disposed && current.request === generation && sourceIsCurrent() && selectedProposalId === id && proposals.some(item => item.id === id && item.revision === revision);
+	};
+	return { render, revealProposal, invalidate, dispose: () => { disposed = true; reset(); refreshView = undefined; lastRender = undefined; } };
 }
 
 function canContinueOperation(operation: AgentSessionPublicationOperationDTO | null | undefined, proposal: AgentSessionPublicationProposalDTO): boolean {

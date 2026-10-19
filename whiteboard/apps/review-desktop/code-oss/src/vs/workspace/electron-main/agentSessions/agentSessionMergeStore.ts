@@ -15,6 +15,7 @@ import type {
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT } from '../../common/workspaceAgentMergeProtocol.js';
 import type { AgentSessionIntegrationGitIdentity, AgentSessionIntegrationProposalDTO } from '../../common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionStore } from './agentSessionStore.js';
 
 export type {
 	AgentSessionMergeApprovalDTO, AgentSessionMergeApplyingBinding, AgentSessionMergeOutcomeDTO,
@@ -105,6 +106,7 @@ export class AgentSessionMergeStore {
 		private readonly getBinding: (projectId: string, bindingId: string) => AgentSessionMergeStoreBinding | undefined,
 		private readonly getTurn: (projectId: string, sessionId: string, turnId: string) => AgentSessionTurnDTO | undefined,
 		private readonly getCommitProposal: (proposalId: string) => AgentSessionIntegrationProposalDTO | undefined,
+		private readonly sessions: AgentSessionStore,
 	) { }
 
 	getOrCreateIntegrationOwner(projectId: string, bindingId: string): string {
@@ -195,6 +197,10 @@ export class AgentSessionMergeStore {
 				input.commitProposalFingerprint, integrationOwnerId, input.sourceHead, input.targetHead, input.mergeBase,
 				input.diffFingerprint, proposalFingerprint, payloadJson, createdAt, expiresAt,
 			);
+			this.sessions.recordNotificationWithinTransaction({
+				eventId: `mergeProposal:${id}:review`, projectId: scope.projectId, sessionId: scope.sessionId,
+				kind: 'approval', target: { kind: 'mergeProposal', id, turnId: scope.turnId }, createdAt,
+			});
 			return this.getProposal(id)!;
 		});
 	}

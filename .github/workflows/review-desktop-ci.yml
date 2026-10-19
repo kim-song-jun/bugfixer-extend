@@ -65,13 +65,13 @@ jobs:
           code-oss/src/vs/review/browser/aiSessions/features/onboarding/onboardingState.test.ts
       - name: Test native PR ref guard protocol
         run: pnpm --filter @dev.fast/review-desktop exec node --test --test-concurrency=1 native/pr-ref-guard/pr-ref-guard.test.mjs
-      - name: Test frozen v26 through v31 migrations and retained change content
+      - name: Test frozen v26 through v32 migrations and retained change content
         run: >-
           pnpm --filter @dev.fast/review-desktop exec
           env TSX_TSCONFIG_PATH=tsconfig.test.json
           node --import ./scripts/test-code-oss-preload.mjs --import tsx
           --test --test-concurrency=1
-          --test-name-pattern="^(frozen v(2[6-9]|30) database upgrades|v31 workspace database upgrades|workspace database startup records interruption for a persisted running PR text request|agent-session content baselines|binary content gaps|managed-worktree content evidence|startup reconciliation adds)"
+          --test-name-pattern="^(frozen v(2[6-9]|30) database upgrades|v31 workspace database upgrades|frozen v32 source preserves|workspace database startup records interruption for a persisted running PR text request|agent-session content baselines|binary content gaps|managed-worktree content evidence|startup reconciliation adds)"
           code-oss/src/vs/workspace/electron-main/workspaceDatabase.test.ts
       - name: Install pinned public CLIs for anonymous setup inspection
         timeout-minutes: 3
