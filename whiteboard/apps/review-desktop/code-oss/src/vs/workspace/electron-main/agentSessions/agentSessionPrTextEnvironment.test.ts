@@ -14,7 +14,7 @@ import { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { createAgentSessionPrTextResolver } from './agentSessionPrTextEnvironment.js';
 
 test('resolver binds sourceCwd to the selected completed turn and rejects changed folder identity at preflight', async () => {
-	const root = mkdtempSync(join(tmpdir(), 'agent-pr-text-environment-'));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), 'agent-pr-text-environment-')));
 	const sourceRoot = join(root, 'source'); mkdirSync(sourceRoot);
 	mkdirSync(join(root, '.claude'), { mode: 0o700 });
 	const packagedHelper = join(root, 'app', 'review-runtime', 'bin', 'provider-group-control.mjs');
