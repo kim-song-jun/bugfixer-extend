@@ -1374,7 +1374,14 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 		status.setAttribute('role', isError ? 'alert' : 'status'); status.textContent = message; parent.appendChild(status);
 	}
 
-	layout(_dimension: Dimension): void { this.terminalController?.layout(); }
+	layout(dimension: Dimension): void {
+		if (this.root) {
+			this.root.style.width = `${dimension.width}px`;
+			this.root.style.height = `${dimension.height}px`;
+			this.root.style.setProperty('--ai-pane-height', `${dimension.height}px`);
+		}
+		this.terminalController?.layout();
+	}
 
 	override clearInput(): void {
 		this.notificationNavigationGeneration++;

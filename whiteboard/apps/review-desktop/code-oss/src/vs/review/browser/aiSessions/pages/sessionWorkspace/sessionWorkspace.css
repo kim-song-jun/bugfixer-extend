@@ -23,7 +23,7 @@
 .ai-session__onboarding-mount[hidden] { display: none; }
 .ai-session__onboarding-toggle { white-space: nowrap; }
 .ai-session__notifications-mount { flex: none; }
-.ai-session__list { position: sticky; top: 52px; box-sizing: border-box; min-width: 0; height: calc(100vh - 52px); overflow: auto; padding: 20px 12px; border-right: 1px solid var(--ai-line); }
+.ai-session__list { position: sticky; top: 52px; box-sizing: border-box; min-width: 0; height: calc(var(--ai-pane-height) - 52px); overflow: auto; padding: 20px 12px; border-right: 1px solid var(--ai-line); }
 .ai-session__list-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 10px; border-bottom: 1px solid var(--ai-line); }
 .ai-session__list-heading h2 { margin: 0; font-size: 15px; font-weight: 650; }
 .ai-session__text-button { padding: 5px 7px; border: 0; color: var(--vscode-textLink-foreground); background: transparent; font: inherit; cursor: pointer; }

@@ -402,6 +402,34 @@ async function terminalInstance(page) {
   return wrapper.elementHandle();
 }
 
+async function verifyWorkspaceViewport(page) {
+  const geometry = await page.locator('.ai-session-workspace').evaluate(element => {
+    const header = element.querySelector('.ai-session__project-header');
+    const list = element.querySelector('.ai-session__list');
+
+    if (!header || !list) throw new Error('The real session workspace header and list must exist.');
+
+    const bounds = target => {
+      const rect = target.getBoundingClientRect();
+
+      return { top: rect.top, bottom: rect.bottom, height: rect.height, left: rect.left, right: rect.right };
+    };
+
+    return { workspace: bounds(element), header: bounds(header), list: bounds(list), viewportHeight: window.innerHeight, viewportWidth: window.innerWidth };
+  });
+
+  assert.ok(geometry.workspace.top >= -1 && geometry.workspace.bottom <= geometry.viewportHeight + 1,
+    'The native editor workspace must stay within the actual window after terminal input.');
+  assert.ok(geometry.workspace.left >= -1 && geometry.workspace.right <= geometry.viewportWidth + 1,
+    'The native editor workspace must fit the actual window width.');
+  assert.ok(geometry.header.height >= 36 && geometry.header.top >= geometry.workspace.top - 1 && geometry.header.bottom <= geometry.workspace.bottom + 1,
+    'Project controls must remain visible in the workspace after terminal focus.');
+  assert.ok(geometry.list.top >= geometry.header.bottom - 1 && geometry.list.bottom <= geometry.workspace.bottom + 1,
+    'The scrollable session list must fit below the header inside the native editor.');
+
+  return geometry;
+}
+
 async function createAndStartSession(page, name, model) {
   await page.locator('.ai-session__list').getByRole('button', { name: '새 AI 세션 만들기', exact: true }).click();
   const form = page.locator('.ai-session__create-form');
@@ -589,6 +617,7 @@ try {
   }, 'real PTY resize event with changed terminal dimensions');
   first.resizeObserved = true;
   assert.equal(processAlive(first.fixturePid), true, 'Session A fixture process must remain live after resize.');
+  first.workspaceGeometry = await verifyWorkspaceViewport(page);
   await page.screenshot({ path: path.join(output, 'session-a-terminal.png') });
 
   const second = await createAndStartSession(page, 'CI terminal session B', 'ci-fixture-codex-session-b');
@@ -641,6 +670,7 @@ try {
   await waitTerminalText(page, 'ECHO FIXTURE_TAG_B_CONCURRENT', 'session B concurrent input');
   second.inputTagsObserved.push('FIXTURE_TAG_B_CONCURRENT');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_A_CONCURRENT'), false, 'Session B output must remain scoped to its PTY.');
+  second.workspaceGeometry = await verifyWorkspaceViewport(page);
   await page.screenshot({ path: path.join(output, 'session-b-terminal.png') });
   await sessionA.click();
   await waitTerminalText(page, `READY pid=${first.fixturePid}`, 'session A after concurrent duplex input');
