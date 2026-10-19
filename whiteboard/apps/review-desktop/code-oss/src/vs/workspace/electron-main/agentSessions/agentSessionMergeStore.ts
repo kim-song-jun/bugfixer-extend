@@ -685,7 +685,7 @@ export class AgentSessionMergeStore {
 		const raw = value as Record<string, unknown>; const path = this.normalizePath(raw.path);
 		if (typeof raw.message !== 'string' || Buffer.byteLength(raw.message, 'utf8') > 16 * 1024 || raw.message.includes('\0')) { throw new Error('Merge conflict message is invalid or too large.'); }
 		if (!Array.isArray(raw.stages) || raw.stages.length > 3) { throw new Error('Merge conflict stages are invalid.'); }
-		const stages = raw.stages.map((entry, stageIndex) => {
+		const stages = raw.stages.map((entry, stageIndex): AgentSessionMergeConflictArtifact['stages'][number] => {
 			this.assertExactKeys(entry, ['stage', 'mode', 'oid'], [], `merge conflict stage ${index + 1}.${stageIndex + 1}`);
 			const stage = (entry as Record<string, unknown>).stage; const mode = (entry as Record<string, unknown>).mode;
 			if (stage !== 1 && stage !== 2 && stage !== 3) { throw new Error('Merge conflict stage number is invalid.'); }

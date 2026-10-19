@@ -278,7 +278,7 @@ export function createSessionOnboarding(parent: HTMLElement, context: SessionOnb
 			if (inspection.authentication.state === 'signedOut') {
 				const command = provider === 'codex' ? 'codex login' : 'claude auth login';
 				const code = document.createElement('code'); code.textContent = command;
-				const copy = makeButton('명령 복사', 'quiet'); copy.dataset.onboardingFocus = `copy-login-${provider}`; copy.addEventListener('click', () => { void currentActions.copyText(command).catch(() => { result.setAttribute('role', 'alert'); result.append(makeText('명령 복사에 실패했습니다. 다시 시도해 주세요.')); }); });
+				const copy = makeButton('명령 복사', 'quiet'); copy.dataset.onboardingFocus = `copy-login-${provider}`; copy.addEventListener('click', () => { void currentActions.copyText(command).catch(() => { target.setAttribute('role', 'alert'); target.append(makeText('명령 복사에 실패했습니다. 다시 시도해 주세요.')); }); });
 				guidance.appendChild(code);
 				guidance.appendChild(copy);
 			}

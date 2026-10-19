@@ -99,7 +99,6 @@ export function createSessionPublication(): SessionPublicationState {
 				selectedProposalId = matching.at(-1)?.id;
 			}
 			if (selectedProposalId && proposals.some(item => item.id === selectedProposalId)) {
-				const selected = proposals.find(item => item.id === selectedProposalId)!;
 				operationRefreshNeeded = true;
 			}
 		} catch {

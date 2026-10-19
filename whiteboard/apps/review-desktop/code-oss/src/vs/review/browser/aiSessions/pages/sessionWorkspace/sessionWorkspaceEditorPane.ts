@@ -56,7 +56,7 @@ import { renderSessionList } from '../../widgets/sessionList/index.js';
 import { renderSessionDetail } from '../../widgets/sessionDetail/index.js';
 import { createSessionLogs, type SessionLogsController, type SessionLogsContext, type SessionLogsPageLoader } from '../../widgets/sessionLogs/index.js';
 import { createSessionNotifications, type SessionNotificationsActions, type SessionNotificationsController } from '../../widgets/sessionNotifications/index.js';
-import { createSessionOnboarding, type SessionOnboardingActions, type SessionOnboardingContext, type SessionOnboardingController, type SessionOnboardingPreview, type SessionOnboardingTab } from '../../widgets/sessionOnboarding/index.js';
+import { createSessionOnboarding, type SessionOnboardingActions, type SessionOnboardingContext, type SessionOnboardingController, type SessionOnboardingPreview } from '../../widgets/sessionOnboarding/index.js';
 import { createSessionMessages, type SessionMessagesActions, type SessionMessagesController } from '../../widgets/sessionMessages/index.js';
 import { createSessionWorkflow, type SessionWorkflowActions, type SessionWorkflowController } from '../../widgets/sessionWorkflow/index.js';
 import { createSessionChanges, type SessionChangesActions, type SessionChangesContext, type SessionChangesController } from '../../widgets/sessionChanges/index.js';

@@ -652,7 +652,7 @@ export class ManagedWorktreeService {
 		if (preview.expiresAt < Date.now()) { this.previews.delete(input.previewId); throw new Error('Merge preview has expired; review the current changes again.'); }
 		if (input.commitMessage !== preview.commitMessage) { throw new Error('Reviewed merge message differs from the exact prepared proposal.'); }
 		const approvedIdentity = this.validateFrozenIdentity({ author: input.author, committer: input.committer });
-		return this.withIntegrationLock(preview.integrationOwnerId, 'merge', async () => {
+		return this.withIntegrationLock<ReviewedMergeResult>(preview.integrationOwnerId, 'merge', async () => {
 			let initial = await this.readAndValidate(preview.integrationOwnerId);
 			const initialSource = await this.readAndValidate(preview.sessionOwnerId);
 			if (initial.kind !== 'integration' || initialSource.kind !== 'session' || initial.commonDirectory !== initialSource.commonDirectory) { throw new Error('Reviewed merge owner bindings are invalid.'); }
@@ -1570,7 +1570,7 @@ export class ManagedWorktreeService {
 		try { fsyncSync(directory); } finally { closeSync(directory); }
 	}
 
-	private async recordMergeArtifact(input: ReviewedMergeJournal, operationId: string, current: readonly AgentSessionMergeArtifactRecord[], event: AgentSessionMergeArtifactEvent): Promise<readonly AgentSessionMergeArtifactRecord[]> {
+	private async recordMergeArtifact(input: Pick<ReviewedMergeJournal, 'recordArtifact' | 'readArtifacts'>, operationId: string, current: readonly AgentSessionMergeArtifactRecord[], event: AgentSessionMergeArtifactEvent): Promise<readonly AgentSessionMergeArtifactRecord[]> {
 		if (Buffer.byteLength(JSON.stringify(event), 'utf8') > MAX_MERGE_ARTIFACT_BYTES) { throw new Error('Merge artifact exceeds its bounded durable size.'); }
 		const expectedRevision = current.length;
 		const appended = await input.recordArtifact(operationId, expectedRevision, event);
@@ -2244,24 +2244,22 @@ export class ManagedWorktreeService {
 			return { ...lease, state: 'recoveryRequired' };
 		}
 		if (pending.kind !== 'remove') { return { ...lease, state: 'recoveryRequired' }; }
-		if (pending.kind === 'remove') {
-			const branchRef = await this.git(lease.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${lease.branch}`]);
-			if (!existsSync(lease.worktreePath)) {
-				const registrations = await this.git(lease.repositoryPath, ['worktree', 'list', '--porcelain']);
-				if (registrations.includes(`worktree ${lease.worktreePath}\n`) || branchRef !== pending.expectedHead) { return { ...lease, state: 'recoveryRequired' }; }
-				if (lease.kind === 'session') {
-					if (!pending.retainedIntegrationOwnerId) { return { ...lease, state: 'recoveryRequired' }; }
-					const retained = await this.readAndValidate(pending.retainedIntegrationOwnerId);
-					if (retained.commonDirectory !== lease.commonDirectory) { return { ...lease, state: 'recoveryRequired' }; }
-					await this.git(retained.worktreePath, ['merge-base', '--is-ancestor', branchRef, 'HEAD']);
-				} else if (branchRef !== lease.baseCommit) { return { ...lease, state: 'recoveryRequired' }; }
-				return this.writeLease({ ...lease, head: branchRef, state: 'removed', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'remove', outcome: 'removed', reconciled: true } });
-			}
-			if (await this.git(lease.worktreePath, ['rev-parse', 'HEAD']) !== pending.expectedHead || await this.git(lease.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])) {
-				return { ...lease, state: 'recoveryRequired' };
-			}
-			return this.writeLease({ ...lease, state: 'active', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'remove', outcome: 'notApplied', reconciled: true } });
+		const branchRef = await this.git(lease.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${lease.branch}`]);
+		if (!existsSync(lease.worktreePath)) {
+			const registrations = await this.git(lease.repositoryPath, ['worktree', 'list', '--porcelain']);
+			if (registrations.includes(`worktree ${lease.worktreePath}\n`) || branchRef !== pending.expectedHead) { return { ...lease, state: 'recoveryRequired' }; }
+			if (lease.kind === 'session') {
+				if (!pending.retainedIntegrationOwnerId) { return { ...lease, state: 'recoveryRequired' }; }
+				const retained = await this.readAndValidate(pending.retainedIntegrationOwnerId);
+				if (retained.commonDirectory !== lease.commonDirectory) { return { ...lease, state: 'recoveryRequired' }; }
+				await this.git(retained.worktreePath, ['merge-base', '--is-ancestor', branchRef, 'HEAD']);
+			} else if (branchRef !== lease.baseCommit) { return { ...lease, state: 'recoveryRequired' }; }
+			return this.writeLease({ ...lease, head: branchRef, state: 'removed', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'remove', outcome: 'removed', reconciled: true } });
 		}
+		if (await this.git(lease.worktreePath, ['rev-parse', 'HEAD']) !== pending.expectedHead || await this.git(lease.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])) {
+			return { ...lease, state: 'recoveryRequired' };
+		}
+		return this.writeLease({ ...lease, state: 'active', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'remove', outcome: 'notApplied', reconciled: true } });
 	}
 
 	private writeLease(lease: ManagedWorktreeLease): ManagedWorktreeLease {
