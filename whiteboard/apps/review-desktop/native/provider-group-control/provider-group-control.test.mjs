@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import net from 'node:net';
@@ -87,34 +87,127 @@ async function request(socketPath, payload) {
   return response;
 }
 
-function groupExists(pgid) {
+function probeProcessGroup(pgid) {
   try {
     process.kill(-pgid, 0);
 
-    return true;
+    return { state: 'present' };
   } catch (error) {
-    if (error.code === 'ESRCH') return false;
+    if (error.code === 'ESRCH') return { state: 'absent' };
+    if (error.code === 'EPERM') return { state: 'unverifiable', error };
 
     throw error;
   }
 }
 
-async function waitForGroupGone(pgid, timeoutMs = 2500) {
-  const deadline = Date.now() + timeoutMs;
+function processGroupSnapshot(pgid) {
+  try {
+    // Darwin's `uid` ps keyword reports the effective UID. Do not request args or env.
+    const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,uid=,state=,comm='], {
+      encoding: 'utf8',
+      timeout: 1000,
+      maxBuffer: 256 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const members = output.split(/\r?\n/).flatMap(line => {
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/);
 
-  while (Date.now() < deadline) {
-    if (!groupExists(pgid)) return true;
+      if (!match || Number(match[3]) !== pgid) return [];
+
+      return [{
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        pgid: Number(match[3]),
+        euid: Number(match[4]),
+        state: match[5],
+        comm: match[6]
+      }];
+    });
+
+    return { members };
+  } catch (error) {
+    return { error: `${error.code ?? 'error'}: ${error.message}` };
+  }
+}
+
+function describeProcessGroupSnapshot(snapshot) {
+  if (snapshot.error) return `ps snapshot unavailable (${snapshot.error})`;
+  if (snapshot.members.length === 0) return 'ps snapshot empty (not proof of process-group absence)';
+
+  return snapshot.members.map(member => `pid=${member.pid} ppid=${member.ppid} pgid=${member.pgid} euid=${member.euid} state=${member.state} comm=${member.comm}`).join('; ');
+}
+
+function describePermissionError(error) {
+  return `${error.message} (code=${error.code ?? 'unknown'}, errno=${error.errno ?? 'unknown'})`;
+}
+
+async function waitForGroupGone(pgid, timeoutMs = 2500, priorEPERM) {
+  const deadline = Date.now() + timeoutMs;
+  let firstEPERM = priorEPERM;
+  let probe;
+
+  do {
+    probe = probeProcessGroup(pgid);
+
+    if (probe.state === 'absent') return { state: 'absent', firstEPERM };
+    if (probe.state === 'unverifiable' && !firstEPERM) firstEPERM = probe.error;
+
+    if (Date.now() >= deadline) break;
     await delay(20);
+  } while (Date.now() < deadline);
+
+  probe = probeProcessGroup(pgid);
+
+  if (probe.state === 'absent') return { state: 'absent', firstEPERM };
+  if (probe.state === 'unverifiable' && !firstEPERM) firstEPERM = probe.error;
+
+  return { state: probe.state, firstEPERM, snapshot: processGroupSnapshot(pgid) };
+}
+
+function verifyOwnedLiveGroup(child, snapshot) {
+  if (snapshot.error) return 'process-group ownership snapshot failed';
+
+  const members = snapshot.members;
+
+  if (members.length === 0) return 'process-group snapshot contained no members';
+
+  if (members.some(member => member.euid !== process.geteuid())) return 'process group contains a member with a different effective UID';
+
+  const childMember = members.find(member => member.pid === child.pid && member.pgid === child.pid);
+
+  if (!childMember || /^[ZX]/.test(childMember.state)) return 'spawned process-group leader is not verifiably live in its owned group';
+  if (child.exitCode !== null || child.signalCode !== null) return 'spawned process-group leader has exited';
+
+  const latestProbe = probeProcessGroup(child.pid);
+
+  if (latestProbe.state !== 'present') {
+    return latestProbe.state === 'unverifiable'
+      ? `latest process-group probe is unverifiable (${describePermissionError(latestProbe.error)})`
+      : 'latest process-group probe confirms absence';
   }
 
-  return !groupExists(pgid);
+  if (child.exitCode !== null || child.signalCode !== null) return 'spawned process-group leader exited before escalation';
+
+  return undefined;
+}
+
+function groupCleanupError(pgid, result, reason) {
+  const permissionDetail = result.firstEPERM
+    ? `; first EPERM: ${describePermissionError(result.firstEPERM)}`
+    : '';
+  const snapshotDetail = result.snapshot
+    ? `; members: ${describeProcessGroupSnapshot(result.snapshot)}`
+    : '';
+
+  return new Error(`test-owned process group ${pgid} cleanup remains ${result.state}: ${reason}${permissionDetail}${snapshotDetail}`);
 }
 
 async function cleanup(run) {
   if (!run) return;
   const { child, directory, socketPath } = run;
+  const initialProbe = probeProcessGroup(child.pid);
 
-  if (groupExists(child.pid)) {
+  if (initialProbe.state !== 'absent') {
     try {
       if ((await stat(socketPath)).isSocket()) await request(socketPath, { attemptId, nonce, command: 'cancel' });
     } catch (error) {
@@ -122,11 +215,31 @@ async function cleanup(run) {
     }
   }
 
-  if (!(await waitForGroupGone(child.pid, 750)) && child.exitCode === null && child.signalCode === null) {
-    process.kill(-child.pid, 'SIGKILL');
+  let groupResult = await waitForGroupGone(child.pid, 750, initialProbe.state === 'unverifiable' ? initialProbe.error : undefined);
+
+  if (groupResult.state !== 'absent') {
+    if (groupResult.state !== 'present') {
+      throw groupCleanupError(child.pid, groupResult, 'ownership or liveness is unverifiable; refusing process-group SIGKILL');
+    }
+
+    const ownershipFailure = verifyOwnedLiveGroup(child, groupResult.snapshot);
+
+    if (ownershipFailure) throw groupCleanupError(child.pid, groupResult, `${ownershipFailure}; refusing process-group SIGKILL`);
+
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch (error) {
+      if (error.code !== 'ESRCH') {
+        throw groupCleanupError(child.pid, groupResult, `verified owned process-group SIGKILL failed (${describePermissionError(error)})`);
+      }
+    }
+
+    groupResult = await waitForGroupGone(child.pid, 2500, groupResult.firstEPERM);
   }
 
-  assert.ok(await waitForGroupGone(child.pid), `test-owned process group ${child.pid} still exists`);
+  if (groupResult.state !== 'absent') {
+    throw groupCleanupError(child.pid, groupResult, 'absence was not confirmed with ESRCH');
+  }
 
   if (child.exitCode === null && child.signalCode === null) {
     await Promise.race([once(child, 'exit'), delay(1500)]);
@@ -274,7 +387,8 @@ test('owner-lifetime EOF terminates the helper process group after bounded grace
   assert.ok(descendantPid > 0);
   run.ownerLifetimeInput.destroy();
   await once(run.child, 'exit');
-  assert.equal(await waitForGroupGone(run.child.pid), true);
+  const groupResult = await waitForGroupGone(run.child.pid);
+  assert.equal(groupResult.state, 'absent', groupCleanupError(run.child.pid, groupResult, 'owner-lifetime cleanup did not confirm absence with ESRCH').message);
 
   for (let i = 0; i < 100; i++) {
     try { process.kill(descendantPid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; }
