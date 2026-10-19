@@ -155,7 +155,7 @@ import { WorkspaceProviderRunsChannel } from '../../workspace/electron-main/work
 import { WORKSPACE_PROVIDER_RUNS_CHANNEL } from '../../workspace/common/workspaceProviderRunProtocol.js';
 import { TaskFolderWriterLock } from '../../workspace/electron-main/providerRuns/taskFolderWriterLock.js';
 import { AgentSessionApplication } from '../../workspace/electron-main/agentSessions/agentSessionApplication.js';
-import { WorkspaceAgentSessionsChannel } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
+import { WorkspaceAgentSessionsChannel, type WorkspaceAgentMergeHost } from '../../workspace/electron-main/workspaceAgentSessionsChannel.js';
 import { formatCommitDialogValue } from '../../workspace/electron-main/agentSessions/agentSessionCommitDialog.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../workspace/common/workspaceAgentSessionProtocol.js';
 import { WorkspaceKnowledgeChannel } from '../../workspace/electron-main/workspaceKnowledgeChannel.js';
@@ -1619,6 +1619,47 @@ export class CodeApplication extends Disposable {
 						return result.response === 1;
 					},
 				},
+				{
+					prepare: input => agentSessions.mergeApplication.prepareProposal(input),
+					list: input => agentSessions.mergeApplication.listProposals(input),
+					approve: input => agentSessions.mergeApplication.approveProposal(input),
+					apply: input => agentSessions.mergeApplication.applyApprovedProposal(input),
+					reconcile: input => agentSessions.mergeApplication.reconcileApplying(input),
+					confirmProposal: async (sender, proposal) => {
+						const window = BrowserWindow.fromWebContents(sender);
+						if (!window || window.isDestroyed() || sender.isDestroyed()) { throw new Error('The project window closed before merge approval.'); }
+						const identity = (label: string, value: typeof proposal.author) => `${label}: ${formatCommitDialogValue(value.name)} <${formatCommitDialogValue(value.email)}> ${formatCommitDialogValue(value.date)}`;
+						const paths = proposal.paths.map(path => [
+							`경로: ${formatCommitDialogValue(path.path)}`,
+							`설명 연결: ${path.explanationState === 'linked' ? '검토 설명 연결됨' : '설명 근거 알 수 없음'}`,
+							...(path.explanations.length ? path.explanations.map(explanation => `설명 ID ${formatCommitDialogValue(explanation.id)} · revision ${explanation.revision} · ${explanation.actor}/${explanation.status} · ${formatCommitDialogValue(explanation.path)} · ${explanation.hunkId ? `구간 ${formatCommitDialogValue(explanation.hunkId)}` : '파일 전체'}`) : ['연결된 설명 기록 없음']),
+						].join('\n'));
+						const detail = [
+							'앱이 관리하는 통합 브랜치에만 병합합니다. 사용자 checkout, 원격 저장소, PR은 변경하지 않습니다.',
+							'세션 브랜치의 정확한 커밋 차이 전체는 앱의 병합 검토 화면에서 확인해야 합니다. 이 대화상자는 경로와 지문을 확인합니다.',
+							`프로젝트: ${formatCommitDialogValue(proposal.projectId)}`, `세션: ${formatCommitDialogValue(proposal.sessionId)}`, `실행: ${formatCommitDialogValue(proposal.turnId)}`,
+							`원본 커밋 제안: ${formatCommitDialogValue(proposal.commitProposalId)} · revision ${proposal.commitProposalRevision} · ${proposal.commitProposalFingerprint}`,
+							`Source HEAD: ${proposal.sourceHead}`, `Target HEAD: ${proposal.targetHead}`, `Merge base: ${proposal.mergeBase}`,
+							`병합 커밋 메시지: ${formatCommitDialogValue(proposal.commitMessage)}`, identity('작성자', proposal.author), identity('커미터', proposal.committer),
+							...(proposal.resolution ? [
+								'충돌을 수정한 결과 전체를 승인하는 새 제안입니다. 이전 승인은 적용되지 않습니다.',
+								`이전 충돌 제안: ${formatCommitDialogValue(proposal.resolution.proposalId)} · 작업 ${formatCommitDialogValue(proposal.resolution.operationId)}`,
+								`충돌 작업 폴더 ID: ${formatCommitDialogValue(proposal.resolution.generationId)} · 등록 ${formatCommitDialogValue(proposal.resolution.registrationId)}`,
+								`해결 트리: ${proposal.resolution.treeOid} · 인덱스 내용 지문 ${proposal.resolution.indexDigest} · 인덱스 파일 지문 ${proposal.resolution.indexFileDigest} · 작업 파일 지문 ${proposal.resolution.treeDigest}`,
+							] : []),
+							`변경 지문: ${proposal.diffFingerprint}`, `제안 revision ${proposal.revision} · 만료 ${proposal.expiresAt}`,
+							`선택 경로 ${proposal.paths.length}개:`, ...paths, `제안 지문: ${proposal.fingerprint}`,
+						].join('\n\n');
+						if (Buffer.byteLength(detail, 'utf8') > 48 * 1024) { throw new Error('Merge proposal metadata is too large for a complete native approval review.'); }
+						const result = await dialog.showMessageBox(window, {
+							type: 'question', title: '검토한 병합 승인',
+							message: `앱 관리 통합 브랜치에 ${proposal.paths.length}개 경로를 병합할까요?`, detail,
+							buttons: ['취소', '병합 승인'], cancelId: 0, defaultId: 0, noLink: true,
+						});
+						if (window.isDestroyed() || sender.isDestroyed()) { throw new Error('The project window closed before merge approval completed.'); }
+						return result.response === 1;
+					},
+				} satisfies WorkspaceAgentMergeHost,
 			);
 			validatedIpcMain.handle(WORKSPACE_AGENT_SESSIONS_CHANNEL, (event, command: string, arg: unknown) => {
 				if (event.senderFrame !== event.sender.mainFrame) { throw new Error('Agent session IPC is only available to the application main frame.'); }

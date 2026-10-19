@@ -26,6 +26,11 @@ import type {
 	AgentSessionIntegrationProposalDTO, WorkspaceAgentCommitPrepareInput, WorkspaceAgentCommitProposalInput,
 	WorkspaceAgentCommitProposalPageInput, WorkspaceAgentCommitRecoveryInput,
 } from '../common/workspaceAgentIntegrationProtocol.js';
+import type {
+	AgentSessionMergeProposalDTO, WorkspaceAgentMergePrepareInput, WorkspaceAgentMergeProposalMutationInput,
+	WorkspaceAgentMergeProposalPageInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput,
+} from '../common/workspaceAgentMergeProtocol.js';
+import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT } from '../common/workspaceAgentMergeProtocol.js';
 import type { AgentSessionAttachResult, AgentSessionService } from './agentSessions/agentSessionService.js';
 import { computeAgentSessionChangeHunks } from './agentSessions/agentSessionChangeHunks.js';
 import type { AgentSessionExplanationTarget } from './agentSessions/agentSessionReviewStore.js';
@@ -90,6 +95,16 @@ export interface WorkspaceAgentCommitHost {
 	confirmProposal(sender: WebContents, proposal: AgentSessionIntegrationProposalDTO): Promise<boolean>;
 }
 
+/** Host-only merge proposal operations. Human confirmation remains a native dialog capability. */
+export interface WorkspaceAgentMergeHost {
+	prepare(input: WorkspaceAgentMergePrepareInput): Promise<AgentSessionMergeProposalDTO>;
+	list(input: WorkspaceAgentMergeProposalPageInput): WorkspaceAgentMergeProposalPageDTO | Promise<WorkspaceAgentMergeProposalPageDTO>;
+	approve(input: WorkspaceAgentMergeProposalMutationInput): AgentSessionMergeProposalDTO['approval'];
+	apply(input: WorkspaceAgentMergeProposalMutationInput): Promise<AgentSessionMergeProposalDTO>;
+	reconcile(input: WorkspaceAgentMergeProposalRecoveryInput): Promise<AgentSessionMergeProposalDTO>;
+	confirmProposal(sender: WebContents, proposal: AgentSessionMergeProposalDTO): Promise<boolean>;
+}
+
 /** Project-scoped IPC for durable sessions and host-owned PTY capabilities. */
 export class WorkspaceAgentSessionsChannel {
 	private readonly attachments = new Map<string, ScopedAttachment>();
@@ -106,6 +121,7 @@ export class WorkspaceAgentSessionsChannel {
 		private readonly prepareWorkspace?: (projectId: string, sessionId: string) => Promise<WorkspaceAgentSessionWorkspacePreparationDTO>,
 		private readonly workflowHost?: WorkspaceAgentWorkflowHost,
 		private readonly commitHost?: WorkspaceAgentCommitHost,
+		private readonly mergeHost?: WorkspaceAgentMergeHost,
 	) { }
 
 	async call<T>(sender: WebContents, command: string, arg?: unknown): Promise<T> {
@@ -361,6 +377,69 @@ export class WorkspaceAgentSessionsChannel {
 					const proposal = await this.requireCommitHost().recover(request);
 					this.assertScopeCurrent(scope);
 					if (!this.sameCommitScope(proposal, request)) { throw new Error('Commit recovery scope does not match the approved proposal.'); }
+					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'listMergeProposals': {
+				const request = this.parseMergeProposalPage(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const page = await this.requireMergeHost().list(request);
+					this.assertScopeCurrent(scope);
+					if (page.proposals.some(proposal => !this.sameMergeScope(proposal, request))) { throw new Error('Merge proposal page contains an out-of-scope proposal.'); }
+					return page as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'prepareMergeProposal': {
+				const request = this.parseMergePrepare(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requireMergeHost().prepare(request);
+					this.assertScopeCurrent(scope);
+					if (!this.sameMergeScope(proposal, request) || proposal.commitProposalId !== request.commitProposalId) { throw new Error('Prepared merge proposal does not match its requested scope and source commit.'); }
+					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'approveMergeProposal': {
+				const request = this.parseMergeProposalMutation(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				const before = this.requireMergeProposal(request);
+				if (before.approval?.proposalFingerprint === before.fingerprint) { return { approved: true, proposal: before } as T; }
+				this.assertMergeProposalCurrent(before);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const approved = await this.requireMergeHost().confirmProposal(sender, before);
+					this.assertScopeCurrent(scope);
+					const current = this.requireMergeProposal(request);
+					if (current.id !== before.id || current.revision !== before.revision || current.fingerprint !== before.fingerprint) { throw new Error('The merge proposal changed while its approval dialog was open.'); }
+					this.assertMergeProposalCurrent(current);
+					if (approved) { this.requireMergeHost().approve(this.mergeProposalInput(request)); }
+					return { approved, proposal: this.requireMergeProposal(request) } as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'applyMergeProposal': {
+				const request = this.parseMergeProposalMutation(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				this.requireMergeProposal(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requireMergeHost().apply(this.mergeProposalInput(request));
+					this.assertScopeCurrent(scope);
+					if (!this.sameMergeScope(proposal, request) || proposal.id !== request.proposalId || proposal.revision !== request.expectedRevision || proposal.fingerprint !== request.expectedFingerprint) { throw new Error('Merge result does not match the exact approved proposal.'); }
+					return proposal as T;
+				} finally { this.finishScopedOperation(scope); }
+			}
+			case 'reconcileMergeProposal': {
+				const request = this.parseMergeRecovery(arg, projectId);
+				this.requireSession(projectId, request.sessionId);
+				this.requireMergeProposal(request);
+				const scope = this.beginScopedOperation(sender, projectId);
+				try {
+					const proposal = await this.requireMergeHost().reconcile(request);
+					this.assertScopeCurrent(scope);
+					if (!this.sameMergeScope(proposal, request) || proposal.id !== request.proposalId || proposal.revision !== request.expectedRevision || proposal.fingerprint !== request.expectedFingerprint) { throw new Error('Merge recovery result does not match the exact approved proposal.'); }
 					return proposal as T;
 				} finally { this.finishScopedOperation(scope); }
 			}
@@ -772,6 +851,78 @@ export class WorkspaceAgentSessionsChannel {
 	private requireCommitHost(): WorkspaceAgentCommitHost {
 		if (!this.commitHost) { throw new Error('Reviewed commit operations are unavailable because no trusted host is registered.'); }
 		return this.commitHost;
+	}
+
+	private requireMergeHost(): WorkspaceAgentMergeHost {
+		if (!this.mergeHost) { throw new Error('Reviewed merge operations are unavailable because no trusted host is registered.'); }
+		return this.mergeHost;
+	}
+
+	private requireMergeProposal(request: WorkspaceAgentMergeProposalMutationInput): AgentSessionMergeProposalDTO {
+		const proposal = this.database.agentSessionMerges.getProposal(request.proposalId);
+		if (!proposal || !this.sameMergeScope(proposal, request) || proposal.revision !== request.expectedRevision || proposal.fingerprint !== request.expectedFingerprint) {
+			throw new Error('Merge proposal is unavailable or changed; review its latest exact revision.');
+		}
+		return proposal;
+	}
+
+	private assertMergeProposalCurrent(proposal: AgentSessionMergeProposalDTO): void {
+		if (Date.parse(proposal.expiresAt) <= Date.now()) { throw new Error('Merge proposal approval has expired. Prepare and review a fresh proposal.'); }
+		const newer = this.requireMergeHost().list({ projectId: proposal.projectId, sessionId: proposal.sessionId, turnId: proposal.turnId, afterRevision: proposal.revision, limit: 1 });
+		if (newer.proposals.length) { throw new Error('A newer merge proposal exists; review that exact revision instead.'); }
+	}
+
+	private sameMergeScope(proposal: Pick<AgentSessionMergeProposalDTO, 'projectId' | 'sessionId' | 'turnId'>, request: Pick<WorkspaceAgentMergeProposalPageInput, 'projectId' | 'sessionId' | 'turnId'>): boolean {
+		return proposal.projectId === request.projectId && proposal.sessionId === request.sessionId && proposal.turnId === request.turnId;
+	}
+
+	private mergeProposalInput(request: WorkspaceAgentMergeProposalMutationInput): WorkspaceAgentMergeProposalMutationInput {
+		return { projectId: request.projectId, sessionId: request.sessionId, turnId: request.turnId, proposalId: request.proposalId, expectedRevision: request.expectedRevision, expectedFingerprint: request.expectedFingerprint };
+	}
+
+	private parseMergeProposalPage(value: unknown, authorizedProjectId: string): WorkspaceAgentMergeProposalPageInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId'], ['afterRevision', 'limit'], 'merge proposal page');
+		this.assertProjectId(raw.projectId, authorizedProjectId);
+		return {
+			projectId: authorizedProjectId, sessionId: this.uuid(raw.sessionId, 'merge session ID'), turnId: this.uuid(raw.turnId, 'merge turn ID'),
+			...(raw.afterRevision === undefined ? {} : { afterRevision: this.integer(raw.afterRevision, 0, MAX_SEQUENCE, 'merge proposal cursor') }),
+			...(raw.limit === undefined ? {} : { limit: this.integer(raw.limit, 1, AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT, 'merge proposal page limit') }),
+		};
+	}
+
+	private parseMergePrepare(value: unknown, authorizedProjectId: string): WorkspaceAgentMergePrepareInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'commitProposalId', 'expectedLatestRevision'], ['resolutionOfProposalId'], 'merge preparation');
+		return {
+			projectId: this.assertProjectAndReturn(raw.projectId, authorizedProjectId),
+			sessionId: this.uuid(raw.sessionId, 'merge session ID'), turnId: this.uuid(raw.turnId, 'merge turn ID'),
+			commitProposalId: this.uuid(raw.commitProposalId, 'source commit proposal ID'),
+			expectedLatestRevision: this.integer(raw.expectedLatestRevision, 0, MAX_SEQUENCE, 'merge proposal revision'),
+			...(raw.resolutionOfProposalId === undefined ? {} : { resolutionOfProposalId: this.uuid(raw.resolutionOfProposalId, 'resolution proposal ID') }),
+		};
+	}
+
+	private parseMergeProposalMutation(value: unknown, authorizedProjectId: string): WorkspaceAgentMergeProposalMutationInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'proposalId', 'expectedRevision', 'expectedFingerprint'], [], 'merge proposal mutation');
+		return {
+			projectId: this.assertProjectAndReturn(raw.projectId, authorizedProjectId), sessionId: this.uuid(raw.sessionId, 'merge session ID'), turnId: this.uuid(raw.turnId, 'merge turn ID'),
+			proposalId: this.uuid(raw.proposalId, 'merge proposal ID'), expectedRevision: this.integer(raw.expectedRevision, 1, MAX_SEQUENCE, 'merge proposal revision'),
+			expectedFingerprint: this.changeFingerprint(raw.expectedFingerprint),
+		};
+	}
+
+	private parseMergeRecovery(value: unknown, authorizedProjectId: string): WorkspaceAgentMergeProposalRecoveryInput {
+		const raw = this.record(value);
+		this.assertExactKeys(raw, ['projectId', 'sessionId', 'turnId', 'proposalId', 'expectedRevision', 'expectedFingerprint'], ['operationId'], 'merge recovery');
+		return {
+			...this.parseMergeProposalMutation({
+				projectId: raw.projectId, sessionId: raw.sessionId, turnId: raw.turnId, proposalId: raw.proposalId,
+				expectedRevision: raw.expectedRevision, expectedFingerprint: raw.expectedFingerprint,
+			}, authorizedProjectId),
+			...(raw.operationId === undefined ? {} : { operationId: this.uuid(raw.operationId, 'merge operation ID') }),
+		};
 	}
 
 	private parseCommitProposalPage(value: unknown, authorizedProjectId: string): WorkspaceAgentCommitProposalPageInput {

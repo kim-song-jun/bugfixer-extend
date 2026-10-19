@@ -18,6 +18,7 @@ import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentCliProcessError } from './agentCliProcess.js';
 import { AgentSessionService } from './agentSessionService.js';
 import { AgentSessionCommitApplication } from './agentSessionCommitApplication.js';
+import { AgentSessionMergeApplication } from './agentSessionMergeApplication.js';
 import { AgentSessionContentCaptureCleanupError, captureAgentSessionContentSnapshot, type AgentSessionContentSnapshot } from './agentSessionContentCapture.js';
 import { AgentWorkflowScheduler } from './agentWorkflowScheduler.js';
 import { AgentSessionWorkspaceResolver } from './agentSessionWorkspace.js';
@@ -43,6 +44,7 @@ export class AgentSessionApplication {
 	readonly workspaceResolver: AgentSessionWorkspaceResolver;
 	readonly service: AgentSessionService;
 	readonly commitApplication: AgentSessionCommitApplication;
+	readonly mergeApplication: AgentSessionMergeApplication;
 	readonly workflowScheduler: AgentWorkflowScheduler;
 	private recoveryReady = false;
 	private readonly worktrees: ManagedWorktreeService;
@@ -85,6 +87,7 @@ export class AgentSessionApplication {
 		this.service.recoverStartup();
 		database.agentSessionContents.reconcileInterruptedCaptures();
 		this.commitApplication = new AgentSessionCommitApplication(database, this.worktrees, this.workspaceResolver, this.service);
+		this.mergeApplication = new AgentSessionMergeApplication(database, this.worktrees, database.agentSessionMerges, this.workspaceResolver, this.service);
 		workflowScheduler = this.workflowScheduler = new AgentWorkflowScheduler(database, this.service);
 		this.recoveryReady = true;
 	}

@@ -39,6 +39,7 @@ import type { WorkspaceAgentSessionMailboxItemRequest, WorkspaceAgentSessionMail
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO, CreateAgentWorkflowInput } from '../../../../../workspace/common/workspaceAgentWorkflowProtocol.js';
 import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO, WorkspaceAgentChangeHunksDTO, WorkspaceAgentExplanationDTO, WorkspaceAgentExplanationPageDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
 import type { AgentSessionIntegrationProposalDTO, WorkspaceAgentCommitPrepareInput, WorkspaceAgentCommitProposalInput, WorkspaceAgentCommitRecoveryInput } from '../../../../../workspace/common/workspaceAgentIntegrationProtocol.js';
+import type { AgentSessionMergeProposalDTO, WorkspaceAgentMergePrepareInput, WorkspaceAgentMergeProposalMutationInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import type { WorkspaceKnowledgeDTO } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
@@ -621,6 +622,11 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			approveCommitProposal: (input: WorkspaceAgentCommitProposalInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'approveCommitProposal', input) as Promise<{ readonly approved: boolean; readonly proposal: AgentSessionIntegrationProposalDTO }>,
 			applyCommitProposal: (input: WorkspaceAgentCommitProposalInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'applyCommitProposal', input) as Promise<AgentSessionIntegrationProposalDTO>,
 			recoverCommitProposal: (input: WorkspaceAgentCommitRecoveryInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'recoverCommitProposal', input) as Promise<AgentSessionIntegrationProposalDTO>,
+			listMergeProposals: (afterRevision, limit) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listMergeProposals', { ...ipcScope, afterRevision, limit }) as Promise<WorkspaceAgentMergeProposalPageDTO>,
+			prepareMergeProposal: (input: WorkspaceAgentMergePrepareInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'prepareMergeProposal', input) as Promise<AgentSessionMergeProposalDTO>,
+			approveMergeProposal: (input: WorkspaceAgentMergeProposalMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'approveMergeProposal', input) as Promise<{ readonly approved: boolean; readonly proposal: AgentSessionMergeProposalDTO }>,
+			applyMergeProposal: (input: WorkspaceAgentMergeProposalMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'applyMergeProposal', input) as Promise<AgentSessionMergeProposalDTO>,
+			reconcileMergeProposal: (input: WorkspaceAgentMergeProposalRecoveryInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'reconcileMergeProposal', input) as Promise<AgentSessionMergeProposalDTO>,
 			openDiff: (evidence, path, before, after, isCurrent) => this.openChangeDiff(context, evidence, path, before, after, isCurrent),
 		};
 		if (!this.sessionChangesController) {

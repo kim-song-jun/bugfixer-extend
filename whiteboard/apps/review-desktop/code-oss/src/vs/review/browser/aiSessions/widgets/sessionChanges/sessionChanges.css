@@ -23,6 +23,16 @@
 .ai-session-changes__detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border); }
 .ai-session-changes__commit-review { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--vscode-panel-border); }
 .ai-session-changes__commit-review h3, .ai-session-changes__commit-review h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
+.ai-session-changes__merge-review { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 14px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__merge-review h4, .ai-session-changes__merge-detail h4 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
+.ai-session-changes__merge-list, .ai-session-changes__merge-paths { display: flex; flex-direction: column; gap: 0; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.ai-session-changes__merge-list .ai-session-changes__button { width: 100%; overflow-wrap: anywhere; text-align: left; }
+.ai-session-changes__merge-list .ai-session-changes__button[aria-pressed="true"] { border-color: var(--vscode-focusBorder); }
+.ai-session-changes__merge-detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__merge-path { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-block: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+.ai-session-changes__merge-path code { color: var(--vscode-foreground); overflow-wrap: anywhere; }
+.ai-session-changes__merge-diff { max-width: 100%; max-height: 560px; margin: 0; padding: 8px; overflow: auto; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); font: 12px/1.5 var(--vscode-editor-font-family, ui-monospace, monospace); white-space: pre; }
+.ai-session-changes__merge-diff:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .ai-session-changes__commit-paths, .ai-session-changes__proposal-list { display: flex; flex-direction: column; gap: 0; min-width: 0; margin: 0; padding: 0; list-style: none; }
 .ai-session-changes__commit-path { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding-block: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
 .ai-session-changes__commit-path > code { overflow-wrap: anywhere; color: var(--vscode-foreground); }

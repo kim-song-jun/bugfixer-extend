@@ -19,13 +19,14 @@ import type { AgentSessionTranscriptPageDTO, AgentSessionTurnSnapshot, SessionNo
 import type { WorkspaceAgentSessionMailboxPage, WorkspaceAgentSessionNotificationStatus } from '../common/workspaceAgentCommunicationProtocol.js';
 import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPlanInput, AgentWorkflowStatusDTO } from '../common/workspaceAgentWorkflowProtocol.js';
 import type { AgentSessionIntegrationProposalDTO } from '../common/workspaceAgentIntegrationProtocol.js';
+import type { AgentSessionMergeProposalDTO } from '../common/workspaceAgentMergeProtocol.js';
 import type { AgentPtyHandle, AgentPtyHost, AgentPtyOutputPage, AgentPtySnapshot, AgentPtyStopResult } from './agentSessions/agentPtyHost.js';
 import { AgentSessionService, type AgentSessionRuntimeFactory, type AgentSessionRuntimeHandle } from './agentSessions/agentSessionService.js';
 import { AgentSessionWorkspaceResolver } from './agentSessions/agentSessionWorkspace.js';
 import { ManagedWorktreeService } from './agentSessions/managedWorktrees.js';
 import { TaskFolderWriterLock } from './providerRuns/taskFolderWriterLock.js';
 import { WorkspaceDatabase } from './workspaceDatabase.js';
-import { WorkspaceAgentSessionsChannel, type WorkspaceAgentCommitHost, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
+import { WorkspaceAgentSessionsChannel, type WorkspaceAgentCommitHost, type WorkspaceAgentMergeHost, type WorkspaceAgentWorkflowHost } from './workspaceAgentSessionsChannel.js';
 
 function deferred() {
 	let resolve!: () => void;
@@ -454,6 +455,143 @@ test('commit approval IPC requires the exact scoped proposal and native confirma
 		assert.equal(applyCalls, 0, 'approval records authority but never applies the commit');
 		await channel.call(sender, 'applyCommitProposal', newerInput);
 		assert.equal(applyCalls, 1, 'apply requires its separate explicit command');
+	} finally {
+		database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('merge IPC scopes exact proposals, requires native approval, and keeps apply separate', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'workspace-agent-merge-channel-'));
+	const database = WorkspaceDatabase.open(':memory:');
+	try {
+		const descriptorUri = URI.file(join(directory, 'project.code-workspace')).toString();
+		const foreignUri = URI.file(join(directory, 'foreign.code-workspace')).toString();
+		const project = database.createProjectWorkspace('Merge project', directory, descriptorUri, randomUUID(), { vcsKind: 'git', vcsRoot: directory });
+		const foreign = database.createProjectWorkspace('Foreign merge project', directory, foreignUri);
+		const openedWorkspace = { id: 'merge-workspace', configPath: URI.parse(descriptorUri) };
+		const codeWindow = { config: { reviewWindowLaunch: { kind: 'project', projectId: project.project.id } }, openedWorkspace } as unknown as ICodeWindow;
+		const sender = Object.assign(new EventEmitter(), { id: 77, isDestroyed: () => false }) as unknown as WebContents;
+		const windows = { getWindowByWebContents: (candidate: WebContents) => candidate === sender ? codeWindow : undefined } as IWindowsMainService;
+		const session = database.agentSessions.createSession({ projectId: project.project.id, bindingId: project.binding.id, name: 'Merge source', provider: 'codex', model: 'fixture-model', workspaceMode: 'gitWorktree' });
+		const cwd = realpathSync(directory);
+		const stat = statSync(cwd, { bigint: true });
+		const folderIdentity = { canonicalPath: cwd, dev: stat.dev.toString(), ino: stat.ino.toString() };
+		const snapshot: AgentSessionTurnSnapshot = { schemaVersion: 1, projectId: project.project.id, sessionId: session.id, sessionRevision: session.revision,
+			bindingId: session.bindingId, taskId: null, provider: session.provider, model: session.model, profileRef: session.profileRef, cwd, folderIdentity,
+			managedWorktreeOwnerId: session.id, permissionPolicy: { mode: 'mutating', approval: 'on-request' }, convention: null, references: [] };
+		const createdTurn = database.agentSessionTurns.createTurn({ projectId: project.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
+		const scope = { projectId: project.project.id, sessionId: session.id, turnId: createdTurn.id };
+		const bytes = Buffer.from('retained source\n');
+		const capture = (content: string, capturedAt: string) => {
+			const contentBytes = Buffer.from(content);
+			return { schemaVersion: 2 as const, folderIdentity, capturedAt, inventoryCoverage: 'complete' as const, contentCoverage: 'complete' as const,
+				entryCount: 1, fileBytes: contentBytes.length, retainedTextBytes: contentBytes.length, retainedBinaryBytes: 0, contentReadCount: 1,
+				entries: [{ path: 'src/merge.ts', kind: 'file' as const, size: contentBytes.length, sha256: createHash('sha256').update(contentBytes).digest('hex'), content, executable: false }] };
+		};
+		database.agentSessionContents.recordBaseline({ scope, snapshot: capture('before\n', '2026-10-19T00:00:00.000Z'), revision: '1'.repeat(40) });
+		const currentSession = database.agentSessions.getSession(project.project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.project.id, session.id, createdTurn.id, createdTurn.revision, currentSession.revision, { state: 'running' });
+		database.agentSessionContents.recordAfter({ scope, snapshot: capture(bytes.toString(), '2026-10-19T00:00:01.000Z'), expectedLatestVersion: 0, revision: '1'.repeat(40), cleanupVerified: true });
+		const liveSession = database.agentSessions.getSession(project.project.id, session.id)!;
+		database.agentSessionTurns.transitionTurn(project.project.id, session.id, createdTurn.id, running.turn.revision, liveSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });
+		const evidence = database.agentSessionChangeEvidence.getLatest(project.project.id, session.id, createdTurn.id)!;
+		const explanation = database.agentSessionReviews.recordHumanExplanation({ target: { ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, path: 'src/merge.ts', hunkId: null },
+			expectedLatestRevision: 0, what: 'Reviewed update.', why: 'The source change is required.', citations: [], checkClaims: [], status: 'confirmed' });
+		const sourceHead = 'a'.repeat(40);
+		const commit = database.agentSessionIntegrations.createProposal({ ...scope, evidenceVersion: evidence.version, evidenceFingerprint: evidence.fingerprint, sourceHead,
+			proposedGitTreeHash: 'b'.repeat(40), diffFingerprint: 'c'.repeat(64), commitMessage: 'Reviewed source',
+			author: { name: 'Author', email: 'author@example.invalid', date: '1700000000 +0000' }, committer: { name: 'Committer', email: 'committer@example.invalid', date: '1700000000 +0000' },
+			paths: [{ path: 'src/merge.ts', explanationTargets: [{ path: 'src/merge.ts', hunkId: null, revision: explanation.revision }] }], expectedLatestRevision: 0 });
+		database.agentSessionIntegrations.recordTrustedHumanApproval(commit.id, commit.revision);
+		const operationId = randomUUID();
+		const commitReceipt = { operationId, sourceHead, proposedGitTreeHash: commit.proposedGitTreeHash, diffFingerprint: commit.diffFingerprint, candidateHead: 'd'.repeat(40), resultingHead: null, changedPaths: [], failureCode: null };
+		database.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 0, state: 'applying', action: 'commit', receipt: commitReceipt });
+		database.agentSessionIntegrations.recordOutcome({ proposalId: commit.id, expectedOutcomeRevision: 1, state: 'succeeded', action: 'commit', receipt: { ...commitReceipt, resultingHead: commitReceipt.candidateHead, changedPaths: ['src/merge.ts'] } });
+		const integrationOwnerId = database.agentSessionMerges.getOrCreateIntegrationOwner(project.project.id, project.binding.id);
+		const diffText = 'diff --git a/src/merge.ts b/src/merge.ts\n+retained source\n';
+		const makeProposal = (expectedLatestRevision: number, targetHead = 'e'.repeat(40)) => database.agentSessionMerges.createProposal({
+			...scope, commitProposalId: commit.id, commitProposalRevision: commit.revision, commitProposalFingerprint: commit.fingerprint, integrationOwnerId,
+			sourceHead: commitReceipt.candidateHead, targetHead, mergeBase: '1'.repeat(40), diffFingerprint: createHash('sha256').update(diffText).digest('hex'), diffText,
+			commitMessage: `Merge reviewed session ${session.id}`, author: commit.author, committer: commit.committer,
+			changedPaths: ['src/merge.ts'], expectedLatestRevision,
+		});
+		const proposal = makeProposal(0);
+		let accept = false;
+		let applyCalls = 0;
+		let confirmationCalls = 0;
+		let gate: ReturnType<typeof deferred> | undefined;
+		let listGate: ReturnType<typeof deferred> | undefined;
+		const mergeHost: WorkspaceAgentMergeHost = {
+			prepare: async input => { assert.deepEqual(input, { ...scope, commitProposalId: commit.id, expectedLatestRevision: 0 }); return proposal; },
+			list: async input => {
+				if (listGate) { const current = listGate; listGate = undefined; current.entered(); await current.promise; }
+				return database.agentSessionMerges.listProposals(input.projectId, input.sessionId, input.turnId, { afterRevision: input.afterRevision, limit: input.limit });
+			},
+			approve: input => database.agentSessionMerges.recordTrustedHumanApproval(input.proposalId, input.expectedRevision, input.expectedFingerprint),
+			apply: async input => { applyCalls++; return database.agentSessionMerges.getProposal(input.proposalId)!; },
+			reconcile: async input => database.agentSessionMerges.getProposal(input.proposalId)!,
+			confirmProposal: async dialogSender => { confirmationCalls++; assert.equal(dialogSender, sender); if (gate) { const current = gate; gate = undefined; current.entered(); await current.promise; } return accept; },
+		};
+		const channel = new WorkspaceAgentSessionsChannel(database, windows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, mergeHost);
+		const proposalInput = { ...scope, proposalId: proposal.id, expectedRevision: proposal.revision, expectedFingerprint: proposal.fingerprint };
+		const page = await channel.call<{ proposals: readonly AgentSessionMergeProposalDTO[] }>(sender, 'listMergeProposals', scope);
+		assert.deepEqual(page.proposals.map(item => item.id), [proposal.id]);
+		await assert.rejects(channel.call(sender, 'listMergeProposals', { ...scope, limit: 6 }), /merge proposal page limit/u);
+		const listNavigationGate = listGate = deferred();
+		const pendingPage = channel.call(sender, 'listMergeProposals', scope);
+		await listNavigationGate.reached;
+		openedWorkspace.configPath = URI.parse(foreignUri);
+		listNavigationGate.resolve();
+		await assert.rejects(pendingPage, /project window changed/u);
+		openedWorkspace.configPath = URI.parse(descriptorUri);
+		const prepared = await channel.call<AgentSessionMergeProposalDTO>(sender, 'prepareMergeProposal', { ...scope, commitProposalId: commit.id, expectedLatestRevision: 0 });
+		assert.equal(prepared.id, proposal.id);
+		await assert.rejects(channel.call(sender, 'approveMergeProposal', { ...proposalInput, actor: 'human' }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'prepareMergeProposal', { ...scope, commitProposalId: commit.id, expectedLatestRevision: 0, resolutionOfProposalId: 'invalid' }), /resolution proposal ID/u);
+		await assert.rejects(channel.call(sender, 'prepareMergeProposal', { ...scope, commitProposalId: commit.id, expectedLatestRevision: 0, resolvedTree: 'a'.repeat(40) }), /unknown fields/u);
+		await assert.rejects(channel.call(sender, 'approveMergeProposal', { ...proposalInput, projectId: foreign.project.id }), /does not match this window/u);
+		const cancelled = await channel.call<{ approved: boolean; proposal: AgentSessionMergeProposalDTO }>(sender, 'approveMergeProposal', proposalInput);
+		assert.equal(cancelled.approved, false);
+		assert.equal(cancelled.proposal.approval, null);
+		assert.equal(applyCalls, 0);
+		const originalNow = Date.now;
+		try {
+			Date.now = () => Date.parse(proposal.expiresAt) + 1;
+			await assert.rejects(channel.call(sender, 'approveMergeProposal', proposalInput), /expired/u);
+		} finally { Date.now = originalNow; }
+		accept = true;
+		const navigationGate = gate = deferred();
+		const pending = channel.call(sender, 'approveMergeProposal', proposalInput);
+		await navigationGate.reached;
+		openedWorkspace.configPath = URI.parse(foreignUri);
+		navigationGate.resolve();
+		await assert.rejects(pending, /project window changed/u);
+		openedWorkspace.configPath = URI.parse(descriptorUri);
+		assert.equal(database.agentSessionMerges.getProposal(proposal.id)?.approval, null);
+		const staleGate = gate = deferred();
+		const staleApproval = channel.call(sender, 'approveMergeProposal', proposalInput);
+		await staleGate.reached;
+		const newerProposal = makeProposal(proposal.revision, 'f'.repeat(40));
+		staleGate.resolve();
+		await assert.rejects(staleApproval, /newer merge proposal/u);
+		assert.equal(database.agentSessionMerges.getProposal(proposal.id)?.approval, null);
+		const newerInput = { ...scope, proposalId: newerProposal.id, expectedRevision: newerProposal.revision, expectedFingerprint: newerProposal.fingerprint };
+		const approved = await channel.call<{ approved: boolean; proposal: AgentSessionMergeProposalDTO }>(sender, 'approveMergeProposal', newerInput);
+		assert.equal(approved.approved, true);
+		assert.equal(approved.proposal.approval?.actor, 'human');
+		assert.equal(applyCalls, 0);
+		const confirmationCount = confirmationCalls;
+		try {
+			Date.now = () => Date.parse(newerProposal.expiresAt) + 1;
+			const repeated = await channel.call<{ approved: boolean; proposal: AgentSessionMergeProposalDTO }>(sender, 'approveMergeProposal', newerInput);
+			assert.equal(repeated.approved, true);
+			assert.equal(repeated.proposal.approval?.id, approved.proposal.approval?.id);
+			assert.equal(confirmationCalls, confirmationCount, 'an exact durable approval retry never opens another dialog');
+			assert.equal(applyCalls, 0, 'approval retry never applies the merge');
+		} finally { Date.now = originalNow; }
+		await channel.call(sender, 'applyMergeProposal', newerInput);
+		assert.equal(applyCalls, 1);
 	} finally {
 		database.close();
 		rmSync(directory, { recursive: true, force: true });

@@ -12,7 +12,7 @@ import { delimiter, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 
-import { ManagedWorktreeService, type ManagedWorktreeLease, type ReviewedCommitApplyingRecord, type ReviewedCommitBinding } from './managedWorktrees.js';
+import { ManagedWorktreeService, type ManagedWorktreeLease, type ReviewedCommitApplyingRecord, type ReviewedCommitBinding, type ReviewedMergeApplyingRecord, type MergePreview } from './managedWorktrees.js';
 import { OwnerOperationCoordinator } from './ownerOperationCoordinator.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -24,19 +24,19 @@ function gitExitCode(cwd: string, ...args: string[]): number | null {
 	catch (error) { return (error as NodeJS.ErrnoException & { status?: number }).status ?? null; }
 }
 
-async function fixture(run: (root: string, repository: string, service: ManagedWorktreeService) => Promise<void>, options: { globalIdentity?: boolean } = {}): Promise<void> {
+async function fixture(run: (root: string, repository: string, service: ManagedWorktreeService) => Promise<void>, options: { globalIdentity?: boolean; objectFormat?: 'sha1' | 'sha256' } = {}): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), 'bugfixer-managed-worktrees-'));
 	const repository = join(root, 'repository');
 	const profile = join(root, 'profile');
 	mkdirSync(repository);
 	mkdirSync(profile);
 	const priorGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
-	const identityEnvironment = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL'];
+	const identityEnvironment = ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE', 'EMAIL'];
 	const priorIdentityEnvironment = new Map(identityEnvironment.map(key => [key, process.env[key]]));
 	if (options.globalIdentity) { for (const key of identityEnvironment) { delete process.env[key]; } }
 	const isolatedGlobalConfig = join(profile, 'gitconfig');
 	try {
-		git(repository, 'init', '-q', '-b', 'user-work');
+		git(repository, 'init', '-q', '-b', 'user-work', `--object-format=${options.objectFormat ?? 'sha1'}`);
 		if (options.globalIdentity) {
 			writeFileSync(isolatedGlobalConfig, '[user]\n\tname = Fixture Global\n\temail = global@example.invalid\n');
 		} else {
@@ -59,10 +59,10 @@ async function fixture(run: (root: string, repository: string, service: ManagedW
 	}
 }
 
-async function withEnv(values: Record<string, string | undefined>, run: () => Promise<void>): Promise<void> {
+async function withEnv<T>(values: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
 	const prior = new Map(Object.keys(values).map(key => [key, process.env[key]]));
 	for (const [key, value] of Object.entries(values)) { if (value === undefined) { delete process.env[key]; } else { process.env[key] = value; } }
-	try { await run(); }
+	try { return await run(); }
 	finally { for (const [key, value] of prior) { if (value === undefined) { delete process.env[key]; } else { process.env[key] = value; } } }
 }
 
@@ -107,6 +107,48 @@ function applyingJournal(): {
 	};
 }
 
+type TestMergeJournal = {
+	readonly operationId: string;
+	readonly readApplying: (operationId: string) => Promise<ReviewedMergeApplyingRecord | undefined>;
+	readonly recordArtifact: (operationId: string, expectedRevision: number, event: import('../../common/workspaceAgentMergeProtocol.js').AgentSessionMergeArtifactEvent) => Promise<import('../../common/workspaceAgentMergeProtocol.js').AgentSessionMergeArtifactRecord>;
+	readonly readArtifacts: (operationId: string) => Promise<readonly import('../../common/workspaceAgentMergeProtocol.js').AgentSessionMergeArtifactRecord[]>;
+};
+
+async function mergeReviewed(service: ManagedWorktreeService, preview: MergePreview, options: {
+	beforeReadback?: () => Promise<void>;
+	readback?: (record: ReviewedMergeApplyingRecord) => ReviewedMergeApplyingRecord | undefined;
+	beforeArtifact?: (event: import('../../common/workspaceAgentMergeProtocol.js').AgentSessionMergeArtifactEvent) => Promise<void> | void;
+	captureJournal?: (journal: TestMergeJournal) => void;
+} = {}) {
+	let durable: ReviewedMergeApplyingRecord | undefined;
+	let artifacts: Array<{ readonly revision: number; readonly event: import('../../common/workspaceAgentMergeProtocol.js').AgentSessionMergeArtifactEvent }> = [];
+	const operationId = randomUUID();
+	const journal: TestMergeJournal = {
+		operationId,
+		readApplying: async requestedId => requestedId === operationId ? durable : undefined,
+		recordArtifact: async (requestedId, expectedRevision, event) => {
+			if (requestedId !== operationId || expectedRevision !== artifacts.length) { throw new Error('Test journal rejected an unexpected artifact revision.'); }
+			await options.beforeArtifact?.(event);
+			const record = { revision: expectedRevision + 1, event };
+			artifacts.push(record);
+			return record;
+		},
+		readArtifacts: async requestedId => requestedId === operationId ? artifacts : []
+	};
+	options.captureJournal?.(journal);
+	return service.mergeReviewed({
+		previewId: preview.previewId, operationId, proposalId: randomUUID(), proposalFingerprint: 'a'.repeat(64),
+		commitMessage: preview.commitMessage, author: preview.author, committer: preview.committer,
+		recordApplying: async record => { durable = record; await options.beforeReadback?.(); },
+		readApplying: async requestedId => {
+			if (!durable || durable.operationId !== requestedId) { return undefined; }
+			return options.readback ? options.readback(durable) : durable;
+		},
+		recordArtifact: journal.recordArtifact,
+		readArtifacts: journal.readArtifacts,
+	});
+}
+
 test('session worktrees use separate owned branches and leave the user checkout untouched', async () => {
 	await fixture(async (_root, repository, service) => {
 		const originalHead = git(repository, 'rev-parse', 'HEAD');
@@ -139,6 +181,40 @@ test('concurrent preparation for one session owner creates one signed worktree l
 	});
 });
 
+test('integration target is stable, starts at the source base, and never claims an orphan branch', async () => {
+	await fixture(async (_root, repository, service) => {
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(session.worktreePath, 'committed.txt', 'committed source\n', 'source commit');
+		writeFileSync(join(session.worktreePath, 'unselected.txt'), 'leave dirty\n');
+		const ownerId = randomUUID();
+		const integration = await service.ensureIntegrationTarget({ ownerId, sessionOwnerId: session.ownerId });
+		assert.equal(integration.ownerId, ownerId);
+		assert.equal(integration.kind, 'integration');
+		assert.equal(integration.baseCommit, session.baseCommit);
+		assert.equal(integration.head, session.baseCommit);
+		const reused = await service.ensureIntegrationTarget({ ownerId, sessionOwnerId: session.ownerId });
+		assert.equal(reused.worktreePath, integration.worktreePath);
+		assert.equal(reused.head, integration.head);
+		assert.equal(readFileSync(join(session.worktreePath, 'unselected.txt'), 'utf8'), 'leave dirty\n');
+		assert.equal(existsSync(join(integration.worktreePath, 'unselected.txt')), false);
+
+		const orphanOwner = randomUUID();
+		git(repository, 'branch', `bugfixer/integration/${orphanOwner}`, base);
+		await assert.rejects(service.ensureIntegrationTarget({ ownerId: orphanOwner, sessionOwnerId: session.ownerId }), /unmanifested integration/u);
+		assert.equal(git(repository, 'rev-parse', `refs/heads/bugfixer/integration/${orphanOwner}`), base);
+		const preview = await service.previewMerge({ integrationOwnerId: ownerId, sessionOwnerId: session.ownerId });
+		const merged = await mergeReviewed(service, preview);
+		assert.equal(merged.state, 'merged');
+		const updated = await service.inspect(ownerId);
+		assert.ok(updated.generationId);
+		assert.equal(updated.generations?.length, 2);
+		assert.notEqual(updated.worktreePath, integration.worktreePath);
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), base);
+		assert.equal(updated.head, git(repository, 'rev-parse', `refs/heads/${updated.branch}`));
+	});
+});
+
 test('reviewed merge integrates the reviewed session commit in the integration worktree', async () => {
 	await fixture(async (_root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
@@ -146,10 +222,137 @@ test('reviewed merge integrates the reviewed session commit in the integration w
 		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
 		commit(session.worktreePath, 'feature.txt', 'feature\n', 'feature');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		const result = await service.mergeReviewed(preview.previewId);
+		const result = await mergeReviewed(service, preview);
 		assert.equal(result.state, 'merged');
-		assert.equal(readFileSync(join(integration.worktreePath, 'feature.txt'), 'utf8'), 'feature\n');
+		const current = await service.inspect(integration.ownerId);
+		assert.notEqual(current.worktreePath, integration.worktreePath);
+		assert.equal(readFileSync(join(current.worktreePath, 'feature.txt'), 'utf8'), 'feature\n');
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), base);
+		assert.equal(git(integration.worktreePath, 'branch', '--show-current'), '');
 		assert.equal(git(repository, 'branch', '--show-current'), 'user-work');
+	});
+});
+
+for (const objectFormat of ['sha1', 'sha256'] as const) {
+	test(`isolated ${objectFormat} generation ignores ambient index/worktree/object redirection and publishes exact divergent heads`, async () => {
+		await fixture(async (root, repository, service) => {
+			const source = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+			const originalHead = git(repository, 'rev-parse', 'HEAD');
+			const originalIndex = readFileSync(join(repository, '.git', 'index'));
+			commit(source.worktreePath, 'source.txt', 'reviewed source\n', 'source');
+			const decoy = join(root, 'decoy'); mkdirSync(decoy);
+			const decoyIndex = join(decoy, 'index'); writeFileSync(decoyIndex, 'do not read or replace');
+			await withEnv({ GIT_INDEX_FILE: decoyIndex, GIT_WORK_TREE: decoy, GIT_OBJECT_DIRECTORY: decoy }, async () => {
+				const integration = await service.ensureIntegrationTarget({ ownerId: randomUUID(), sessionOwnerId: source.ownerId });
+				const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: source.ownerId });
+				assert.notEqual(preview.targetHead, preview.sourceHead);
+				assert.equal(preview.targetHead.length, objectFormat === 'sha256' ? 64 : 40);
+				const result = await mergeReviewed(service, preview);
+				assert.equal(result.state, 'merged');
+				if (result.state !== 'merged') { throw new Error('Expected isolated merge publication.'); }
+				assert.equal(readFileSync(join(result.integration.worktreePath, 'source.txt'), 'utf8'), 'reviewed source\n');
+			});
+			assert.equal(readFileSync(decoyIndex, 'utf8'), 'do not read or replace');
+			assert.equal(git(repository, 'rev-parse', 'HEAD'), originalHead);
+			assert.deepEqual(readFileSync(join(repository, '.git', 'index')), originalIndex);
+		}, { objectFormat });
+	});
+}
+
+test('auto-merging messages preserve clean stage zero entries beside a real conflict', async () => {
+	await fixture(async (_root, repository, service) => {
+		commit(repository, 'auto.txt', 'one\ntwo\nthree\nfour\nfive\nsix\nseven\n', 'base lines');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: 'HEAD' });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		commit(integration.worktreePath, 'auto.txt', 'TARGET\ntwo\nthree\nfour\nfive\nsix\nseven\n', 'target clean part');
+		commit(session.worktreePath, 'auto.txt', 'one\ntwo\nthree\nfour\nfive\nsix\nSOURCE\n', 'source clean part');
+		const cleanPreview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		const clean = await mergeReviewed(service, cleanPreview);
+		assert.equal(clean.state, 'merged');
+		if (clean.state !== 'merged') { throw new Error('Informational auto-merging output must remain clean.'); }
+		assert.equal(readFileSync(join(clean.integration.worktreePath, 'auto.txt'), 'utf8'), 'TARGET\ntwo\nthree\nfour\nfive\nsix\nSOURCE\n');
+		// A second pair retains a clean automerge and an unrelated staged conflict together.
+		const secondTarget = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: 'HEAD' });
+		const secondSource = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		commit(secondTarget.worktreePath, 'auto.txt', 'TARGET\ntwo\nthree\nfour\nfive\nsix\nseven\n', 'target clean part');
+		commit(secondSource.worktreePath, 'auto.txt', 'one\ntwo\nthree\nfour\nfive\nsix\nSOURCE\n', 'source clean part');
+		commit(secondTarget.worktreePath, 'README.md', 'target conflict\n', 'target conflict');
+		commit(secondSource.worktreePath, 'README.md', 'source conflict\n', 'source conflict');
+		const conflict = await mergeReviewed(service, await service.previewMerge({ integrationOwnerId: secondTarget.ownerId, sessionOwnerId: secondSource.ownerId }));
+		assert.equal(conflict.state, 'conflict');
+		if (conflict.state !== 'conflict') { throw new Error('Expected real conflict.'); }
+		assert.deepEqual(conflict.conflictedPaths, ['README.md']);
+		assert.match(git(conflict.integration.worktreePath, 'ls-files', '--stage', '--', 'auto.txt'), / 0\tauto\.txt$/u);
+		assert.equal(git(conflict.integration.worktreePath, 'ls-files', '--unmerged', '--', 'auto.txt'), '');
+	});
+});
+
+test('invalid UTF-8 repository paths are rejected before generation materialization', async () => {
+	await fixture(async (root, repository, service) => {
+		const invalidPath = Buffer.concat([Buffer.from(`${repository}/`), Buffer.from([0xff]), Buffer.from('.txt')]);
+		writeFileSync(invalidPath, 'invalid byte path\n');
+		git(repository, 'add', '--all'); git(repository, 'commit', '-qm', 'invalid byte path');
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const ownerId = randomUUID();
+		await assert.rejects(service.ensureIntegrationTarget({ ownerId, sessionOwnerId: session.ownerId }), /invalid UTF-8/u);
+		assert.equal(existsSync(join(root, 'profile', 'managed-worktrees', `${ownerId}.json`)), false);
+		assert.equal(git(repository, 'branch', '--list', `bugfixer/integration/${ownerId}`), '');
+	});
+});
+
+test('merge preview shows the complete committed source delta and preserves unrelated dirty source files', async () => {
+	await fixture(async (_root, repository, service) => {
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(session.worktreePath, 'z-last.txt', 'committed source\n', 'source commit');
+		writeFileSync(join(session.worktreePath, 'unselected.txt'), 'keep as dirty source state\n');
+		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		assert.equal(preview.mergeBase, base);
+		assert.deepEqual(preview.changedPaths, ['z-last.txt']);
+		assert.match(preview.diffText, /committed source/u);
+		assert.equal(createHash('sha256').update(preview.diffText, 'utf8').digest('hex'), preview.diffHash);
+		assert.equal((await mergeReviewed(service, preview)).state, 'merged');
+		const current = await service.inspect(integration.ownerId);
+		assert.equal(readFileSync(join(current.worktreePath, 'z-last.txt'), 'utf8'), 'committed source\n');
+		assert.equal(readFileSync(join(session.worktreePath, 'unselected.txt'), 'utf8'), 'keep as dirty source state\n');
+		assert.match(git(session.worktreePath, 'status', '--porcelain'), /unselected\.txt/u);
+	});
+});
+
+test('missing or mismatched durable merge readback prevents the Git merge', async () => {
+	await fixture(async (_root, repository, service) => {
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(session.worktreePath, 'journal-required.txt', 'must not merge\n', 'source commit');
+		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		const before = git(integration.worktreePath, 'rev-parse', 'HEAD');
+		await assert.rejects(mergeReviewed(service, preview, { readback: () => undefined }), /did not read back/u);
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), before);
+		assert.equal((await service.inspect(integration.ownerId)).pendingOperation, undefined);
+
+		const second = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		await assert.rejects(mergeReviewed(service, second, { readback: record => ({ ...record, targetHead: '0'.repeat(40) }) }), /did not read back/u);
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), before);
+	});
+});
+
+test('source or target changes while durable applying is recorded never execute the stale merge', async () => {
+	await fixture(async (_root, repository, service) => {
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(session.worktreePath, 'reviewed.txt', 'reviewed source\n', 'source commit');
+		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		const sourceHead = preview.sourceHead;
+		await assert.rejects(mergeReviewed(service, preview, {
+			beforeReadback: async () => { commit(session.worktreePath, 'later.txt', 'later source\n', 'later commit'); },
+		}), /stale|changed/u);
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), preview.targetHead);
+		assert.equal(git(session.worktreePath, 'rev-parse', 'HEAD') === sourceHead, false);
+		assert.equal(existsSync(join(integration.worktreePath, 'reviewed.txt')), false);
+		assert.equal((await service.inspect(integration.ownerId)).pendingOperation, undefined);
 	});
 });
 
@@ -160,12 +363,13 @@ test('merge uses the repository user identity from global Git config', async () 
 		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
 		commit(session.worktreePath, 'global-identity.txt', 'ok\n', 'global identity');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		assert.equal((await service.mergeReviewed(preview.previewId)).state, 'merged');
-		assert.match(git(integration.worktreePath, 'show', '-s', '--format=%an <%ae>', 'HEAD'), /^Fixture Global <global@example\.invalid>$/);
+		assert.equal((await mergeReviewed(service, preview)).state, 'merged');
+		const current = await service.inspect(integration.ownerId);
+		assert.match(git(current.worktreePath, 'show', '-s', '--format=%an <%ae>', 'HEAD'), /^Fixture Global <global@example\.invalid>$/);
 	}, { globalIdentity: true });
 });
 
-test('a merge failure before Git mutation reconciles as not applied', async () => {
+test('missing effective Git identity blocks merge review without changing the integration lease', async () => {
 	await fixture(async (_root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
@@ -173,26 +377,53 @@ test('a merge failure before Git mutation reconciles as not applied', async () =
 		commit(session.worktreePath, 'identity-failure.txt', 'preserved\n', 'source commit');
 		git(repository, 'config', '--unset', 'user.name');
 		git(repository, 'config', '--unset', 'user.email');
-		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		await assert.rejects(service.mergeReviewed(preview.previewId), /identity/i);
+		await assert.rejects(service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId }), /identity/i);
 		const inspected = await service.inspect(integration.ownerId);
+		assert.equal(inspected.worktreePath, integration.worktreePath);
 		assert.equal(inspected.state, 'active');
 		assert.equal(inspected.pendingOperation, undefined);
-		assert.ok(inspected.lastOperation);
-		assert.match(inspected.lastOperation.id, /^[0-9a-f-]{36}$/i);
-		assert.equal(inspected.lastOperation.kind, 'merge');
-		assert.equal(inspected.lastOperation.outcome, 'notApplied');
-		assert.equal(inspected.lastOperation.reconciled, true);
-		assert.equal('version' in inspected, false);
-		assert.equal('signature' in inspected, false);
+		assert.equal(inspected.lastOperation, undefined);
 		assert.equal(existsSync(join(integration.worktreePath, 'identity-failure.txt')), false);
 		assert.equal(git(integration.worktreePath, 'status', '--porcelain'), '');
 		const reopened = new ManagedWorktreeService(join(_root, 'profile'));
-		assert.deepEqual((await reopened.inspect(integration.ownerId)).lastOperation, inspected.lastOperation);
+		assert.equal((await reopened.inspect(integration.ownerId)).lastOperation, undefined);
 	});
 });
 
-test('a non-conflict commit-signing failure after merge preparation remains pending for recovery', async () => {
+test('reviewed commit captures effective identity environment and keeps candidate headers frozen', async () => {
+	await fixture(async (_root, repository, service) => {
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: 'HEAD' });
+		const sourceHead = git(session.worktreePath, 'rev-parse', 'HEAD');
+		const bytes = Buffer.from('identity-bound content\n');
+		const author = { name: 'Captured Author', email: 'captured-author@example.invalid', date: '946684800 +0000' };
+		const committer = { name: 'Captured Committer', email: 'captured-committer@example.invalid', date: '978307200 -0700' };
+		const preview = await withEnv({
+			GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email, GIT_AUTHOR_DATE: author.date,
+			GIT_COMMITTER_NAME: committer.name, GIT_COMMITTER_EMAIL: committer.email, GIT_COMMITTER_DATE: committer.date
+		}, () => service.prepareReviewedCommit({
+			ownerId: session.ownerId, sourceHead, commitMessage: 'Identity environment review',
+			files: [{ path: 'identity.txt', before: { absent: true }, after: { mode: '100644', sha256: createHash('sha256').update(bytes).digest('hex'), bytes } }]
+		}));
+		assert.deepEqual(preview.author, author);
+		assert.deepEqual(preview.committer, committer);
+
+		const candidate = await withEnv({
+			GIT_AUTHOR_NAME: 'Changed Author', GIT_AUTHOR_EMAIL: 'changed-author@example.invalid', GIT_AUTHOR_DATE: '1000000000 +0000',
+			GIT_COMMITTER_NAME: 'Changed Committer', GIT_COMMITTER_EMAIL: 'changed-committer@example.invalid', GIT_COMMITTER_DATE: '1000000060 +0000'
+		}, () => service.createReviewedCommitCandidate(preview.previewId));
+		const commitObject = execFileSync('git', ['-C', repository, 'cat-file', 'commit', candidate.candidateCommitOid]);
+		const headerSeparator = commitObject.indexOf(Buffer.from('\n\n'));
+		assert.ok(headerSeparator >= 0);
+		assert.deepEqual(commitObject.subarray(0, headerSeparator).toString('utf8').split('\n'), [
+			`tree ${preview.proposedTreeOid}`,
+			`parent ${preview.sourceHead}`,
+			`author ${author.name} <${author.email}> ${author.date}`,
+			`committer ${committer.name} <${committer.email}> ${committer.date}`
+		]);
+	});
+});
+
+test('configured signing helpers are rejected without execution or mutation', async () => {
 	await fixture(async (root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
@@ -202,22 +433,39 @@ test('a non-conflict commit-signing failure after merge preparation remains pend
 		const failingGpg = join(root, 'failing-gpg');
 		writeFileSync(failingGpg, `#!/bin/sh\nprintf 'fixture signing failure\\n' >&2\nprintf called > '${gpgMarker}'\nexit 1\n`);
 		chmodSync(failingGpg, 0o700);
-		git(integration.worktreePath, 'config', 'commit.gpgsign', 'true');
-		git(integration.worktreePath, 'config', 'gpg.program', failingGpg);
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		await assert.rejects(service.mergeReviewed(preview.previewId), /fixture signing failure/i);
-		assert.equal(existsSync(gpgMarker), true);
-		assert.equal(readFileSync(join(integration.worktreePath, 'signing-failure.txt'), 'utf8'), 'preserved in prepared merge\n');
-		const mergeHeadValue = git(integration.worktreePath, 'rev-parse', '--git-path', 'MERGE_HEAD');
-		const mergeHeadPath = mergeHeadValue.startsWith('/') ? mergeHeadValue : join(integration.worktreePath, mergeHeadValue);
-		assert.equal(readFileSync(mergeHeadPath, 'utf8').trim(), preview.sourceHead);
-		assert.equal(git(integration.worktreePath, 'ls-files', '--error-unmatch', 'signing-failure.txt'), 'signing-failure.txt');
-		assert.equal(git(integration.worktreePath, 'ls-files', '--unmerged'), '');
+		git(repository, 'config', 'commit.gpgsign', 'true');
+		git(repository, 'config', 'gpg.program', failingGpg);
+		await assert.rejects(mergeReviewed(service, preview), /unsupported|signing|configuration/i);
+		assert.equal(existsSync(gpgMarker), false);
+		assert.equal(existsSync(join(integration.worktreePath, 'signing-failure.txt')), false);
 		const inspected = await service.inspect(integration.ownerId);
-		assert.equal(inspected.state, 'recoveryRequired');
-		assert.equal(inspected.pendingOperation?.kind, 'merge');
+		assert.equal(inspected.state, 'active');
+		assert.equal(inspected.pendingOperation, undefined);
 		const reopened = new ManagedWorktreeService(join(root, 'profile'));
-		assert.equal((await reopened.inspect(integration.ownerId)).pendingOperation?.id, inspected.pendingOperation?.id);
+		assert.equal((await reopened.inspect(integration.ownerId)).pendingOperation, undefined);
+	});
+});
+
+test('configured merge drivers are rejected before an actual content conflict can invoke them', async () => {
+	await fixture(async (root, repository, service) => {
+		writeFileSync(join(repository, '.gitattributes'), 'README.md merge=fixture\n');
+		git(repository, 'add', '.gitattributes');
+		git(repository, 'commit', '-qm', 'pin merge driver attribute');
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(integration.worktreePath, 'README.md', 'target side\n', 'target conflict');
+		commit(session.worktreePath, 'README.md', 'source side\n', 'source conflict');
+		const marker = join(root, 'merge-driver-ran');
+		const driver = join(root, 'merge-driver');
+		writeFileSync(driver, `#!/bin/sh\nprintf ran > '${marker}'\ncat\n`);
+		chmodSync(driver, 0o700);
+		git(repository, 'config', 'merge.fixture.driver', driver);
+		await assert.rejects(service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId }), /unsupported/u);
+		assert.equal(existsSync(marker), false);
+		assert.equal(readFileSync(join(integration.worktreePath, 'README.md'), 'utf8'), 'target side\n');
+		assert.equal(readFileSync(join(session.worktreePath, 'README.md'), 'utf8'), 'source side\n');
 	});
 });
 
@@ -246,14 +494,14 @@ test('preview expires if either source or target HEAD advances', async () => {
 		commit(session.worktreePath, 'source.txt', 'one\n', 'source one');
 		const sourcePreview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
 		commit(session.worktreePath, 'source.txt', 'two\n', 'source two');
-		await assert.rejects(service.mergeReviewed(sourcePreview.previewId), /stale|changed/i);
+		await assert.rejects(mergeReviewed(service, sourcePreview), /stale|changed/i);
 		const targetPreview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
 		commit(integration.worktreePath, 'target.txt', 'advance\n', 'target advance');
-		await assert.rejects(service.mergeReviewed(targetPreview.previewId), /stale|changed/i);
+		await assert.rejects(mergeReviewed(service, targetPreview), /stale|changed/i);
 	});
 });
 
-test('a target commit inserted between snapshot validation and merge is never recorded as reviewed success', async () => {
+test('an integration ref race at conditional publication remains journaled without a retry', async () => {
 	await fixture(async (root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
@@ -264,19 +512,46 @@ test('a target commit inserted between snapshot validation and merge is never re
 		const shimDirectory = join(root, 'git-shim');
 		mkdirSync(shimDirectory);
 		const marker = join(root, 'target-advanced');
-		const targetFile = join(integration.worktreePath, 'external-target.txt');
 		const wrapper = join(shimDirectory, 'git');
-		writeFileSync(wrapper, `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = merge ] && [ ! -f '${marker}' ]; then\n    printf 'external target advance\\n' > '${targetFile}'\n    '${realGit}' -C '${integration.worktreePath}' add external-target.txt\n    '${realGit}' -C '${integration.worktreePath}' commit -qm 'external target advance'\n    touch '${marker}'\n    break\n  fi\ndone\nexec '${realGit}' "$@"\n`);
+		writeFileSync(wrapper, `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = update-ref ] && [ ! -f '${marker}' ]; then\n    '${realGit}' -C '${repository}' update-ref 'refs/heads/${integration.branch}' '${preview.sourceHead}'\n    touch '${marker}'\n    break\n  fi\ndone\nexec '${realGit}' "$@"\n`);
 		chmodSync(wrapper, 0o700);
 		await withEnv({ PATH: `${shimDirectory}${delimiter}${process.env.PATH ?? ''}` }, async () => {
-			await assert.rejects(service.mergeReviewed(preview.previewId), /reviewed target and source|durable recovery|merge commit/i);
+			const result = await mergeReviewed(service, preview);
+			assert.equal(result.state, 'recoveryRequired');
 			const inspected = await service.inspect(integration.ownerId);
 			assert.equal(inspected.state, 'recoveryRequired');
-			assert.equal(inspected.pendingOperation?.targetHead, preview.targetHead);
-			assert.match(git(integration.worktreePath, 'log', '-1', '--format=%s'), /Merge|merge/i);
-			assert.equal(readFileSync(targetFile, 'utf8'), 'external target advance\n');
-			assert.equal(readFileSync(join(integration.worktreePath, 'reviewed-source.txt'), 'utf8'), 'reviewed change\n');
+			assert.equal(inspected.pendingOperation?.kind, 'merge');
+			assert.equal(git(repository, 'rev-parse', `refs/heads/${integration.branch}`), preview.sourceHead);
+			assert.equal(existsSync(marker), true);
+			assert.equal(git(repository, 'branch', '--show-current'), 'user-work');
 		});
+	});
+});
+
+test('explicit recovery finishes a verified candidate published before its final artifact', async () => {
+	await fixture(async (_root, repository, service) => {
+		const base = git(repository, 'rev-parse', 'HEAD');
+		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
+		const session = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'session', baseRef: base });
+		commit(session.worktreePath, 'recovery-candidate.txt', 'retained candidate\n', 'recovery candidate');
+		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
+		let journal: TestMergeJournal | undefined;
+		const result = await mergeReviewed(service, preview, {
+			captureJournal: value => { journal = value; },
+			beforeArtifact: event => { if (event.phase === 'published') { throw new Error('simulated durable artifact outage'); } }
+		});
+		assert.equal(result.state, 'recoveryRequired');
+		assert.ok(journal);
+		assert.notEqual(git(repository, 'rev-parse', `refs/heads/${integration.branch}`), preview.targetHead);
+		const recovered = await service.reconcileReviewedMerge({
+			integrationOwnerId: integration.ownerId, operationId: journal.operationId,
+			readApplying: journal.readApplying, recordArtifact: journal.recordArtifact, readArtifacts: journal.readArtifacts
+		});
+		assert.equal(recovered.state, 'merged');
+		if (recovered.state !== 'merged') { throw new Error('Expected exact journal recovery to finalize the verified merge.'); }
+		assert.equal(git(repository, 'rev-parse', `refs/heads/${integration.branch}`), recovered.commit);
+		assert.equal(readFileSync(join(recovered.integration.worktreePath, 'recovery-candidate.txt'), 'utf8'), 'retained candidate\n');
+		assert.equal(git(repository, 'branch', '--show-current'), 'user-work');
 	});
 });
 
@@ -288,14 +563,25 @@ test('merge conflict is reported and retained for explicit recovery', async () =
 		commit(session.worktreePath, 'README.md', 'session\n', 'session edit');
 		commit(integration.worktreePath, 'README.md', 'integration\n', 'integration edit');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		const result = await service.mergeReviewed(preview.previewId);
+		const result = await mergeReviewed(service, preview);
 		assert.equal(result.state, 'conflict');
-		assert.ok(git(integration.worktreePath, 'status', '--porcelain').length > 0);
+		assert.deepEqual(result.conflictedPaths, ['README.md']);
+		const conflicted = await service.inspect(integration.ownerId);
+		assert.notEqual(conflicted.worktreePath, integration.worktreePath);
+		assert.match(git(conflicted.worktreePath, 'status', '--porcelain'), /README\.md/u);
+		assert.equal(git(repository, 'rev-parse', `refs/heads/${integration.branch}`), preview.targetHead);
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), preview.targetHead);
+		assert.equal(conflicted.lastOperation?.sourceOwnerId, session.ownerId);
+		assert.equal(conflicted.lastOperation?.sourceHead, preview.sourceHead);
+		assert.equal(conflicted.lastOperation?.targetHead, preview.targetHead);
+		assert.equal(conflicted.lastOperation?.mergeBase, preview.mergeBase);
+		assert.equal(conflicted.lastOperation?.diffFingerprint, preview.diffHash);
+		assert.deepEqual(conflicted.lastOperation?.conflictedPaths, ['README.md']);
 		await assert.rejects(service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId }), /conflict|recovery/i);
 	});
 });
 
-test('a crash after Git merge but before receipt is reconciled from exact merge parents', async () => {
+test('inspection never reconciles a pending merge without its exact approval journal', async () => {
 	await fixture(async (root, repository, service) => {
 		const base = git(repository, 'rev-parse', 'HEAD');
 		const integration = await service.create({ repositoryPath: repository, ownerId: randomUUID(), kind: 'integration', baseRef: base });
@@ -306,16 +592,16 @@ test('a crash after Git merge but before receipt is reconciled from exact merge 
 		const pending = { id: randomUUID(), kind: 'merge' as const, startedAt: Date.now(), sourceOwnerId: session.ownerId, sourceHead, targetHead };
 		(service as unknown as TestInternals).writeLease({ ...integration, state: 'recoveryRequired', pendingOperation: pending });
 		git(integration.worktreePath, 'merge', '--no-ff', '--no-edit', sourceHead);
-		const internals = service as unknown as TestInternals;
-		const operationLock = join(root, 'profile', 'managed-worktrees', `${integration.ownerId}.operation-lock.json`);
-		const lockUnsigned = { ownerId: integration.ownerId, operation: 'merge' as const, operationId: randomUUID(), pid: process.pid, processStart: execFileSync('ps', ['-p', String(process.pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 2_000, maxBuffer: 16 * 1024 }).trim() };
-		writeFileSync(operationLock, JSON.stringify({ ...lockUnsigned, signature: internals.sign(lockUnsigned) }));
-		assert.equal((await service.inspect(integration.ownerId)).pendingOperation?.id, pending.id);
-		rmSync(operationLock);
+		const first = await service.inspect(integration.ownerId);
+		assert.equal(first.state, 'recoveryRequired');
+		assert.deepEqual(first.pendingOperation, pending);
+		assert.equal(first.lastOperation, undefined);
+		assert.equal(git(integration.worktreePath, 'rev-parse', 'HEAD'), git(integration.worktreePath, 'rev-parse', `refs/heads/${integration.branch}`));
 		const reopened = new ManagedWorktreeService(join(root, 'profile'));
-		const recovered = await reopened.inspect(integration.ownerId);
-		assert.equal(recovered.state, 'active');
-		assert.deepEqual(recovered.lastOperation, { id: pending.id, kind: 'merge', outcome: 'merged', commit: recovered.head, reconciled: true });
+		const second = await reopened.inspect(integration.ownerId);
+		assert.equal(second.state, 'recoveryRequired');
+		assert.deepEqual(second.pendingOperation, pending);
+		assert.equal(second.lastOperation, undefined);
 		assert.equal(git(integration.worktreePath, 'show', 'HEAD:crash-window.txt'), 'merged');
 	});
 });
@@ -364,7 +650,7 @@ test('a crash after worktree removal is reconciled without discarding the retain
 		commit(session.worktreePath, 'retained.txt', 'ref retained\n', 'retained session');
 		const sourceHead = git(session.worktreePath, 'rev-parse', 'HEAD');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		assert.equal((await service.mergeReviewed(preview.previewId)).state, 'merged');
+		assert.equal((await mergeReviewed(service, preview)).state, 'merged');
 		const pending = { id: randomUUID(), kind: 'remove' as const, startedAt: Date.now(), expectedHead: sourceHead, retainedIntegrationOwnerId: integration.ownerId };
 		(service as unknown as TestInternals).writeLease({ ...session, state: 'recoveryRequired', pendingOperation: pending });
 		git(repository, 'worktree', 'remove', session.worktreePath);
@@ -402,7 +688,7 @@ test('merge hooks stay disabled and operation locks reject concurrent owners the
 		await assert.rejects(internals.withIntegrationLock(integration.ownerId, 'merge', () => undefined), /invalid|ambiguous|recovery/i);
 		rmSync(lockPath);
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		assert.equal((await service.mergeReviewed(preview.previewId)).state, 'merged');
+		assert.equal((await mergeReviewed(service, preview)).state, 'merged');
 		assert.equal(existsSync(marker), false);
 	});
 });
@@ -518,11 +804,12 @@ test('clean merged session cleanup preserves the commit in its integration branc
 		commit(session.worktreePath, 'merged.txt', 'retained\n', 'unique session change');
 		const sessionHead = git(session.worktreePath, 'rev-parse', 'HEAD');
 		const preview = await service.previewMerge({ integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId });
-		const merged = await service.mergeReviewed(preview.previewId);
+		const merged = await mergeReviewed(service, preview);
 		assert.equal(merged.state, 'merged');
 		await service.remove(session.ownerId, { retainedIntegrationOwnerId: integration.ownerId });
-		assert.equal(git(integration.worktreePath, 'merge-base', '--is-ancestor', sessionHead, 'HEAD'), '');
-		assert.equal(git(integration.worktreePath, 'show', 'HEAD:merged.txt'), 'retained');
+		const current = await service.inspect(integration.ownerId);
+		assert.equal(git(current.worktreePath, 'merge-base', '--is-ancestor', sessionHead, 'HEAD'), '');
+		assert.equal(git(current.worktreePath, 'show', 'HEAD:merged.txt'), 'retained');
 	});
 });
 

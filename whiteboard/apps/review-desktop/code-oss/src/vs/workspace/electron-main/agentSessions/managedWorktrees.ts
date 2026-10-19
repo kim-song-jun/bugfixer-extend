@@ -5,8 +5,15 @@
 
 import { createHmac, createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import type {
+	AgentSessionMergeConflictArtifact,
+	AgentSessionMergeResolutionDTO,
+	AgentSessionMergeArtifactEvent,
+	AgentSessionMergeArtifactRecord,
+} from '../../common/workspaceAgentMergeProtocol.js';
+import type { AgentSessionIntegrationGitIdentity } from '../../common/workspaceAgentIntegrationProtocol.js';
 
 const COMMAND_TIMEOUT_MS = 15_000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
@@ -18,6 +25,12 @@ const MAX_REVIEWED_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_REVIEWED_DIFF_BYTES = 8 * 1024 * 1024;
 const MAX_COMMIT_MESSAGE_BYTES = 4096;
 const MAX_ACTIVE_COMMIT_PREVIEWS = 4;
+const MAX_ACTIVE_MERGE_PREVIEWS = 16;
+const MAX_MERGE_CHANGED_PATHS = 300;
+const MAX_MERGE_ARTIFACT_BYTES = 2 * 1024 * 1024;
+const MAX_INTEGRATION_GENERATIONS = 32;
+const MAX_GENERATION_TREE_ENTRIES = 25_000;
+const MAX_GENERATION_TREE_BYTES = 256 * 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
@@ -35,17 +48,37 @@ export interface ManagedWorktreeLease {
 	readonly state: 'active' | 'conflict' | 'recoveryRequired' | 'removed';
 	readonly pendingOperation?: PendingOperation;
 	readonly lastOperation?: OperationReceipt;
+	readonly generationId?: string;
+	readonly registrationId?: string;
+	readonly generations?: readonly ManagedWorktreeGeneration[];
+}
+
+interface ManagedWorktreeGeneration {
+	readonly generationId: string;
+	readonly worktreePath: string;
+	readonly registrationId: string;
+	readonly head: string;
+	readonly treeOid: string;
+	readonly indexDigest: string;
+	readonly treeDigest: string;
 }
 
 interface PendingOperation {
 	readonly id: string;
 	readonly kind: 'merge' | 'remove';
 	readonly startedAt: number;
+	readonly proposalId?: string;
+	readonly proposalFingerprint?: string;
 	readonly sourceOwnerId?: string;
 	readonly sourceHead?: string;
 	readonly targetHead?: string;
+	readonly mergeBase?: string;
+	readonly diffFingerprint?: string;
 	readonly expectedHead?: string;
 	readonly retainedIntegrationOwnerId?: string;
+	readonly generationId?: string;
+	readonly generationPath?: string;
+	readonly registrationId?: string;
 }
 
 interface OperationReceipt {
@@ -54,21 +87,92 @@ interface OperationReceipt {
 	readonly outcome: 'merged' | 'conflict' | 'notApplied' | 'removed';
 	readonly commit?: string;
 	readonly reconciled?: boolean;
+	readonly proposalId?: string;
+	readonly proposalFingerprint?: string;
+	readonly sourceOwnerId?: string;
+	readonly sourceHead?: string;
+	readonly targetHead?: string;
+	readonly mergeBase?: string;
+	readonly diffFingerprint?: string;
+	readonly conflictedPaths?: readonly string[];
 }
 
 export interface MergePreview {
+	readonly resolution?: AgentSessionMergeResolutionDTO;
 	readonly previewId: string;
 	readonly integrationOwnerId: string;
 	readonly sessionOwnerId: string;
 	readonly sourceHead: string;
 	readonly targetHead: string;
+	readonly mergeBase: string;
 	readonly diffHash: string;
+	readonly diffText: string;
+	readonly changedPaths: readonly string[];
+	readonly commitMessage: string;
+	readonly author: AgentSessionIntegrationGitIdentity;
+	readonly committer: AgentSessionIntegrationGitIdentity;
 	readonly expiresAt: number;
+}
+
+export interface ReviewedMergeApplyingRecord {
+	readonly operationId: string;
+	readonly proposalId: string;
+	readonly proposalFingerprint: string;
+	readonly integrationOwnerId: string;
+	readonly sessionOwnerId: string;
+	readonly sourceHead: string;
+	readonly targetHead: string;
+	readonly mergeBase: string;
+	readonly diffFingerprint: string;
+	readonly commitMessage: string;
+	readonly author: AgentSessionIntegrationGitIdentity;
+	readonly committer: AgentSessionIntegrationGitIdentity;
+}
+
+export interface ReviewedMergeJournal {
+	readonly recordApplying: (record: ReviewedMergeApplyingRecord) => Promise<void>;
+	readonly readApplying: (operationId: string) => Promise<ReviewedMergeApplyingRecord | undefined>;
+	readonly recordArtifact: (operationId: string, expectedRevision: number, event: AgentSessionMergeArtifactEvent) => Promise<AgentSessionMergeArtifactRecord>;
+	readonly readArtifacts: (operationId: string) => Promise<readonly AgentSessionMergeArtifactRecord[]>;
+}
+
+function compareCodeUnits(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
+
+function decodeGitUtf8(bytes: Buffer): string {
+	try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+	catch { throw new Error('Git output contains invalid UTF-8 paths; materialization is unavailable.'); }
+}
+
+function sameMergeApplyingRecord(left: ReviewedMergeApplyingRecord, right: ReviewedMergeApplyingRecord): boolean {
+	const expectedKeys = ['author', 'committer', 'commitMessage', 'diffFingerprint', 'integrationOwnerId', 'mergeBase', 'operationId', 'proposalFingerprint', 'proposalId', 'sessionOwnerId', 'sourceHead', 'targetHead'].sort(compareCodeUnits);
+	if (Object.keys(left).sort(compareCodeUnits).some((key, index) => key !== expectedKeys[index]) || Object.keys(left).length !== expectedKeys.length) { return false; }
+	return left.operationId === right.operationId && left.proposalId === right.proposalId && left.proposalFingerprint === right.proposalFingerprint
+		&& left.integrationOwnerId === right.integrationOwnerId && left.sessionOwnerId === right.sessionOwnerId
+		&& left.sourceHead === right.sourceHead && left.targetHead === right.targetHead && left.mergeBase === right.mergeBase
+		&& left.diffFingerprint === right.diffFingerprint && left.commitMessage === right.commitMessage
+		&& JSON.stringify(left.author) === JSON.stringify(right.author) && JSON.stringify(left.committer) === JSON.stringify(right.committer);
+}
+
+function mergeReceipt(pending: PendingOperation, outcome: 'merged' | 'conflict' | 'notApplied', commit?: string, conflictedPaths?: readonly string[], reconciled?: boolean): OperationReceipt {
+	return {
+		id: pending.id, kind: 'merge', outcome,
+		...(commit !== undefined ? { commit } : {}), ...(reconciled !== undefined ? { reconciled } : {}),
+		...(pending.proposalId !== undefined ? { proposalId: pending.proposalId } : {}),
+		...(pending.proposalFingerprint !== undefined ? { proposalFingerprint: pending.proposalFingerprint } : {}),
+		...(pending.sourceOwnerId !== undefined ? { sourceOwnerId: pending.sourceOwnerId } : {}),
+		...(pending.sourceHead !== undefined ? { sourceHead: pending.sourceHead } : {}),
+		...(pending.targetHead !== undefined ? { targetHead: pending.targetHead } : {}),
+		...(pending.mergeBase !== undefined ? { mergeBase: pending.mergeBase } : {}),
+		...(pending.diffFingerprint !== undefined ? { diffFingerprint: pending.diffFingerprint } : {}),
+		...(conflictedPaths !== undefined ? { conflictedPaths: [...conflictedPaths].sort(compareCodeUnits) } : {})
+	};
 }
 
 export type ReviewedMergeResult =
 	| { readonly state: 'merged'; readonly commit: string; readonly integration: ManagedWorktreeLease }
-	| { readonly state: 'conflict'; readonly integration: ManagedWorktreeLease; readonly conflictedPaths: readonly string[] };
+	| { readonly state: 'conflict'; readonly integration: ManagedWorktreeLease; readonly conflictedPaths: readonly string[] }
+	| { readonly state: 'notApplied'; readonly operationId: string; readonly integration: ManagedWorktreeLease }
+	| { readonly state: 'recoveryRequired'; readonly operationId: string; readonly reason: string };
 
 export type ReviewedFileMode = '100644' | '100755' | '120000';
 export type ReviewedFileBefore = { readonly absent: true } | { readonly mode: ReviewedFileMode; readonly sha256: string };
@@ -145,6 +249,18 @@ interface RealIndexSnapshot {
 
 interface IndexEntry { readonly mode: string; readonly oid: string; readonly stage: number; readonly path: string; }
 interface OwnedIndexLock { readonly path: string; readonly fd: number; readonly dev: number; readonly ino: number; }
+interface SafeMergeContext { readonly root: string; readonly gitDirectory: string; readonly objectDirectory: string; readonly environment: NodeJS.ProcessEnv; }
+interface MergeTreeResult { readonly treeOid: string; readonly clean: boolean; readonly conflicts: readonly AgentSessionMergeConflictArtifact[]; }
+export interface MergeResolutionSource {
+	readonly proposalId: string;
+	readonly operationId: string;
+	readonly sourceHead: string;
+	readonly targetHead: string;
+	readonly mergeBase: string;
+	readonly generationId: string;
+	readonly registrationId: string;
+}
+interface RegisteredGeneration { readonly generationId: string; readonly registrationId: string; readonly worktreePath: string; readonly indexPath: string; readonly head: string; }
 
 interface StoredReviewedCommitPreview {
 	readonly preview: ReviewedCommitPreview;
@@ -152,9 +268,9 @@ interface StoredReviewedCommitPreview {
 }
 interface PreparedReviewedTree { readonly treeOid: string; readonly rawDiffFingerprint: string; }
 
-interface LeaseManifest extends ManagedWorktreeLease { readonly version: 1; readonly signature: string; }
-interface LeaseManifestPayload extends ManagedWorktreeLease { readonly version: 1; }
-interface OperationLock { readonly ownerId: string; readonly operation: 'merge' | 'remove' | 'prepareCommit' | 'applyReviewedCommit'; readonly operationId: string; readonly pid: number; readonly processStart: string; readonly signature: string; }
+interface LeaseManifest extends ManagedWorktreeLease { readonly version: 1 | 2; readonly signature: string; }
+interface LeaseManifestPayload extends ManagedWorktreeLease { readonly version: 1 | 2; }
+interface OperationLock { readonly ownerId: string; readonly operation: 'merge' | 'remove' | 'ensureIntegration' | 'prepareCommit' | 'applyReviewedCommit'; readonly operationId: string; readonly pid: number; readonly processStart: string; readonly signature: string; }
 
 /** App-profile-owned Git worktrees. A merge preview is an exact, expiring snapshot, not approval. */
 export class ManagedWorktreeService {
@@ -213,6 +329,7 @@ export class ManagedWorktreeService {
 
 	async inspect(ownerId: string): Promise<ManagedWorktreeLease> {
 		const lease = await this.readAndValidate(ownerId);
+		if (lease.pendingOperation?.kind === 'merge') { return { ...lease, state: 'recoveryRequired' }; }
 		return lease.pendingOperation ? this.reconcilePendingOperation(lease) : lease;
 	}
 
@@ -245,68 +362,433 @@ export class ManagedWorktreeService {
 		return Object.freeze({ worktreePath: join(this.root, kind, ownerId), branch: `bugfixer/${kind}/${ownerId}` });
 	}
 
-	async previewMerge(input: { integrationOwnerId: string; sessionOwnerId: string }): Promise<MergePreview> {
+	async ensureIntegrationTarget(input: { readonly ownerId: string; readonly sessionOwnerId: string }): Promise<ManagedWorktreeLease> {
+		this.validateOwnerId(input.ownerId);
+		this.validateOwnerId(input.sessionOwnerId);
+		const initialSource = await this.readAndValidate(input.sessionOwnerId);
+		this.assertMergeSourceReady(initialSource);
+		return this.withIntegrationLock(input.ownerId, 'ensureIntegration', async () => {
+			const source = await this.readAndValidate(input.sessionOwnerId);
+			this.assertMergeSourceReady(source);
+			if (existsSync(this.manifestPath(input.ownerId))) {
+				const integration = await this.readAndValidate(input.ownerId);
+				if (integration.kind !== 'integration' || integration.commonDirectory !== source.commonDirectory || integration.repositoryPath !== source.repositoryPath) {
+					throw new Error('The owned integration target does not belong to the source session repository.');
+				}
+				if (integration.pendingOperation) { return { ...integration, state: 'recoveryRequired' }; }
+				return integration;
+			}
+			const worktreePath = join(this.root, 'integration', input.ownerId);
+			const branch = `bugfixer/integration/${input.ownerId}`;
+			if (existsSync(worktreePath) || await this.git(source.repositoryPath, ['branch', '--list', branch])) {
+				throw new Error('An unmanifested integration path or branch is retained; explicit recovery is required.');
+			}
+			return this.createInitialIntegrationGeneration(source, input.ownerId);
+		});
+	}
+
+	private async createInitialIntegrationGeneration(source: ManagedWorktreeLease, ownerId: string): Promise<ManagedWorktreeLease> {
+		const context = await this.createSafeMergeContext(source);
+		try {
+			const entries = await this.listTreeEntries(context, source.worktreePath, source.baseCommit);
+			await this.assertGenerationBudget(context, source.worktreePath, entries);
+			await this.assertMergeAttributesSafe(context, source.worktreePath, source.baseCommit, entries.map(entry => entry.path));
+			const branch = `bugfixer/integration/${ownerId}`;
+			const update = Buffer.from(`start\noption no-deref\ncreate refs/heads/${branch} ${source.baseCommit}\nprepare\ncommit\n`, 'utf8');
+			await this.runGit(source.repositoryPath, ['-c', `core.hooksPath=${join(context.root, 'hooks')}`, '-c', 'core.fsmonitor=false', '-c', 'maintenance.auto=false', 'update-ref', '--stdin'], {
+				env: { GIT_CONFIG_GLOBAL: context.environment.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' }, input: update, maxOutputBytes: 64 * 1024
+			});
+			const generation = await this.registerDetachedGeneration(source.repositoryPath, source.commonDirectory, ownerId, source.baseCommit, context);
+			const digests = await this.materializeGeneration(context, generation, source.baseCommit, []);
+			const treeOid = (await this.safeMergeGit(context, generation.worktreePath, ['rev-parse', `${source.baseCommit}^{tree}`])).stdout.toString('ascii').trim();
+			const generationRecord: ManagedWorktreeGeneration = {
+				generationId: generation.generationId, worktreePath: generation.worktreePath, registrationId: generation.registrationId,
+				head: source.baseCommit, treeOid, indexDigest: digests.indexDigest, treeDigest: digests.treeDigest
+			};
+			return this.writeLease({
+				ownerId, kind: 'integration', repositoryPath: source.repositoryPath, commonDirectory: source.commonDirectory,
+				branch, worktreePath: generation.worktreePath, baseCommit: source.baseCommit, head: source.baseCommit,
+				state: 'active', generationId: generation.generationId, registrationId: generation.registrationId, generations: [generationRecord]
+			});
+		} finally { this.removeSafeMergeContext(context); }
+	}
+
+	discardMergePreview(previewId: string): void {
+		if (!UUID_PATTERN.test(previewId)) { throw new Error('Merge preview ID must be a UUID.'); }
+		this.previews.delete(previewId);
+	}
+
+	async getMergeGenerationDirectory(ownerId: string, generationId: string, registrationId: string): Promise<string> {
+		const lease = await this.readAndValidate(ownerId);
+		const generation = lease.generations?.find(value => value.generationId === generationId && value.registrationId === registrationId);
+		if (lease.kind !== 'integration') { throw new Error('Merge generation directory requires an integration owner.'); }
+		if (generation) { return generation.worktreePath; }
+		const pending = lease.pendingOperation;
+		if (pending?.kind !== 'merge' || pending.generationId !== generationId || pending.registrationId !== registrationId || pending.generationPath !== this.generationPath(ownerId, generationId)) { throw new Error('Merge generation directory is not a registered signed integration generation.'); }
+		const path = pending.generationPath;
+		if (!existsSync(path) || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path
+			|| realpathSync(await this.git(path, ['rev-parse', '--show-toplevel'])) !== path || await this.git(path, ['branch', '--show-current']) !== '') { throw new Error('Pending merge generation directory registration is unavailable or changed.'); }
+		const common = await this.git(path, ['rev-parse', '--git-common-dir']);
+		if (realpathSync(isAbsolute(common) ? common : resolve(path, common)) !== lease.commonDirectory) { throw new Error('Pending merge generation belongs to a different repository.'); }
+		return path;
+	}
+
+	async previewMerge(input: { integrationOwnerId: string; sessionOwnerId: string; resolutionOf?: MergeResolutionSource }): Promise<MergePreview> {
+		return this.withIntegrationLock(input.integrationOwnerId, 'merge', () => this.prepareMergePreview(input));
+	}
+
+	private async prepareMergePreview(input: { integrationOwnerId: string; sessionOwnerId: string; resolutionOf?: MergeResolutionSource }): Promise<MergePreview> {
 		const integration = await this.readAndValidate(input.integrationOwnerId);
 		const session = await this.readAndValidate(input.sessionOwnerId);
 		if (integration.kind !== 'integration' || session.kind !== 'session') { throw new Error('Merge requires an integration worktree and a session worktree.'); }
 		if (integration.commonDirectory !== session.commonDirectory) { throw new Error('Managed worktrees must belong to the same repository.'); }
-		await this.assertMergeReady(integration);
-		await this.assertMergeReady(session);
+		const context = await this.createSafeMergeContext(integration);
+		try {
+		if (!input.resolutionOf) { await this.assertMergeReady(integration, context); }
+		this.assertMergeSourceReady(session);
 		const targetHead = await this.git(integration.worktreePath, ['rev-parse', 'HEAD']);
 		const sourceHead = await this.git(session.worktreePath, ['rev-parse', 'HEAD']);
-		const patch = await this.gitBuffer(integration.worktreePath, ['diff', '--binary', '--no-ext-diff', '--no-textconv', `${targetHead}...${sourceHead}`]);
+		const targetRef = await this.git(integration.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${integration.branch}`]);
+		const sourceRef = await this.git(session.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${session.branch}`]);
+		if (targetRef !== targetHead || sourceRef !== sourceHead) { throw new Error('A managed worktree branch ref does not match its checked-out HEAD.'); }
+		const mergeBase = await this.resolveUniqueMergeBase(context, integration.worktreePath, targetHead, sourceHead);
+		const resolution = input.resolutionOf ? await this.captureResolution(context, integration, input.resolutionOf) : undefined;
+		if (input.resolutionOf && (sourceHead !== input.resolutionOf.sourceHead || targetHead !== input.resolutionOf.targetHead || mergeBase !== input.resolutionOf.mergeBase)) { throw new Error('Conflict resolution source or target changed; the prior conflict cannot be reused.'); }
+		const diffBase = resolution ? targetHead : mergeBase;
+		const diffTarget = resolution?.treeOid ?? sourceHead;
+		const patch = (await this.safeMergeGit(context, integration.worktreePath, ['diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', diffBase, diffTarget], { maxOutputBytes: MAX_BUFFER_BYTES })).stdout;
+		if (patch.byteLength === 0 && !resolution) { throw new Error('There are no committed source changes to merge.'); }
+		let diffText: string;
+		try { diffText = new TextDecoder('utf-8', { fatal: true }).decode(patch); }
+		catch { throw new Error('The complete merge diff cannot be displayed as UTF-8; review is unavailable.'); }
+		if (Buffer.byteLength(diffText, 'utf8') !== patch.byteLength || patch.byteLength > MAX_BUFFER_BYTES) { throw new Error('The complete merge diff exceeds the review display limit.'); }
+		const pathBytes = (await this.safeMergeGit(context, integration.worktreePath, ['diff', '--name-only', '-z', '--no-renames', diffBase, diffTarget])).stdout;
+		if ((!pathBytes.byteLength && !resolution) || (pathBytes.byteLength && pathBytes[pathBytes.byteLength - 1] !== 0)) { throw new Error('The complete changed-path list is unavailable.'); }
+		let changedPaths: string[];
+		try { changedPaths = new TextDecoder('utf-8', { fatal: true }).decode(pathBytes).split('\0').filter(Boolean).sort(compareCodeUnits); }
+		catch { throw new Error('Changed paths cannot be displayed as valid UTF-8.'); }
+		if ((!changedPaths.length && !resolution) || changedPaths.length > MAX_MERGE_CHANGED_PATHS
+			|| changedPaths.some(path => path.startsWith('/') || path.split('/').some(part => part === '..' || part === '.' || part === ''))) {
+			throw new Error('The merge diff has too many paths or contains an invalid changed path.');
+		}
+		for (const tree of [mergeBase, targetHead, sourceHead]) { await this.assertMergeAttributesSafe(context, integration.worktreePath, tree, changedPaths); }
+		const author = await this.readCommitIdentity(integration.worktreePath, 'GIT_AUTHOR_IDENT');
+		const committer = await this.readCommitIdentity(integration.worktreePath, 'GIT_COMMITTER_IDENT');
+		const commitMessage = `Merge reviewed session ${session.ownerId}`;
 		const preview: MergePreview = {
 			previewId: randomUUID(), integrationOwnerId: integration.ownerId, sessionOwnerId: session.ownerId,
-			sourceHead, targetHead, diffHash: createHash('sha256').update(patch).digest('hex'), expiresAt: Date.now() + PREVIEW_TTL_MS
+			sourceHead, targetHead, mergeBase, diffHash: createHash('sha256').update(patch).digest('hex'), diffText, changedPaths,
+			commitMessage, author, committer, ...(resolution ? { resolution } : {}),
+			expiresAt: Date.now() + PREVIEW_TTL_MS
 		};
+		this.expireMergePreviews();
+		if (this.previews.size >= MAX_ACTIVE_MERGE_PREVIEWS) { throw new Error('Too many merge reviews are already open; close or expire one before preparing another.'); }
 		this.previews.set(preview.previewId, preview);
 		return preview;
+		} finally { this.removeSafeMergeContext(context); }
 	}
 
-	async mergeReviewed(previewId: string): Promise<ReviewedMergeResult> {
-		const preview = this.previews.get(previewId);
+	private async captureResolution(context: SafeMergeContext, lease: ManagedWorktreeLease, prior: MergeResolutionSource): Promise<AgentSessionMergeResolutionDTO> {
+		const operation = lease.lastOperation;
+		if (lease.state !== 'conflict' || lease.pendingOperation || lease.generationId !== prior.generationId || lease.registrationId !== prior.registrationId
+			|| !operation || operation.kind !== 'merge' || operation.outcome !== 'conflict' || operation.id !== prior.operationId || operation.proposalId !== prior.proposalId
+			|| operation.sourceHead !== prior.sourceHead || operation.targetHead !== prior.targetHead || operation.mergeBase !== prior.mergeBase) {
+			throw new Error('Resolution requires the exact current signed conflict operation and generation.');
+		}
+		const indexPath = await this.generationIndexPath(lease.worktreePath);
+		const snapshot = this.readIndexAtPath(indexPath);
+		const copiedIndex = join(context.root, `resolution-index-${randomUUID()}`);
+		writeFileSync(copiedIndex, snapshot.bytes, { flag: 'wx', mode: 0o600 });
+		const unmerged = await this.safeMergeGit(context, lease.worktreePath, ['ls-files', '--unmerged', '-z'], { indexPath: copiedIndex });
+		if (unmerged.stdout.length) { throw new Error('Stage every resolved conflict before requesting a new resolution review.'); }
+		const treeOid = (await this.safeMergeGit(context, lease.worktreePath, ['write-tree'], { indexPath: copiedIndex })).stdout.toString('ascii').trim();
+		if (!OBJECT_ID_PATTERN.test(treeOid)) { throw new Error('The staged resolution did not produce a complete Git tree.'); }
+		const entries = await this.listTreeEntries(context, lease.worktreePath, treeOid);
+		await this.assertGenerationBudget(context, lease.worktreePath, entries);
+		await this.assertMergeAttributesSafe(context, lease.worktreePath, treeOid, entries.map(entry => entry.path));
+		await this.assertGenerationWorktreeMatches(context, lease.worktreePath, treeOid);
+		const digests = await this.generationDigests(context, lease.worktreePath, copiedIndex, treeOid);
+		if (!this.realIndexStillMatches(snapshot)) { throw new Error('The staged resolution index changed during review capture.'); }
+		return { proposalId: prior.proposalId, operationId: prior.operationId, generationId: prior.generationId, registrationId: prior.registrationId, treeOid, ...digests, indexFileDigest: createHash('sha256').update(snapshot.bytes).digest('hex') };
+	}
+
+	async mergeReviewed(input: { readonly previewId: string; readonly operationId: string; readonly proposalId: string; readonly proposalFingerprint: string; readonly commitMessage: string; readonly author: AgentSessionIntegrationGitIdentity; readonly committer: AgentSessionIntegrationGitIdentity } & ReviewedMergeJournal): Promise<ReviewedMergeResult> {
+		if (!UUID_PATTERN.test(input.operationId) || !UUID_PATTERN.test(input.proposalId) || !SHA256_PATTERN.test(input.proposalFingerprint)
+			|| typeof input.recordApplying !== 'function' || typeof input.readApplying !== 'function'
+			|| typeof input.recordArtifact !== 'function' || typeof input.readArtifacts !== 'function') {
+			throw new Error('Reviewed merge requires an exact operation and durable proposal journal.');
+		}
+		const preview = this.previews.get(input.previewId);
 		if (!preview) { throw new Error('Merge preview is unknown, expired, or already consumed.'); }
-		this.previews.delete(previewId);
-		if (preview.expiresAt < Date.now()) { throw new Error('Merge preview has expired; review the current changes again.'); }
+		if (preview.expiresAt < Date.now()) { this.previews.delete(input.previewId); throw new Error('Merge preview has expired; review the current changes again.'); }
+		if (input.commitMessage !== preview.commitMessage) { throw new Error('Reviewed merge message differs from the exact prepared proposal.'); }
+		const approvedIdentity = this.validateFrozenIdentity({ author: input.author, committer: input.committer });
 		return this.withIntegrationLock(preview.integrationOwnerId, 'merge', async () => {
-			const integration = await this.readAndValidate(preview.integrationOwnerId);
-			const session = await this.readAndValidate(preview.sessionOwnerId);
-			await this.assertMergeReady(integration);
-			await this.assertMergeReady(session);
-			const sourceHead = await this.git(session.worktreePath, ['rev-parse', 'HEAD']);
-			const targetHead = await this.git(integration.worktreePath, ['rev-parse', 'HEAD']);
-			const patch = await this.gitBuffer(integration.worktreePath, ['diff', '--binary', '--no-ext-diff', '--no-textconv', `${targetHead}...${sourceHead}`]);
-			if (sourceHead !== preview.sourceHead || targetHead !== preview.targetHead || createHash('sha256').update(patch).digest('hex') !== preview.diffHash) {
-				throw new Error('Merge preview is stale because a source or target change occurred; review again.');
-			}
-			const pendingOperation: PendingOperation = {
-				id: randomUUID(), kind: 'merge', startedAt: Date.now(), sourceOwnerId: session.ownerId,
-				sourceHead, targetHead
-			};
-			this.writeLease({ ...integration, state: 'recoveryRequired', pendingOperation });
+			let initial = await this.readAndValidate(preview.integrationOwnerId);
+			const initialSource = await this.readAndValidate(preview.sessionOwnerId);
+			if (initial.kind !== 'integration' || initialSource.kind !== 'session' || initial.commonDirectory !== initialSource.commonDirectory) { throw new Error('Reviewed merge owner bindings are invalid.'); }
+			const context = await this.createSafeMergeContext(initial);
 			try {
-				await this.git(integration.worktreePath, ['merge', '--no-ff', '--no-edit', sourceHead], true);
-				const commit = await this.git(integration.worktreePath, ['rev-parse', 'HEAD']);
-				const parents = (await this.git(integration.worktreePath, ['rev-list', '--parents', '-n', '1', commit])).split(/\s+/);
-				if (parents.length !== 3 || parents[1] !== targetHead || parents[2] !== sourceHead) {
-					throw new Error('Git produced a merge commit whose parents do not match the reviewed target and source; recovery is required.');
+				if (!preview.resolution) { await this.assertMergeReady(initial, context); }
+				this.assertMergeSourceReady(initialSource);
+				const applying: ReviewedMergeApplyingRecord = {
+					operationId: input.operationId, proposalId: input.proposalId, proposalFingerprint: input.proposalFingerprint,
+					integrationOwnerId: preview.integrationOwnerId, sessionOwnerId: preview.sessionOwnerId,
+					sourceHead: preview.sourceHead, targetHead: preview.targetHead, mergeBase: preview.mergeBase, diffFingerprint: preview.diffHash,
+					commitMessage: input.commitMessage, author: approvedIdentity.author, committer: approvedIdentity.committer
+				};
+				await this.assertMergePreviewFresh(preview, initial, initialSource, context);
+				await input.recordApplying(applying);
+				const readback = await input.readApplying(input.operationId);
+				if (!readback || !sameMergeApplyingRecord(readback, applying)) { throw new Error('The durable merge journal did not read back the exact applying operation; Git was not changed.'); }
+				await this.assertMergePreviewFresh(preview, initial, initialSource, context);
+				const retainedCount = initial.generations?.length ?? 1;
+				if (retainedCount >= MAX_INTEGRATION_GENERATIONS) { throw new Error('Integration generation retention is full; no generation was removed.'); }
+				const priorGeneration = preview.resolution ? {
+					generationId: preview.resolution.generationId, registrationId: preview.resolution.registrationId,
+					worktreePath: initial.worktreePath, head: preview.targetHead, treeOid: preview.resolution.treeOid,
+					indexDigest: preview.resolution.indexDigest, treeDigest: preview.resolution.treeDigest
+				} : await this.capturePriorGeneration(context, initial);
+				const nextGenerationId = randomUUID();
+				const nextRegistrationId = randomUUID();
+				const nextPath = this.generationPath(initial.ownerId, nextGenerationId);
+				const nextArtifactPath = this.generationArtifactPath(initial.ownerId, nextGenerationId);
+				const priorArtifact = priorGeneration ? {
+					generationId: priorGeneration.generationId, generationPath: this.generationArtifactPathFromLease(initial.ownerId, priorGeneration),
+					registrationId: priorGeneration.registrationId, head: priorGeneration.head,
+					indexDigest: priorGeneration.indexDigest, treeDigest: priorGeneration.treeDigest
+				} : null;
+				const intent = { phase: 'intent', generationId: nextGenerationId, generationPath: nextArtifactPath, registrationId: nextRegistrationId, priorGeneration: priorArtifact } as const;
+				let artifacts: readonly AgentSessionMergeArtifactRecord[] = [];
+				artifacts = await this.recordMergeArtifact(input, input.operationId, artifacts, intent);
+				if (preview.resolution) {
+					// The old generation stays in place. Record the newly reviewed human snapshot
+					// in the signed intent only after its exact applying journal is durable.
+					initial = { ...initial, generations: initial.generations!.map(value => value.generationId === priorGeneration.generationId ? priorGeneration : value) };
 				}
-				const updated = this.writeLease({ ...integration, head: commit, state: 'active', pendingOperation: undefined, lastOperation: { id: pendingOperation.id, kind: 'merge', outcome: 'merged', commit } });
-				return { state: 'merged', commit, integration: updated };
-			} catch (error) {
-				const unmerged = await this.git(integration.worktreePath, ['ls-files', '--unmerged']);
-				const mergeHeadPath = await this.git(integration.worktreePath, ['rev-parse', '--git-path', 'MERGE_HEAD']);
-				const mergeHead = existsSync(isAbsolute(mergeHeadPath) ? mergeHeadPath : resolve(integration.worktreePath, mergeHeadPath))
-					? readFileSync(isAbsolute(mergeHeadPath) ? mergeHeadPath : resolve(integration.worktreePath, mergeHeadPath), 'utf8').trim() : '';
-				const currentHead = await this.git(integration.worktreePath, ['rev-parse', 'HEAD']);
-				if (!unmerged || mergeHead !== sourceHead || currentHead !== targetHead) {
-					throw new Error(`Merge did not complete as a conflict; durable recovery is required: ${this.errorMessage(error)}`);
+				const pendingOperation: PendingOperation = {
+					id: input.operationId, kind: 'merge', startedAt: Date.now(), proposalId: input.proposalId, proposalFingerprint: input.proposalFingerprint,
+					sourceOwnerId: initialSource.ownerId, sourceHead: preview.sourceHead, targetHead: preview.targetHead,
+					mergeBase: preview.mergeBase, diffFingerprint: preview.diffHash, generationId: nextGenerationId, generationPath: nextPath, registrationId: nextRegistrationId
+				};
+				this.writeLease({ ...initial, state: 'recoveryRequired', pendingOperation });
+				try {
+					await this.assertMergePreviewFresh(preview, initial, initialSource, context);
+					await this.detachLegacyIntegration(initial, preview.targetHead);
+					const merge: MergeTreeResult = preview.resolution ? { treeOid: preview.resolution.treeOid, clean: true, conflicts: [] }
+						: await this.mergeTree(context, initial.worktreePath, preview.targetHead, preview.sourceHead, preview.mergeBase);
+					const treeEntries = await this.listTreeEntries(context, initial.worktreePath, merge.treeOid);
+					await this.assertGenerationBudget(context, initial.worktreePath, treeEntries);
+					await this.assertMergeAttributesSafe(context, initial.worktreePath, merge.treeOid, treeEntries.map(entry => entry.path));
+					if (merge.conflicts.some(conflict => conflict.stages.some(stage => stage.mode === '160000'))) { throw new Error('Submodule conflicts are unsupported for integration generations.'); }
+					const commit = merge.clean ? await this.createReviewedMergeCommit(context, initial.worktreePath, merge.treeOid, preview, approvedIdentity) : null;
+					artifacts = await this.recordMergeArtifact(input, input.operationId, artifacts, {
+						phase: 'candidatePrepared', candidateTreeOid: merge.treeOid, candidateCommitOid: commit, outcome: merge.clean ? 'clean' : 'conflict', conflicts: merge.conflicts
+					});
+					const generation = await this.registerDetachedGeneration(initial.repositoryPath, initial.commonDirectory, initial.ownerId, preview.targetHead, context, nextGenerationId, nextRegistrationId);
+					artifacts = await this.recordMergeArtifact(input, input.operationId, artifacts, { phase: 'generationRegistered', generationPath: nextArtifactPath, registrationId: generation.registrationId });
+					const digests = await this.materializeGeneration(context, generation, merge.treeOid, merge.conflicts);
+					const generationHead = merge.clean ? commit! : preview.targetHead;
+					if (generationHead !== preview.targetHead) {
+						await this.updateDetachedGenerationHead(generation.worktreePath, preview.targetHead, generationHead);
+					}
+					const publishedGeneration: RegisteredGeneration = { ...generation, head: generationHead };
+					await this.assertMaterializedGeneration(context, publishedGeneration, merge.treeOid, digests);
+					artifacts = await this.recordMergeArtifact(input, input.operationId, artifacts, {
+						phase: 'generationMaterialized', head: generationHead, indexDigest: digests.indexDigest, treeDigest: digests.treeDigest,
+						conflictDigest: merge.clean ? null : createHash('sha256').update(JSON.stringify(merge.conflicts)).digest('hex')
+					});
+					let nextHead = preview.targetHead;
+					await this.assertMergePreviewFresh(preview, initial, initialSource, context);
+					await this.assertPriorGenerationUnchanged(initial, priorGeneration);
+					await this.assertMaterializedGeneration(context, publishedGeneration, merge.treeOid, digests);
+					if (merge.clean) {
+						await this.publishIntegrationRef(initial, initialSource, preview.sourceHead, preview.targetHead, commit!, context);
+						nextHead = commit!;
+					}
+					if (merge.clean) {
+						artifacts = await this.recordMergeArtifact(input, input.operationId, artifacts, {
+							phase: 'published', targetRef: `refs/heads/${initial.branch}`, resultingHead: nextHead,
+							currentGenerationId: nextGenerationId, priorGenerationId: priorGeneration?.generationId ?? null
+						});
+					}
+					const finalSourceRef = await this.git(initialSource.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${initialSource.branch}`]);
+					const finalTargetRef = await this.git(initial.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${initial.branch}`]);
+					if (finalSourceRef !== preview.sourceHead || finalTargetRef !== nextHead) { throw new Error('Managed refs changed before the generation pointer was finalized.'); }
+					return await this.finalizeMergeGeneration(initial, pendingOperation, publishedGeneration, nextHead, digests, merge, priorGeneration);
+				} catch {
+					return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Merge state is retained for exact journal-backed recovery; no references or generations were discarded.' };
 				}
-				const conflictedPaths = (await this.git(integration.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
-				if (conflictedPaths.length === 0) { throw new Error(`Merge left an index state that is not a confirmed file conflict; durable recovery is required: ${this.errorMessage(error)}`); }
-				const updated = this.writeLease({ ...integration, state: 'conflict', pendingOperation: undefined, lastOperation: { id: pendingOperation.id, kind: 'merge', outcome: 'conflict' } });
-				return { state: 'conflict', integration: updated, conflictedPaths };
+			} finally { this.removeSafeMergeContext(context); }
+		}).finally(() => this.previews.delete(input.previewId));
+	}
+
+	/** Reconciles only from an exact durable apply journal. Ambiguous operations remain retained for manual recovery. */
+	async reconcileReviewedMerge(input: Pick<ReviewedMergeJournal, 'readApplying' | 'readArtifacts' | 'recordArtifact'> & { readonly integrationOwnerId: string; readonly operationId: string }): Promise<ReviewedMergeResult> {
+		this.validateOwnerId(input.integrationOwnerId);
+		if (!UUID_PATTERN.test(input.operationId) || typeof input.readApplying !== 'function' || typeof input.readArtifacts !== 'function' || typeof input.recordArtifact !== 'function') {
+			throw new Error('Merge recovery requires an exact operation and durable journal capabilities.');
+		}
+		const applying = await input.readApplying(input.operationId);
+		if (!applying || !sameMergeApplyingRecord(applying, applying) || applying.operationId !== input.operationId || applying.integrationOwnerId !== input.integrationOwnerId
+			|| !UUID_PATTERN.test(applying.proposalId) || !SHA256_PATTERN.test(applying.proposalFingerprint)
+			|| !UUID_PATTERN.test(applying.sessionOwnerId) || !OBJECT_ID_PATTERN.test(applying.sourceHead)
+			|| !OBJECT_ID_PATTERN.test(applying.targetHead) || !OBJECT_ID_PATTERN.test(applying.mergeBase)
+			|| !SHA256_PATTERN.test(applying.diffFingerprint) || applying.commitMessage !== `Merge reviewed session ${applying.sessionOwnerId}`) {
+			throw new Error('Merge recovery journal does not contain the exact applying operation.');
+		}
+		this.validateFrozenIdentity({ author: applying.author, committer: applying.committer });
+		let artifacts = await input.readArtifacts(input.operationId);
+		if (!Array.isArray(artifacts) || artifacts.length > 5) { throw new Error('Merge recovery artifacts are malformed or exceed their phase limit.'); }
+		const expectedPhases = ['intent', 'candidatePrepared', 'generationRegistered', 'generationMaterialized', 'published'];
+		for (let index = 0; index < artifacts.length; index++) {
+			const record = artifacts[index];
+			if (!record || record.revision !== index + 1 || !record.event || record.event.phase !== expectedPhases[index]) {
+				throw new Error('Merge recovery artifact history is not a contiguous exact phase sequence.');
 			}
+		}
+		return this.withIntegrationLock(input.integrationOwnerId, 'merge', async () => {
+			const integration = await this.readAndValidate(input.integrationOwnerId);
+			if (integration.kind !== 'integration' || integration.commonDirectory !== realpathSync(integration.commonDirectory)) {
+				throw new Error('Merge recovery target does not match its signed managed integration lease.');
+			}
+			const source = await this.readAndValidate(applying.sessionOwnerId);
+			if (source.kind !== 'session' || source.commonDirectory !== integration.commonDirectory) {
+				throw new Error('Merge recovery source and target do not share the exact managed repository.');
+			}
+			const targetRef = await this.git(integration.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${integration.branch}`]);
+			const sourceRef = await this.git(source.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${source.branch}`]);
+			if (artifacts.length === 0 && !integration.pendingOperation && targetRef === applying.targetHead && sourceRef === applying.sourceHead) {
+				return { state: 'notApplied', operationId: input.operationId, integration };
+			}
+			if (artifacts.length === 1 && artifacts[0].event.phase === 'intent' && targetRef === applying.targetHead && sourceRef === applying.sourceHead) {
+				const intent = artifacts[0].event;
+				const newPath = this.generationPath(integration.ownerId, intent.generationId);
+				const registrations = await this.git(integration.repositoryPath, ['worktree', 'list', '--porcelain']);
+				const currentBranch = (await this.git(integration.worktreePath, ['branch', '--show-current'])).trim();
+				const branchIsStillOwned = integration.generationId ? currentBranch === '' : currentBranch === integration.branch;
+				if (intent.generationPath !== this.generationArtifactPath(integration.ownerId, intent.generationId) || existsSync(newPath)
+					|| registrations.includes(`worktree ${newPath}\n`) || !branchIsStillOwned
+					|| integration.pendingOperation && (integration.pendingOperation.kind !== 'merge' || integration.pendingOperation.id !== input.operationId || integration.pendingOperation.generationId !== intent.generationId)
+					|| !intent.priorGeneration || !this.priorGenerationMatchesLease(integration, intent.priorGeneration)) {
+					return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Merge intent may have crossed a repository mutation boundary; retained for manual recovery.' };
+				}
+				if (intent.priorGeneration) {
+					if (!this.priorGenerationMatchesLease(integration, intent.priorGeneration)) {
+						return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Prior generation identity does not match the signed current generation pointer.' };
+					}
+					const priorPath = this.resolvePriorGenerationPath(integration.ownerId, intent.priorGeneration);
+					const priorTree = (await this.git(priorPath, ['rev-parse', `${intent.priorGeneration.head}^{tree}`])).trim();
+					await this.assertPriorGenerationUnchanged(integration, { ...intent.priorGeneration, worktreePath: priorPath, treeOid: priorTree });
+				}
+				const pending: PendingOperation = {
+					id: applying.operationId, kind: 'merge', startedAt: Date.now(), proposalId: applying.proposalId,
+					proposalFingerprint: applying.proposalFingerprint, sourceOwnerId: source.ownerId, sourceHead: applying.sourceHead,
+					targetHead: applying.targetHead, mergeBase: applying.mergeBase, diffFingerprint: applying.diffFingerprint,
+					generationId: intent.generationId, generationPath: newPath, registrationId: intent.registrationId
+				};
+				const updated = this.writeLease({ ...integration, state: 'active', pendingOperation: undefined, lastOperation: mergeReceipt(pending, 'notApplied', undefined, undefined, true) });
+				return { state: 'notApplied', operationId: input.operationId, integration: updated };
+			}
+			if (artifacts.length < 4) { return { state: 'recoveryRequired', operationId: input.operationId, reason: 'The durable merge journal is incomplete; refs and managed generations were retained.' }; }
+			const [intentRecord, candidateRecord, registeredRecord, materializedRecord] = artifacts;
+			const intent = intentRecord.event;
+			const candidate = candidateRecord.event;
+			const registered = registeredRecord.event;
+			const materialized = materializedRecord.event;
+			if (intent.phase !== 'intent' || candidate.phase !== 'candidatePrepared' || registered.phase !== 'generationRegistered'
+				|| materialized.phase !== 'generationMaterialized'
+				|| !UUID_PATTERN.test(intent.generationId) || !UUID_PATTERN.test(intent.registrationId)
+				|| intent.generationPath !== this.generationArtifactPath(integration.ownerId, intent.generationId)
+				|| !intent.priorGeneration || !this.priorGenerationMatchesLease(integration, intent.priorGeneration)
+				|| registered.generationPath !== intent.generationPath || registered.registrationId !== intent.registrationId
+				|| !OBJECT_ID_PATTERN.test(candidate.candidateTreeOid)
+				|| !SHA256_PATTERN.test(materialized.indexDigest) || !SHA256_PATTERN.test(materialized.treeDigest)
+				|| !OBJECT_ID_PATTERN.test(materialized.head)) {
+				return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Merge journal artifacts do not match their exact operation binding; retained for review.' };
+			}
+			if (sourceRef !== applying.sourceHead) { return { state: 'recoveryRequired', operationId: input.operationId, reason: 'The source reference changed after approval; no merge reference was retried.' }; }
+			const isConflict = candidate.outcome === 'conflict' && candidate.candidateCommitOid === null;
+			const isClean = candidate.outcome === 'clean' && candidate.candidateCommitOid !== null;
+			if ((!isClean && !isConflict) || (isConflict && artifacts.length !== 4) || (isClean && materialized.head !== candidate.candidateCommitOid)
+				|| (isConflict && materialized.head !== applying.targetHead)
+				|| (isClean && targetRef !== candidate.candidateCommitOid && targetRef !== applying.targetHead)
+				|| (isConflict && targetRef !== applying.targetHead)) {
+				return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Reference state does not match the recorded merge outcome; automatic reference updates are forbidden.' };
+			}
+			let published: Extract<AgentSessionMergeArtifactEvent, { phase: 'published' }> | undefined;
+			if (isConflict && artifacts.length === 4) {
+				published = undefined;
+			} else if (artifacts.length === 5) {
+				const record = artifacts[4];
+				if (record.event.phase !== 'published') { return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Published artifact is malformed.' }; }
+				published = record.event;
+			} else if (isClean && targetRef === candidate.candidateCommitOid) {
+				const resultingHead = candidate.candidateCommitOid!;
+				artifacts = await this.recordMergeArtifact(input, input.operationId, artifacts, {
+					phase: 'published', targetRef: `refs/heads/${integration.branch}`, resultingHead,
+					currentGenerationId: intent.generationId, priorGenerationId: intent.priorGeneration?.generationId ?? null
+				});
+				published = artifacts[4].event.phase === 'published' ? artifacts[4].event : undefined;
+			} else if (!isConflict) { return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Candidate was prepared but its conditional ref update did not publish; no retry was attempted.' }; }
+			if (isClean && (!published || published.currentGenerationId !== intent.generationId || published.priorGenerationId !== (intent.priorGeneration?.generationId ?? null)
+				|| published.targetRef !== `refs/heads/${integration.branch}` || published.resultingHead !== candidate.candidateCommitOid)) {
+				return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Published artifact is not bound to the observed exact reference state.' };
+			}
+			const generationPath = this.generationPath(integration.ownerId, intent.generationId);
+			if (!existsSync(generationPath) || lstatSync(generationPath).isSymbolicLink() || realpathSync(generationPath) !== generationPath
+				|| realpathSync((await this.git(generationPath, ['rev-parse', '--show-toplevel'])).trim()) !== generationPath
+				|| (await this.git(generationPath, ['branch', '--show-current'])).trim() !== '') {
+				return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Recorded detached generation registration is missing or changed; retained for manual recovery.' };
+			}
+			const generationHead = (await this.git(generationPath, ['rev-parse', 'HEAD'])).trim();
+			if (generationHead !== materialized.head) { return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Recorded generation HEAD differs from its durable materialization receipt.' }; }
+			const generation: RegisteredGeneration = {
+				generationId: intent.generationId, registrationId: intent.registrationId, worktreePath: generationPath,
+				indexPath: await this.generationIndexPath(generationPath), head: generationHead
+			};
+			const context = await this.createSafeMergeContext(integration, false);
+			try {
+				const actualDigests = await this.generationDigests(context, generationPath, generation.indexPath, candidate.candidateTreeOid);
+				await this.assertGenerationWorktreeMatches(context, generationPath, candidate.candidateTreeOid);
+				if (actualDigests.indexDigest !== materialized.indexDigest || actualDigests.treeDigest !== materialized.treeDigest) {
+					return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Generation bytes or index no longer match durable merge artifacts.' };
+				}
+				const conflicts = candidate.conflicts;
+				if (!Array.isArray(conflicts) || conflicts.length > MAX_MERGE_CHANGED_PATHS
+					|| (isConflict && createHash('sha256').update(JSON.stringify(conflicts)).digest('hex') !== materialized.conflictDigest)
+					|| (isClean && (conflicts.length !== 0 || materialized.conflictDigest !== null))) {
+					return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Recorded conflict details do not match the materialized generation.' };
+				}
+				if (isClean) { await this.assertMergeCommitMetadata(context, integration.worktreePath, candidate.candidateCommitOid!, candidate.candidateTreeOid, applying); }
+				const priorGeneration: ManagedWorktreeGeneration | null = intent.priorGeneration
+					? { ...intent.priorGeneration, worktreePath: this.resolvePriorGenerationPath(integration.ownerId, intent.priorGeneration),
+						treeOid: integration.generations?.find(value => value.generationId === intent.priorGeneration!.generationId)?.treeOid
+							?? (await this.git(this.resolvePriorGenerationPath(integration.ownerId, intent.priorGeneration), ['rev-parse', `${intent.priorGeneration.head}^{tree}`])).trim() }
+					: null;
+				if (priorGeneration) { await this.assertPriorGenerationUnchanged(integration, priorGeneration); }
+				const finalSourceRef = await this.git(source.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${source.branch}`]);
+				const finalTargetRef = await this.git(integration.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${integration.branch}`]);
+				if (finalSourceRef !== applying.sourceHead || finalTargetRef !== (isClean ? candidate.candidateCommitOid : applying.targetHead)) {
+					return { state: 'recoveryRequired', operationId: input.operationId, reason: 'Managed refs changed while recovery verified; the operation remains retained.' };
+				}
+				if (integration.generationId === intent.generationId && integration.lastOperation?.id === applying.operationId) {
+					if (isClean && integration.lastOperation.outcome === 'merged' && integration.head === candidate.candidateCommitOid) {
+						return { state: 'merged', commit: candidate.candidateCommitOid!, integration };
+					}
+					if (isConflict && integration.lastOperation.outcome === 'conflict' && integration.head === applying.targetHead) {
+						return { state: 'conflict', integration, conflictedPaths: conflicts.map(item => item.path) };
+					}
+				}
+				const pending: PendingOperation = {
+					id: applying.operationId, kind: 'merge', startedAt: Date.now(), proposalId: applying.proposalId,
+					proposalFingerprint: applying.proposalFingerprint, sourceOwnerId: source.ownerId, sourceHead: applying.sourceHead,
+					targetHead: applying.targetHead, mergeBase: applying.mergeBase, diffFingerprint: applying.diffFingerprint,
+					generationId: intent.generationId, generationPath, registrationId: intent.registrationId
+				};
+				return this.finalizeMergeGeneration(integration, pending, generation, isClean ? candidate.candidateCommitOid! : applying.targetHead,
+					actualDigests, { treeOid: candidate.candidateTreeOid, clean: isClean, conflicts }, priorGeneration);
+			} finally { this.removeSafeMergeContext(context); }
 		});
 	}
 
@@ -543,9 +1025,488 @@ export class ManagedWorktreeService {
 		});
 	}
 
-	private async assertMergeReady(lease: ManagedWorktreeLease): Promise<void> {
+	private async assertMergeReady(lease: ManagedWorktreeLease, context: SafeMergeContext): Promise<void> {
 		if (lease.state !== 'active') { throw new Error(`Worktree requires conflict recovery before another merge (${lease.state}).`); }
-		await this.assertClean(lease);
+		await this.assertMergeWorktreeClean(context, lease);
+	}
+
+	private async assertMergeWorktreeClean(context: SafeMergeContext, lease: ManagedWorktreeLease): Promise<void> {
+		const indexPath = await this.generationIndexPath(lease.worktreePath);
+		const head = (await this.git(lease.worktreePath, ['rev-parse', 'HEAD'])).trim();
+		if (!OBJECT_ID_PATTERN.test(head)) { throw new Error('Managed merge worktree HEAD is malformed.'); }
+		writeFileSync(join(context.gitDirectory, 'HEAD'), `${head}\n`, { mode: 0o600 });
+		const status = await this.safeMergeGit(context, lease.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], { indexPath, maxOutputBytes: MAX_BUFFER_BYTES });
+		if (status.stdout.length !== 0) { throw new Error('Managed integration generation contains dirty, untracked, or unmerged files.'); }
+	}
+
+	private async resolveUniqueMergeBase(context: SafeMergeContext, worktreePath: string, targetHead: string, sourceHead: string): Promise<string> {
+		const bytes = (await this.safeMergeGit(context, worktreePath, ['merge-base', '--all', targetHead, sourceHead], { maxOutputBytes: 16 * 1024 })).stdout;
+		const values = bytes.toString('ascii').trim().split(/\r?\n/u).filter(Boolean);
+		if (values.length !== 1 || !OBJECT_ID_PATTERN.test(values[0]) || values[0] !== values[0].toLowerCase()) {
+			throw new Error('Reviewed merge requires exactly one unambiguous merge base.');
+		}
+		return values[0];
+	}
+
+	private async assertMergeConfigurationSafe(repositoryPath: string): Promise<void> {
+		const config = (await this.runGit(repositoryPath, ['config', '--null', '--list', '--show-origin', '--show-scope'], { env: this.discoveryGitEnvironment(), maxOutputBytes: MAX_BUFFER_BYTES })).stdout;
+		if (config.length && config[config.length - 1] !== 0) { throw new Error('Effective Git configuration could not be parsed safely.'); }
+		const configFields = decodeGitUtf8(config).split('\0');
+		configFields.pop();
+		if (configFields.length % 3 !== 0) { throw new Error('Effective Git configuration contains incomplete scope/origin records.'); }
+		for (let configIndex = 2; configIndex < configFields.length; configIndex += 3) {
+			const raw = configFields[configIndex];
+			const newline = raw.indexOf('\n');
+			if (newline < 0) { throw new Error('Effective Git configuration contains a malformed record.'); }
+			const header = raw.slice(0, newline);
+			const key = header.split('\t').at(-1)?.toLowerCase();
+			const value = raw.slice(newline + 1).trim().toLowerCase();
+			if (!key) { throw new Error('Effective Git configuration contains an unnamed key.'); }
+			if (/^(?:merge\..*\.driver|filter\..*\.(?:clean|smudge|process)|diff\.(?:external|.*\.command|.*\.textconv)|gpg\.program|gpg\.format|core\.attributesfile|extensions\.partialclone|remote\..*\.promisor)$/.test(key)
+				|| key === 'core.fsmonitor' && !['false', 'no', 'off', '0', ''].includes(value)
+				|| key === 'commit.gpgsign' && !['false', 'no', 'off', '0'].includes(value)
+				|| key === 'merge.default' && value !== '') {
+				throw new Error(`Git configuration ${key} is unsupported for reviewed merges; no external Git command was started.`);
+			}
+		}
+		const replacements = await this.runGit(repositoryPath, ['for-each-ref', '--format=%(refname)', 'refs/replace'], { maxOutputBytes: 64 * 1024 });
+		const shallow = (await this.runGit(repositoryPath, ['rev-parse', '--is-shallow-repository'])).stdout.toString('ascii').trim();
+		const graftPathValue = (await this.runGit(repositoryPath, ['rev-parse', '--git-path', 'info/grafts'])).stdout.toString('utf8').trim();
+		const graftPath = isAbsolute(graftPathValue) ? graftPathValue : resolve(repositoryPath, graftPathValue);
+		const graftInfo = existsSync(graftPath) ? lstatSync(graftPath) : undefined;
+		if (replacements.stdout.length !== 0 || shallow !== 'false' || graftInfo && (graftInfo.isSymbolicLink() || !graftInfo.isFile() || graftInfo.size > 0)) {
+			throw new Error('Reviewed merge does not support replacement refs, grafts, or shallow history.');
+		}
+	}
+
+	private async createSafeMergeContext(lease: ManagedWorktreeLease, preflightRepositoryConfig = true): Promise<SafeMergeContext> {
+		if (preflightRepositoryConfig) { await this.assertMergeConfigurationSafe(lease.repositoryPath); }
+		const objectFormat = (await this.git(lease.repositoryPath, ['rev-parse', '--show-object-format'])).trim();
+		if (!['sha1', 'sha256'].includes(objectFormat)) { throw new Error('Repository object format is unsupported for reviewed merges.'); }
+		const root = mkdtempSync(join(this.root, '.merge-context-'));
+		try {
+			const gitDirectory = join(root, 'git');
+			const hooksDirectory = join(root, 'hooks');
+			mkdirSync(join(gitDirectory, 'objects'), { recursive: true, mode: 0o700 });
+			mkdirSync(join(gitDirectory, 'refs'), { recursive: true, mode: 0o700 });
+			mkdirSync(hooksDirectory, { mode: 0o700 });
+			const emptyGlobal = join(root, 'empty-global-config');
+			const attributes = join(root, 'empty-attributes');
+			writeFileSync(emptyGlobal, '', { mode: 0o600 });
+			writeFileSync(attributes, '', { mode: 0o600 });
+			writeFileSync(join(gitDirectory, 'HEAD'), 'ref: refs/heads/bugfixer-private\n', { mode: 0o600 });
+			writeFileSync(join(gitDirectory, 'config'), `[core]\n\trepositoryformatversion = ${objectFormat === 'sha256' ? 1 : 0}\n\tbare = true\n\tfilemode = true\n\tautocrlf = false\n\tattributesfile = ${attributes}\n\thooksPath = ${hooksDirectory}\n${objectFormat === 'sha256' ? '[extensions]\n\tobjectformat = sha256\n' : ''}[commit]\n\tgpgsign = false\n[maintenance]\n\tauto = false\n[submodule]\n\trecurse = false\n`, { mode: 0o600 });
+			const objectPath = (await this.git(lease.repositoryPath, ['rev-parse', '--git-path', 'objects'])).trim();
+			const objectDirectory = realpathSync(isAbsolute(objectPath) ? objectPath : resolve(lease.repositoryPath, objectPath));
+			const environment: NodeJS.ProcessEnv = {
+				GIT_CONFIG_GLOBAL: emptyGlobal, GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1',
+				GIT_OBJECT_DIRECTORY: objectDirectory, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1'
+			};
+			return { root, gitDirectory, objectDirectory, environment };
+		} catch (error) {
+			this.removeSafeMergeContext({ root, gitDirectory: join(root, 'git'), objectDirectory: '', environment: {} });
+			throw error;
+		}
+	}
+
+	private async safeMergeGit(context: SafeMergeContext, worktreePath: string, args: readonly string[], options: { readonly input?: Buffer; readonly maxOutputBytes?: number; readonly allowExitCodes?: readonly number[]; readonly indexPath?: string; readonly author?: ReviewedCommitIdentity; readonly committer?: ReviewedCommitIdentity } = {}): Promise<{ readonly stdout: Buffer; readonly stderr: Buffer; readonly exitCode: number }> {
+		const env: NodeJS.ProcessEnv = { ...context.environment, GIT_WORK_TREE: worktreePath, ...(options.indexPath ? { GIT_INDEX_FILE: options.indexPath } : {}),
+			...(options.author && options.committer ? this.commitIdentityEnvironment(options.author, options.committer) : {}) };
+		return this.runCommand('git', ['--git-dir', context.gitDirectory, '--work-tree', worktreePath, ...args], COMMAND_TIMEOUT_MS, {
+			env, isolated: true, ...(options.input ? { input: options.input } : {}), ...(options.maxOutputBytes ? { maxOutputBytes: options.maxOutputBytes } : {}),
+			...(options.allowExitCodes ? { allowExitCodes: options.allowExitCodes } : {})
+		});
+	}
+
+	private removeSafeMergeContext(context: SafeMergeContext): void {
+		if (!existsSync(context.root)) { return; }
+		if (lstatSync(context.root).isSymbolicLink() || realpathSync(context.root) !== context.root || !context.root.startsWith(`${this.root}${process.platform === 'win32' ? '\\' : '/'}`)) {
+			throw new Error('Private merge context ownership changed; it was retained for recovery.');
+		}
+		rmSync(context.root, { recursive: true, force: false });
+		if (existsSync(context.root)) { throw new Error('Private merge context cleanup could not be verified.'); }
+	}
+
+	private async mergeTree(context: SafeMergeContext, worktreePath: string, targetHead: string, sourceHead: string, mergeBase: string): Promise<MergeTreeResult> {
+		const output = await this.safeMergeGit(context, worktreePath, ['merge-tree', '--write-tree', '-z', '--messages', `--merge-base=${mergeBase}`, targetHead, sourceHead], {
+			maxOutputBytes: MAX_BUFFER_BYTES, allowExitCodes: [1]
+		});
+		if (output.exitCode !== 0 && output.exitCode !== 1) { throw new Error('Git could not prepare a deterministic merge tree.'); }
+		const fields = decodeGitUtf8(output.stdout).split('\0');
+		if (fields.length < 2 || fields.at(-1) !== '') { throw new Error('Git merge-tree returned malformed bounded output.'); }
+		const treeOid = fields[0].trim();
+		if (!OBJECT_ID_PATTERN.test(treeOid) || treeOid !== treeOid.toLowerCase()) { throw new Error('Git merge-tree returned an invalid result tree.'); }
+		const stages: Array<{ path: string; stage: 1 | 2 | 3; mode: '100644' | '100755' | '120000' | '160000'; oid: string }> = [];
+		let cursor = 1;
+		while (cursor < fields.length - 1 && fields[cursor] !== '') {
+			const entry = /^([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([123])[\t ]([\s\S]+)$/.exec(fields[cursor]);
+			if (!entry || !['100644', '100755', '120000', '160000'].includes(entry[1])) { throw new Error('Git merge-tree returned an unsupported conflict stage.'); }
+			this.validateGitPath(entry[4]);
+			stages.push({ path: entry[4], mode: entry[1] as '100644' | '100755' | '120000' | '160000', oid: entry[2], stage: Number(entry[3]) as 1 | 2 | 3 });
+			cursor++;
+		}
+		const conflictsByPath = new Map<string, { message: string; stages: Array<{ stage: 1 | 2 | 3; mode: '100644' | '100755' | '120000' | '160000'; oid: string }> }>();
+		for (const stage of stages) {
+			const current = conflictsByPath.get(stage.path) ?? { message: '', stages: [] };
+			current.stages.push({ stage: stage.stage, mode: stage.mode, oid: stage.oid });
+			conflictsByPath.set(stage.path, current);
+		}
+		if (fields[cursor] === '') { cursor++; }
+		while (cursor < fields.length - 1) {
+			const pathCount = Number(fields[cursor++]);
+			if (!Number.isSafeInteger(pathCount) || pathCount < 0 || pathCount > MAX_MERGE_CHANGED_PATHS || cursor + pathCount + 1 >= fields.length) {
+				throw new Error('Git merge-tree returned malformed conflict messages.');
+			}
+			const paths = fields.slice(cursor, cursor + pathCount);
+			cursor += pathCount;
+			const conflictType = fields[cursor++];
+			const message = fields[cursor++];
+			if (typeof conflictType !== 'string' || typeof message !== 'string' || Buffer.byteLength(message, 'utf8') > 4096) {
+				throw new Error('Git merge-tree returned an invalid conflict message.');
+			}
+			for (const path of paths) {
+				this.validateGitPath(path);
+				// Informational auto-merging messages do not imply an unmerged index entry.
+				if (!conflictType.startsWith('CONFLICT') && !conflictsByPath.has(path)) { continue; }
+				const current = conflictsByPath.get(path) ?? { message: '', stages: [] };
+				current.message = [current.message, `${conflictType}: ${message}`].filter(Boolean).join('\n');
+				if (Buffer.byteLength(current.message, 'utf8') > 16 * 1024) { throw new Error('Git conflict explanation exceeds the durable artifact limit.'); }
+				conflictsByPath.set(path, current);
+			}
+		}
+		if (output.exitCode === 0) {
+			if (conflictsByPath.size !== 0) { throw new Error('Git reported a clean merge with conflict data.'); }
+			return { treeOid, clean: true, conflicts: [] };
+		}
+		if (conflictsByPath.size === 0 || conflictsByPath.size > MAX_MERGE_CHANGED_PATHS) { throw new Error('Git reported conflicts without a bounded path-bound conflict record; recovery is required.'); }
+		const conflicts = [...conflictsByPath].sort(([left], [right]) => compareCodeUnits(left, right)).map(([path, conflict]) => ({
+			path, message: conflict.message || 'Git reported a non-stage conflict for this path.',
+			stages: conflict.stages.sort((left, right) => left.stage - right.stage)
+		}));
+		const foldedPaths = new Set<string>();
+		for (const conflict of conflicts) {
+			const folded = conflict.path.normalize('NFD').toLowerCase();
+			if (foldedPaths.has(folded)) { throw new Error('Merge conflicts contain case-colliding paths unsupported by this filesystem.'); }
+			foldedPaths.add(folded);
+		}
+		return { treeOid, clean: false, conflicts };
+	}
+
+	private async listTreeEntries(context: SafeMergeContext, worktreePath: string, treeOid: string): Promise<readonly { path: string; mode: string; oid: string }[]> {
+		const output = (await this.safeMergeGit(context, worktreePath, ['ls-tree', '-r', '-z', '--full-tree', treeOid], { maxOutputBytes: MAX_BUFFER_BYTES })).stdout;
+		if (output.length && output[output.length - 1] !== 0) { throw new Error('Git returned a malformed tree listing.'); }
+		const entries: Array<{ path: string; mode: string; oid: string }> = [];
+		const seenFolded = new Set<string>();
+		for (const record of decodeGitUtf8(output).split('\0').filter(Boolean)) {
+			const tab = record.indexOf('\t');
+			const header = tab < 0 ? '' : record.slice(0, tab);
+			const match = /^([0-7]{6}) (?:blob|commit) ([0-9a-f]{40}|[0-9a-f]{64})$/.exec(header);
+			if (!match) { throw new Error('Git returned an unsupported or malformed tree entry.'); }
+			const path = record.slice(tab + 1);
+			this.validateGitPath(path);
+			if (match[1] === '160000') { throw new Error('Submodule entries cannot be materialized in an app-owned merge generation.'); }
+			const folded = path.normalize('NFD').toLowerCase();
+			if (seenFolded.has(folded)) { throw new Error('The merge result has case-colliding paths unsupported by this filesystem.'); }
+			seenFolded.add(folded);
+			entries.push({ path, mode: match[1], oid: match[2] });
+			if (entries.length > MAX_GENERATION_TREE_ENTRIES) { throw new Error('The merge result exceeds the bounded file-count limit.'); }
+		}
+		return entries;
+	}
+
+	private validateGitPath(path: string): void {
+		if (typeof path !== 'string' || !path || Buffer.byteLength(path, 'utf8') > 4096 || path.startsWith('/') || path.includes('\0') || path.includes('\\')
+			|| path.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git') || /^[A-Za-z]:/.test(path)) {
+			throw new Error('Git returned a path outside the supported relative path contract.');
+		}
+	}
+
+	private async assertMergeAttributesSafe(context: SafeMergeContext, worktreePath: string, treeOid: string, changedPaths: readonly string[]): Promise<void> {
+		const indexPath = join(context.root, 'attribute-check-index');
+		await this.safeMergeGit(context, worktreePath, ['read-tree', treeOid], { indexPath });
+		if (!changedPaths.length) { return; }
+		const input = Buffer.from(`${changedPaths.join('\0')}\0`, 'utf8');
+		const result = await this.safeMergeGit(context, worktreePath, ['check-attr', '--cached', '-z', '--stdin', 'filter', 'merge', 'working-tree-encoding', 'ident'], { indexPath, input, maxOutputBytes: MAX_BUFFER_BYTES });
+		const fields = decodeGitUtf8(result.stdout).split('\0');
+		if (fields.at(-1) !== '' || (fields.length - 1) % 3 !== 0) { throw new Error('Committed Git attributes could not be parsed safely.'); }
+		for (let index = 2; index < fields.length - 1; index += 3) {
+			if (fields[index] !== 'unspecified' && fields[index] !== 'unset') {
+				throw new Error(`Committed ${fields[index - 1]} attributes are unsupported for reviewed merges.`);
+			}
+		}
+	}
+
+	private async generationIndexPath(worktreePath: string): Promise<string> {
+		const gitDirectory = (await this.git(worktreePath, ['rev-parse', '--absolute-git-dir'])).trim();
+		const canonicalGitDirectory = realpathSync(gitDirectory);
+		const indexPath = join(canonicalGitDirectory, 'index');
+		if (existsSync(indexPath) && (lstatSync(indexPath).isSymbolicLink() || !lstatSync(indexPath).isFile())) { throw new Error('Generation index must be a regular owned file.'); }
+		return indexPath;
+	}
+
+	private async generationDigests(context: SafeMergeContext, worktreePath: string, indexPath: string, treeOid: string): Promise<{ indexDigest: string; treeDigest: string }> {
+		const index = await this.safeMergeGit(context, worktreePath, ['ls-files', '--stage', '-z'], { indexPath, maxOutputBytes: MAX_BUFFER_BYTES });
+		const tree = await this.safeMergeGit(context, worktreePath, ['ls-tree', '-r', '-z', '--full-tree', treeOid], { maxOutputBytes: MAX_BUFFER_BYTES });
+		return {
+			indexDigest: createHash('sha256').update(index.stdout).digest('hex'),
+			treeDigest: createHash('sha256').update(tree.stdout).digest('hex')
+		};
+	}
+
+	private async assertGenerationWorktreeMatches(context: SafeMergeContext, worktreePath: string, treeOid: string): Promise<void> {
+		const exactIndex = join(context.root, `worktree-check-${randomUUID()}`);
+		try {
+			await this.safeMergeGit(context, worktreePath, ['read-tree', treeOid], { indexPath: exactIndex });
+			// read-tree creates an index without worktree stat information. Refresh only
+			// this private index before diff-files so equal bytes are not falsely dirty.
+			await this.safeMergeGit(context, worktreePath, ['update-index', '--refresh'], { indexPath: exactIndex, allowExitCodes: [1], maxOutputBytes: MAX_BUFFER_BYTES });
+			const changed = await this.safeMergeGit(context, worktreePath, ['diff-files', '--raw', '-z', '--no-ext-diff', '--no-textconv'], { indexPath: exactIndex, maxOutputBytes: MAX_BUFFER_BYTES });
+			const untracked = await this.safeMergeGit(context, worktreePath, ['ls-files', '--others', '--directory', '-z'], { indexPath: exactIndex, maxOutputBytes: MAX_BUFFER_BYTES });
+			if (changed.stdout.length !== 0 || untracked.stdout.length !== 0) { throw new Error('Managed generation files differ from the recorded materialized tree.'); }
+		} finally { if (existsSync(exactIndex)) { unlinkSync(exactIndex); } }
+	}
+
+	private async assertMaterializedGeneration(context: SafeMergeContext, generation: RegisteredGeneration, treeOid: string, expected: { readonly indexDigest: string; readonly treeDigest: string }): Promise<void> {
+		const actualHead = (await this.git(generation.worktreePath, ['rev-parse', 'HEAD'])).trim();
+		const digests = await this.generationDigests(context, generation.worktreePath, generation.indexPath, treeOid);
+		await this.assertGenerationWorktreeMatches(context, generation.worktreePath, treeOid);
+		if (actualHead !== generation.head || digests.indexDigest !== expected.indexDigest || digests.treeDigest !== expected.treeDigest) {
+			throw new Error('Detached generation changed after materialization; publication is blocked.');
+		}
+	}
+
+	private async assertGenerationBudget(context: SafeMergeContext, worktreePath: string, entries: readonly { path: string; mode: string; oid: string }[]): Promise<void> {
+		if (entries.length > MAX_GENERATION_TREE_ENTRIES) { throw new Error('Merge generation exceeds its bounded file-count limit.'); }
+		const objectIds = entries.map(entry => entry.oid);
+		if (objectIds.length === 0) { return; }
+		const input = Buffer.from(`${objectIds.join('\n')}\n`, 'ascii');
+		const result = await this.safeMergeGit(context, worktreePath, ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], { input, maxOutputBytes: MAX_BUFFER_BYTES });
+		const lines = result.stdout.toString('ascii').trimEnd().split('\n');
+		if (lines.length !== objectIds.length) { throw new Error('Merge generation object sizes are incomplete.'); }
+		let totalBytes = 0;
+		for (let index = 0; index < lines.length; index++) {
+			const match = /^([0-9a-f]{40}|[0-9a-f]{64}) blob ([0-9]+)$/.exec(lines[index]);
+			if (!match || match[1] !== objectIds[index]) { throw new Error('Merge generation contains an unsupported tree object.'); }
+			const size = Number(match[2]);
+			if (!Number.isSafeInteger(size) || size < 0 || size > MAX_GENERATION_TREE_BYTES || (totalBytes += size) > MAX_GENERATION_TREE_BYTES) {
+				throw new Error('Merge generation exceeds its bounded materialized-byte limit.');
+			}
+		}
+	}
+
+	private async registerDetachedGeneration(repositoryPath: string, commonDirectory: string, ownerId: string, head: string, safeContext: SafeMergeContext, generationId = randomUUID(), registrationId = randomUUID()): Promise<RegisteredGeneration> {
+		const worktreePath = this.generationPath(ownerId, generationId);
+		this.ensureGenerationParent(ownerId);
+		if (existsSync(worktreePath)) { throw new Error('The unpredictable integration generation path is already occupied.'); }
+		const env = { GIT_CONFIG_GLOBAL: safeContext.environment.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
+		await this.runGit(repositoryPath, [
+			'-c', `core.hooksPath=${join(safeContext.root, 'hooks')}`, '-c', 'core.fsmonitor=false', '-c', 'maintenance.auto=false', '-c', 'submodule.recurse=false',
+			'worktree', 'add', '--detach', '--no-checkout', '--lock', worktreePath, head
+		], { env, maxOutputBytes: 64 * 1024 });
+		if (realpathSync(worktreePath) !== worktreePath
+			|| realpathSync((await this.git(worktreePath, ['rev-parse', '--show-toplevel'])).trim()) !== worktreePath
+			|| realpathSync(isAbsolute((await this.git(worktreePath, ['rev-parse', '--git-common-dir'])).trim())
+				? (await this.git(worktreePath, ['rev-parse', '--git-common-dir'])).trim()
+				: resolve(worktreePath, (await this.git(worktreePath, ['rev-parse', '--git-common-dir'])).trim())) !== commonDirectory
+			|| (await this.git(worktreePath, ['branch', '--show-current'])).trim() !== ''
+			|| (await this.git(worktreePath, ['rev-parse', 'HEAD'])).trim() !== head) {
+			throw new Error('Registered detached generation failed exact repository, HEAD, or branch verification.');
+		}
+		const indexPath = await this.generationIndexPath(worktreePath);
+		return { generationId, registrationId, worktreePath, indexPath, head };
+	}
+
+	private async capturePriorGeneration(context: SafeMergeContext, lease: ManagedWorktreeLease): Promise<ManagedWorktreeGeneration> {
+		const indexPath = await this.generationIndexPath(lease.worktreePath);
+		const tree = (await this.safeMergeGit(context, lease.worktreePath, ['rev-parse', `${lease.head}^{tree}`])).stdout.toString('ascii').trim();
+		if (!OBJECT_ID_PATTERN.test(tree)) { throw new Error('Prior integration generation tree is unavailable.'); }
+		const digests = await this.generationDigests(context, lease.worktreePath, indexPath, tree);
+		if (lease.generationId) {
+			const recorded = lease.generations?.find(value => value.generationId === lease.generationId);
+			if (!recorded || recorded.head !== lease.head || recorded.treeOid !== tree || recorded.indexDigest !== digests.indexDigest || recorded.treeDigest !== digests.treeDigest) {
+				throw new Error('Current generation differs from its signed retained-generation record.');
+			}
+			return recorded;
+		}
+		return { generationId: randomUUID(), worktreePath: lease.worktreePath, registrationId: randomUUID(), head: lease.head, treeOid: tree, ...digests };
+	}
+
+	private async assertPriorGenerationUnchanged(lease: ManagedWorktreeLease, prior: ManagedWorktreeGeneration): Promise<void> {
+		if (!existsSync(prior.worktreePath) || lstatSync(prior.worktreePath).isSymbolicLink() || realpathSync(prior.worktreePath) !== prior.worktreePath) {
+			throw new Error('Prior integration generation path changed; publication is blocked.');
+		}
+		const head = (await this.git(prior.worktreePath, ['rev-parse', 'HEAD'])).trim();
+		const indexPath = await this.generationIndexPath(prior.worktreePath);
+		const context = await this.createSafeMergeContext(lease, false);
+		try {
+			const tree = prior.treeOid;
+			const digests = await this.generationDigests(context, prior.worktreePath, indexPath, tree);
+			if (head !== prior.head || tree !== prior.treeOid || digests.indexDigest !== prior.indexDigest || digests.treeDigest !== prior.treeDigest) {
+				throw new Error('Prior integration generation changed during merge; publication is blocked.');
+			}
+			await this.assertGenerationWorktreeMatches(context, prior.worktreePath, prior.treeOid);
+		} finally { this.removeSafeMergeContext(context); }
+	}
+
+	private async createReviewedMergeCommit(context: SafeMergeContext, worktreePath: string, treeOid: string, preview: MergePreview, identity: { readonly author: ReviewedCommitIdentity; readonly committer: ReviewedCommitIdentity }): Promise<string> {
+		const output = await this.safeMergeGit(context, worktreePath, ['-c', 'commit.gpgsign=false', 'commit-tree', treeOid, '-p', preview.targetHead, '-p', preview.sourceHead, '-m', preview.commitMessage], {
+			maxOutputBytes: 4096, author: identity.author, committer: identity.committer
+		});
+		const oid = output.stdout.toString('ascii').trim();
+		if (!OBJECT_ID_PATTERN.test(oid) || oid !== oid.toLowerCase()) { throw new Error('Git returned an invalid merge candidate commit.'); }
+		const bytes = (await this.safeMergeGit(context, worktreePath, ['cat-file', 'commit', oid], { maxOutputBytes: 16 * 1024 })).stdout;
+		const split = bytes.indexOf(Buffer.from('\n\n'));
+		if (split < 0) { throw new Error('Candidate merge commit headers are malformed.'); }
+		const headers = bytes.subarray(0, split).toString('utf8').split('\n');
+		const expected = [
+			`tree ${treeOid}`, `parent ${preview.targetHead}`, `parent ${preview.sourceHead}`,
+			`author ${identity.author.name} <${identity.author.email}> ${identity.author.date}`,
+			`committer ${identity.committer.name} <${identity.committer.email}> ${identity.committer.date}`
+		];
+		if (headers.length !== expected.length || headers.some((value, index) => value !== expected[index])
+			|| !bytes.subarray(split + 2).equals(Buffer.from(`${preview.commitMessage}\n`, 'utf8'))) {
+			throw new Error('Candidate merge commit differs from its exact approved tree, parents, identity, or message.');
+		}
+		return oid;
+	}
+
+	private async finalizeMergeGeneration(lease: ManagedWorktreeLease, pending: PendingOperation, generation: RegisteredGeneration, head: string, digests: { readonly indexDigest: string; readonly treeDigest: string }, merge: MergeTreeResult, prior: ManagedWorktreeGeneration | null): Promise<ReviewedMergeResult> {
+		const operation = mergeReceipt(pending, merge.clean ? 'merged' : 'conflict', merge.clean ? head : undefined, merge.clean ? undefined : merge.conflicts.map(item => item.path));
+		const next: ManagedWorktreeGeneration = { generationId: generation.generationId, worktreePath: generation.worktreePath, registrationId: generation.registrationId, head: generation.head, treeOid: merge.treeOid, ...digests };
+		const generations = [...(lease.generations ?? []), ...(prior && !lease.generationId ? [prior] : []), next];
+		const updated = this.writeLease({
+			...lease, worktreePath: generation.worktreePath, head, state: merge.clean ? 'active' : 'conflict',
+			generationId: generation.generationId, registrationId: generation.registrationId, generations,
+			pendingOperation: undefined, lastOperation: operation
+		});
+		return merge.clean ? { state: 'merged', commit: head, integration: updated } : { state: 'conflict', integration: updated, conflictedPaths: merge.conflicts.map(item => item.path) };
+	}
+
+	private async materializeGeneration(context: SafeMergeContext, generation: RegisteredGeneration, treeOid: string, conflicts: readonly AgentSessionMergeConflictArtifact[]): Promise<{ readonly indexDigest: string; readonly treeDigest: string }> {
+		if (existsSync(join(generation.worktreePath, 'MERGE_HEAD')) || existsSync(join(generation.worktreePath, 'index.lock'))) { throw new Error('New detached generation unexpectedly contains merge state.'); }
+		await this.safeMergeGit(context, generation.worktreePath, ['read-tree', treeOid], { indexPath: generation.indexPath });
+		await this.safeMergeGit(context, generation.worktreePath, ['checkout-index', '--all', '--force'], { indexPath: generation.indexPath, maxOutputBytes: MAX_BUFFER_BYTES });
+		if (conflicts.length) {
+			const zeroOid = '0'.repeat(treeOid.length);
+			const entries: Buffer[] = [];
+			for (const conflict of conflicts) {
+				if (!conflict.stages.length) { continue; }
+				entries.push(Buffer.from(`0 ${zeroOid}\t${conflict.path}\0`, 'utf8'));
+				for (const stage of conflict.stages) { entries.push(Buffer.from(`${stage.mode} ${stage.oid} ${stage.stage}\t${conflict.path}\0`, 'utf8')); }
+			}
+			if (entries.length) { await this.safeMergeGit(context, generation.worktreePath, ['update-index', '-z', '--index-info'], { indexPath: generation.indexPath, input: Buffer.concat(entries) }); }
+		}
+		const digests = await this.generationDigests(context, generation.worktreePath, generation.indexPath, treeOid);
+		const actualHead = (await this.git(generation.worktreePath, ['rev-parse', 'HEAD'])).trim();
+		if (actualHead !== generation.head) { throw new Error('Materializing a detached generation unexpectedly changed its HEAD.'); }
+		return digests;
+	}
+
+	private async detachedHeadPath(worktreePath: string): Promise<string> {
+		const gitDirectory = realpathSync((await this.git(worktreePath, ['rev-parse', '--absolute-git-dir'])).trim());
+		const headPath = join(gitDirectory, 'HEAD');
+		if (lstatSync(headPath).isSymbolicLink() || !lstatSync(headPath).isFile()) { throw new Error('Legacy integration HEAD is not a regular owned file.'); }
+		return headPath;
+	}
+
+	private async detachLegacyIntegration(lease: ManagedWorktreeLease, expectedHead: string): Promise<void> {
+		if (lease.generationId) { return; }
+		const headPath = await this.detachedHeadPath(lease.worktreePath);
+		const current = readFileSync(headPath, 'utf8');
+		const expected = `ref: refs/heads/${lease.branch}\n`;
+		if (current !== expected) { throw new Error('Legacy integration HEAD changed before journaled detachment.'); }
+		const lockPath = `${headPath}.lock`;
+		const fd = openSync(lockPath, 'wx', 0o600);
+		try { writeFileSync(fd, `${expectedHead}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+		const latest = readFileSync(headPath, 'utf8');
+		if (latest !== expected) { unlinkSync(lockPath); throw new Error('Legacy integration HEAD changed while acquiring its lock.'); }
+		renameSync(lockPath, headPath);
+		const directory = openSync(dirname(headPath), 'r');
+		try { fsyncSync(directory); } finally { closeSync(directory); }
+	}
+
+	private async updateDetachedGenerationHead(worktreePath: string, expectedHead: string, resultingHead: string): Promise<void> {
+		const headPath = await this.detachedHeadPath(worktreePath);
+		const current = readFileSync(headPath, 'utf8');
+		if (current !== `${expectedHead}\n`) { throw new Error('Detached generation HEAD changed before conditional advancement.'); }
+		const lockPath = `${headPath}.lock`;
+		const fd = openSync(lockPath, 'wx', 0o600);
+		try { writeFileSync(fd, `${resultingHead}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+		if (readFileSync(headPath, 'utf8') !== `${expectedHead}\n`) {
+			unlinkSync(lockPath);
+			throw new Error('Detached generation HEAD changed while acquiring its lock.');
+		}
+		renameSync(lockPath, headPath);
+		const directory = openSync(dirname(headPath), 'r');
+		try { fsyncSync(directory); } finally { closeSync(directory); }
+	}
+
+	private async recordMergeArtifact(input: ReviewedMergeJournal, operationId: string, current: readonly AgentSessionMergeArtifactRecord[], event: AgentSessionMergeArtifactEvent): Promise<readonly AgentSessionMergeArtifactRecord[]> {
+		if (Buffer.byteLength(JSON.stringify(event), 'utf8') > MAX_MERGE_ARTIFACT_BYTES) { throw new Error('Merge artifact exceeds its bounded durable size.'); }
+		const expectedRevision = current.length;
+		const appended = await input.recordArtifact(operationId, expectedRevision, event);
+		const reread = await input.readArtifacts(operationId);
+		if (!Array.isArray(reread) || reread.length !== expectedRevision + 1 || appended.revision !== expectedRevision + 1
+			|| reread.some((record, index) => index < current.length && (record.revision !== current[index].revision || JSON.stringify(record.event) !== JSON.stringify(current[index].event)))
+			|| reread.at(-1)?.revision !== appended.revision || JSON.stringify(reread.at(-1)?.event) !== JSON.stringify(event)) {
+			throw new Error('Merge artifact did not read back as the exact durable next phase.');
+		}
+		return reread;
+	}
+
+	private async publishIntegrationRef(lease: ManagedWorktreeLease, source: ManagedWorktreeLease, sourceHead: string, targetHead: string, resultingHead: string, context: SafeMergeContext): Promise<void> {
+		const input = Buffer.from(`start\noption no-deref\nverify refs/heads/${source.branch} ${sourceHead}\nupdate refs/heads/${lease.branch} ${resultingHead} ${targetHead}\nprepare\ncommit\n`, 'utf8');
+		await this.runGit(lease.repositoryPath, ['-c', `core.hooksPath=${join(context.root, 'hooks')}`, '-c', 'core.fsmonitor=false', '-c', 'maintenance.auto=false', 'update-ref', '--stdin'], {
+			env: { GIT_CONFIG_GLOBAL: context.environment.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' }, input, maxOutputBytes: 64 * 1024
+		});
+	}
+
+	private assertMergeSourceReady(lease: ManagedWorktreeLease): void {
+		if (lease.kind !== 'session' || lease.state !== 'active' || lease.pendingOperation) { throw new Error('The source session worktree is not an active committed source.'); }
+	}
+
+	private async assertMergePreviewFresh(preview: MergePreview, integration: ManagedWorktreeLease, session: ManagedWorktreeLease, context: SafeMergeContext): Promise<void> {
+		if (integration.state !== (preview.resolution ? 'conflict' : 'active') || session.state !== 'active'
+			|| integration.kind !== 'integration' || session.kind !== 'session'
+			|| integration.ownerId !== preview.integrationOwnerId || session.ownerId !== preview.sessionOwnerId
+			|| integration.commonDirectory !== session.commonDirectory) {
+			throw new Error('Merge proposal worktree ownership or state changed; prepare a fresh review.');
+		}
+		if (preview.resolution) {
+			const current = await this.captureResolution(context, integration, { ...preview.resolution, sourceHead: preview.sourceHead, targetHead: preview.targetHead, mergeBase: preview.mergeBase });
+			if (JSON.stringify(current) !== JSON.stringify(preview.resolution)) { throw new Error('The staged resolution changed after review; prepare a new proposal and approval.'); }
+		} else { await this.assertMergeWorktreeClean(context, integration); }
+		const targetHead = await this.git(integration.worktreePath, ['rev-parse', 'HEAD']);
+		const sourceHead = await this.git(session.worktreePath, ['rev-parse', 'HEAD']);
+		const mergeBase = await this.resolveUniqueMergeBase(context, integration.worktreePath, targetHead, sourceHead);
+		const targetRef = await this.git(integration.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${integration.branch}`]);
+		const sourceRef = await this.git(session.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${session.branch}`]);
+		const patch = (await this.safeMergeGit(context, integration.worktreePath, ['diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', preview.resolution ? targetHead : mergeBase, preview.resolution?.treeOid ?? sourceHead], { maxOutputBytes: MAX_BUFFER_BYTES })).stdout;
+		if (sourceRef !== sourceHead || targetRef !== targetHead || sourceHead !== preview.sourceHead || targetHead !== preview.targetHead || mergeBase !== preview.mergeBase
+			|| createHash('sha256').update(patch).digest('hex') !== preview.diffHash) {
+			throw new Error('Merge preview is stale because a source or target change occurred; review again.');
+		}
+	}
+
+	private async assertMergeCommitMetadata(context: SafeMergeContext, worktreePath: string, commitOid: string, treeOid: string, applying: ReviewedMergeApplyingRecord): Promise<void> {
+		const bytes = (await this.safeMergeGit(context, worktreePath, ['cat-file', 'commit', commitOid], { maxOutputBytes: 16 * 1024 })).stdout;
+		const separator = bytes.indexOf(Buffer.from('\n\n'));
+		if (separator < 0) { throw new Error('Recorded merge commit object has malformed headers.'); }
+		const headers = bytes.subarray(0, separator).toString('utf8').split('\n');
+		const expected = [
+			`tree ${treeOid}`, `parent ${applying.targetHead}`, `parent ${applying.sourceHead}`,
+			`author ${applying.author.name} <${applying.author.email}> ${applying.author.date}`,
+			`committer ${applying.committer.name} <${applying.committer.email}> ${applying.committer.date}`
+		];
+		if (headers.length !== expected.length || headers.some((value, index) => value !== expected[index])
+			|| !bytes.subarray(separator + 2).equals(Buffer.from(`${applying.commitMessage}\n`, 'utf8'))) {
+			throw new Error('Recorded merge commit differs from the exact approved tree, parents, identity, or message.');
+		}
+	}
+
+	private expireMergePreviews(): void {
+		const now = Date.now();
+		for (const [id, preview] of this.previews) { if (preview.expiresAt <= now) { this.previews.delete(id); } }
 	}
 
 	private validateReviewedCommitInput(input: ReviewedCommitInput): void {
@@ -929,7 +1890,11 @@ export class ManagedWorktreeService {
 	}
 
 	private async readCommitIdentity(cwd: string, variable: 'GIT_AUTHOR_IDENT' | 'GIT_COMMITTER_IDENT'): Promise<ReviewedCommitIdentity> {
-		const value = (await this.runGit(cwd, ['var', variable])).stdout.toString('utf8').trimEnd();
+		const env = this.discoveryGitEnvironment();
+		for (const key of ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE'] as const) {
+			if (process.env[key] !== undefined) { env[key] = process.env[key]; }
+		}
+		const value = (await this.runGit(cwd, ['var', variable], { env })).stdout.toString('utf8').trimEnd();
 		const match = /^(.*) <([^<>]+)> ([0-9]+ [+-][0-9]{4})$/.exec(value);
 		if (!match || !match[1].trim() || !match[2].trim() || /[\r\n<>]/.test(match[1]) || /[\r\n<>]/.test(match[2])) { throw new Error(`Effective ${variable === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity is unavailable.`); }
 		return { name: match[1], email: match[2], date: match[3] };
@@ -1026,15 +1991,15 @@ export class ManagedWorktreeService {
 		this.validateOwnerId(ownerId);
 		const manifestPath = this.manifestPath(ownerId);
 		const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as LeaseManifest;
-		const allowedKeys = new Set(['version', 'ownerId', 'kind', 'repositoryPath', 'commonDirectory', 'branch', 'worktreePath', 'baseCommit', 'head', 'state', 'pendingOperation', 'lastOperation', 'signature']);
+		const allowedKeys = new Set(['version', 'ownerId', 'kind', 'repositoryPath', 'commonDirectory', 'branch', 'worktreePath', 'baseCommit', 'head', 'state', 'pendingOperation', 'lastOperation', 'generationId', 'registrationId', 'generations', 'signature']);
 		if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).some(key => !allowedKeys.has(key))
 			|| typeof parsed.signature !== 'string' || !/^[0-9a-f]{64}$/i.test(parsed.signature)) {
 			throw new Error('Managed worktree manifest contains unsupported or malformed fields.');
 		}
-		if (parsed.pendingOperation && Object.keys(parsed.pendingOperation).some(key => !['id', 'kind', 'startedAt', 'sourceOwnerId', 'sourceHead', 'targetHead', 'expectedHead', 'retainedIntegrationOwnerId'].includes(key))) {
+		if (parsed.pendingOperation && Object.keys(parsed.pendingOperation).some(key => !['id', 'kind', 'startedAt', 'proposalId', 'proposalFingerprint', 'sourceOwnerId', 'sourceHead', 'targetHead', 'mergeBase', 'diffFingerprint', 'expectedHead', 'retainedIntegrationOwnerId', 'generationId', 'generationPath', 'registrationId'].includes(key))) {
 			throw new Error('Managed worktree pending operation contains unsupported fields.');
 		}
-		if (parsed.lastOperation && Object.keys(parsed.lastOperation).some(key => !['id', 'kind', 'outcome', 'commit', 'reconciled'].includes(key))) {
+		if (parsed.lastOperation && Object.keys(parsed.lastOperation).some(key => !['id', 'kind', 'outcome', 'commit', 'reconciled', 'proposalId', 'proposalFingerprint', 'sourceOwnerId', 'sourceHead', 'targetHead', 'mergeBase', 'diffFingerprint', 'conflictedPaths'].includes(key))) {
 			throw new Error('Managed worktree operation receipt contains unsupported fields.');
 		}
 		const unsigned = this.manifestPayload(parsed);
@@ -1042,11 +2007,15 @@ export class ManagedWorktreeService {
 		const actualSignature = Buffer.from(parsed.signature, 'hex');
 		const expectedSignatureBytes = Buffer.from(expectedSignature, 'hex');
 		if (actualSignature.length !== expectedSignatureBytes.length || !timingSafeEqual(actualSignature, expectedSignatureBytes)) { throw new Error('Managed worktree manifest signature is invalid.'); }
-		if (parsed.version !== 1 || parsed.ownerId !== ownerId || !['session', 'integration'].includes(parsed.kind)) { throw new Error('Managed worktree manifest identity is invalid.'); }
+		if (![1, 2].includes(parsed.version) || parsed.ownerId !== ownerId || !['session', 'integration'].includes(parsed.kind)
+			|| (parsed.version === 2 && (parsed.kind !== 'integration' || !UUID_PATTERN.test(parsed.generationId ?? '') || !UUID_PATTERN.test(parsed.registrationId ?? '') || !Array.isArray(parsed.generations)))) {
+			throw new Error('Managed worktree manifest identity is invalid.');
+		}
 		const verifiedLease = this.publicLease(unsigned);
-		const expectedWorktree = join(this.root, parsed.kind, ownerId);
+		const expectedWorktree = parsed.version === 2 ? parsed.worktreePath : join(this.root, parsed.kind, ownerId);
 		const expectedBranch = `bugfixer/${parsed.kind}/${ownerId}`;
 		if (parsed.worktreePath !== expectedWorktree || parsed.branch !== expectedBranch) { throw new Error('Managed worktree path or ref identity was retargeted.'); }
+		if (parsed.version === 2) { this.assertGenerationManifest(parsed, expectedWorktree); }
 		const repositoryPath = realpathSync(parsed.repositoryPath);
 		const commonDirectory = realpathSync(parsed.commonDirectory);
 		const originCommonValue = await this.git(repositoryPath, ['rev-parse', '--git-common-dir']);
@@ -1067,13 +2036,77 @@ export class ManagedWorktreeService {
 		}
 		const worktreeRoot = await this.git(expectedWorktree, ['rev-parse', '--show-toplevel']);
 		const worktreeCommonValue = await this.git(expectedWorktree, ['rev-parse', '--git-common-dir']);
+		const worktreeBranch = await this.git(expectedWorktree, ['branch', '--show-current']);
 		if (realpathSync(worktreeRoot) !== expectedWorktree
 			|| realpathSync(isAbsolute(worktreeCommonValue) ? worktreeCommonValue : resolve(expectedWorktree, worktreeCommonValue)) !== commonDirectory
-			|| await this.git(expectedWorktree, ['branch', '--show-current']) !== expectedBranch) {
+			|| (parsed.version === 2 ? worktreeBranch !== '' : worktreeBranch !== expectedBranch && !(parsed.kind === 'integration' && worktreeBranch === '' && parsed.pendingOperation?.kind === 'merge'))) {
 			throw new Error('Managed worktree repository, common-dir, or branch identity does not match its manifest.');
 		}
 		const head = await this.git(expectedWorktree, ['rev-parse', 'HEAD']);
+		const branchHead = await this.git(repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${expectedBranch}`]);
+		if (branchHead !== head && parsed.pendingOperation?.kind !== 'merge') { throw new Error('Managed worktree branch ref does not match its checked-out HEAD; explicit recovery is required.'); }
+		if (parsed.version === 2 && branchHead !== head && parsed.pendingOperation?.kind !== 'merge') { throw new Error('Integration generation HEAD does not match its logical branch ref.'); }
+		if (parsed.version === 2) {
+			const context = await this.createSafeMergeContext({ ...verifiedLease, ownerId, kind: parsed.kind, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree, baseCommit: parsed.baseCommit, head }, false);
+			try {
+				for (const generation of parsed.generations!) {
+					const registration = await this.git(generation.worktreePath, ['worktree', 'list', '--porcelain']);
+					const registeredRoot = (await this.git(generation.worktreePath, ['rev-parse', '--show-toplevel'])).trim();
+					const generationCommonValue = (await this.git(generation.worktreePath, ['rev-parse', '--git-common-dir'])).trim();
+					const generationCommon = realpathSync(isAbsolute(generationCommonValue) ? generationCommonValue : resolve(generation.worktreePath, generationCommonValue));
+					const worktreeHead = (await this.git(generation.worktreePath, ['rev-parse', 'HEAD'])).trim();
+					const worktreeBranch = (await this.git(generation.worktreePath, ['branch', '--show-current'])).trim();
+					const indexPath = await this.generationIndexPath(generation.worktreePath);
+					// Retained and conflict generations are human-owned working files. Validate their
+					// registration here; exact content is checked only by the operation using them.
+					const verifyContent = generation.generationId === parsed.generationId && parsed.state === 'active' && !parsed.pendingOperation;
+					if (verifyContent) {
+						const digests = await this.generationDigests(context, generation.worktreePath, indexPath, generation.treeOid);
+						await this.assertGenerationWorktreeMatches(context, generation.worktreePath, generation.treeOid);
+						if (digests.indexDigest !== generation.indexDigest || digests.treeDigest !== generation.treeDigest) { throw new Error('Current integration generation differs from its signed content digests.'); }
+					}
+					if (realpathSync(registeredRoot) !== generation.worktreePath || generationCommon !== commonDirectory
+						|| !registration.includes(`worktree ${generation.worktreePath}\n`) || worktreeHead !== generation.head || worktreeBranch !== '') {
+						throw new Error('A retained integration generation no longer matches its signed registration and content digests.');
+					}
+				}
+			} finally { this.removeSafeMergeContext(context); }
+		}
 		return { ...verifiedLease, ownerId, kind: parsed.kind, repositoryPath, commonDirectory, branch: expectedBranch, worktreePath: expectedWorktree, baseCommit: parsed.baseCommit, head };
+	}
+
+	private assertGenerationManifest(manifest: LeaseManifest, currentPath: string): void {
+		if (manifest.kind !== 'integration' || manifest.version !== 2 || !UUID_PATTERN.test(manifest.generationId ?? '')
+			|| !UUID_PATTERN.test(manifest.registrationId ?? '') || !Array.isArray(manifest.generations)
+			|| manifest.generations.length === 0 || manifest.generations.length > MAX_INTEGRATION_GENERATIONS) {
+			throw new Error('Integration generation manifest is malformed or exceeds its retention limit.');
+		}
+		const seen = new Set<string>();
+		let currentFound = false;
+		for (const generation of manifest.generations) {
+			const legacyPath = join(this.root, 'integration', manifest.ownerId);
+			if (!generation || Object.keys(generation).sort(compareCodeUnits).join(',') !== 'generationId,head,indexDigest,registrationId,treeDigest,treeOid,worktreePath'
+				|| !UUID_PATTERN.test(generation.generationId) || !UUID_PATTERN.test(generation.registrationId)
+				|| !OBJECT_ID_PATTERN.test(generation.head) || !OBJECT_ID_PATTERN.test(generation.treeOid) || !SHA256_PATTERN.test(generation.indexDigest) || !SHA256_PATTERN.test(generation.treeDigest)
+				|| seen.has(generation.generationId) || (generation.worktreePath !== this.generationPath(manifest.ownerId, generation.generationId) && generation.worktreePath !== legacyPath)) {
+				throw new Error('Integration generation history contains malformed or retargeted data.');
+			}
+			seen.add(generation.generationId);
+			if (generation.generationId === manifest.generationId) {
+				if (generation.registrationId !== manifest.registrationId || generation.worktreePath !== currentPath || generation.head !== manifest.head) {
+					throw new Error('Current integration generation does not match its signed manifest pointer.');
+				}
+				currentFound = true;
+			}
+			if (existsSync(generation.worktreePath)) {
+				if (lstatSync(generation.worktreePath).isSymbolicLink() || realpathSync(generation.worktreePath) !== generation.worktreePath) {
+					throw new Error('Retained integration generation path was replaced by a symbolic link.');
+				}
+			} else {
+				throw new Error('A retained integration generation is missing; explicit recovery is required.');
+			}
+		}
+		if (!currentFound) { throw new Error('Current integration generation is absent from signed history.'); }
 	}
 
 	private async reconcilePendingOperation(lease: ManagedWorktreeLease): Promise<ManagedWorktreeLease> {
@@ -1081,6 +2114,7 @@ export class ManagedWorktreeService {
 		if (await this.operationLockIsLive(lease.kind === 'integration' ? lease.ownerId : pending.retainedIntegrationOwnerId ?? lease.ownerId)) {
 			return { ...lease, state: 'recoveryRequired' };
 		}
+		if (pending.kind !== 'remove') { return { ...lease, state: 'recoveryRequired' }; }
 		if (pending.kind === 'remove') {
 			const branchRef = await this.git(lease.repositoryPath, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${lease.branch}`]);
 			if (!existsSync(lease.worktreePath)) {
@@ -1099,23 +2133,6 @@ export class ManagedWorktreeService {
 			}
 			return this.writeLease({ ...lease, state: 'active', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'remove', outcome: 'notApplied', reconciled: true } });
 		}
-		const currentHead = await this.git(lease.worktreePath, ['rev-parse', 'HEAD']);
-		const unmerged = await this.git(lease.worktreePath, ['ls-files', '--unmerged']);
-		const mergeHeadPath = await this.git(lease.worktreePath, ['rev-parse', '--git-path', 'MERGE_HEAD']);
-		const resolvedMergeHeadPath = isAbsolute(mergeHeadPath) ? mergeHeadPath : resolve(lease.worktreePath, mergeHeadPath);
-		const mergeHead = existsSync(resolvedMergeHeadPath) ? readFileSync(resolvedMergeHeadPath, 'utf8').trim() : '';
-		if (currentHead === pending.targetHead && unmerged && mergeHead === pending.sourceHead) {
-			return this.writeLease({ ...lease, state: 'conflict', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'merge', outcome: 'conflict', reconciled: true } });
-		}
-		if (currentHead === pending.targetHead && !mergeHead && !await this.git(lease.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])) {
-			return this.writeLease({ ...lease, state: 'active', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'merge', outcome: 'notApplied', reconciled: true } });
-		}
-		const parents = (await this.git(lease.worktreePath, ['rev-list', '--parents', '-n', '1', currentHead])).split(/\s+/);
-		if (!unmerged && !mergeHead && parents.length === 3 && parents[1] === pending.targetHead && parents[2] === pending.sourceHead
-			&& !await this.git(lease.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'])) {
-			return this.writeLease({ ...lease, head: currentHead, state: 'active', pendingOperation: undefined, lastOperation: { id: pending.id, kind: 'merge', outcome: 'merged', commit: currentHead, reconciled: true } });
-		}
-		return { ...lease, state: 'recoveryRequired' };
 	}
 
 	private writeLease(lease: ManagedWorktreeLease): ManagedWorktreeLease {
@@ -1134,21 +2151,38 @@ export class ManagedWorktreeService {
 	private manifestPayload(lease: ManagedWorktreeLease): LeaseManifestPayload {
 		const pendingOperation = lease.pendingOperation ? {
 			id: lease.pendingOperation.id, kind: lease.pendingOperation.kind, startedAt: lease.pendingOperation.startedAt,
+			...(lease.pendingOperation.proposalId !== undefined ? { proposalId: lease.pendingOperation.proposalId } : {}),
+			...(lease.pendingOperation.proposalFingerprint !== undefined ? { proposalFingerprint: lease.pendingOperation.proposalFingerprint } : {}),
 			...(lease.pendingOperation.sourceOwnerId !== undefined ? { sourceOwnerId: lease.pendingOperation.sourceOwnerId } : {}),
 			...(lease.pendingOperation.sourceHead !== undefined ? { sourceHead: lease.pendingOperation.sourceHead } : {}),
 			...(lease.pendingOperation.targetHead !== undefined ? { targetHead: lease.pendingOperation.targetHead } : {}),
+			...(lease.pendingOperation.mergeBase !== undefined ? { mergeBase: lease.pendingOperation.mergeBase } : {}),
+			...(lease.pendingOperation.diffFingerprint !== undefined ? { diffFingerprint: lease.pendingOperation.diffFingerprint } : {}),
 			...(lease.pendingOperation.expectedHead !== undefined ? { expectedHead: lease.pendingOperation.expectedHead } : {}),
-			...(lease.pendingOperation.retainedIntegrationOwnerId !== undefined ? { retainedIntegrationOwnerId: lease.pendingOperation.retainedIntegrationOwnerId } : {})
+			...(lease.pendingOperation.retainedIntegrationOwnerId !== undefined ? { retainedIntegrationOwnerId: lease.pendingOperation.retainedIntegrationOwnerId } : {}),
+			...(lease.pendingOperation.generationId !== undefined ? { generationId: lease.pendingOperation.generationId } : {}),
+			...(lease.pendingOperation.generationPath !== undefined ? { generationPath: lease.pendingOperation.generationPath } : {}),
+			...(lease.pendingOperation.registrationId !== undefined ? { registrationId: lease.pendingOperation.registrationId } : {})
 		} : undefined;
 		const lastOperation = lease.lastOperation ? {
 			id: lease.lastOperation.id, kind: lease.lastOperation.kind, outcome: lease.lastOperation.outcome,
+			...(lease.lastOperation.proposalId !== undefined ? { proposalId: lease.lastOperation.proposalId } : {}),
+			...(lease.lastOperation.proposalFingerprint !== undefined ? { proposalFingerprint: lease.lastOperation.proposalFingerprint } : {}),
 			...(lease.lastOperation.commit !== undefined ? { commit: lease.lastOperation.commit } : {}),
-			...(lease.lastOperation.reconciled !== undefined ? { reconciled: lease.lastOperation.reconciled } : {})
+			...(lease.lastOperation.reconciled !== undefined ? { reconciled: lease.lastOperation.reconciled } : {}),
+			...(lease.lastOperation.sourceOwnerId !== undefined ? { sourceOwnerId: lease.lastOperation.sourceOwnerId } : {}),
+			...(lease.lastOperation.sourceHead !== undefined ? { sourceHead: lease.lastOperation.sourceHead } : {}),
+			...(lease.lastOperation.targetHead !== undefined ? { targetHead: lease.lastOperation.targetHead } : {}),
+			...(lease.lastOperation.mergeBase !== undefined ? { mergeBase: lease.lastOperation.mergeBase } : {}),
+			...(lease.lastOperation.diffFingerprint !== undefined ? { diffFingerprint: lease.lastOperation.diffFingerprint } : {}),
+			...(lease.lastOperation.conflictedPaths !== undefined ? { conflictedPaths: lease.lastOperation.conflictedPaths } : {})
 		} : undefined;
+		const version: 1 | 2 = lease.kind === 'integration' && lease.generationId ? 2 : 1;
 		return {
-			version: 1, ownerId: lease.ownerId, kind: lease.kind, repositoryPath: lease.repositoryPath,
+			version, ownerId: lease.ownerId, kind: lease.kind, repositoryPath: lease.repositoryPath,
 			commonDirectory: lease.commonDirectory, branch: lease.branch, worktreePath: lease.worktreePath,
-			baseCommit: lease.baseCommit, head: lease.head, state: lease.state, pendingOperation, lastOperation
+			baseCommit: lease.baseCommit, head: lease.head, state: lease.state, pendingOperation, lastOperation,
+			...(version === 2 ? { generationId: lease.generationId, registrationId: lease.registrationId, generations: lease.generations } : {})
 		};
 	}
 
@@ -1158,7 +2192,10 @@ export class ManagedWorktreeService {
 			commonDirectory: payload.commonDirectory, branch: payload.branch, worktreePath: payload.worktreePath,
 			baseCommit: payload.baseCommit, head: payload.head, state: payload.state,
 			...(payload.pendingOperation ? { pendingOperation: payload.pendingOperation } : {}),
-			...(payload.lastOperation ? { lastOperation: payload.lastOperation } : {})
+			...(payload.lastOperation ? { lastOperation: payload.lastOperation } : {}),
+			...(payload.generationId ? { generationId: payload.generationId } : {}),
+			...(payload.registrationId ? { registrationId: payload.registrationId } : {}),
+			...(payload.generations ? { generations: payload.generations } : {})
 		};
 	}
 
@@ -1211,7 +2248,7 @@ export class ManagedWorktreeService {
 		try { lock = JSON.parse(readFileSync(lockPath, 'utf8')) as OperationLock; }
 		catch (error) { throw new Error(`Operation lock metadata is malformed or ambiguous; manual recovery is required: ${this.errorMessage(error)}`); }
 		if (!lock || !UUID_PATTERN.test(lock.ownerId) || !UUID_PATTERN.test(lock.operationId)
-			|| !['merge', 'remove', 'prepareCommit', 'applyReviewedCommit'].includes(lock.operation) || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
+			|| !['merge', 'remove', 'ensureIntegration', 'prepareCommit', 'applyReviewedCommit'].includes(lock.operation) || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
 			|| typeof lock.processStart !== 'string' || !lock.processStart || !this.isValidSignature(lock)) {
 			throw new Error('Operation lock metadata is invalid or ambiguous; manual recovery is required.');
 		}
@@ -1241,13 +2278,13 @@ export class ManagedWorktreeService {
 		return result.stdout;
 	}
 
-	private async runGit(cwd: string, args: readonly string[], options: { readonly env?: NodeJS.ProcessEnv; readonly input?: Buffer; readonly maxOutputBytes?: number } = {}): Promise<{ stdout: Buffer; stderr: Buffer }> {
+	private async runGit(cwd: string, args: readonly string[], options: { readonly env?: NodeJS.ProcessEnv; readonly input?: Buffer; readonly maxOutputBytes?: number; readonly allowExitCodes?: readonly number[] } = {}): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
 		return this.runCommand('git', ['-C', cwd, ...args], COMMAND_TIMEOUT_MS, options);
 	}
 
-	private runCommand(command: string, args: readonly string[], timeoutMs: number, options: { readonly env?: NodeJS.ProcessEnv; readonly input?: Buffer; readonly maxOutputBytes?: number } = {}): Promise<{ stdout: Buffer; stderr: Buffer }> {
+	private runCommand(command: string, args: readonly string[], timeoutMs: number, options: { readonly env?: NodeJS.ProcessEnv; readonly isolated?: boolean; readonly input?: Buffer; readonly maxOutputBytes?: number; readonly allowExitCodes?: readonly number[] } = {}): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
 		return new Promise((resolvePromise, rejectPromise) => {
-			const child = spawn(command, args, { detached: process.platform !== 'win32', env: this.gitEnvironment(options.env), shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+			const child = spawn(command, args, { detached: process.platform !== 'win32', env: this.gitEnvironment(options.env, options.isolated), shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
 			const stdout: Buffer[] = [];
 			const stderr: Buffer[] = [];
 			let buffered = 0;
@@ -1307,24 +2344,29 @@ export class ManagedWorktreeService {
 				if (spawnError) { rejectPromise(spawnError); }
 				else if (timedOut) { rejectPromise(new Error(`${command} exceeded its ${timeoutMs}ms timeout and its owned process group was terminated.`)); }
 				else if (outputExceeded) { rejectPromise(new Error(`${command} exceeded the ${options.maxOutputBytes ?? MAX_BUFFER_BYTES}-byte output limit and its owned process group was terminated.`)); }
-				else if (code !== 0) { rejectPromise(new Error(`${command} exited with ${signal ?? code}: ${err.toString('utf8').trim()}`)); }
-				else { resolvePromise({ stdout: out, stderr: err }); }
+				else if (code !== 0 && !options.allowExitCodes?.includes(code ?? -1)) { rejectPromise(new Error(`${command} exited with ${signal ?? code}: ${err.toString('utf8').trim()}`)); }
+				else { resolvePromise({ stdout: out, stderr: err, exitCode: code ?? -1 }); }
 			});
 		});
 	}
 
-	private gitEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-		const env = { ...process.env };
-		const allowedGitVariables = new Set(['GIT_CONFIG_GLOBAL', 'GIT_OPTIONAL_LOCKS', 'GIT_TERMINAL_PROMPT', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL']);
+	private gitEnvironment(overrides: NodeJS.ProcessEnv = {}, isolated = false): NodeJS.ProcessEnv {
+		const env: NodeJS.ProcessEnv = isolated ? Object.fromEntries(['PATH', 'SYSTEMROOT', 'TMPDIR', 'TEMP', 'TMP'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])) : { ...process.env };
+		const allowedGitVariables = new Set(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_ATTR_NOSYSTEM', 'GIT_NO_REPLACE_OBJECTS', 'GIT_NO_LAZY_FETCH', 'GIT_OBJECT_DIRECTORY', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_OPTIONAL_LOCKS', 'GIT_TERMINAL_PROMPT', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE']);
 		for (const key of Object.keys(env)) {
-			if (key.startsWith('GIT_') && !allowedGitVariables.has(key)) { delete env[key]; }
+			if (key.startsWith('GIT_')) { delete env[key]; }
 		}
 		env.GIT_OPTIONAL_LOCKS = '0';
 		for (const [key, value] of Object.entries(overrides)) {
-			if (!key.startsWith('GIT_')) { throw new Error('Internal Git environment override is invalid.'); }
+			if (!allowedGitVariables.has(key)) { throw new Error('Internal Git environment override is invalid.'); }
 			if (value === undefined) { delete env[key]; } else { env[key] = value; }
 		}
 		return env;
+	}
+
+	/** Identity/config discovery alone honors the caller's explicit global config file. */
+	private discoveryGitEnvironment(): NodeJS.ProcessEnv {
+		return process.env.GIT_CONFIG_GLOBAL === undefined ? {} : { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
 	}
 
 	private sign(value: object): string {
@@ -1332,6 +2374,46 @@ export class ManagedWorktreeService {
 	}
 
 	private manifestPath(ownerId: string): string { return join(this.root, `${ownerId}.json`); }
+	private generationPath(ownerId: string, generationId: string): string {
+		this.validateOwnerId(ownerId);
+		if (!UUID_PATTERN.test(generationId)) { throw new Error('Integration generation ID must be a UUID.'); }
+		return join(this.root, 'integration-generations', ownerId, generationId);
+	}
+	private ensureGenerationParent(ownerId: string): void {
+		this.validateOwnerId(ownerId);
+		const generationsRoot = join(this.root, 'integration-generations');
+		const ownerRoot = join(generationsRoot, ownerId);
+		for (const directory of [generationsRoot, ownerRoot]) {
+			if (!existsSync(directory)) { mkdirSync(directory, { mode: 0o700 }); }
+			const info = lstatSync(directory);
+			if (info.isSymbolicLink() || !info.isDirectory() || realpathSync(directory) !== directory) {
+				throw new Error('Integration generation parent directory is not an exact app-owned directory.');
+			}
+		}
+	}
+	private generationArtifactPath(ownerId: string, generationId: string): string {
+		this.validateOwnerId(ownerId);
+		if (!UUID_PATTERN.test(generationId)) { throw new Error('Integration generation ID must be a UUID.'); }
+		return `integration-generations/${ownerId}/${generationId}`;
+	}
+	private generationArtifactPathFromLease(ownerId: string, generation: ManagedWorktreeGeneration): string {
+		if (generation.worktreePath === join(this.root, 'integration', ownerId)) { return `integration/${ownerId}`; }
+		if (generation.worktreePath !== this.generationPath(ownerId, generation.generationId)) { throw new Error('Prior generation path is outside its signed owner directory.'); }
+		return this.generationArtifactPath(ownerId, generation.generationId);
+	}
+	private priorGenerationMatchesLease(lease: ManagedWorktreeLease, prior: { readonly generationId: string; readonly generationPath: string; readonly registrationId: string; readonly head: string; readonly indexDigest: string; readonly treeDigest: string }): boolean {
+		if (prior.head !== lease.head) { return false; }
+		if (!lease.generationId) { return prior.generationPath === `integration/${lease.ownerId}`; }
+		const current = lease.generations?.find(generation => generation.generationId === lease.generationId);
+		return !!current && prior.generationId === current.generationId && prior.registrationId === current.registrationId
+			&& prior.generationPath === this.generationArtifactPathFromLease(lease.ownerId, current)
+			&& prior.head === current.head && prior.indexDigest === current.indexDigest && prior.treeDigest === current.treeDigest;
+	}
+	private resolvePriorGenerationPath(ownerId: string, generation: { readonly generationId: string; readonly generationPath: string }): string {
+		if (generation.generationPath === `integration/${ownerId}`) { return join(this.root, 'integration', ownerId); }
+		if (generation.generationPath === this.generationArtifactPath(ownerId, generation.generationId)) { return this.generationPath(ownerId, generation.generationId); }
+		throw new Error('Prior generation artifact path is not bound to its logical owner.');
+	}
 	private validateOwnerId(ownerId: string): void { if (!UUID_PATTERN.test(ownerId)) { throw new Error('Managed worktree owner ID must be a UUID.'); } }
 	private errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 }

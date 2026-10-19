@@ -1642,6 +1642,12 @@ try {
 
       fixture.reviewedCommit = await seedReviewedCommit(logFixtureDatabase, fixture, projectFolder, userData, tag, ManagedWorktreeService);
 
+      fixture.reviewedConflictCommit = await seedReviewedCommit(logFixtureDatabase, fixture, projectFolder, userData, `${tag}-conflict`, ManagedWorktreeService, {
+        repository: fixture.reviewedCommit.repository,
+        bindingId: fixture.reviewedCommit.bindingId,
+        retainedAfter: `conflicting second session ${tag}\n`,
+      });
+
       assert.equal(seeded.receipt.turnIds.length, 2, 'The isolated history fixture must contain two real persisted turns');
 
       for (const turnId of seeded.receipt.turnIds) {
@@ -1735,6 +1741,7 @@ try {
     try {
       await waitForExtensionReadiness(session, `reviewed-commit-${tag}`);
       await verifyReviewedCommitApply(session.page, fixture, tag, screenshots, viewports);
+      await verifyReviewedMergeProposal(session.page, fixture, tag, screenshots, viewports);
     } catch (error) {
       await captureFailure(session.page, path.join(output, `reviewed-commit-${tag}-failure.png`), diagnostics);
 
@@ -1747,8 +1754,244 @@ try {
 
     try {
       await verifyReviewedCommitResult(commitDatabase, fixture);
+
+      const commitFixture = fixture.reviewedCommit;
+
+      const mergePage = commitDatabase.agentSessionMerges.listProposals(fixture.projectId, commitFixture.sessionId, commitFixture.turnId, { limit: 2 });
+
+      assert.equal(mergePage.proposals.length, 1, 'The real UI must create one explicit merge proposal');
+
+      const merge = mergePage.proposals[0];
+
+      assert.equal(merge.state, 'pending');
+      assert.equal(merge.approval, null, 'A merge review must not grant approval');
+      assert.equal(merge.commitProposalId, commitFixture.proposalId);
+      assert.equal(merge.sourceHead, commitFixture.resultingHead);
+      assert.equal(merge.targetHead, commitFixture.sourceHead);
+      assert.deepEqual(merge.paths.map(item => item.path), ['selected.txt']);
+      assert.equal(merge.paths[0].explanationState, 'linked');
+      assert.equal(createHash('sha256').update(merge.diffText).digest('hex'), merge.diffFingerprint);
+      fixture.reviewedMerge = {
+        proposalId: merge.id, fingerprint: merge.fingerprint, sourceHead: merge.sourceHead, targetHead: merge.targetHead,
+        integrationOwnerId: merge.integrationOwnerId, commitMessage: merge.commitMessage, author: merge.author, committer: merge.committer,
+        nativeHumanApprovalExercised: false,
+        approvalSource: 'Synthetic test-host approval in isolated CI SQLite; the native human confirmation dialog was not exercised.',
+      };
+      commitDatabase.agentSessionMerges.recordTrustedHumanApproval(merge.id, merge.revision, merge.fingerprint);
     } finally {
       commitDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-merge-${tag}`);
+      await verifyReviewedMergeApply(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-merge-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const mergeDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      await verifyReviewedMergeResult(mergeDatabase, fixture);
+    } finally {
+      mergeDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-conflict-commit-${tag}`);
+      await verifyReviewedCommitProposal(session.page, fixture, `${tag}-conflict`, screenshots, viewports, fixture.reviewedConflictCommit);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-conflict-commit-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const conflictCommitDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const commitFixture = fixture.reviewedConflictCommit;
+      const proposals = conflictCommitDatabase.agentSessionIntegrations.listProposals(fixture.projectId, commitFixture.sessionId, commitFixture.turnId, { limit: 2 });
+
+      assert.equal(proposals.proposals.length, 1, 'The second real UI must persist one source commit proposal');
+      const proposal = proposals.proposals[0];
+
+      assert.equal(proposal.state, 'pending');
+      assert.equal(proposal.approval, null);
+      assert.equal(proposal.commitMessage, commitFixture.commitMessage);
+      assert.equal(proposal.sourceHead, commitFixture.sourceHead);
+      assert.deepEqual(proposal.paths.map(item => item.path), ['selected.txt']);
+      assert.equal(proposal.paths[0].explanations[0].revision, commitFixture.explanationRevision);
+      commitFixture.proposalId = proposal.id;
+      commitFixture.proposalFingerprint = proposal.fingerprint;
+      conflictCommitDatabase.agentSessionIntegrations.recordTrustedHumanApproval(proposal.id, proposal.revision);
+      commitFixture.approvalSource = 'Synthetic test-host approval in isolated CI SQLite; native confirmation was not exercised.';
+    } finally {
+      conflictCommitDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-conflict-commit-apply-${tag}`);
+      await verifyReviewedCommitApply(session.page, fixture, `${tag}-conflict`, screenshots, viewports, fixture.reviewedConflictCommit);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-conflict-commit-apply-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const conflictSourceDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      await verifyReviewedCommitResult(conflictSourceDatabase, fixture, fixture.reviewedConflictCommit);
+    } finally {
+      conflictSourceDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-conflict-merge-${tag}`);
+      await verifyReviewedMergeProposal(session.page, fixture, `${tag}-conflict`, screenshots, viewports, fixture.reviewedConflictCommit);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-conflict-merge-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const conflictMergeDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const commitFixture = fixture.reviewedConflictCommit;
+      const mergePage = conflictMergeDatabase.agentSessionMerges.listProposals(fixture.projectId, commitFixture.sessionId, commitFixture.turnId, { limit: 2 });
+
+      assert.equal(mergePage.proposals.length, 1, 'The second source must have one durable conflict candidate proposal');
+      const merge = mergePage.proposals[0];
+
+      assert.equal(merge.state, 'pending');
+      assert.equal(merge.approval, null);
+      assert.equal(merge.sourceHead, commitFixture.resultingHead);
+      assert.equal(merge.targetHead, fixture.reviewedMerge.resultingHead);
+      assert.deepEqual(merge.paths.map(item => item.path), ['selected.txt']);
+      fixture.reviewedConflictMerge = {
+        proposalId: merge.id, fingerprint: merge.fingerprint, sourceHead: merge.sourceHead, targetHead: merge.targetHead,
+        integrationOwnerId: merge.integrationOwnerId, commitMessage: merge.commitMessage, author: merge.author, committer: merge.committer,
+        nativeHumanApprovalExercised: false,
+        approvalSource: 'Synthetic test-host approval in isolated CI SQLite; the native confirmation was not exercised.',
+      };
+      conflictMergeDatabase.agentSessionMerges.recordTrustedHumanApproval(merge.id, merge.revision, merge.fingerprint);
+    } finally {
+      conflictMergeDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-conflict-merge-apply-${tag}`);
+      await verifyReviewedConflictMergeApply(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-conflict-merge-apply-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const conflictResultDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      await verifyReviewedConflictResult(conflictResultDatabase, fixture);
+    } finally {
+      conflictResultDatabase.close();
+    }
+
+    await prepareReviewedConflictResolution(fixture);
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-conflict-resolution-${tag}`);
+      await verifyReviewedResolutionProposal(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-conflict-resolution-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const resolutionProposalDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const commit = fixture.reviewedConflictCommit;
+      const proposals = resolutionProposalDatabase.agentSessionMerges.listProposals(fixture.projectId, commit.sessionId, commit.turnId, { limit: 5 });
+
+      assert.equal(proposals.proposals.length, 2, 'Conflict resolution must append a second independently reviewable proposal');
+      const oldConflict = proposals.proposals.find(item => item.id === fixture.reviewedConflictMerge.proposalId);
+
+      assert.equal(oldConflict?.state, 'conflict');
+      assert.equal(oldConflict?.approval?.actor, 'human', 'The original synthetic approval remains bound only to the conflict proposal');
+      assert.equal(oldConflict?.approval?.proposalFingerprint, oldConflict?.fingerprint);
+      const proposal = proposals.proposals.find(item => item.resolution?.proposalId === fixture.reviewedConflictMerge.proposalId);
+
+      assert.ok(proposal, 'The new proposal must bind the exact previous conflict');
+      assert.equal(proposal.revision, 2);
+      assert.equal(proposal.state, 'pending');
+      assert.equal(proposal.approval, null, 'The old conflict approval must not approve the resolution proposal');
+      assert.equal(proposal.resolution.operationId, fixture.reviewedConflictMerge.operationId);
+      assert.equal(proposal.resolution.generationId, fixture.reviewedConflictMerge.generationId);
+      assert.equal(proposal.resolution.registrationId, fixture.reviewedConflictMerge.registrationId);
+      assert.equal(proposal.resolution.treeOid, fixture.reviewedConflictMerge.manualResolution.stagedTree);
+      assert.equal(proposal.resolution.indexFileDigest, fixture.reviewedConflictMerge.manualResolution.stagedIndexSha256);
+      assert.equal(proposal.resolution.indexDigest, fixture.reviewedConflictMerge.manualResolution.indexDigest);
+      assert.equal(proposal.resolution.treeDigest, fixture.reviewedConflictMerge.manualResolution.treeDigest);
+      assert.equal(proposal.diffText, fixture.reviewedConflictMerge.manualResolution.fullDiff, 'The stored review must preserve the exact complete target-to-resolution Git diff');
+      assert.equal(proposal.diffFingerprint, fixture.reviewedConflictMerge.manualResolution.fullDiffFingerprint);
+      fixture.reviewedResolutionMerge = {
+        proposalId: proposal.id, fingerprint: proposal.fingerprint, revision: proposal.revision,
+        sourceHead: proposal.sourceHead, targetHead: proposal.targetHead, commitMessage: proposal.commitMessage,
+        integrationOwnerId: proposal.integrationOwnerId, author: proposal.author, committer: proposal.committer, resolution: proposal.resolution,
+        nativeHumanApprovalExercised: false,
+        approvalSource: 'Synthetic test-host approval in isolated CI SQLite; the native confirmation was not exercised.',
+      };
+      resolutionProposalDatabase.agentSessionMerges.recordTrustedHumanApproval(proposal.id, proposal.revision, proposal.fingerprint);
+    } finally {
+      resolutionProposalDatabase.close();
+    }
+
+    session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
+
+    try {
+      await waitForExtensionReadiness(session, `reviewed-resolution-merge-apply-${tag}`);
+      await verifyReviewedResolutionApply(session.page, fixture, tag, screenshots, viewports);
+    } catch (error) {
+      await captureFailure(session.page, path.join(output, `reviewed-resolution-merge-apply-${tag}-failure.png`), diagnostics);
+
+      throw error;
+    } finally {
+      await closeApp(session);
+    }
+
+    const resolutionResultDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      await verifyReviewedResolutionResult(resolutionResultDatabase, fixture);
+    } finally {
+      resolutionResultDatabase.close();
     }
 
     const mailboxFixtureDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
@@ -1973,7 +2216,7 @@ async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
   await page.keyboard.press('ArrowRight');
   await page.waitForFunction(() => document.activeElement?.id === 'ai-session-tab-changes');
 
-  assert.equal(await workspace.getByRole('tab', { name: '변경 내역', exact: true }).getAttribute('aria-selected'), 'true');
+  assert.equal(await workspace.getByRole('tab', { name: '변경', exact: true }).getAttribute('aria-selected'), 'true');
 
   return { name, model };
 }
@@ -2327,33 +2570,37 @@ async function readChangeEvidenceSnapshot(folderPath, folderIdentity) {
   };
 }
 
-async function seedReviewedCommit(database, fixture, projectFolder, userData, tag, WorktreeService) {
-  const repository = path.join(projectFolder, `ci-reviewed-commit-${tag}`);
+async function seedReviewedCommit(database, fixture, projectFolder, userData, tag, WorktreeService, options = {}) {
+  const repository = options.repository ?? path.join(projectFolder, `ci-reviewed-commit-${tag}`);
 
   await mkdir(repository, { recursive: true });
 
   const git = async (...args) => (await execFileAsync('git', ['-C', repository, ...args], { maxBuffer: 1024 * 1024 })).stdout.trim();
 
-  await git('init', '-q', '-b', 'user-work');
-  await git('config', 'user.name', 'CI reviewed commit fixture');
-  await git('config', 'user.email', 'reviewed-commit@example.invalid');
-  await writeFile(path.join(repository, 'selected.txt'), `before ${tag}\n`);
-  await writeFile(path.join(repository, 'unselected.txt'), `unselected base ${tag}\n`);
-  await git('add', '--', 'selected.txt', 'unselected.txt');
-  await git('commit', '-qm', 'CI fixture source');
+  if (!options.repository) {
+    await git('init', '-q', '-b', 'user-work');
+    await git('config', 'user.name', 'CI reviewed commit fixture');
+    await git('config', 'user.email', 'reviewed-commit@example.invalid');
+    await writeFile(path.join(repository, 'selected.txt'), `before ${tag}\n`);
+    await writeFile(path.join(repository, 'unselected.txt'), `unselected base ${tag}\n`);
+    await git('add', '--', 'selected.txt', 'unselected.txt');
+    await git('commit', '-qm', 'CI fixture source');
+  }
 
   const sourceHead = await git('rev-parse', 'HEAD');
 
   const originalIndexSha256 = createHash('sha256').update(await readFile(path.join(repository, '.git', 'index'))).digest('hex');
 
-  const binding = database.createFolderBinding({ projectId: fixture.projectId, path: repository, vcsKind: 'git', vcsRoot: repository });
+  const bindingId = options.bindingId ?? database.createFolderBinding({ projectId: fixture.projectId, path: repository, vcsKind: 'git', vcsRoot: repository }).id;
 
   const session = database.agentSessions.createSession({
-    projectId: fixture.projectId, bindingId: binding.id, name: `CI 커밋 검수 fixture ${tag}`,
+    projectId: fixture.projectId, bindingId, name: `CI 커밋 검수 fixture ${tag}`,
     provider: 'codex', model: 'ci-fixture-not-executed', profileRef: 'ci-commit-fixture-only', workspaceMode: 'gitWorktree',
   });
 
   const worktrees = new WorktreeService(path.join(userData, 'agent-sessions'));
+
+  const managedRoot = path.join(await realpath(path.join(userData, 'agent-sessions')), 'managed-worktrees');
 
   const managed = await worktrees.create({ repositoryPath: repository, ownerId: session.id, kind: 'session', baseRef: 'HEAD' });
 
@@ -2365,7 +2612,7 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
     projectId: fixture.projectId, sessionId: session.id, expectedSessionRevision: session.revision,
     snapshot: {
       schemaVersion: 1, projectId: fixture.projectId, sessionId: session.id, sessionRevision: session.revision,
-      bindingId: binding.id, taskId: null, provider: session.provider, model: session.model, profileRef: session.profileRef,
+      bindingId, taskId: null, provider: session.provider, model: session.model, profileRef: session.profileRef,
       cwd: managed.worktreePath, folderIdentity, managedWorktreeOwnerId: session.id,
       permissionPolicy: { mode: 'read-only', approval: 'never' }, convention: null, references: [],
     },
@@ -2381,7 +2628,7 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
 
   const running = database.agentSessionTurns.transitionTurn(fixture.projectId, session.id, turn.id, turn.revision, startingSession.revision, { state: 'running' });
 
-  const retainedAfter = `reviewed after ${tag}\n`;
+  const retainedAfter = options.retainedAfter ?? `reviewed after ${tag}\n`;
 
   await writeFile(path.join(managed.worktreePath, 'selected.txt'), retainedAfter);
   await writeFile(path.join(managed.worktreePath, 'unselected.txt'), `unselected observed ${tag}\n`);
@@ -2408,13 +2655,13 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
   return {
     fixtureOnly: true, providerExecuted: false, ptyExecuted: false, nativeHumanApprovalExercised: false,
     proofLimit: 'Actual disposable Git and retained-file application path; any approval seeded by this fixture is synthetic and does not prove native human confirmation.',
-    ...scope, name: session.name, repository, worktreePath: managed.worktreePath, sourceHead, originalIndexSha256,
+    ...scope, name: session.name, repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256,
     evidenceVersion: evidence.evidenceVersion, fingerprint: evidence.fingerprint, explanationRevision: explanation.revision,
     retainedAfter, laterSelected, laterUnselected, unselectedBase: `unselected base ${tag}\n`, commitMessage: `CI reviewed selected content ${tag}`,
   };
 }
 
-async function openReviewedCommitChanges(page, fixture) {
+async function openReviewedCommitChanges(page, fixture, reviewedCommit = fixture.reviewedCommit) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.waitForFunction(() => window.innerWidth === 1440);
 
@@ -2426,23 +2673,23 @@ async function openReviewedCommitChanges(page, fixture) {
 
   const workspace = page.locator('.ai-session-workspace');
 
-  await workspace.locator('.ai-session__session-row').filter({ hasText: fixture.reviewedCommit.name }).click();
-  await workspace.getByRole('heading', { name: fixture.reviewedCommit.name, exact: true }).waitFor();
+  await workspace.locator('.ai-session__session-row').getByText(reviewedCommit.name, { exact: true }).click();
+  await workspace.getByRole('heading', { name: reviewedCommit.name, exact: true }).waitFor();
   await workspace.getByRole('tab', { name: '변경', exact: true }).click();
 
   const panel = workspace.locator('.ai-session__changes-panel');
 
-  assert.equal(await panel.getByRole('combobox', { name: '변경을 확인할 실행 기록', exact: true }).inputValue(), fixture.reviewedCommit.turnId);
+  assert.equal(await panel.getByRole('combobox', { name: '변경을 확인할 실행 기록', exact: true }).inputValue(), reviewedCommit.turnId);
 
   const changes = panel.locator('.ai-session-changes');
 
-  await changes.getByText(`v${fixture.reviewedCommit.evidenceVersion} · ${fixture.reviewedCommit.fingerprint}`, { exact: true }).waitFor();
+  await changes.getByText(`v${reviewedCommit.evidenceVersion} · ${reviewedCommit.fingerprint}`, { exact: true }).waitFor();
 
   return changes;
 }
 
-async function verifyReviewedCommitProposal(page, fixture, tag, screenshots, viewports) {
-  const changes = await openReviewedCommitChanges(page, fixture);
+async function verifyReviewedCommitProposal(page, fixture, tag, screenshots, viewports, reviewedCommit = fixture.reviewedCommit) {
+  const changes = await openReviewedCommitChanges(page, fixture, reviewedCommit);
 
   const selected = changes.getByRole('checkbox', { name: 'selected.txt 커밋 검토에 포함', exact: true });
 
@@ -2455,8 +2702,8 @@ async function verifyReviewedCommitProposal(page, fixture, tag, screenshots, vie
   const explanations = changes.getByRole('combobox', { name: 'selected.txt에 연결할 파일 설명 기록', exact: true });
 
   await explanations.waitFor();
-  await explanations.selectOption(String(fixture.reviewedCommit.explanationRevision));
-  await changes.getByRole('textbox', { name: '커밋 메시지', exact: true }).fill(fixture.reviewedCommit.commitMessage);
+  await explanations.selectOption(String(reviewedCommit.explanationRevision));
+  await changes.getByRole('textbox', { name: '커밋 메시지', exact: true }).fill(reviewedCommit.commitMessage);
   await changes.getByRole('button', { name: '커밋 제안 만들기', exact: true }).click();
   await changes.getByRole('heading', { name: '제안 v1 검토', exact: true }).waitFor();
 
@@ -2472,14 +2719,14 @@ async function verifyReviewedCommitProposal(page, fixture, tag, screenshots, vie
   await capturePage(page, screenshot);
   screenshots.push(screenshot);
   viewports.push({ theme: tag, state: 'commit-proposal-before-approval', width: 1440, height: 900, screenshot });
-  fixture.reviewedCommit.proposalCreatedThroughUi = true;
+  reviewedCommit.proposalCreatedThroughUi = true;
 }
 
-async function verifyReviewedCommitApply(page, fixture, tag, screenshots, viewports) {
-  const changes = await openReviewedCommitChanges(page, fixture);
+async function verifyReviewedCommitApply(page, fixture, tag, screenshots, viewports, reviewedCommit = fixture.reviewedCommit) {
+  const changes = await openReviewedCommitChanges(page, fixture, reviewedCommit);
 
   await changes.getByRole('heading', { name: '제안 v1 검토', exact: true }).waitFor();
-  await changes.getByText(`제안 ID ${fixture.reviewedCommit.proposalId} · 지문 ${fixture.reviewedCommit.proposalFingerprint}`, { exact: true }).waitFor();
+  await changes.getByText(`제안 ID ${reviewedCommit.proposalId} · 지문 ${reviewedCommit.proposalFingerprint}`, { exact: true }).waitFor();
 
   const apply = changes.getByRole('button', { name: '승인한 커밋 적용', exact: true });
 
@@ -2519,8 +2766,7 @@ async function verifyReviewedCommitApply(page, fixture, tag, screenshots, viewpo
   viewports.push({ theme: tag, state: 'commit-applied-narrow', width: 760, height: 820, screenshot: narrow, layout });
 }
 
-async function verifyReviewedCommitResult(database, fixture) {
-  const receipt = fixture.reviewedCommit;
+async function verifyReviewedCommitResult(database, fixture, receipt = fixture.reviewedCommit) {
 
   const proposal = database.agentSessionIntegrations.getProposal(receipt.proposalId);
 
@@ -2544,8 +2790,426 @@ async function verifyReviewedCommitResult(database, fixture) {
   assert.equal(await readFile(path.join(receipt.worktreePath, 'selected.txt'), 'utf8'), receipt.laterSelected);
   assert.equal(await readFile(path.join(receipt.worktreePath, 'unselected.txt'), 'utf8'), receipt.laterUnselected);
   assert.equal((await git(receipt.repository, 'rev-parse', 'HEAD')).trim(), receipt.sourceHead);
+  assert.equal((await git(receipt.repository, 'rev-parse', `refs/heads/bugfixer/session/${receipt.sessionId}`)).trim(), candidate, 'The committed source branch must advance without moving the user checkout');
   assert.equal(createHash('sha256').update(await readFile(path.join(receipt.repository, '.git', 'index'))).digest('hex'), receipt.originalIndexSha256);
   receipt.resultingHead = candidate;
+  receipt.appliedThroughUi = true;
+}
+
+async function verifyReviewedMergeProposal(page, fixture, tag, screenshots, viewports, reviewedCommit = fixture.reviewedCommit) {
+  const changes = await openReviewedCommitChanges(page, fixture, reviewedCommit);
+
+  const review = changes.getByRole('region', { name: '로컬 병합 검토', exact: true });
+
+  const prepare = review.getByRole('button', { name: '병합 제안 준비', exact: true });
+
+  await prepare.waitFor();
+  assert.equal(await prepare.isDisabled(), false);
+  await prepare.click();
+  await review.getByRole('heading', { name: '병합 제안 v1 검토', exact: true }).waitFor();
+
+  const diff = review.getByLabel('보관된 전체 병합 diff', { exact: true });
+
+  assert.ok((await diff.innerText()).includes(reviewedCommit.retainedAfter.trim()));
+  assert.ok(!(await diff.innerText()).includes(reviewedCommit.laterSelected.trim()), 'Merge review must use the committed retained content');
+  assert.equal(await review.getByRole('button', { name: '승인한 병합 적용', exact: true }).isDisabled(), true, 'A merge proposal never grants implicit approval');
+  await diff.scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-merge-before-approval-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'merge-proposal-before-approval', width: 1440, height: 900, screenshot });
+}
+
+async function verifyReviewedMergeApply(page, fixture, tag, screenshots, viewports) {
+  const changes = await openReviewedCommitChanges(page, fixture);
+
+  const review = changes.getByRole('region', { name: '로컬 병합 검토', exact: true });
+
+  await review.getByText(`제안 ID ${fixture.reviewedMerge.proposalId} · 지문 ${fixture.reviewedMerge.fingerprint}`, { exact: true }).waitFor();
+
+  const apply = review.getByRole('button', { name: '승인한 병합 적용', exact: true });
+
+  assert.equal(await apply.isDisabled(), false, 'The restarted app must load the exact isolated merge approval');
+  await apply.click();
+  await review.getByText('병합 적용 상태: 병합 완료.', { exact: true }).waitFor();
+  assert.equal(await apply.isDisabled(), true, 'A completed merge cannot be applied again');
+  assert.ok((await review.innerText()).includes('이번 병합 작업 폴더'), 'The actual integration generation must be visible');
+  await apply.scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-merge-applied-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'merge-applied-with-fixture-only-approval', width: 1440, height: 900, screenshot });
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  await apply.scrollIntoViewIfNeeded();
+
+  const layout = await review.evaluate(element => {
+    const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 병합 적용');
+    const bounds = action?.getBoundingClientRect();
+
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(layout.overflow, false, `Merge review must not overflow at ${tag}/760`);
+  assert.equal(layout.actionReachable, true, `Merge apply must remain reachable at ${tag}/760`);
+
+  const narrow = path.join(output, `ai-session-merge-applied-${tag}-760.png`);
+
+  await capturePage(page, narrow);
+  screenshots.push(narrow);
+  viewports.push({ theme: tag, state: 'merge-applied-narrow', width: 760, height: 820, screenshot: narrow, layout });
+}
+
+async function verifyReviewedConflictMergeApply(page, fixture, tag, screenshots, viewports) {
+  const commit = fixture.reviewedConflictCommit;
+  const receipt = fixture.reviewedConflictMerge;
+  const changes = await openReviewedCommitChanges(page, fixture, commit);
+  const review = changes.getByRole('region', { name: '로컬 병합 검토', exact: true });
+
+  await review.getByText(`제안 ID ${receipt.proposalId} · 지문 ${receipt.fingerprint}`, { exact: true }).waitFor();
+  const apply = review.getByRole('button', { name: '승인한 병합 적용', exact: true });
+
+  assert.equal(await apply.isDisabled(), false, 'The isolated fixture approval must authorize only this exact conflict proposal');
+  await apply.click();
+  await review.getByText('충돌 작업 폴더의 파일을 수정하고 Git에 스테이징한 뒤 새 제안을 준비하세요. 수정 결과 전체를 다시 검토하고 승인해야 적용됩니다.', { exact: true }).waitFor();
+  assert.equal(await apply.isDisabled(), true, 'A conflict is terminal and cannot be applied again');
+  assert.ok((await review.innerText()).includes('충돌 경로: selected.txt.'), 'The actual merge conflict must be visible');
+  await review.scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-merge-conflict-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'actual-merge-conflict-with-fixture-only-approval', width: 1440, height: 900, screenshot });
+}
+
+async function verifyReviewedConflictResult(database, fixture) {
+  const receipt = fixture.reviewedConflictMerge;
+  const proposal = database.agentSessionMerges.getProposal(receipt.proposalId);
+
+  assert.equal(proposal.state, 'conflict');
+  assert.equal(proposal.fingerprint, receipt.fingerprint);
+  assert.equal(proposal.approval.actor, 'human');
+  assert.equal(proposal.outcomes.at(-1).state, 'conflict');
+  assert.deepEqual(proposal.outcomes.at(-1).receipt.conflictedPaths, ['selected.txt']);
+  assert.equal(proposal.approval.proposalFingerprint, proposal.fingerprint);
+
+  const intent = proposal.artifacts.find(item => item.event.phase === 'intent')?.event;
+  const candidate = proposal.artifacts.find(item => item.event.phase === 'candidatePrepared')?.event;
+  const registered = proposal.artifacts.find(item => item.event.phase === 'generationRegistered')?.event;
+  const materialized = proposal.artifacts.find(item => item.event.phase === 'generationMaterialized')?.event;
+
+  assert.ok(intent && candidate && registered && materialized, 'Conflict recovery requires the complete durable generation record');
+  assert.equal(candidate.outcome, 'conflict');
+  assert.equal(candidate.candidateCommitOid, null);
+  assert.deepEqual(candidate.conflicts.map(item => item.path), ['selected.txt']);
+  assert.equal(materialized.head, receipt.targetHead);
+  assert.equal(materialized.conflictDigest, createHash('sha256').update(JSON.stringify(candidate.conflicts)).digest('hex'));
+  assert.equal(proposal.artifacts.some(item => item.event.phase === 'published'), false, 'A conflict must not publish an integration ref');
+
+  const relative = `integration-generations/${receipt.integrationOwnerId}/${intent.generationId}`;
+  const generationDirectory = path.resolve(fixture.reviewedCommit.managedRoot, intent.generationPath);
+
+  assert.equal(intent.generationPath, relative);
+  assert.equal(path.relative(fixture.reviewedCommit.managedRoot, generationDirectory).split(path.sep).join('/'), relative);
+  assert.equal(await realpath(generationDirectory), generationDirectory);
+  assert.equal(registered.generationPath, intent.generationPath);
+  assert.equal(registered.registrationId, intent.registrationId);
+
+  const git = async (cwd, ...args) => (await execFileAsync('git', ['-C', cwd, ...args], { maxBuffer: 1024 * 1024 })).stdout;
+
+  assert.equal((await git(generationDirectory, 'rev-parse', 'HEAD')).trim(), receipt.targetHead);
+  assert.match(await git(generationDirectory, 'status', '--porcelain', '--untracked-files=all'), /^UU selected\.txt\n$/);
+  assert.equal((await git(generationDirectory, 'ls-files', '-u', '--', 'selected.txt')).trim().split('\n').length, 3, 'The conflict generation must retain all three real index stages');
+  const conflictText = await readFile(path.join(generationDirectory, 'selected.txt'), 'utf8');
+
+  assert.ok(conflictText.includes('<<<<<<<'), 'The actual conflict worktree must be preserved for human resolution');
+  const conflictUnselected = await readFile(path.join(generationDirectory, 'unselected.txt'), 'utf8');
+
+  const originalGeneration = fixture.reviewedMerge.generationPath;
+
+  assert.equal(await readFile(path.join(originalGeneration, 'selected.txt'), 'utf8'), fixture.reviewedCommit.retainedAfter, 'The earlier published generation must remain unchanged');
+  const originalGitDirectory = (await git(originalGeneration, 'rev-parse', '--absolute-git-dir')).trim();
+  assert.equal(createHash('sha256').update(await readFile(path.join(originalGitDirectory, 'index'))).digest('hex'), fixture.reviewedMerge.indexSha256);
+  assert.equal((await git(fixture.reviewedCommit.repository, 'rev-parse', 'HEAD')).trim(), fixture.reviewedCommit.sourceHead, 'The user checkout HEAD must remain unchanged');
+  assert.equal(createHash('sha256').update(await readFile(path.join(fixture.reviewedCommit.repository, '.git', 'index'))).digest('hex'), fixture.reviewedCommit.originalIndexSha256);
+  assert.equal(await readFile(path.join(fixture.reviewedConflictCommit.worktreePath, 'selected.txt'), 'utf8'), fixture.reviewedConflictCommit.laterSelected, 'The dirty source worktree must remain unchanged');
+
+  receipt.generationId = intent.generationId;
+  receipt.operationId = proposal.outcomes.at(-1).receipt.operationId;
+  receipt.registrationId = intent.registrationId;
+  receipt.generationPath = generationDirectory;
+  receipt.conflictUnselected = conflictUnselected;
+  receipt.appliedThroughUi = true;
+}
+
+async function prepareReviewedConflictResolution(fixture) {
+  const receipt = fixture.reviewedConflictMerge;
+  const generationDirectory = receipt.generationPath;
+  const git = async (...args) => (await execFileAsync('git', ['-C', generationDirectory, ...args], { maxBuffer: 1024 * 1024 })).stdout;
+  const resolvedText = `human fixture resolution ${fixture.reviewedConflictCommit.sourceHead}\n`;
+
+  await writeFile(path.join(generationDirectory, 'selected.txt'), resolvedText);
+  await git('add', '--', 'selected.txt');
+
+  const stagedPaths = (await git('diff', '--cached', '--name-only', '--')).trim().split('\n');
+
+  assert.deepEqual(stagedPaths, ['selected.txt'], 'The human fixture must stage only the selected conflict path');
+  assert.equal((await git('ls-files', '-u', '--', 'selected.txt')).trim(), '', 'The selected conflict must be resolved in the index');
+
+  const gitDirectory = (await git('rev-parse', '--absolute-git-dir')).trim();
+  const indexBytes = await readFile(path.join(gitDirectory, 'index'));
+  const stagedTree = (await git('write-tree')).trim();
+  const fullDiff = await git('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', receipt.targetHead, stagedTree);
+  const resolution = {
+    actor: 'CI fixture human-resolution simulation; no AI provider was executed.',
+    text: resolvedText,
+    stagedIndexSha256: createHash('sha256').update(indexBytes).digest('hex'),
+    stagedTree,
+    fullDiff,
+    fullDiffFingerprint: createHash('sha256').update(fullDiff).digest('hex'),
+    indexDigest: createHash('sha256').update(await git('ls-files', '--stage', '-z')).digest('hex'),
+  };
+  resolution.treeDigest = createHash('sha256').update(await git('ls-tree', '-r', '-z', '--full-tree', resolution.stagedTree)).digest('hex');
+
+  assert.equal((await git('rev-parse', 'HEAD')).trim(), receipt.targetHead, 'Manual staging must not advance the detached generation HEAD');
+  assert.ok(resolution.fullDiff.includes(resolvedText.trim()));
+  assert.equal((await git('status', '--porcelain', '--untracked-files=all')).trim(), 'M  selected.txt');
+  receipt.manualResolution = resolution;
+}
+
+async function verifyReviewedResolutionProposal(page, fixture, tag, screenshots, viewports) {
+  const commit = fixture.reviewedConflictCommit;
+  const resolution = fixture.reviewedConflictMerge.manualResolution;
+  const changes = await openReviewedCommitChanges(page, fixture, commit);
+  const review = changes.getByRole('region', { name: '로컬 병합 검토', exact: true });
+  const prepare = review.getByRole('button', { name: '수정한 충돌 결과로 새 제안 준비', exact: true });
+
+  await prepare.waitFor();
+  assert.equal(await prepare.isDisabled(), false);
+  await prepare.click();
+  await review.getByRole('heading', { name: '충돌 해결 제안 v2 검토', exact: true }).waitFor();
+  const diff = review.getByLabel('보관된 전체 충돌 해결 diff', { exact: true });
+  const diffText = await diff.innerText();
+
+  assert.ok(diffText.includes(fixture.reviewedCommit.retainedAfter.trim()), 'The resolution diff must include the current integration target content');
+  assert.ok(diffText.includes(resolution.text.trim()), 'The resolution diff must include the retained human-staged resolution');
+  assert.ok(!(diffText.includes(commit.laterSelected.trim())), 'The resolution proposal must use committed source bytes, not later worktree bytes');
+  assert.equal(await review.getByRole('button', { name: '승인한 병합 적용', exact: true }).isDisabled(), true, 'The resolution proposal requires its own approval');
+  assert.ok((await review.innerText()).includes(fixture.reviewedConflictMerge.proposalId), 'The resolution proposal must link its exact prior conflict');
+  await diff.scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-merge-resolution-proposal-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'resolution-proposal-before-fresh-approval', width: 1440, height: 900, screenshot });
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  await diff.scrollIntoViewIfNeeded();
+  const narrowLayout = await review.evaluate(element => {
+    const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 병합 적용');
+    const bounds = action?.getBoundingClientRect();
+
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(narrowLayout.overflow, false, `Resolution proposal must not overflow at ${tag}/760`);
+  assert.equal(narrowLayout.actionReachable, true, `Resolution apply action must remain visible at ${tag}/760`);
+  const narrow = path.join(output, `ai-session-merge-resolution-proposal-${tag}-760.png`);
+
+  await capturePage(page, narrow);
+  screenshots.push(narrow);
+  viewports.push({ theme: tag, state: 'resolution-proposal-before-fresh-approval-narrow', width: 760, height: 820, screenshot: narrow, layout: narrowLayout });
+}
+
+async function verifyReviewedResolutionApply(page, fixture, tag, screenshots, viewports) {
+  const commit = fixture.reviewedConflictCommit;
+  const receipt = fixture.reviewedResolutionMerge;
+  const changes = await openReviewedCommitChanges(page, fixture, commit);
+  const review = changes.getByRole('region', { name: '로컬 병합 검토', exact: true });
+
+  await review.getByRole('heading', { name: '충돌 해결 제안 v2 검토', exact: true }).waitFor();
+  await review.getByText(`제안 ID ${receipt.proposalId} · 지문 ${receipt.fingerprint}`, { exact: true }).waitFor();
+  const apply = review.getByRole('button', { name: '승인한 병합 적용', exact: true });
+
+  assert.equal(await apply.isDisabled(), false, 'The restarted app must load the exact new approval');
+  await apply.click();
+  await review.getByText('병합 적용 상태: 병합 완료.', { exact: true }).waitFor();
+  assert.equal(await apply.isDisabled(), true);
+  assert.ok((await review.innerText()).includes('충돌 해결 제안 v2 검토'));
+  await apply.scrollIntoViewIfNeeded();
+
+  const screenshot = path.join(output, `ai-session-merge-resolution-applied-${tag}-1440.png`);
+
+  await capturePage(page, screenshot);
+  screenshots.push(screenshot);
+  viewports.push({ theme: tag, state: 'resolution-merge-applied-with-fresh-fixture-approval', width: 1440, height: 900, screenshot });
+  await page.setViewportSize({ width: 760, height: 820 });
+  await page.waitForFunction(() => window.innerWidth === 760);
+  await apply.scrollIntoViewIfNeeded();
+  const layout = await review.evaluate(element => {
+    const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 병합 적용');
+    const bounds = action?.getBoundingClientRect();
+
+    return {
+      overflow: element.scrollWidth > element.clientWidth + 1,
+      actionReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+        && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+    };
+  });
+
+  assert.equal(layout.overflow, false, `Applied resolution must not overflow at ${tag}/760`);
+  assert.equal(layout.actionReachable, true, `Applied resolution action must remain reachable at ${tag}/760`);
+  const narrow = path.join(output, `ai-session-merge-resolution-applied-${tag}-760.png`);
+
+  await capturePage(page, narrow);
+  screenshots.push(narrow);
+  viewports.push({ theme: tag, state: 'resolution-merge-applied-narrow', width: 760, height: 820, screenshot: narrow, layout });
+}
+
+async function verifyReviewedMergeResult(database, fixture) {
+  const receipt = fixture.reviewedMerge;
+
+  const proposal = database.agentSessionMerges.getProposal(receipt.proposalId);
+
+  assert.equal(proposal.state, 'merged');
+  assert.equal(proposal.fingerprint, receipt.fingerprint);
+  assert.deepEqual(proposal.author, receipt.author, 'The approved author date must survive restart');
+  assert.deepEqual(proposal.committer, receipt.committer, 'The approved committer date must survive restart');
+
+  const outcome = proposal.outcomes.at(-1);
+
+  assert.equal(outcome.state, 'merged');
+  assert.deepEqual(outcome.receipt.changedPaths, ['selected.txt']);
+  assert.deepEqual(outcome.receipt.conflictedPaths, []);
+
+  const intent = proposal.artifacts.find(item => item.event.phase === 'intent')?.event;
+
+  const published = proposal.artifacts.find(item => item.event.phase === 'published')?.event;
+
+  assert.ok(intent && published, 'Success requires durable generation and publication artifacts');
+  assert.equal(published.resultingHead, outcome.receipt.resultingHead);
+  assert.equal(published.currentGenerationId, intent.generationId);
+
+  const expectedRelative = `integration-generations/${receipt.integrationOwnerId}/${intent.generationId}`;
+
+  assert.equal(intent.generationPath, expectedRelative, 'The signed generation path must be scoped to this integration owner');
+
+  const generationDirectory = path.resolve(fixture.reviewedCommit.managedRoot, intent.generationPath);
+
+  assert.equal(path.relative(fixture.reviewedCommit.managedRoot, generationDirectory).split(path.sep).join('/'), expectedRelative);
+  assert.equal(await realpath(generationDirectory), generationDirectory, 'The fixture must inspect the canonical owned generation');
+
+  const git = async (cwd, ...args) => (await execFileAsync('git', ['-C', cwd, ...args], { maxBuffer: 1024 * 1024 })).stdout;
+
+  const candidate = outcome.receipt.resultingHead;
+
+  assert.equal((await git(generationDirectory, 'rev-parse', 'HEAD')).trim(), candidate);
+  assert.equal((await git(generationDirectory, 'rev-parse', '--abbrev-ref', 'HEAD')).trim(), 'HEAD', 'Integration generations must remain detached');
+  assert.equal((await git(generationDirectory, 'show', '-s', '--format=%P', candidate)).trim(), `${receipt.targetHead} ${receipt.sourceHead}`);
+  assert.equal((await git(fixture.reviewedCommit.repository, 'rev-parse', `refs/heads/bugfixer/integration/${receipt.integrationOwnerId}`)).trim(), candidate);
+  assert.equal(await readFile(path.join(generationDirectory, 'selected.txt'), 'utf8'), fixture.reviewedCommit.retainedAfter);
+  assert.equal(await readFile(path.join(generationDirectory, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.unselectedBase);
+  assert.equal((await git(generationDirectory, 'status', '--porcelain', '--untracked-files=all')).trim(), '', 'The published generation files and index must match its candidate');
+  const gitDirectory = (await git(generationDirectory, 'rev-parse', '--absolute-git-dir')).trim();
+  receipt.indexSha256 = createHash('sha256').update(await readFile(path.join(gitDirectory, 'index'))).digest('hex');
+
+  const commit = await git(generationDirectory, 'cat-file', 'commit', candidate);
+
+  assert.ok(commit.includes(`\nauthor ${receipt.author.name} <${receipt.author.email}> ${receipt.author.date}\n`));
+  assert.ok(commit.includes(`\ncommitter ${receipt.committer.name} <${receipt.committer.email}> ${receipt.committer.date}\n`));
+  assert.ok(commit.endsWith(`\n\n${receipt.commitMessage}\n`));
+  await verifyReviewedCommitResult(database, fixture);
+  receipt.resultingHead = candidate;
+  receipt.generationPath = generationDirectory;
+  receipt.appliedThroughUi = true;
+}
+
+async function verifyReviewedResolutionResult(database, fixture) {
+  const receipt = fixture.reviewedResolutionMerge;
+  const proposal = database.agentSessionMerges.getProposal(receipt.proposalId);
+
+  assert.equal(proposal.state, 'merged');
+  assert.equal(proposal.fingerprint, receipt.fingerprint);
+  assert.deepEqual(proposal.author, receipt.author);
+  assert.deepEqual(proposal.committer, receipt.committer);
+  assert.equal(proposal.approval?.actor, 'human');
+  assert.equal(proposal.approval?.proposalFingerprint, receipt.fingerprint);
+  assert.equal(proposal.resolution.proposalId, fixture.reviewedConflictMerge.proposalId);
+  assert.equal(proposal.resolution.operationId, fixture.reviewedConflictMerge.operationId);
+  assert.equal(proposal.resolution.generationId, fixture.reviewedConflictMerge.generationId);
+  assert.equal(proposal.resolution.registrationId, fixture.reviewedConflictMerge.registrationId);
+  assert.equal(proposal.resolution.treeOid, fixture.reviewedConflictMerge.manualResolution.stagedTree);
+  assert.equal(proposal.resolution.indexFileDigest, fixture.reviewedConflictMerge.manualResolution.stagedIndexSha256);
+  assert.equal(proposal.resolution.indexDigest, fixture.reviewedConflictMerge.manualResolution.indexDigest);
+  assert.equal(proposal.resolution.treeDigest, fixture.reviewedConflictMerge.manualResolution.treeDigest);
+  const priorConflict = database.agentSessionMerges.getProposal(fixture.reviewedConflictMerge.proposalId);
+
+  assert.equal(priorConflict.state, 'conflict');
+  assert.equal(priorConflict.approval?.actor, 'human');
+  assert.equal(priorConflict.approval?.proposalFingerprint, priorConflict.fingerprint, 'The old approval must remain scoped to its original conflict');
+
+  const outcome = proposal.outcomes.at(-1);
+  const intent = proposal.artifacts.find(item => item.event.phase === 'intent')?.event;
+  const published = proposal.artifacts.find(item => item.event.phase === 'published')?.event;
+
+  assert.equal(outcome.state, 'merged');
+  assert.deepEqual(outcome.receipt.changedPaths, ['selected.txt']);
+  assert.deepEqual(outcome.receipt.conflictedPaths, []);
+  assert.ok(intent && published);
+  assert.equal(published.resultingHead, outcome.receipt.resultingHead);
+  assert.equal(published.currentGenerationId, intent.generationId);
+  assert.equal(published.priorGenerationId, fixture.reviewedConflictMerge.generationId);
+  const relative = `integration-generations/${receipt.integrationOwnerId}/${intent.generationId}`;
+  const generationDirectory = path.resolve(fixture.reviewedCommit.managedRoot, intent.generationPath);
+
+  assert.equal(intent.generationPath, relative);
+  assert.equal(path.relative(fixture.reviewedCommit.managedRoot, generationDirectory).split(path.sep).join('/'), relative);
+  assert.equal(await realpath(generationDirectory), generationDirectory);
+  assert.notEqual(generationDirectory, fixture.reviewedConflictMerge.generationPath, 'Resolution must publish a new detached generation');
+
+  const git = async (cwd, ...args) => (await execFileAsync('git', ['-C', cwd, ...args], { maxBuffer: 1024 * 1024 })).stdout;
+  const candidate = outcome.receipt.resultingHead;
+
+  assert.equal((await git(generationDirectory, 'rev-parse', 'HEAD')).trim(), candidate);
+  assert.equal((await git(generationDirectory, 'rev-parse', '--abbrev-ref', 'HEAD')).trim(), 'HEAD');
+  assert.equal((await git(generationDirectory, 'show', '-s', '--format=%P', candidate)).trim(), `${receipt.targetHead} ${receipt.sourceHead}`);
+  assert.equal((await git(fixture.reviewedCommit.repository, 'rev-parse', `refs/heads/bugfixer/integration/${receipt.integrationOwnerId}`)).trim(), candidate);
+  assert.equal(await readFile(path.join(generationDirectory, 'selected.txt'), 'utf8'), fixture.reviewedConflictMerge.manualResolution.text);
+  assert.equal(await readFile(path.join(generationDirectory, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.unselectedBase);
+  assert.equal((await git(generationDirectory, 'status', '--porcelain', '--untracked-files=all')).trim(), '', 'Published generation index and files must be clean');
+
+  const oldConflictGitDir = (await git(fixture.reviewedConflictMerge.generationPath, 'rev-parse', '--absolute-git-dir')).trim();
+
+  assert.equal(await readFile(path.join(fixture.reviewedConflictMerge.generationPath, 'selected.txt'), 'utf8'), fixture.reviewedConflictMerge.manualResolution.text, 'The resolved conflict file must remain byte-for-byte unchanged after publication');
+  assert.equal(await readFile(path.join(fixture.reviewedConflictMerge.generationPath, 'unselected.txt'), 'utf8'), fixture.reviewedConflictMerge.conflictUnselected);
+  assert.equal(createHash('sha256').update(await readFile(path.join(oldConflictGitDir, 'index'))).digest('hex'), fixture.reviewedConflictMerge.manualResolution.stagedIndexSha256);
+  assert.equal(createHash('sha256').update(await readFile(path.join(fixture.reviewedCommit.repository, '.git', 'index'))).digest('hex'), fixture.reviewedCommit.originalIndexSha256);
+  assert.equal((await git(fixture.reviewedCommit.repository, 'rev-parse', 'HEAD')).trim(), fixture.reviewedCommit.sourceHead);
+  assert.equal(await readFile(path.join(fixture.reviewedConflictCommit.worktreePath, 'selected.txt'), 'utf8'), fixture.reviewedConflictCommit.laterSelected);
+  assert.equal(await readFile(path.join(fixture.reviewedConflictCommit.worktreePath, 'unselected.txt'), 'utf8'), fixture.reviewedConflictCommit.laterUnselected);
+
+  const commit = await git(generationDirectory, 'cat-file', 'commit', candidate);
+
+  assert.ok(commit.includes(`\nauthor ${receipt.author.name} <${receipt.author.email}> ${receipt.author.date}\n`));
+  assert.ok(commit.includes(`\ncommitter ${receipt.committer.name} <${receipt.committer.email}> ${receipt.committer.date}\n`));
+  assert.ok(commit.endsWith(`\n\n${receipt.commitMessage}\n`));
+  receipt.resultingHead = candidate;
+  receipt.generationId = intent.generationId;
+  receipt.generationPath = generationDirectory;
   receipt.appliedThroughUi = true;
 }
 

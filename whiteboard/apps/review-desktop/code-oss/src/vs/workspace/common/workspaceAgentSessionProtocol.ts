@@ -235,7 +235,8 @@ export type WorkspaceAgentSessionsCommand =
 	| 'listWorkflows' | 'getWorkflow' | 'createWorkflow' | 'reviseWorkflow' | 'approveWorkflow' | 'startWorkflow' | 'cancelWorkflow'
 	| 'getLatestChangeEvidence' | 'listChangeEvidence' | 'getChangeFile' | 'getChangeHunks'
 	| 'getLatestChangeExplanation' | 'listChangeExplanationRevisions' | 'recordHumanChangeExplanation'
-	| 'prepareCommitProposal' | 'listCommitProposals' | 'approveCommitProposal' | 'applyCommitProposal' | 'recoverCommitProposal';
+	| 'prepareCommitProposal' | 'listCommitProposals' | 'approveCommitProposal' | 'applyCommitProposal' | 'recoverCommitProposal'
+	| 'listMergeProposals' | 'prepareMergeProposal' | 'approveMergeProposal' | 'applyMergeProposal' | 'reconcileMergeProposal';
 
 export interface WorkspaceAgentSessionProjectRequest { readonly projectId: string; }
 export type WorkspaceAgentSessionCreateRequest = CreateAgentSessionInput;
