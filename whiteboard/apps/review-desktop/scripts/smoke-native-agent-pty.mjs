@@ -760,6 +760,7 @@ try {
 
   const finalTranscriptPage = readCompleteTranscript(options =>
     serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id, options));
+
   const finalTranscript = finalTranscriptPage.entries;
 
   receipt.finalTranscript = {
