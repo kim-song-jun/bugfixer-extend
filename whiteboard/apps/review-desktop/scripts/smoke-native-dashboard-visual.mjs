@@ -2616,8 +2616,10 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
     profileRef: 'ci-control-fixture-only',
     workspaceMode: 'sharedFolder',
   });
+
   const folder = await statFolder(projectFolder);
   const current = database.agentSessions.getSession(fixture.projectId, caller.id);
+
   const snapshot = {
     schemaVersion: 1,
     projectId: fixture.projectId,
@@ -2635,6 +2637,7 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
     convention: null,
     references: [],
   };
+
   const turn = database.agentSessionTurns.createTurn({ projectId: fixture.projectId, sessionId: caller.id, expectedSessionRevision: current.revision, snapshot });
   const starting = database.agentSessions.getSession(fixture.projectId, caller.id);
   const running = database.agentSessionTurns.transitionTurn(fixture.projectId, caller.id, turn.id, turn.revision, starting.revision, { state: 'running' });
@@ -2642,6 +2645,7 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
 
   const target = database.agentSessions.getSession(fixture.projectId, targetSession.id);
   assert.ok(target, 'The UI-created target session must exist before the request is inserted');
+
   const request = database.agentSessionControlRequests.createStartRequest({
     projectId: fixture.projectId,
     callerSessionId: caller.id,
@@ -2652,8 +2656,10 @@ async function seedSessionControlRequest(database, fixture, projectFolder, targe
     reason: 'CI fixture request for native review and rejection.',
     idempotencyKey: `native-dashboard-control-${target.id}`,
   });
+
   assert.equal(request.state, 'pendingReview');
   assert.equal(database.agentSessionTurns.listTurns(fixture.projectId, target.id).length, 0, 'Persisting a request must not create a target turn');
+
   return { requestId: request.id, targetSessionId: target.id, callerSessionId: caller.id, callerTurnId: turn.id, callerName: caller.name };
 }
 
@@ -3246,13 +3252,19 @@ async function verifyReviewedCommitApply(page, fixture, tag, screenshots, viewpo
     const action = [...element.querySelectorAll('button')].find(button => button.textContent?.trim() === '승인한 커밋 적용');
     const bounds = action?.getBoundingClientRect();
     const container = element.getBoundingClientRect();
-    const overflowingElements = [...element.querySelectorAll('*')].filter(child => child.getClientRects().length > 0).map(child => {
+
+    const overflowingElements = [...element.querySelectorAll('*')].flatMap(child => {
+      if (child.getClientRects().length === 0) return [];
+
       const rect = child.getBoundingClientRect();
+
+      if (rect.left >= container.left - 1 && rect.right <= container.right + 1) return [];
+
       const style = getComputedStyle(child);
 
-      return { tag: child.tagName, className: String(child.className), left: rect.left, right: rect.right, width: rect.width,
-        clientWidth: child.clientWidth, scrollWidth: child.scrollWidth, boxSizing: style.boxSizing, minWidth: style.minWidth, whiteSpace: style.whiteSpace };
-    }).filter(child => child.left < container.left - 1 || child.right > container.right + 1).slice(0, 20);
+      return [{ tag: child.tagName, className: String(child.className), left: rect.left, right: rect.right, width: rect.width,
+        clientWidth: child.clientWidth, scrollWidth: child.scrollWidth, boxSizing: style.boxSizing, minWidth: style.minWidth, whiteSpace: style.whiteSpace }];
+    }).slice(0, 20);
 
     return {
       overflow: element.scrollWidth > element.clientWidth + 1,
