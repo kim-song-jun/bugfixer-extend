@@ -2249,6 +2249,7 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
   await guide.getByText(fixture.projectName, { exact: true }).waitFor();
   await guide.getByText(fixture.projectFolder, { exact: true }).waitFor();
   await guide.getByText('이 안내는 이 프로젝트의 세션과 작업 상태를 사용합니다. 예시 데이터는 만들지 않습니다.', { exact: true }).waitFor();
+  await guide.getByText('Slack, Notion 등 외부 연결은 선택 사항이며 나중에 프로젝트 대시보드에서 설정할 수 있습니다. 연결하지 않아도 CLI 세션을 시작할 수 있습니다.', { exact: true }).waitFor();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 1/5 · 프로젝트', { exact: true }).waitFor();
 
   await captureOnboardingViewport(page, guide, tag, 'project-first-run', screenshots, viewports);
@@ -2295,7 +2296,8 @@ async function verifySessionOnboardingAfterRestart(page, fixture, tag, screensho
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
   await workspace.getByRole('heading', { name: fixture.reviewedCommit.name, exact: true }).waitFor();
   await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
-  await guide.getByRole('heading', { name: '기존 작업이나 세션 선택', exact: true }).waitFor();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 3/5 · 세션·모델', { exact: true }).waitFor();
+  await guide.getByRole('heading', { name: '기존 작업이나 세션·모델 선택', exact: true }).waitFor();
   await guide.getByRole('button', { name: `“${fixture.taskTitle}” 작업으로 Codex 세션 만들기`, exact: true }).waitFor();
   await guide.getByRole('button', { name: `${fixture.reviewedCommit.name} · ${fixture.reviewedCommit.provider === 'codex' ? 'Codex' : 'Claude'} · ${fixture.reviewedCommit.model} · exited`, exact: true }).waitFor();
 

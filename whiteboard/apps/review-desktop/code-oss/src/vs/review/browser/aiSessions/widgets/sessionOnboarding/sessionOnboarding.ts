@@ -14,7 +14,7 @@ import {
 	type SessionOnboardingState,
 } from '../../features/onboarding/index.js';
 
-const STEPS = ['프로젝트', 'CLI와 계정', '세션', '작업 범위', '첫 작업'] as const;
+const STEPS = ['프로젝트', 'CLI와 계정', '세션·모델', '작업 범위', '첫 작업'] as const;
 
 export interface SessionOnboardingTask {
 	readonly id: string;
@@ -226,6 +226,7 @@ export function createSessionOnboarding(parent: HTMLElement, context: SessionOnb
 		const path = makeText(currentContext.project.path); path.classList.add('ai-session-onboarding__path'); target.append(path);
 		if (currentContext.project.bindingLabel) { target.append(makeText(`연결된 폴더 · ${currentContext.project.bindingLabel}`)); }
 		target.append(makeText('이 안내는 이 프로젝트의 세션과 작업 상태를 사용합니다. 예시 데이터는 만들지 않습니다.'));
+		target.append(makeText('Slack, Notion 등 외부 연결은 선택 사항이며 나중에 프로젝트 대시보드에서 설정할 수 있습니다. 연결하지 않아도 CLI 세션을 시작할 수 있습니다.'));
 	}
 
 	function renderInspectionStep(target: HTMLElement): void {
@@ -291,7 +292,8 @@ export function createSessionOnboarding(parent: HTMLElement, context: SessionOnb
 	}
 
 	function renderSessionStep(target: HTMLElement): void {
-		target.append(makeHeading('기존 작업이나 세션 선택'));
+		target.append(makeHeading('기존 작업이나 세션·모델 선택'));
+		target.append(makeText('새 세션에서는 공급자를 고르고 모델 ID를 입력합니다. 세션 목록에서 공급자와 모델을 함께 확인할 수 있습니다.'));
 		if (currentContext.tasks.length) {
 			const taskList = document.createElement('ul'); taskList.className = 'ai-session-onboarding__list';
 			for (const task of currentContext.tasks) {
