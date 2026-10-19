@@ -356,8 +356,6 @@ test('commit approval IPC requires the exact scoped proposal and native confirma
 			managedWorktreeOwnerId: session.id, permissionPolicy: { mode: 'read-only', approval: 'never' }, convention: null, references: [],
 		};
 		const turn = database.agentSessionTurns.createTurn({ projectId: project.project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot: turnSnapshot });
-		const runningSession = database.agentSessions.getSession(project.project.id, session.id)!;
-		const running = database.agentSessionTurns.transitionTurn(project.project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
 		const sourceHead = 'a'.repeat(40);
 		const contents = (value: string, capturedAt: string) => {
 			const bytes = Buffer.from(value, 'utf8');
@@ -369,6 +367,8 @@ test('commit approval IPC requires the exact scoped proposal and native confirma
 		};
 		const scope = { projectId: project.project.id, sessionId: session.id, turnId: turn.id };
 		database.agentSessionContents.recordBaseline({ scope, snapshot: contents('before\n', '2026-10-19T00:00:00.000Z'), revision: sourceHead });
+		const runningSession = database.agentSessions.getSession(project.project.id, session.id)!;
+		const running = database.agentSessionTurns.transitionTurn(project.project.id, session.id, turn.id, turn.revision, runningSession.revision, { state: 'running' });
 		database.agentSessionContents.recordAfter({ scope, snapshot: contents('after\n', '2026-10-19T00:00:01.000Z'), expectedLatestVersion: 0, revision: sourceHead, cleanupVerified: true });
 		const currentSession = database.agentSessions.getSession(project.project.id, session.id)!;
 		database.agentSessionTurns.transitionTurn(project.project.id, session.id, turn.id, running.turn.revision, currentSession.revision, { state: 'exited', exitCode: 0, cleanupVerified: true });

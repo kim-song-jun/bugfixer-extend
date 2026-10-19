@@ -538,7 +538,6 @@ test('reviewed commit candidate uses retained bytes and leaves checkout, branch,
 		const filterCommand = join(root, 'clean-filter');
 		writeFileSync(filterCommand, `#!/bin/sh\nprintf ran > '${filterMarker}'\ncat\n`);
 		chmodSync(filterCommand, 0o700);
-		git(repository, 'config', 'filter.fixture.clean', filterCommand);
 		const hookMarker = join(root, 'hook-ran');
 		const hookPath = git(repository, 'rev-parse', '--git-path', 'hooks/pre-commit');
 		const hook = hookPath.startsWith('/') ? hookPath : join(repository, hookPath);
@@ -561,6 +560,8 @@ test('reviewed commit candidate uses retained bytes and leaves checkout, branch,
 		const optionNamedFile = Buffer.from('literal option-like path\n');
 		const symlinkTarget = Buffer.from('target.txt');
 		const executable = Buffer.from('#!/bin/sh\nexit 0\n');
+		assert.equal(existsSync(filterMarker), false, 'Fixture setup must not invoke the candidate clean filter');
+		git(repository, 'config', 'filter.fixture.clean', filterCommand);
 		const preview = await service.prepareReviewedCommit({
 			ownerId: session.ownerId, sourceHead, commitMessage: 'Reviewed retained files\nwith a second paragraph',
 			files: [
