@@ -15,6 +15,7 @@ import './browser/aiSessions/app/index.js';
 import './browser/parts/canvas/reviewCanvasEditorRegistration.js';
 import './browser/projectDashboard/index.js';
 import './contrib/extensions/reviewCuratedExtensions.contribution.js';
+import './contrib/settings/reviewSettings.contribution.js';
 import './contrib/verbs/reviewControl.contribution.js';
 import { InstantiationType, registerSingleton } from '../platform/instantiation/common/extensions.js';
 import { IReviewVerbsService, ReviewVerbsService } from './contrib/verbs/reviewVerbs.js';

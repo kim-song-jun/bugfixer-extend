@@ -407,6 +407,8 @@ try {
   const b = await launchFixture(host, 'b');
   const liveOutput = [];
 
+  receipt.checks.push('two real TTYs');
+
   for (let index = 0; index < 10; index++) {
     await assert.rejects(host.attach(a, () => undefined, Number.MAX_SAFE_INTEGER), /cursor/);
   }
@@ -428,29 +430,44 @@ try {
   receipt.checks.push('real PTY output attachment fanout is bounded and released slots are reusable');
 
   assert.throws(() => host.getSnapshot(Object.freeze({})), /not created by this host/);
+  receipt.checks.push('opaque handles');
   await host.write(a, 'echo:한글-A\n');
   await host.write(b, 'echo:B\n');
   await until(() => retained(host, a).includes('ECHO:한글-A') && retained(host, b).includes('ECHO:B'), 'independent duplex terminals');
   assert.ok(!retained(host, a).includes('ECHO:B'));
+  receipt.checks.push('duplex Unicode input');
   attachment.dispose();
   await host.write(a, 'echo:detached\n');
   await until(() => retained(host, a).includes('ECHO:detached'), 'detached terminal remains alive');
 
   const reattached = await host.attach(a, chunk => liveOutput.push(chunk.text));
 
+  receipt.checks.push('detach and reattach');
+
   await host.resize(a, 101, 33);
   await until(() => retained(host, a).includes('SIZE:101:33'), 'actual PTY dimensions');
+  receipt.checks.push('resize');
   await host.write(a, 'secret\n');
   await until(() => retained(host, a).includes('***'), 'production cross-chunk sanitization');
   assert.ok(!retained(host, a).includes(secret) && !liveOutput.join('').includes(secret));
+  receipt.checks.push('sanitized pages and listeners');
   await host.write(a, 'flood\n');
   await until(() => retained(host, a).includes('FLOOD_DONE'), 'bounded flood completes');
 
   const page = host.read(a, 0, 500);
 
-  assert.equal(page.retentionGap, true);
+  receipt.duplexRetention = {
+    retentionGap: page.retentionGap,
+    firstSequence: page.chunks[0]?.sequence,
+    cursor: page.cursor,
+    latestSequence: page.latestSequence,
+    retainedBytes: Buffer.byteLength(page.chunks.map(chunk => chunk.text).join('')),
+  };
+
+  assert.equal(page.retentionGap, true, 'Flood output must evict earlier retained chunks.');
   assert.ok(Buffer.byteLength(page.chunks.map(chunk => chunk.text).join('')) <= 4096);
   assert.ok(page.chunks.every((chunk, index) => index === 0 || chunk.sequence > page.chunks[index - 1].sequence));
+  receipt.checks.push('retention gap');
   reattached.dispose();
   let providerExit;
 
@@ -466,12 +483,15 @@ try {
     exitObserver.dispose();
   }
 
-  assert.equal((await host.stop(a)).cleanupVerified, true);
+  receipt.duplexNaturalExitCleanup = await host.stop(a);
+  assert.equal(receipt.duplexNaturalExitCleanup.cleanupVerified, true, 'The naturally exited PTY must verify its first cleanup.');
   assert.ok(retained(host, a).endsWith('FINAL_WITHOUT_NEWLINE'), 'Verified exit must flush final sanitized output');
-  assert.equal((await host.stop(b)).cleanupVerified, true);
+  receipt.checks.push('natural exit and final flush');
+  receipt.duplexPeerCleanup = await host.stop(b);
+  assert.equal(receipt.duplexPeerCleanup.cleanupVerified, true, 'The live peer PTY must verify its first cleanup.');
+  receipt.checks.push('TERM-resistant descendant cleanup');
   await host.release(a);
   await host.release(b);
-  receipt.checks.push('two real TTYs', 'duplex Unicode input', 'detach and reattach', 'resize', 'sanitized pages and listeners', 'retention gap', 'natural exit and final flush', 'TERM-resistant descendant cleanup', 'opaque handles');
 
   const failureHost = createHost();
 
@@ -1070,7 +1090,8 @@ try {
 
   ownedAgentSessionService = undefined;
 } catch (error) {
-  receipt.failure = error instanceof Error ? error.message : 'Unknown PTY probe failure';
+  receipt.failure = error instanceof Error ? error.message.replaceAll(secret, '***') : 'Unknown PTY probe failure';
+  receipt.failureStack = error instanceof Error ? error.stack?.replaceAll(secret, '***').slice(0, 8192) : undefined;
   process.exitCode = 1;
 } finally {
   if (ownedAgentSessionService) {
