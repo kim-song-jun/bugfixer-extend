@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import type { AgentSessionNativeNotification, AgentSessionNativeNotificationSink } from './agentSessionNativeNotifications.js';
 import { AgentSessionNativeNotifications } from './agentSessionNativeNotifications.js';
+import type { SessionNotificationDTO } from '../../common/workspaceAgentSessionProtocol.js';
 import { WorkspaceDatabase } from '../workspaceDatabase.js';
 
 class NotificationFixture extends EventEmitter implements AgentSessionNativeNotification {
@@ -60,14 +61,26 @@ function fixture(options?: { readonly supported?: boolean; readonly failOnShow?:
 }
 
 function commitMessageNotification(value: ReturnType<typeof fixture>, body = 'private-token-123 and source text', idempotencyKey = 'native-alert-fixture') {
-	const message = value.database.agentSessions.sendMessage(value.project.id, value.sender.id, {
-		recipientSessionId: value.recipient.id,
-		idempotencyKey,
-		body,
-	});
-	const notification = value.database.agentSessions.getNotification(value.project.id, value.database.agentSessions.listNotifications(value.project.id, { limit: 1 })[0].id)!;
+	const committed: SessionNotificationDTO[] = [];
+	const subscription = value.database.agentSessions.onDidCommitNotification(notification => committed.push(notification), error => { throw error; });
+	const messageId = (() => {
+		try {
+			return value.database.agentSessions.sendMessage(value.project.id, value.sender.id, {
+				recipientSessionId: value.recipient.id,
+				idempotencyKey,
+				body,
+			}).id;
+		} finally {
+			subscription.dispose();
+		}
+	})();
+	assert.equal(committed.length, 1, 'the source commit must publish exactly one notification synchronously');
+	const [committedNotification] = committed;
+	assert.ok(committedNotification, 'the commit must report its notification row');
+	const notification = value.database.agentSessions.getNotification(value.project.id, committedNotification.id);
+	assert.ok(notification, 'the observed committed notification must read back by its exact ID');
 	assert.equal(notification.target.kind, 'message');
-	assert.equal(notification.target.id, message.id);
+	assert.equal(notification.target.id, messageId);
 	return notification;
 }
 
