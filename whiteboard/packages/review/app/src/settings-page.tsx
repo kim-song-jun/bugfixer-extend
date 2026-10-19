@@ -113,7 +113,9 @@ export function SettingsPage({
                   type="button"
                   className="review-settings-button"
                   disabled={busy !== null}
-                  onClick={() => void run("session-onboarding", reopenSessionGuide)}
+                  onClick={() =>
+                    void run("session-onboarding", reopenSessionGuide)
+                  }
                 >
                   안내 다시 보기
                 </button>

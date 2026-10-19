@@ -1489,7 +1489,7 @@ try {
         description: '패키지 앱의 task 상태 버튼과 포커스를 확인합니다.',
       });
 
-      fixture = { projectId: project.project.id, bindingId: project.binding.id, projectName: project.project.name, descriptorPath: project.descriptorPath, taskId: task.id, taskTitle: task.title, initialState: task.state };
+      fixture = { projectId: project.project.id, bindingId: project.binding.id, projectName: project.project.name, projectFolder: project.binding.path, descriptorPath: project.descriptorPath, taskId: task.id, taskTitle: task.title, initialState: task.state };
     } finally {
       database.close();
     }
@@ -1601,6 +1601,8 @@ try {
 
       assert.equal(await page.evaluate(() => document.activeElement?.id), 'project-task-state-heading', 'Task state mutation must return focus to its heading');
 
+      await verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, viewports);
+
       fixture.aiSession = await verifyAiSessionWorkspace(page, tag, screenshots, viewports);
     } catch (error) {
 
@@ -1669,6 +1671,8 @@ try {
     try {
       await waitForExtensionReadiness(session, `transcript-logs-${tag}`);
 
+      await verifySessionOnboardingAfterRestart(session.page, fixture, tag, screenshots, viewports);
+
       await verifyAiSessionTranscriptLogs(session.page, fixture, tag, screenshots, viewports);
 
       await verifyAiSessionChangeEvidence(session.page, fixture, tag, screenshots, viewports);
@@ -1689,6 +1693,8 @@ try {
 
       assert.deepEqual(turns.map(turn => turn.id), fixture.logHistory.turnIds, 'Both CI history turns must persist after the packaged-app journey');
 
+      assert.equal(fixture.onboarding.completed, true, 'The explicit final guide action must be exercised before task-state verification');
+      assert.equal(verifiedHistoryDatabase.getTask(fixture.taskId)?.state, 'inProgress', 'Finishing onboarding must not mark the actual project task complete');
       assert.equal(verifiedHistoryDatabase.getTask(fixture.taskId)?.state, fixture.finalState, 'Explanation review must not change the dashboard task state');
 
       assert.equal(verifiedHistoryDatabase.getTask(fixture.taskId)?.state, fixture.changeEvidence.seededTaskState, 'The review journey must leave the task at its seeded state');
@@ -1740,6 +1746,7 @@ try {
 
     try {
       await waitForExtensionReadiness(session, `reviewed-commit-${tag}`);
+      await verifyCompletedSessionOnboardingAfterRestart(session.page, fixture, tag, screenshots, viewports);
       await verifyReviewedCommitApply(session.page, fixture, tag, screenshots, viewports);
       await verifyReviewedMergeProposal(session.page, fixture, tag, screenshots, viewports);
     } catch (error) {
@@ -2158,6 +2165,208 @@ assert.deepEqual(diagnostics.console, [], 'Unexpected renderer console errors');
 assert.deepEqual(diagnostics.failedRequests, [], 'Unexpected failed network requests');
 
 console.log(`Native dashboard smoke captured ${diagnostics.pageErrors.length} runtime errors, ${diagnostics.console.length} console errors, ${diagnostics.canceledThemeLoads.length} recovered theme cancellations, and ${diagnostics.failedRequests.length} failed requests.`);
+
+async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, viewports) {
+  const workspace = await openSessionWorkspace(page);
+  const guide = workspace.locator('.ai-session-onboarding');
+
+  await guide.waitFor({ state: 'visible' });
+  await guide.getByRole('heading', { name: 'AI 세션 시작 안내', exact: true }).waitFor();
+  await guide.getByRole('heading', { name: '현재 프로젝트', exact: true }).waitFor();
+  await guide.getByText(fixture.projectName, { exact: true }).waitFor();
+  await guide.getByText(fixture.projectFolder, { exact: true }).waitFor();
+  await guide.getByText('이 안내는 이 프로젝트의 세션과 작업 상태를 사용합니다. 예시 데이터는 만들지 않습니다.', { exact: true }).waitFor();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 1/5 · 프로젝트', { exact: true }).waitFor();
+
+  await captureOnboardingViewport(page, guide, tag, 'project-first-run', screenshots, viewports);
+
+  const next = guide.getByRole('button', { name: '다음 단계', exact: true });
+
+  await next.focus();
+  await page.keyboard.press('Enter');
+  await guide.getByRole('heading', { name: '설치된 CLI와 로컬 프로필 확인', exact: true }).waitFor();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
+  assert.equal(await guide.locator('.ai-session-onboarding__inspection').innerText(), '확인을 누르면 설치 상태와 버전을 조회합니다. 이 조회는 로그인이나 모델 실행을 검증하지 않습니다.', 'The CLI step must state that it has not been inspected');
+  assert.equal(await guide.locator('.ai-session-onboarding__inspection').locator('button').count(), 0, 'No inspection result or provider action may appear before a deliberate inspection');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-onboarding-focus')), 'next', 'Keyboard navigation must preserve focus on the next step control');
+
+  await captureOnboardingViewport(page, guide, tag, 'cli-uninspected', screenshots, viewports);
+
+  await guide.getByRole('button', { name: '건너뛰기', exact: true }).click();
+
+  const toggle = workspace.locator('[data-onboarding-toggle="true"]');
+
+  await page.waitForFunction(() => document.activeElement?.getAttribute('data-onboarding-toggle') === 'true');
+  assert.equal(await toggle.innerText(), '이어서 안내 보기', 'Skipping must focus the project guide toggle and preserve resumable progress');
+  await guide.waitFor({ state: 'hidden' });
+  await toggle.click();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
+  assert.equal(await guide.locator('.ai-session-onboarding__inspection').innerText(), '확인을 누르면 설치 상태와 버전을 조회합니다. 이 조회는 로그인이나 모델 실행을 검증하지 않습니다.', 'Resuming must return to the same uninspected step');
+  await guide.getByRole('button', { name: '건너뛰기', exact: true }).click();
+  await guide.waitFor({ state: 'hidden' });
+
+  fixture.onboarding = { initialStep: 0, skippedAtStep: 1, cliInspected: false, resumedAtStep: 1, providerStarted: false };
+}
+
+async function verifySessionOnboardingAfterRestart(page, fixture, tag, screenshots, viewports) {
+  const changes = await openReviewedCommitChanges(page, fixture);
+  const workspace = page.locator('.ai-session-workspace');
+  const toggle = workspace.locator('[data-onboarding-toggle="true"]');
+
+  assert.equal(await toggle.innerText(), '이어서 안내 보기', 'A normal app restart must preserve this project’s skipped guide state');
+  await changes.getByText(`v${fixture.reviewedCommit.evidenceVersion} · ${fixture.reviewedCommit.fingerprint}`, { exact: true }).waitFor();
+  await toggle.click();
+
+  const guide = workspace.locator('.ai-session-onboarding');
+
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
+  await workspace.getByRole('heading', { name: fixture.reviewedCommit.name, exact: true }).waitFor();
+  await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
+  await guide.getByRole('heading', { name: '기존 작업이나 세션 선택', exact: true }).waitFor();
+  await guide.getByRole('button', { name: `“${fixture.taskTitle}” 작업으로 Codex 세션 만들기`, exact: true }).waitFor();
+  await guide.getByRole('button', { name: `${fixture.reviewedCommit.name} · ${fixture.reviewedCommit.provider === 'codex' ? 'Codex' : 'Claude'} · ${fixture.reviewedCommit.model} · exited`, exact: true }).waitFor();
+
+  await captureOnboardingViewport(page, guide, tag, 'actual-project-task-session', screenshots, viewports);
+
+  await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
+  await guide.getByRole('heading', { name: '폴더와 규칙을 실행 전에 확인', exact: true }).waitFor();
+  const workspaceModeLabel = fixture.reviewedCommit.workspaceMode === 'gitWorktree' ? '세션 전용 Git worktree' : '기존 폴더의 단일 수정자 정책';
+
+  await guide.getByText(`${fixture.reviewedCommit.provider === 'codex' ? 'Codex' : 'Claude'} · ${fixture.reviewedCommit.model} · ${workspaceModeLabel}`, { exact: true }).waitFor();
+  await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
+  await guide.getByRole('heading', { name: '첫 실제 작업에서 확인할 항목', exact: true }).waitFor();
+  await guide.getByText(/실제 실행 상태 · exited · 종료 코드 0 · 정리 확인됨/).waitFor();
+
+  const finish = guide.getByRole('button', { name: '안내 마치기', exact: true });
+
+  await finish.focus();
+  await page.keyboard.press('Enter');
+  await guide.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.activeElement?.getAttribute('data-onboarding-toggle') === 'true');
+  assert.equal(await toggle.innerText(), '안내 다시 열기', 'Finishing the guide must be distinct from completing the real task');
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440 && window.innerHeight === 900);
+  await verifyTheme(page, tag === 'dark', `onboarding-${tag}-completed`);
+
+  const completedScreenshot = path.join(output, `ai-session-onboarding-completed-${tag}-1440.png`);
+
+  await capturePage(page, completedScreenshot);
+  screenshots.push(completedScreenshot);
+  viewports.push({ theme: tag, state: 'onboarding-explicitly-finished-task-still-in-progress', width: 1440, height: 900, screenshot: completedScreenshot });
+  fixture.onboarding.completed = true;
+  fixture.onboarding.actualSession = fixture.reviewedCommit.name;
+  fixture.onboarding.actualTurn = fixture.reviewedCommit.turnId;
+}
+
+async function verifyCompletedSessionOnboardingAfterRestart(page, fixture, tag, screenshots, viewports) {
+  await openReviewedCommitChanges(page, fixture);
+
+  const workspace = page.locator('.ai-session-workspace');
+  const toggle = workspace.locator('[data-onboarding-toggle="true"]');
+
+  assert.equal(await toggle.innerText(), '안내 다시 열기', 'The completed guide state must survive a normal app restart');
+
+  await page.keyboard.press('Meta+,');
+
+  const settings = page.locator('.review-home-content.review-settings-page');
+
+  await settings.waitFor({ state: 'visible' });
+  await settings.getByRole('button', { name: '안내 다시 보기', exact: true }).click();
+
+  const guide = workspace.locator('.ai-session-onboarding');
+
+  await workspace.getByRole('heading', { name: fixture.reviewedCommit.name, exact: true }).waitFor();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 5/5 · 첫 작업', { exact: true }).waitFor();
+  await guide.getByRole('heading', { name: '첫 실제 작업에서 확인할 항목', exact: true }).waitFor();
+  await guide.getByText(/실제 실행 상태 · exited · 종료 코드 0 · 정리 확인됨/).waitFor();
+
+  for (const viewport of [{ width: 1440, height: 760 }, { width: 760, height: 820 }]) {
+    await page.setViewportSize(viewport);
+    await page.waitForFunction(width => window.innerWidth === width, viewport.width);
+    await verifyTheme(page, tag === 'dark', `onboarding-settings-reopen-${tag}-${viewport.width}`);
+    await guide.scrollIntoViewIfNeeded();
+    await guide.getByRole('button', { name: '안내 마치기', exact: true }).scrollIntoViewIfNeeded();
+
+    const layout = await guide.evaluate(element => {
+      const navigation = element.querySelector('.ai-session-onboarding__footer');
+      const bounds = navigation?.getBoundingClientRect();
+
+      return {
+        documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        guideOverflow: element.scrollWidth > element.clientWidth + 1,
+        navigationReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+          && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+      };
+
+    });
+
+    assert.equal(layout.documentOverflow, false, `Reopened onboarding document must not overflow at ${tag}/${viewport.width}`);
+    assert.equal(layout.guideOverflow, false, `Reopened onboarding must not overflow at ${tag}/${viewport.width}`);
+    assert.equal(layout.navigationReachable, true, `Reopened guide finish action must be reachable at ${tag}/${viewport.width}`);
+
+    const screenshot = path.join(output, `ai-session-onboarding-reopened-${tag}-${viewport.width}.png`);
+
+    await capturePage(page, screenshot);
+    screenshots.push(screenshot);
+    viewports.push({ theme: tag, state: 'onboarding-completed-state-reopened-from-settings-button', ...viewport, screenshot, layout });
+  }
+
+  const finish = guide.getByRole('button', { name: '안내 마치기', exact: true });
+
+  await finish.focus();
+  await page.keyboard.press('Enter');
+  await guide.waitFor({ state: 'hidden' });
+  assert.equal(await toggle.innerText(), '안내 다시 열기', 'Closing the reopened guide must preserve its completed state');
+  fixture.onboarding.reopenedAfterRestart = true;
+}
+
+async function openSessionWorkspace(page) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  const sidebar = page.getByRole('navigation', { name: '프로젝트 탐색', exact: true });
+
+  if (!(await sidebar.isVisible())) {
+    await page.getByRole('button', { name: '프로젝트 메뉴', exact: true }).click();
+  }
+
+  await sidebar.getByRole('button', { name: 'AI 세션', exact: true }).click();
+
+  return page.locator('.ai-session-workspace');
+}
+
+async function captureOnboardingViewport(page, guide, tag, state, screenshots, viewports) {
+  for (const viewport of [{ width: 1440, height: 760 }, { width: 760, height: 820 }]) {
+    await page.setViewportSize(viewport);
+    await page.waitForFunction(width => window.innerWidth === width, viewport.width);
+    await verifyTheme(page, tag === 'dark', `onboarding-${state}-${tag}-${viewport.width}`);
+    await guide.scrollIntoViewIfNeeded();
+
+    const layout = await guide.evaluate(element => {
+      const navigation = element.querySelector('.ai-session-onboarding__footer');
+      navigation?.scrollIntoView({ block: 'end' });
+      const bounds = navigation?.getBoundingClientRect();
+
+      return {
+        documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        guideOverflow: element.scrollWidth > element.clientWidth + 1,
+        navigationReachable: !!bounds && bounds.width > 0 && bounds.left >= -1 && bounds.right <= window.innerWidth + 1
+          && bounds.top >= -1 && bounds.bottom <= window.innerHeight + 1,
+      };
+
+    });
+
+    assert.equal(layout.documentOverflow, false, `Onboarding document must not overflow at ${tag}/${viewport.width}`);
+    assert.equal(layout.guideOverflow, false, `Onboarding content must not overflow at ${tag}/${viewport.width}`);
+    assert.equal(layout.navigationReachable, true, `Onboarding navigation must be reachable at scroll end at ${tag}/${viewport.width}`);
+
+    const screenshot = path.join(output, `ai-session-onboarding-${state}-${tag}-${viewport.width}.png`);
+
+    await capturePage(page, screenshot);
+    screenshots.push(screenshot);
+    viewports.push({ theme: tag, state: `onboarding-${state}`, ...viewport, screenshot, layout });
+  }
+}
 
 async function verifyAiSessionWorkspace(page, tag, screenshots, viewports) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -2671,7 +2880,8 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
   return {
     fixtureOnly: true, providerExecuted: false, ptyExecuted: false, nativeHumanApprovalExercised: false,
     proofLimit: 'Actual disposable Git and retained-file application path; any approval seeded by this fixture is synthetic and does not prove native human confirmation.',
-    ...scope, name: session.name, repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256,
+    ...scope, name: session.name, provider: session.provider, model: session.model, workspaceMode: session.workspaceMode,
+    repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256,
     evidenceVersion: evidence.evidenceVersion, fingerprint: evidence.fingerprint, explanationRevision: explanation.revision,
     retainedAfter, laterSelected, laterUnselected, unselectedBase: `unselected base ${tag}\n`, commitMessage: `CI reviewed selected content ${tag}`,
   };

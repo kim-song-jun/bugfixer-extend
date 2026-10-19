@@ -4,13 +4,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { discoverAgentCliCapabilities } from '../agentCliCapabilities.js';
 import { createAgentSessionCommand } from '../agentSessionCommands.js';
 import { runBoundedAgentCliProcess } from '../agentCliProcess.js';
+import { inspectWorkspaceAgentSetup } from '../agentSessionSetupInspection.js';
 
 describe('pinned provider CLI help and version discovery', () => {
 	it('Codex 0.163.0 reports the interactive flags required by the command builder', async () => {
@@ -41,6 +43,30 @@ describe('pinned provider CLI help and version discovery', () => {
 		assert.equal(capabilities.invocationMcpConfig, true);
 		assert.equal(capabilities.exclusiveMcpRoster, true);
 	});
+
+	for (const provider of ['codex', 'claude'] as const) {
+		it(`${provider} setup inspection recognizes an anonymous profile without invoking a model`, async () => {
+			const root = realpathSync(mkdtempSync(join(tmpdir(), 'agent-cli-anonymous-setup-')));
+			const profileDirectory = join(root, 'profile');
+			try {
+				mkdirSync(profileDirectory, { mode: 0o700 });
+				const profileKey = provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
+				const result = await inspectWorkspaceAgentSetup({
+					projectId: 'ci-anonymous-profile-inspection', provider,
+					executable: requiredExecutable(provider === 'codex' ? 'BUGFIXER_CODEX_CLI' : 'BUGFIXER_CLAUDE_CLI'),
+					profileDirectory,
+					environment: { PATH: process.env.PATH ?? '', HOME: root, [profileKey]: profileDirectory, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+					guardianNodeExecutable: process.execPath,
+					guardianScriptPath: fileURLToPath(new URL('../agentCliProbeGuardian.mjs', import.meta.url)),
+				});
+				assert.equal(result.installation.state, 'available');
+				assert.equal(result.authentication.state, 'signedOut');
+				assert.equal(result.authentication.validForExecution, false);
+				assert.equal(result.cleanupVerified, true);
+				assert.equal(result.capabilities?.provider, provider);
+			} finally { rmSync(root, { recursive: true, force: true }); }
+		});
+	}
 
 	it('Codex invocation overrides add the app bridge without clearing an inherited MCP roster', async () => {
 		const executable = requiredExecutable('BUGFIXER_CODEX_CLI');

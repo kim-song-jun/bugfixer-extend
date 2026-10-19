@@ -46,6 +46,8 @@ jobs:
           cache-dependency-path: whiteboard/pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Lint before session contracts
+        run: pnpm lint
       - name: Record runner resources before session contracts
         run: |
           uptime
@@ -71,12 +73,12 @@ jobs:
           --test --test-concurrency=1
           --test-name-pattern="^(frozen v(2[6-9]|30) database upgrades|agent-session content baselines|binary content gaps|managed-worktree content evidence|startup reconciliation adds)"
           code-oss/src/vs/workspace/electron-main/workspaceDatabase.test.ts
-      - name: Install pinned public CLIs for help-only discovery
+      - name: Install pinned public CLIs for anonymous setup inspection
         timeout-minutes: 3
         run: |
           mkdir -p "$RUNNER_TEMP/agent-cli-help-tools" "$RUNNER_TEMP/agent-cli-help-home/codex" "$RUNNER_TEMP/agent-cli-help-home/claude"
           npm install --prefix "$RUNNER_TEMP/agent-cli-help-tools" --no-save --package-lock=false @openai/codex@0.163.0 @anthropic-ai/claude-code@2.1.302
-      - name: Check pinned CLI help and versions without authentication
+      - name: Check pinned CLI help and anonymous login status without model execution
         timeout-minutes: 3
         run: |
           HOME="$RUNNER_TEMP/agent-cli-help-home" \
@@ -154,11 +156,25 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-${{ runner.arch }}-playwright-chromium-${{ hashFiles('whiteboard/pnpm-lock.yaml') }}
 
-      - name: Lint
-        run: pnpm lint
 
       - name: Check formatting
+        id: formatting
         run: pnpm format:check
+
+      - name: Prepare owned settings formatting repair
+        if: failure() && steps.formatting.conclusion == 'failure'
+        run: |
+          pnpm exec oxfmt --write packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts
+          git diff --binary -- packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts > "$RUNNER_TEMP/review-settings-format.patch"
+
+      - name: Upload owned settings formatting repair
+        if: failure() && steps.formatting.conclusion == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-settings-format-repair
+          path: ${{ runner.temp }}/review-settings-format.patch
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Install Code OSS native build prerequisites
         run: |
