@@ -5,7 +5,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { isAbsolute } from 'node:path';
-import type { Writable } from 'node:stream';
+import { Readable, type Writable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import {
 	type ProviderCommandSpec,
@@ -299,8 +299,9 @@ async function launch(
 	if (recoveryControl) {
 		if (child.stderr) attachLines(child.stderr, 'stderr');
 	} else {
-		const providerStderr = child.stdio[5] as NodeJS.ReadableStream | null;
-		if (providerStderr) attachLines(providerStderr, 'stderr');
+		const providerStderr = child.stdio.at(5);
+		if (providerStderr instanceof Readable) attachLines(providerStderr, 'stderr');
+		else { parserError = 'Provider stderr stream could not be attached safely.'; requestTermination(); }
 		child.stderr?.resume();
 	}
 	child.once('exit', () => {
@@ -374,9 +375,9 @@ async function launch(
 		await result;
 		return { ...handle, pid: undefined };
 	}
-	// The gate remains closed until durable ownership is recorded. This final
-	// synchronous check closes the cancel/delete race immediately before GO.
-	if (request.signal?.aborted || cancelled) {
+	// The gate remains closed until durable ownership is recorded. Parser and gate
+	// failures can also arrive while the ownership callback is pending.
+	if (request.signal?.aborted || cancelled || parserError || launchGateFailed) {
 		handle.cancel();
 		await result;
 		return { ...handle, pid: undefined };
@@ -412,6 +413,13 @@ async function launch(
 	}
 	if (request.ownerLifetime && (!ownerLifetimeInput || ownerLifetimeInputFailed)) {
 		launchGateFailed = true;
+		handle.cancel();
+		await result;
+		return { ...handle, pid: undefined };
+	}
+	// Recheck synchronously after nonce/owner-lifetime writes, immediately before
+	// GO, so no async parser or launch-gate failure can authorize provider exec.
+	if (request.signal?.aborted || cancelled || parserError || launchGateFailed) {
 		handle.cancel();
 		await result;
 		return { ...handle, pid: undefined };

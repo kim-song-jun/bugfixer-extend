@@ -123,10 +123,6 @@ interface RevisionRow extends Readonly<Record<string, SQLOutputValue>> {
 	body: SQLOutputValue; content_hash: SQLOutputValue; created_at: SQLOutputValue;
 }
 
-interface RequestEventRow extends Readonly<Record<string, SQLOutputValue>> {
-	sequence: SQLOutputValue; event_type: SQLOutputValue; event_json: SQLOutputValue; created_at: SQLOutputValue;
-}
-
 type StoredCandidate = { readonly source: AgentPrTextSource; readonly content: AgentPrTextContent; readonly receivedAt: string };
 type StoredCandidateEvent = StoredCandidate & { readonly late: boolean; readonly contentFingerprint: string };
 

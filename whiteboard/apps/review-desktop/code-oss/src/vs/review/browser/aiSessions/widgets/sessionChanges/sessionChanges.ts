@@ -13,7 +13,7 @@ import type {
 } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT as MERGE_PAGE_SIZE } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
 import type { IWorkspaceAgentPrTextService, WorkspaceAgentPrTextSelection } from '../../../../../workspace/common/workspaceAgentPrTextHostProtocol.js';
-import { createSessionPrText } from '../sessionPrText/index.js';
+import { createSessionPrText } from '../../features/sessionPrText/index.js';
 import { createSessionPublication, type SessionPublicationActions } from './sessionPublication.js';
 import './sessionChanges.css';
 

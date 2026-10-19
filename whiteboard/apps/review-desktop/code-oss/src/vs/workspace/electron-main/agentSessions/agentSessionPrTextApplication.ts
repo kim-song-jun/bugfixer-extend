@@ -12,7 +12,7 @@ import type {
 	IWorkspaceAgentPrTextService, WorkspaceAgentPrTextApplyInput, WorkspaceAgentPrTextCancelInput,
 	WorkspaceAgentPrTextDraftDTO, WorkspaceAgentPrTextPageInput, WorkspaceAgentPrTextPreviewDTO,
 	WorkspaceAgentPrTextPreviewInput, WorkspaceAgentPrTextRequestInput, WorkspaceAgentPrTextSaveInput,
-	WorkspaceAgentPrTextSelection, WorkspaceAgentPrTextStartInput,
+	WorkspaceAgentPrTextStartInput,
 } from '../../common/workspaceAgentPrTextHostProtocol.js';
 import type { AgentSessionDTO, AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';

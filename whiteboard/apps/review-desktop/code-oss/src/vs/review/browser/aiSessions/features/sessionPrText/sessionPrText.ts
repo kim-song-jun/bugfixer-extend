@@ -169,8 +169,10 @@ export function createSessionPrText(): SessionPrTextController {
 			pollAttempts++;
 			void refreshRequest(scope, actions, requestGeneration, request.id).then(() => {
 				const latest = requests.find(item => item.id === request.id);
-				if (latest?.state === 'running') { schedulePoll(scope, actions, requestGeneration, latest); }
-				else if (pollAttempts >= MAX_POLL_ATTEMPTS && latest?.state === 'running') { status = '상태 자동 확인을 마쳤습니다. 직접 다시 확인할 수 있습니다.'; update(); }
+				if (latest?.state === 'running') {
+					if (pollAttempts >= MAX_POLL_ATTEMPTS) { status = '상태 자동 확인을 마쳤습니다. 직접 다시 확인할 수 있습니다.'; update(); }
+					else { schedulePoll(scope, actions, requestGeneration, latest); }
+				}
 			});
 		}, POLL_INTERVAL_MS);
 	};

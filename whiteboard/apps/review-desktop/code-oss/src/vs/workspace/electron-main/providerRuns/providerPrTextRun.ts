@@ -35,10 +35,9 @@ export interface ProviderPrTextCapabilityRequest {
 	readonly processControl: { readonly nodeExecutable: string; readonly helperScript: string };
 }
 
-export interface ProviderPrTextCapability {
-	readonly available: boolean;
-	readonly reason?: string;
-}
+export type ProviderPrTextCapability =
+	| { readonly available: true; readonly reason?: undefined }
+	| { readonly available: false; readonly reason: string };
 
 export interface ProviderPrTextRunRequest extends ProviderPrTextCapabilityRequest {
 	readonly requestId: string;
