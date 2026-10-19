@@ -22,7 +22,7 @@ import { INativeWorkbenchEnvironmentService } from '../../../../../workbench/ser
 import type { IEditorGroup } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
 import { EditorsOrder } from '../../../../../workbench/common/editor.js';
 import type { EditorInput } from '../../../../../workbench/common/editor/editorInput.js';
-import type { IEditorOpenContext, ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
+import type { IEditorOpenContext, IEditorPane, ITextDiffEditorPane } from '../../../../../workbench/common/editor.js';
 import { EditorExtensions, type IEditorFactoryRegistry } from '../../../../../workbench/common/editor.js';
 import { IEditorService } from '../../../../../workbench/services/editor/common/editorService.js';
 import { IEditorGroupsService } from '../../../../../workbench/services/editor/common/editorGroupsService.js';
@@ -1491,7 +1491,7 @@ class AgentSessionWorkspaceContribution extends Disposable implements IWorkbench
 			this.layoutService.setPartHidden(true, Parts.SIDEBAR_PART);
 		}
 	};
-	private async open(activate: boolean, showOnboarding = false, isCurrent: () => boolean = () => true): Promise<EditorPane | undefined> {
+	private async open(activate: boolean, showOnboarding = false, isCurrent: () => boolean = () => true): Promise<IEditorPane | undefined> {
 		const launch = this.environment.reviewWindowLaunch;
 		if (launch.kind !== 'project') return undefined;
 		await this.groups.whenRestored;

@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { Notification } from 'electron';
 import type { IStateService } from '../../../platform/state/node/state.js';
 import type { ILogService } from '../../../platform/log/common/log.js';
 import type { SessionNotificationDTO } from '../../common/workspaceAgentSessionProtocol.js';
@@ -18,9 +17,14 @@ export interface AgentSessionNativeNotificationSink {
 	create(options: { readonly title: string; readonly body: string }): AgentSessionNativeNotification;
 }
 
-export interface AgentSessionNativeNotification extends Pick<Notification, 'show' | 'close' | 'removeAllListeners'> {
-	on(event: 'show' | 'click' | 'close', listener: () => void): this;
-	on(event: 'failed', listener: (_event: Electron.Event, error: string) => void): this;
+export interface AgentSessionNativeNotification {
+	show(): void;
+	close(): void;
+	removeAllListeners(): void;
+	on(event: 'show', listener: () => void): void;
+	on(event: 'click', listener: () => void): void;
+	on(event: 'close', listener: () => void): void;
+	on(event: 'failed', listener: (_event: Electron.Event, error: string) => void): void;
 }
 
 export type AgentSessionNotificationRoute = (projectId: string, notificationId: string) => Promise<void>;
@@ -51,7 +55,7 @@ export class AgentSessionNativeNotifications {
 	private disposed = false;
 
 	constructor(
-		private readonly source: AgentSessionNativeNotificationSource,
+		source: AgentSessionNativeNotificationSource,
 		private readonly stateService: Pick<IStateService, 'getItem' | 'setItem'>,
 		private readonly sink: AgentSessionNativeNotificationSink,
 		private readonly route: AgentSessionNotificationRoute,

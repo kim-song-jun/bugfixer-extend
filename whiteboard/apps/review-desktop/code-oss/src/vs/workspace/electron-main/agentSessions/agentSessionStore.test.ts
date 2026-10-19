@@ -238,7 +238,7 @@ test('committed notification observers read the exact scoped SQLite row and neve
 			assert.deepEqual(database.agentSessions.getNotification(notification.projectId, notification.id), notification);
 		}, error => observerErrors.push(error));
 		try {
-			assert.deepEqual(seen, [], 'Subscribing does not replay notifications already in SQLite.');
+			assert.equal(seen.length, 0, 'Subscribing does not replay notifications already in SQLite.');
 			const firstMessage = database.agentSessions.sendMessage(first.project.id, firstSender.id, {
 				recipientSessionId: firstRecipient.id, idempotencyKey: 'after-subscribe-first', body: 'First project event.',
 			});

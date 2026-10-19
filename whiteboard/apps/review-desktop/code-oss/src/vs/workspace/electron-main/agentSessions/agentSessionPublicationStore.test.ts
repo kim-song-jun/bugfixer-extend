@@ -82,10 +82,11 @@ test('publication history retains at most five full proposals and never prunes a
 	const fixture = createMergedPublicationFixture(); let database: WorkspaceDatabase | undefined;
 	let disposeNotificationObserver: { dispose(): void } | undefined;
 	try {
-		database = WorkspaceDatabase.open(fixture.sourcePath);
-		const store = database.agentSessionPublications;
+		const openedDatabase = WorkspaceDatabase.open(fixture.sourcePath);
+		database = openedDatabase;
+		const store = openedDatabase.agentSessionPublications;
 		const committedNotifications: string[] = [];
-		disposeNotificationObserver = database.agentSessions.onDidCommitNotification(notification => committedNotifications.push(notification.eventId), error => { throw error; });
+		disposeNotificationObserver = openedDatabase.agentSessions.onDidCommitNotification(notification => committedNotifications.push(notification.eventId), error => { throw error; });
 		const ids: string[] = [];
 		for (let revision = 0; revision < 6; revision++) {
 			const proposal = store.createProposal({ ...fixture.input, expectedRevision: revision, title: `Change ${revision}` });
@@ -100,11 +101,11 @@ test('publication history retains at most five full proposals and never prunes a
 		assert.deepEqual(first.proposals.map(proposal => proposal.id), ids.slice(1));
 		assert.equal(first.hasMore, false);
 		assert.equal(store.getProposal(ids[0]), undefined, 'The original unstarted proposal is pruned by the existing retention policy.');
-		const prunedProposalAlert = database.agentSessions.listNotifications(fixture.input.projectId, { limit: 100 }).find(item => item.eventId === `publicationProposal:${ids[0]}:review`);
+		const prunedProposalAlert = openedDatabase.agentSessions.listNotifications(fixture.input.projectId, { limit: 100 }).find(item => item.eventId === `publicationProposal:${ids[0]}:review`);
 		assert.deepEqual(prunedProposalAlert?.target, { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId }, 'The durable alert keeps its exact pruned target.');
-		const sqlite = Reflect.get(database, 'db') as DatabaseSync;
+		const sqlite = Reflect.get(openedDatabase, 'db') as DatabaseSync;
 		assert.deepEqual(
-			runAgentSessionTransaction(sqlite, () => database.agentSessions.recordNotificationWithinTransaction({ eventId: `publicationProposal:${ids[0]}:review`, projectId: fixture.input.projectId,
+			runAgentSessionTransaction(sqlite, () => openedDatabase.agentSessions.recordNotificationWithinTransaction({ eventId: `publicationProposal:${ids[0]}:review`, projectId: fixture.input.projectId,
 				sessionId: fixture.input.sessionId, kind: 'prReady', target: { kind: 'publicationProposal', id: ids[0], turnId: fixture.input.turnId } })),
 			prunedProposalAlert,
 			'An idempotent event retry remains valid after its proposal is pruned.',
