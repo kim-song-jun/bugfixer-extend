@@ -12,9 +12,8 @@ import type {
 	AgentSessionIntegrationAction, AgentSessionIntegrationActionReceipt, AgentSessionIntegrationApprovalDTO,
 	AgentSessionIntegrationGitIdentity, AgentSessionIntegrationOutcomeDTO, AgentSessionIntegrationOutcomeState,
 	AgentSessionIntegrationPathDTO, AgentSessionIntegrationPathInput, AgentSessionIntegrationProposalDTO,
-	AgentSessionIntegrationState,
 } from '../../common/workspaceAgentIntegrationProtocol.js';
-import type { AgentSessionChangeEvidenceDTO, AgentSessionChangeFileObservation } from './agentSessionChangeEvidenceStore.js';
+import type { AgentSessionChangeEvidenceDTO } from './agentSessionChangeEvidenceStore.js';
 import type { AgentSessionExplanationDTO, AgentSessionExplanationTarget } from './agentSessionReviewStore.js';
 
 export type {
@@ -290,7 +289,8 @@ export class AgentSessionIntegrationStore {
 			if (!observation) { throw new Error(`Selected path is not part of the exact change evidence: ${path}`); }
 			if (!Array.isArray(entry.explanationTargets) || entry.explanationTargets.length < 1) { throw new Error(`Selected path requires at least one exact explanation revision: ${path}`); }
 			const seenTargets = new Set<string>();
-			const explanations = entry.explanationTargets.map((target, targetIndex) => {
+			const explanationTargets: AgentSessionIntegrationPathInput['explanationTargets'] = entry.explanationTargets;
+			const explanations = explanationTargets.map((target: AgentSessionIntegrationPathInput['explanationTargets'][number], targetIndex: number) => {
 				this.assertExactKeys(target, ['path', 'hunkId', 'revision'], [], `explanation target ${targetIndex + 1}`);
 				if (target.path !== path || (target.hunkId !== null && !SHA256_PATTERN.test(target.hunkId))) { throw new Error('Selected explanation target must match its exact changed path and hunk ID.'); }
 				if (!Number.isSafeInteger(target.revision) || target.revision < 1) { throw new Error('Selected explanation revision is invalid.'); }

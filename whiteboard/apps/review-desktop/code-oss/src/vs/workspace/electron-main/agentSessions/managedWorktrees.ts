@@ -899,7 +899,7 @@ export class ManagedWorktreeService {
 
 	private retainReviewedFiles(files: readonly ReviewedCommitFileInput[]): StoredReviewedCommitPreview['files'] {
 		return files.map(file => {
-			const before = 'absent' in file.before ? { absent: true as const } : { mode: file.before.mode, sha256: file.before.sha256.toLowerCase() };
+			const before = 'sha256' in file.before ? { mode: file.before.mode, sha256: file.before.sha256.toLowerCase() } : { absent: true as const };
 			const after = 'absent' in file.after ? { absent: true as const } : { mode: file.after.mode, sha256: file.after.sha256.toLowerCase() };
 			return { path: file.path, before, after, ...('bytes' in file.after ? { bytes: Buffer.from(file.after.bytes) } : {}) };
 		});
@@ -1246,7 +1246,7 @@ export class ManagedWorktreeService {
 
 	private runCommand(command: string, args: readonly string[], timeoutMs: number, options: { readonly env?: NodeJS.ProcessEnv; readonly input?: Buffer; readonly maxOutputBytes?: number } = {}): Promise<{ stdout: Buffer; stderr: Buffer }> {
 		return new Promise((resolvePromise, rejectPromise) => {
-			const child = spawn(command, args, { detached: process.platform !== 'win32', env: this.gitEnvironment(options.env), shell: false, stdio: [options.input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+			const child = spawn(command, args, { detached: process.platform !== 'win32', env: this.gitEnvironment(options.env), shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
 			const stdout: Buffer[] = [];
 			const stderr: Buffer[] = [];
 			let buffered = 0;
@@ -1296,10 +1296,8 @@ export class ManagedWorktreeService {
 			child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk));
 			child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk));
 			child.on('error', error => { spawnError = error; });
-			if (options.input) {
-				child.stdin.on('error', error => { spawnError ??= error; });
-				child.stdin.end(options.input);
-			}
+			child.stdin.on('error', error => { spawnError ??= error; });
+			child.stdin.end(options.input);
 			child.on('close', async (code, signal) => {
 				clearTimeout(timeout);
 				if (terminationRequested) { await cleanupPromise; }
