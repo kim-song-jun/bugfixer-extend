@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomUUID } from 'node:crypto';
-import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO } from '../../common/workspaceAgentSessionProtocol.js';
+import type { AgentSessionPermissionPolicy, AgentSessionTurnDTO, AgentSessionTranscriptPageOptions } from '../../common/workspaceAgentSessionProtocol.js';
 import type { AgentWorkflowDTO, AgentWorkflowPlan } from '../../common/workspaceAgentWorkflowProtocol.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
 import { createAgentPtyOutputSanitizer, sanitizeCompleteAgentText } from './agentOutputRedactor.js';
@@ -88,7 +88,7 @@ export class AgentSessionCollaborationService {
 	private activeWaiters = 0;
 
 	constructor(
-		private readonly database: Pick<WorkspaceDatabase, 'agentSessions' | 'agentSessionTurns' | 'agentWorkflows'>,
+		private readonly database: Pick<WorkspaceDatabase, 'agentSessions' | 'agentSessionTurns' | 'agentWorkflows' | 'agentSessionTranscripts'>,
 		private readonly workflowHost?: AgentSessionWorkflowHost,
 	) { }
 
@@ -130,16 +130,57 @@ export class AgentSessionCollaborationService {
 	}
 
 	listSessions(grant: AgentSessionCollaborationGrant, limit = 50): readonly Record<string, string | number | null>[] {
+		return this.listSessionPage(grant, { limit }).sessions;
+	}
+
+	listSessionPage(grant: AgentSessionCollaborationGrant, options: { readonly afterSessionId?: string; readonly limit?: number } = {}): { readonly sessions: readonly Record<string, string | number | null>[]; readonly nextCursor: string | null } {
 		const record = this.requireGrant(grant);
+		const limit = options.limit ?? 50;
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) { throw new Error('The session page limit must be between 1 and 100.'); }
-		return this.database.agentSessions.listSessions(record.projectId).slice(0, limit).map(session => ({
-			id: session.id,
-			name: this.sanitize(record, session.name).text,
-			provider: session.provider,
-			model: this.sanitize(record, session.model).text,
-			state: session.state,
-			updatedAt: session.updatedAt,
-		}));
+		const ordered = this.database.agentSessions.listSessions(record.projectId);
+		let start = 0;
+		if (options.afterSessionId !== undefined) {
+			assertUuid(options.afterSessionId, 'session cursor');
+			const cursorIndex = ordered.findIndex(session => session.id === options.afterSessionId);
+			if (cursorIndex < 0) { throw new Error('The session cursor is unavailable in this project.'); }
+			start = cursorIndex + 1;
+		}
+		const sessions: Record<string, string | number | null>[] = [];
+		for (const session of ordered.slice(start, start + limit + 1)) {
+			const item = {
+				id: session.id,
+				name: this.sanitize(record, session.name).text,
+				provider: session.provider,
+				model: this.sanitize(record, session.model).text,
+				state: session.state,
+				createdAt: session.createdAt,
+				updatedAt: session.updatedAt,
+			};
+			if (sessions.length === limit) { break; }
+			if (!fitsMcpToolResult({ sessions: [...sessions, item], nextCursor: item.id })) {
+				if (!sessions.length) { throw new Error('A session cannot be represented within the session MCP response limit.'); }
+				break;
+			}
+			sessions.push(item);
+		}
+		const hasMore = ordered.length > start + sessions.length;
+		const nextCursor = hasMore && sessions.length ? String(sessions[sessions.length - 1].id) : null;
+		const page = { sessions, nextCursor };
+		if (!fitsMcpToolResult(page)) { throw new Error('The session page cannot be represented within the session MCP response limit.'); }
+		return page;
+	}
+
+	readTranscriptPage(grant: AgentSessionCollaborationGrant, turnId: string, options: AgentSessionTranscriptPageOptions = {}) {
+		const record = this.requireGrant(grant);
+		assertUuid(turnId, 'turn ID');
+		const targetTurn = this.database.agentSessionTurns.getTurn(record.projectId, record.sessionId, turnId);
+		const liveTurn = this.database.agentSessionTurns.getTurn(record.projectId, record.sessionId, record.turnId);
+		if (!targetTurn || targetTurn.projectId !== record.projectId || targetTurn.sessionId !== record.sessionId || !liveTurn) {
+			throw new Error('The requested transcript is unavailable within this session capability.');
+		}
+		if (isTerminal(liveTurn)) { throw new Error('The session collaboration turn has ended.'); }
+		if (targetTurn.ordinal > liveTurn.ordinal) { throw new Error('The requested transcript must be from this turn or earlier in the same session.'); }
+		return this.database.agentSessionTranscripts.readPage(record.projectId, record.sessionId, turnId, options);
 	}
 
 	sendMessage(grant: AgentSessionCollaborationGrant, input: { readonly recipientSessionId: string; readonly idempotencyKey: string; readonly body: string }): AgentSessionCollaborationMessage {

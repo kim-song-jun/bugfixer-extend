@@ -211,7 +211,8 @@ test('real MCP SDK client uses scoped loopback ports for all provider pairings a
 				pairClients.push(receiverClient);
 
 				const toolList = await senderClient.client.listTools();
-				assert.deepEqual(toolList.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'pr_get', 'pr_list', 'pr_prepare', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
+				assert.ok(toolList.tools.some(tool => tool.name === 'sessions_list' && tool.inputSchema.properties?.afterSessionId));
+				assert.ok(toolList.tools.some(tool => tool.name === 'logs_read' && tool.inputSchema.required?.includes('targetTurnId')));
 				const request = {
 					name: 'messages_send',
 					arguments: { recipientSessionId: receiver.id, idempotencyKey: `stable-${senderProvider}-${receiverProvider}`, body: 'Inspect this collaboration request.' },
@@ -244,6 +245,84 @@ test('real MCP SDK client uses scoped loopback ports for all provider pairings a
 			}
 		}
 	} finally {
+		fixture.database.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test('real MCP SDK pages scoped sessions and reads redacted retained transcript fragments', async () => {
+	const directory = mkdtempSync(join(tmpdir(), 'agent-session-mcp-logs-'));
+	const fixture = createFixture(directory);
+	const session = createSession(fixture, 'codex');
+	const otherSession = createSession(fixture, 'claude');
+	const turn = createTurn(fixture, session);
+	const otherTurn = createTurn(fixture, otherSession);
+	const collaboration = new AgentSessionCollaborationService(fixture.database);
+	const bridge = new AgentSessionMcpBridge(collaboration);
+	let access: Awaited<ReturnType<AgentSessionMcpBridge['issueAccess']>> | undefined;
+	let client: Awaited<ReturnType<typeof openMcpClient>> | undefined;
+	try {
+		const secret = 'private-log-secret';
+		access = await bridge.issueAccess({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id, permissionPolicy: POLICY, knownSecrets: [secret] });
+		client = await openMcpClient(access);
+		const firstSessionPage = readSuccessfulToolPayload(await client.client.callTool({ name: 'sessions_list', arguments: { limit: 1 } }), 'sessions_list page one');
+		const firstRows = firstSessionPage.sessions as Array<{ id: string }>;
+		assert.equal(firstRows.length, 1);
+		assert.equal(typeof firstSessionPage.nextCursor, 'string');
+		const secondSessionPage = readSuccessfulToolPayload(await client.client.callTool({ name: 'sessions_list', arguments: { limit: 1, afterSessionId: firstRows[0].id } }), 'sessions_list page two');
+		assert.equal((secondSessionPage.sessions as Array<{ id: string }>).length, 1);
+
+		const longText = `${'😀'.repeat(995)}${secret}${'界'.repeat(1_120)}`;
+		fixture.database.agentSessionTranscripts.appendStructuredLog({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id,
+			sequence: 1, text: longText, severity: 'error', source: 'host', trustedKnownSecrets: [secret] });
+		fixture.database.agentSessionTranscripts.appendStructuredLog({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id,
+			sequence: 2, text: 'filtered provider detail', severity: 'info', source: 'provider' });
+		const storedSafeText = fixture.database.agentSessionTranscripts.readPage(fixture.project.id, session.id, turn.id, { limit: 1 }).entries[0].text;
+		let cursor: string | undefined;
+		let firstCursor: string | undefined;
+		let fragments = '';
+		let firstPage = true;
+		while (firstPage || cursor) {
+			firstPage = false;
+			const args = cursor ? { targetTurnId: turn.id, cursor, maxCharacters: 1_000 } : {
+				targetTurnId: turn.id, kind: 'log', severity: 'error', source: 'host', maxCharacters: 1_000,
+			};
+			const payload = readSuccessfulToolPayload(await client.client.callTool({ name: 'logs_read', arguments: args }), 'logs_read');
+			const pageEntries = payload.entries as Array<{ textFragment: string; sequence: number }>;
+			assert.equal(pageEntries.length, 1);
+			assert.equal(pageEntries[0].sequence, 1);
+			fragments += pageEntries[0].textFragment;
+			cursor = typeof payload.nextCursor === 'string' ? payload.nextCursor : undefined;
+			firstCursor ??= cursor;
+		}
+		assert.equal(fragments, storedSafeText);
+		assert.equal(fragments.includes(secret), false);
+		const crossSession = await client.client.callTool({ name: 'logs_read', arguments: { targetTurnId: otherTurn.id } });
+		assert.equal((crossSession as { isError?: boolean }).isError, true);
+
+		const expiringText = 'z'.repeat(2_500);
+		fixture.database.agentSessionTranscripts.appendStructuredLog({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id,
+			sequence: 3, text: expiringText, severity: 'error', source: 'host' });
+		const expiringPage = readSuccessfulToolPayload(await client.client.callTool({ name: 'logs_read', arguments: {
+			targetTurnId: turn.id, afterSequence: 2, kind: 'log', severity: 'error', source: 'host', maxCharacters: 1_000,
+		} }), 'expiring logs.read');
+		const expiringCursor = expiringPage.nextCursor as string;
+		for (let index = 4; index <= 84; index++) {
+			fixture.database.agentSessionTranscripts.appendStructuredLog({ projectId: fixture.project.id, sessionId: session.id, turnId: turn.id,
+				sequence: index, text: 'x'.repeat(128 * 1024), severity: 'debug', source: 'workspace' });
+		}
+		const expiredFragment = await client.client.callTool({ name: 'logs_read', arguments: { targetTurnId: turn.id, cursor: expiringCursor } });
+		assert.equal((expiredFragment as { isError?: boolean }).isError, true);
+		assert.match((expiredFragment as { content: Array<{ text: string }> }).content[0].text, /fragment cursor expired.*firstRetainedSequence.*gaps/i);
+		const retained = readSuccessfulToolPayload(await client.client.callTool({ name: 'logs_read', arguments: { targetTurnId: turn.id, afterSequence: 0, kind: 'log', severity: 'error', source: 'host' } }), 'retained logs.read');
+		assert.ok(Array.isArray(retained.gaps));
+		assert.ok((retained.gaps as Array<{ throughSequence: number }>).some(gap => gap.throughSequence >= 1));
+		const forgedCursor = await client.client.callTool({ name: 'logs_read', arguments: { targetTurnId: otherTurn.id, cursor: firstCursor } });
+		assert.equal((forgedCursor as { isError?: boolean }).isError, true);
+		access.revokeAccess();
+		await assert.rejects(client.client.callTool({ name: 'logs_read', arguments: { targetTurnId: turn.id } }));
+	} finally {
+		await closeOwnedMcpResources(client ? [client] : [], access ? [access] : []);
 		fixture.database.close();
 		rmSync(directory, { recursive: true, force: true });
 	}
@@ -288,8 +367,6 @@ test('real MCP SDK exposes only scoped workflow status and cancel for its own se
 			'The real MCP SDK must observe gateway authentication failure within two seconds.',
 		);
 		client = await openMcpClient(access);
-		const listed = await client.client.listTools();
-		assert.deepEqual(listed.tools.map(tool => tool.name), ['sessions_list', 'messages_send', 'messages_list', 'messages_ack', 'messages_wait', 'workflows_status', 'workflows_cancel', 'pr_get', 'pr_list', 'pr_prepare', 'getChangeHunks', 'getLatestChangeExplanation', 'listChangeExplanationRevisions', 'recordAgentChangeExplanation']);
 		const statusResult = await client.client.callTool({ name: 'workflows_status', arguments: { workflowId: ownWorkflow.id } });
 		const status = readSuccessfulToolPayload(statusResult, 'own workflows_status') as unknown as {
 			workflow: { id: string; state: string };

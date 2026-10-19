@@ -6,6 +6,7 @@
 import { connect } from 'node:net';
 
 const MAX_FRAME_BYTES = 65_536;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const MAX_IN_FLIGHT = 8;
 const MAX_STDOUT_QUEUE_BYTES = 1_048_576;
 const PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
@@ -319,9 +320,42 @@ function writeJsonRpcError(id, code, message) { queueStdout(`${JSON.stringify({ 
 const TOOLS = [
 	{
 		name: 'sessions_list', description: 'List sessions in this launch project.',
-		inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } }, additionalProperties: false },
-		validate(args) { if (!allowedFields(args, ['limit'])) { return { error: 'Unexpected tool arguments.' }; } const limit = integerField(args, 'limit', 1, 100, 50); return limit.error ? limit : { value: { limit: limit.value } }; },
+		inputSchema: { type: 'object', properties: { afterSessionId: { type: 'string', format: 'uuid' }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, additionalProperties: false },
+		validate(args) {
+			if (!allowedFields(args, ['afterSessionId', 'limit'])) { return { error: 'Unexpected tool arguments.' }; }
+			const limit = integerField(args, 'limit', 1, 100, 50);
+			if (limit.error) { return limit; }
+			if (args.afterSessionId === undefined) { return { value: { limit: limit.value } }; }
+			const afterSessionId = stringField(args, 'afterSessionId', 64);
+			return afterSessionId.error ? afterSessionId : UUID_RE.test(afterSessionId.value) ? { value: { afterSessionId: afterSessionId.value, limit: limit.value } } : { error: 'afterSessionId must be a UUID.' };
+		},
 		method: 'sessions.list',
+	},
+	{
+		name: 'logs_read', description: 'Read retained logs from this session or an earlier turn in the same session.',
+		inputSchema: { type: 'object', required: ['targetTurnId'], properties: {
+			targetTurnId: { type: 'string', format: 'uuid' }, afterSequence: { type: 'integer', minimum: 0 },
+			limit: { type: 'integer', minimum: 1, maximum: 20 }, maxCharacters: { type: 'integer', minimum: 1, maximum: 1000 },
+			kind: { type: 'string', enum: ['terminal', 'log'] }, severity: { type: 'string', enum: ['debug', 'info', 'warning', 'error'] },
+			source: { type: 'string', enum: ['pty', 'provider', 'host', 'workspace'] }, cursor: { type: 'string', maxLength: 2048 },
+		}, additionalProperties: false },
+		validate(args) {
+			const fields = ['targetTurnId', 'afterSequence', 'limit', 'maxCharacters', 'kind', 'severity', 'source', 'cursor'];
+			if (!allowedFields(args, fields) || typeof args.targetTurnId !== 'string' || !UUID_RE.test(args.targetTurnId)) { return { error: 'Invalid targetTurnId or unexpected tool arguments.' }; }
+			if (args.cursor !== undefined && (typeof args.cursor !== 'string' || args.cursor.length > 2048 || args.afterSequence !== undefined)) { return { error: 'Invalid transcript cursor.' }; }
+			const afterSequence = integerField(args, 'afterSequence', 0, Number.MAX_SAFE_INTEGER, undefined);
+			const limit = integerField(args, 'limit', 1, 20, 20);
+			const maxCharacters = integerField(args, 'maxCharacters', 1, 1000, 1000);
+			const bad = [afterSequence, limit, maxCharacters].find(field => field.error);
+			if (bad) { return bad; }
+			if (args.kind !== undefined && !['terminal', 'log'].includes(args.kind)) { return { error: 'Invalid transcript kind.' }; }
+			if (args.severity !== undefined && !['debug', 'info', 'warning', 'error'].includes(args.severity)) { return { error: 'Invalid transcript severity.' }; }
+			if (args.source !== undefined && !['pty', 'provider', 'host', 'workspace'].includes(args.source)) { return { error: 'Invalid transcript source.' }; }
+			return { value: { targetTurnId: args.targetTurnId, ...(afterSequence.value === undefined ? {} : { afterSequence: afterSequence.value }), limit: limit.value,
+				maxCharacters: maxCharacters.value, ...(args.kind === undefined ? {} : { kind: args.kind }), ...(args.severity === undefined ? {} : { severity: args.severity }),
+				...(args.source === undefined ? {} : { source: args.source }), ...(args.cursor === undefined ? {} : { cursor: args.cursor }) } };
+		},
+		method: 'logs.read',
 	},
 	{
 		name: 'messages_send', description: 'Send a durable mailbox message to a session in this project. Each recipient has a 100-unread-message queue capacity.',

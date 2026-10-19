@@ -10,6 +10,7 @@ import type { AgentPrTextRevisionDTO } from '../../common/workspaceAgentPrTextPr
 import type { AgentSessionExplanationCitation, AgentSessionReportedCheck, AgentSessionExplanationTarget } from './agentSessionReviewStore.js';
 import { computeAgentSessionChangeHunks } from './agentSessionChangeHunks.js';
 import { sanitizeCompleteAgentText } from './agentOutputRedactor.js';
+import { readAgentSessionMcpLogs } from './agentSessionMcpLogs.js';
 import { AgentSessionCollaborationService, type AgentSessionCollaborationGrant } from './agentSessionCollaborationService.js';
 import { AgentSessionPreparationError, type AgentSessionPreparationRecovery } from './agentSessionPreparationError.js';
 import type { WorkspaceDatabase } from '../workspaceDatabase.js';
@@ -253,8 +254,30 @@ async function dispatch(
 ): Promise<unknown> {
 	switch (method) {
 		case 'sessions.list':
-			assertAllowedKeys(params, ['limit']);
-			return { sessions: collaboration.listSessions(grant, optionalInteger(params.limit, 50)) };
+			assertAllowedKeys(params, ['afterSessionId', 'limit']);
+			return collaboration.listSessionPage(grant, { afterSessionId: params.afterSessionId === undefined ? undefined : requiredUuid(params.afterSessionId, 'afterSessionId'), limit: optionalInteger(params.limit, 50) });
+		case 'logs.read': {
+			assertAllowedKeys(params, ['targetTurnId', 'afterSequence', 'limit', 'maxCharacters', 'kind', 'severity', 'source', 'cursor']);
+			const targetTurnId = requiredUuid(params.targetTurnId, 'targetTurnId');
+			if (params.kind !== undefined && (typeof params.kind !== 'string' || !['terminal', 'log'].includes(params.kind))) { throw new Error('Transcript kind filter is invalid.'); }
+			if (params.severity !== undefined && (typeof params.severity !== 'string' || !['debug', 'info', 'warning', 'error'].includes(params.severity))) { throw new Error('Transcript severity filter is invalid.'); }
+			if (params.source !== undefined && (typeof params.source !== 'string' || !['pty', 'provider', 'host', 'workspace'].includes(params.source))) { throw new Error('Transcript source filter is invalid.'); }
+			const authorizeRead = () => {
+				if (!isActive() || signal.aborted) { throw new Error('The session collaboration capability is revoked, invalid, or cancelled.'); }
+				collaboration.listSessions(grant, 1);
+			};
+			return readAgentSessionMcpLogs((_afterSequence, options) => {
+				authorizeRead();
+				return collaboration.readTranscriptPage(grant, targetTurnId, options);
+			}, {
+				projectId: grant.projectId, sessionId: grant.sessionId, turnId: targetTurnId,
+				afterSequence: params.afterSequence === undefined ? undefined : requiredInteger(params.afterSequence, 'afterSequence'),
+				limit: optionalInteger(params.limit, 20), maxCharacters: optionalInteger(params.maxCharacters, 1_000),
+				kind: params.kind as 'terminal' | 'log' | undefined, severity: params.severity as 'debug' | 'info' | 'warning' | 'error' | undefined,
+				source: params.source as 'pty' | 'provider' | 'host' | 'workspace' | undefined,
+				cursor: params.cursor === undefined ? undefined : requiredString(params.cursor, 'cursor'),
+			}, knownSecrets, authorizeRead);
+		}
 		case 'messages.send':
 			assertAllowedKeys(params, ['recipientSessionId', 'idempotencyKey', 'body']);
 			return { message: collaboration.sendMessage(grant, {
