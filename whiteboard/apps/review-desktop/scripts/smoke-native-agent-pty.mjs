@@ -690,11 +690,13 @@ try {
   const naturalSession = await createSession('Service natural exit');
   const naturalPreview = await previewSession(naturalSession);
   const naturalTurn = await service.start({ projectId: project.id, sessionId: naturalSession.id, ticketId: naturalPreview.ticketId });
+
   const beforeAttachmentPage = await until(() => {
     const page = serviceDatabase.agentSessionTranscripts.readPage(project.id, naturalSession.id, naturalTurn.id);
 
     return page.entries.some(entry => entry.kind === 'terminal' && entry.text.includes('READY')) ? page : false;
   }, 'first PTY output durable before any renderer attaches');
+
   assert.ok(beforeAttachmentPage.entries.some(entry => entry.kind === 'terminal' && entry.text.includes('READY')),
     'The first PTY output must be durable before any renderer attaches.');
   await recordOwnedIdentity(naturalTurn.id, 'service-natural');

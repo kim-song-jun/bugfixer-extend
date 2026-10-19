@@ -3504,6 +3504,7 @@ async function seedReviewedPublication(database, fixture) {
   const title = '[CI 전용] 로컬 병합 결과 검토 (외부 게시 없음)';
   const body = '격리된 CI SQLite의 표시용 fixture입니다. 문구는 합성된 에이전트 초안이며 실제 모델은 실행하지 않았습니다. GitHub 계정 조회, 네트워크 게시, 사람의 네이티브 승인은 수행하지 않았습니다.';
   const prTextScope = { projectId: merge.projectId, sessionId: merge.sessionId, targetTurnId: merge.turnId };
+
   const prTextRevision = database.agentSessionPrTexts.appendGeneratedRevision({
     scope: prTextScope,
     expectedRevision: 0,
@@ -3512,6 +3513,7 @@ async function seedReviewedPublication(database, fixture) {
     sanitizedCompleteAgentText: { title, body },
     knownSecrets: [],
   });
+
   const textRevision = {
     scope: prTextScope,
     revision: prTextRevision.revision,
@@ -3640,8 +3642,10 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
 
   await titleInput.focus();
   await titleInput.press('Tab');
+
   const textKeyboardFocus = await prText.evaluate(element => {
     const active = document.activeElement;
+
     return {
       inside: !!active && element.contains(active),
       bodyFocused: active?.getAttribute('aria-label') === 'PR 설명',
@@ -3649,11 +3653,13 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
       label: active?.getAttribute('aria-label') ?? '',
     };
   });
+
   assert.equal(textKeyboardFocus.inside, true, 'Keyboard navigation must remain within the PR text editor');
   assert.equal(textKeyboardFocus.bodyFocused, true, 'Tab from the title must move focus to the PR description');
   assert.equal(textKeyboardFocus.visible, true, 'Keyboard focus must remain visibly indicated in the editor');
 
   const disclosures = prText.locator('details.ai-session-pr-text__details');
+
   assert.ok(await disclosures.count() > 0, 'Execution details must be available in a native disclosure');
   assert.equal(await disclosures.evaluateAll(items => items.every(item => !item.open)), true, 'Technical execution details must remain folded by default');
 
@@ -3663,6 +3669,7 @@ async function verifyPublicationReview(page, fixture, tag, screenshots, viewport
       { expectedWidth: width, expectedHeight: height });
     await verifyTheme(page, tag === 'dark', `pr-text-${tag}-${width}`);
     await prText.evaluate(element => element.scrollIntoView({ block: 'end' }));
+
     const textLayout = await prText.evaluate(element => {
       const bounds = element.getBoundingClientRect();
       const title = element.querySelector('[aria-label="PR 제목"]');

@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:net';
-import { chmodSync, closeSync, constants as fsConstants, createReadStream, fstatSync, lstatSync, openSync, readSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, writeSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 
@@ -194,8 +194,11 @@ async function main() {
 
   if (config.ownerLifetime) {
     const ownerLifetimeInfo = fstatSync(6);
+
     if (!ownerLifetimeInfo.isFIFO() && !ownerLifetimeInfo.isSocket()) throw new Error('invalid owner-lifetime descriptor');
+
     const ownerLifetime = createReadStream('', { fd: 6, autoClose: true });
+
     ownerLifetime.on('end', () => {
       diagnostic('application owner exited; terminating the owned provider group');
       beginCancellation();
