@@ -52,3 +52,24 @@
 .ai-session-changes__revision p { margin: 0 0 4px; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
 .ai-session-changes__revision p:first-child { color: var(--vscode-foreground); }
 @media (max-width: 600px) { .ai-session-changes__file { align-items: flex-start; flex-direction: column; } }
+.ai-session-publication { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding-block: 12px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-publication h4, .ai-session-publication h5 { margin: 0; color: var(--vscode-foreground); font-size: 13px; font-weight: 600; }
+.ai-session-publication__note, .ai-session-publication__status, .ai-session-publication__empty, .ai-session-publication__facts, .ai-session-publication__error, .ai-session-publication__warning { margin: 0; overflow-wrap: anywhere; }
+.ai-session-publication__note, .ai-session-publication__empty { color: var(--vscode-descriptionForeground); }
+.ai-session-publication__facts { color: var(--vscode-foreground); }
+.ai-session-publication__status { color: var(--vscode-descriptionForeground); }
+.ai-session-publication__error, .ai-session-publication__warning { color: var(--vscode-errorForeground); }
+.ai-session-publication__field { display: flex; flex-direction: column; gap: 5px; color: var(--vscode-foreground); }
+.ai-session-publication__field select, .ai-session-publication__input { width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 2px; font: inherit; }
+.ai-session-publication__field textarea { min-height: 88px; resize: vertical; }
+.ai-session-publication__field select:focus-visible, .ai-session-publication__input:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-publication__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.ai-session-publication__history, .ai-session-publication__paths, .ai-session-publication__events { display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.ai-session-publication__history .ai-session-changes__button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.ai-session-publication__history .ai-session-changes__button[aria-pressed="true"] { border-color: var(--vscode-focusBorder); }
+.ai-session-publication__detail { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
+.ai-session-publication__paths li, .ai-session-publication__event { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding-block: 5px; border-bottom: 1px solid var(--vscode-panel-border); overflow-wrap: anywhere; }
+.ai-session-publication__paths code { color: var(--vscode-foreground); }
+.ai-session-publication__diff { max-width: 100%; max-height: 360px; overflow: auto; margin: 0; padding: 8px; color: var(--vscode-editor-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); font: 12px/1.5 var(--vscode-editor-font-family, ui-monospace, monospace); white-space: pre; }
+.ai-session-publication__diff:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+.ai-session-publication__event a { width: fit-content; color: var(--vscode-textLink-foreground); }

@@ -12,11 +12,12 @@ import type {
 	WorkspaceAgentMergePrepareInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput,
 } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
 import { AGENT_SESSION_MERGE_PROPOSAL_PAGE_LIMIT as MERGE_PAGE_SIZE } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
+import { createSessionPublication, type SessionPublicationActions } from './sessionPublication.js';
 import './sessionChanges.css';
 
 export interface SessionChangesKnowledgeReference extends WorkspaceAgentExplanationCitationDTO { readonly label: string; }
 export interface SessionChangesContext { readonly projectId: string; readonly sessionId: string; readonly turnId: string; readonly knowledgeReferences: readonly SessionChangesKnowledgeReference[]; }
-export interface SessionChangesActions {
+export interface SessionChangesActions extends SessionPublicationActions {
 	readonly latest: () => Promise<WorkspaceAgentChangeEvidenceDTO | null>;
 	readonly list: (beforeVersion: number, limit: number) => Promise<WorkspaceAgentChangeEvidencePageDTO>;
 	readonly file: (evidence: WorkspaceAgentChangeEvidenceDTO, path: string) => Promise<WorkspaceAgentChangeFileDTO | null>;
@@ -47,6 +48,7 @@ const PAGE_SIZE = 50;
 
 export function createSessionChanges(parent: HTMLElement, context: SessionChangesContext, actions: SessionChangesActions): SessionChangesController {
 	parent.classList.add('ai-session-changes');
+	const publication = createSessionPublication();
 	let currentContext = context;
 	let currentActions = actions;
 	let snapshots: WorkspaceAgentChangeEvidenceDTO[] = [];
@@ -401,7 +403,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 				const row = document.createElement('li');
 				const select = button(`v${item.revision} · ${mergeStateLabel(item.state)} · ${item.id}`); select.dataset.focusKey = `merge-proposal:${item.id}`;
 				select.setAttribute('aria-pressed', String(item.id === selectedMergeProposalId)); select.disabled = mergeBusy || mergeLoading;
-				select.addEventListener('click', () => { if (mergeBusy || mergeLoading) { return; } selectedMergeProposalId = item.id; mergeError = undefined; mergeNotice = undefined; render(); });
+				select.addEventListener('click', () => { if (mergeBusy || mergeLoading) { return; } selectMergeProposal(item.id); mergeError = undefined; mergeNotice = undefined; render(); });
 				row.appendChild(select); list.appendChild(row);
 			}
 			section.appendChild(list);
@@ -495,6 +497,16 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			const reconcile = button(mergeBusy ? '상태 확인 중…' : '병합 적용 상태 복구 확인'); reconcile.dataset.focusKey = 'reconcile-merge-proposal'; reconcile.disabled = mergeBusy || commitBusy || !sourceMatches; reconcile.addEventListener('click', () => void reconcileMergeProposal(proposal)); controls.appendChild(reconcile);
 		}
 		if (proposal.state === 'conflict') { appendText(detail, 'ai-session-changes__message', '충돌 작업 폴더의 파일을 수정하고 Git에 스테이징한 뒤 새 제안을 준비하세요. 수정 결과 전체를 다시 검토하고 승인해야 적용됩니다.'); }
+		if (proposal.state === 'merged') {
+			const contextAtRender = currentContext;
+			const evidenceAtRender = selected;
+			const mergeRequestAtRender = mergeGeneration;
+			const commitRequestAtRender = commitGeneration;
+			const publicationSourceIsCurrent = (): boolean => !!evidenceAtRender && !disposed && visible && selectedMergeProposalId === proposal.id && proposal.state === 'merged' && sourceMatches &&
+				isMergeCurrent(mergeRequestAtRender, commitRequestAtRender, contextAtRender, evidenceAtRender, commitProposal.id) &&
+				mergeWindow.some(item => item.id === proposal.id && item.state === 'merged' && item.fingerprint === proposal.fingerprint);
+			publication.render(detail, currentContext, currentActions, proposal, publicationSourceIsCurrent, render);
+		}
 		detail.appendChild(controls); parentNode.appendChild(detail);
 	};
 
@@ -508,7 +520,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			if (!isCurrentRequest()) { return; }
 			assertMergePage(latestPage, requested, 0);
 			mergeWindow = [...latestPage.proposals]; mergeAfterRevision = latestPage.nextRevision; mergeHasMore = latestPage.hasMore; mergeLatestWindow = !latestPage.hasMore; mergeInitialized = true;
-			selectedMergeProposalId = mergeWindow.at(-1)?.id;
+			selectMergeProposal(mergeWindow.at(-1)?.id);
 		} catch (error) { if (isCurrentRequest()) { mergeError = describe(error); mergeInitialized = false; } }
 		finally { if (isCurrentRequest()) { mergeLoading = false; render(); } }
 	};
@@ -523,7 +535,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			if (!isCurrentRequest()) { return; }
 			assertMergePage(page, requested, afterRevision);
 			mergeWindow = [...page.proposals]; mergeAfterRevision = page.nextRevision; mergeHasMore = page.hasMore; mergeLatestWindow = !page.hasMore; mergeInitialized = true;
-			selectedMergeProposalId = selectedId && mergeWindow.some(item => item.id === selectedId) ? selectedId : mergeWindow.at(-1)?.id;
+			selectMergeProposal(selectedId && mergeWindow.some(item => item.id === selectedId) ? selectedId : mergeWindow.at(-1)?.id);
 			mergeNotice = undefined;
 		} catch (error) { if (isCurrentRequest()) { mergeError = describe(error); } }
 		finally { if (isCurrentRequest()) { mergeLoading = false; render(); } }
@@ -541,13 +553,13 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 			assertMergeProposal(proposal, requested, commitProposal);
 			if ((proposal.resolution?.proposalId ?? undefined) !== resolutionOfProposalId) { throw new Error('새 제안이 선택한 충돌 해결 작업과 일치하지 않습니다.'); }
 			mergeNotice = '병합 제안을 저장했습니다. 사람 승인 전에는 적용되지 않습니다.';
-			mergeWindow = [proposal]; mergeAfterRevision = proposal.revision; mergeHasMore = proposal.revision > 1; mergeLatestWindow = true; mergeInitialized = true; selectedMergeProposalId = proposal.id;
+			mergeWindow = [proposal]; mergeAfterRevision = proposal.revision; mergeHasMore = proposal.revision > 1; mergeLatestWindow = true; mergeInitialized = true; selectMergeProposal(proposal.id);
 			const pageStart = Math.max(0, proposal.revision - MERGE_PAGE_SIZE);
 			try {
 				const page = await source.listMergeProposals(pageStart, MERGE_PAGE_SIZE);
 				if (!isCurrentRequest()) { return; }
 				assertMergePage(page, requested, pageStart);
-				mergeWindow = [...page.proposals]; mergeAfterRevision = page.nextRevision; mergeHasMore = page.hasMore; mergeLatestWindow = true; selectedMergeProposalId = proposal.id;
+				mergeWindow = [...page.proposals]; mergeAfterRevision = page.nextRevision; mergeHasMore = page.hasMore; mergeLatestWindow = true; selectMergeProposal(proposal.id);
 			} catch (error) { if (isCurrentRequest()) { mergeError = `제안은 저장됐지만 기록 목록을 새로고침하지 못했습니다: ${describe(error)}`; } }
 		} catch (error) { if (isCurrentRequest()) { mergeError = `${describe(error)} 병합 제안 기록을 다시 확인하세요.`; } }
 		finally { if (isCurrentRequest()) { mergeBusy = false; render(); } }
@@ -605,7 +617,7 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 	};
 
 	function updateMergeProposal(proposal: AgentSessionMergeProposalDTO): void {
-		mergeWindow = mergeWindow.map(item => item.id === proposal.id ? proposal : item); selectedMergeProposalId = proposal.id;
+		mergeWindow = mergeWindow.map(item => item.id === proposal.id ? proposal : item); selectMergeProposal(proposal.id);
 	}
 
 	const toggleCommitPath = (evidence: WorkspaceAgentChangeEvidenceDTO, path: string, checked: boolean): void => {
@@ -942,15 +954,16 @@ export function createSessionChanges(parent: HTMLElement, context: SessionChange
 	}
 	function clearFileSelection(): void { rememberDraft(); activeDraftKey = undefined; fileGeneration++; selectedPath = undefined; fileData = undefined; hunkData = undefined; fileLoading = false; fileError = undefined; selectedHunkId = null; explanation = null; explanationLoading = false; explanationError = undefined; explanationNotice = undefined; reloadRevisionAvailable = false; expectedRevision = 0; what = ''; why = ''; citations = []; dirty = false; revisions = []; hasMoreRevisions = false; latestRevisionWindow = true; saving = false; resetCommitReview(); }
 	function resetCommitReview(): void { commitGeneration++; selectedCommitPaths = new Set(); commitExplanations = new Map(); commitMessage = ''; commitBusy = false; commitError = undefined; commitNotice = undefined; proposalWindow = []; selectedProposalId = undefined; proposalAfterRevision = 0; proposalHasMore = false; proposalLoading = false; proposalInitialized = false; proposalError = undefined; proposalDetails = new Map(); proposalDetailsLoading = false; proposalDetailsError = undefined; proposalDetailsGeneration++; resetMergeReview(); }
-	function resetMergeReview(): void { mergeGeneration++; mergeWindow = []; selectedMergeProposalId = undefined; mergeAfterRevision = 0; mergeHasMore = false; mergeLatestWindow = true; mergeInitialized = false; mergeLoading = false; mergeBusy = false; mergeError = undefined; mergeNotice = undefined; mergeCommitProposalId = undefined; }
+	function selectMergeProposal(id: string | undefined): void { if (selectedMergeProposalId !== id) { publication.invalidate(); } selectedMergeProposalId = id; }
+	function resetMergeReview(): void { publication.invalidate(); mergeGeneration++; mergeWindow = []; selectedMergeProposalId = undefined; mergeAfterRevision = 0; mergeHasMore = false; mergeLatestWindow = true; mergeInitialized = false; mergeLoading = false; mergeBusy = false; mergeError = undefined; mergeNotice = undefined; mergeCommitProposalId = undefined; }
 	function isCommitCurrent(request: number, requested: SessionChangesContext, evidence: WorkspaceAgentChangeEvidenceDTO): boolean { return !disposed && request === commitGeneration && requested === currentContext && evidence === selected; }
 	function isMergeCurrent(request: number, commitRequest: number, requested: SessionChangesContext, evidence: WorkspaceAgentChangeEvidenceDTO, sourceProposalId: string): boolean { return !disposed && request === mergeGeneration && commitRequest === commitGeneration && requested === currentContext && evidence === selected && mergeCommitProposalId === sourceProposalId; }
 
 	return {
-		setContext(next, nextActions) { if (next.projectId === currentContext.projectId && next.sessionId === currentContext.sessionId && next.turnId === currentContext.turnId) { currentActions = nextActions; currentContext = next; return; } currentContext = next; currentActions = nextActions; generation++; loading = false; snapshots = []; selected = undefined; beforeVersion = 0; hasMore = true; latestWindow = true; errorText = undefined; clearFileSelection(); if (visible) { void loadLatest(); } else { render(); } },
-		setVisible(next) { visible = next; if (next && !snapshots.length && !loading) { void loadLatest(); } },
+		setContext(next, nextActions) { if (next.projectId === currentContext.projectId && next.sessionId === currentContext.sessionId && next.turnId === currentContext.turnId) { currentActions = nextActions; currentContext = next; return; } publication.invalidate(); currentContext = next; currentActions = nextActions; generation++; loading = false; snapshots = []; selected = undefined; beforeVersion = 0; hasMore = true; latestWindow = true; errorText = undefined; clearFileSelection(); if (visible) { void loadLatest(); } else { render(); } },
+		setVisible(next) { if (visible !== next) { publication.invalidate(); } visible = next; if (next) { if (!snapshots.length && !loading) { void loadLatest(); } else { render(); } } },
 		refresh() { void loadLatest(); },
-		dispose() { disposed = true; generation++; fileGeneration++; parent.replaceChildren(); },
+		dispose() { disposed = true; generation++; fileGeneration++; publication.dispose(); parent.replaceChildren(); },
 	};
 
 }

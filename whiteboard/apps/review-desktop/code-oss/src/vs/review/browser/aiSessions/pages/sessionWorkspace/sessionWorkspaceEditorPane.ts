@@ -40,6 +40,7 @@ import type { AgentWorkflowApprovalResult, AgentWorkflowPageDTO, AgentWorkflowPl
 import type { WorkspaceAgentChangeEvidenceDTO, WorkspaceAgentChangeEvidencePageDTO, WorkspaceAgentChangeFileDTO, WorkspaceAgentChangeHunksDTO, WorkspaceAgentExplanationDTO, WorkspaceAgentExplanationPageDTO } from '../../../../../workspace/common/workspaceAgentChangesProtocol.js';
 import type { AgentSessionIntegrationProposalDTO, WorkspaceAgentCommitPrepareInput, WorkspaceAgentCommitProposalInput, WorkspaceAgentCommitRecoveryInput } from '../../../../../workspace/common/workspaceAgentIntegrationProtocol.js';
 import type { AgentSessionMergeProposalDTO, WorkspaceAgentMergePrepareInput, WorkspaceAgentMergeProposalMutationInput, WorkspaceAgentMergeProposalPageDTO, WorkspaceAgentMergeProposalRecoveryInput } from '../../../../../workspace/common/workspaceAgentMergeProtocol.js';
+import type { AgentSessionPublicationOperationDTO, AgentSessionPublicationPageDTO, AgentSessionPublicationProposalDTO, AgentSessionPublicationPrepareInput, WorkspaceAgentPublicationAccountsDTO, WorkspaceAgentPublicationExecutionDTO, WorkspaceAgentPublicationMutationInput, WorkspaceAgentPublicationPageInput, WorkspaceAgentPublicationRecoveryInput, WorkspaceAgentPublicationScope } from '../../../../../workspace/common/workspaceAgentPublicationProtocol.js';
 import { WORKSPACE_KNOWLEDGE_CHANNEL } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import type { WorkspaceKnowledgeDTO } from '../../../../../workspace/common/workspaceKnowledgeProtocol.js';
 import { WORKSPACE_AGENT_SESSIONS_CHANNEL } from '../../../../../workspace/common/workspaceAgentSessionProtocol.js';
@@ -627,6 +628,14 @@ export class AgentSessionWorkspaceEditorPane extends EditorPane {
 			approveMergeProposal: (input: WorkspaceAgentMergeProposalMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'approveMergeProposal', input) as Promise<{ readonly approved: boolean; readonly proposal: AgentSessionMergeProposalDTO }>,
 			applyMergeProposal: (input: WorkspaceAgentMergeProposalMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'applyMergeProposal', input) as Promise<AgentSessionMergeProposalDTO>,
 			reconcileMergeProposal: (input: WorkspaceAgentMergeProposalRecoveryInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'reconcileMergeProposal', input) as Promise<AgentSessionMergeProposalDTO>,
+			listPublicationAccounts: (scope: WorkspaceAgentPublicationScope) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listPublicationAccounts', scope) as Promise<WorkspaceAgentPublicationAccountsDTO>,
+			listPublicationProposals: (input: WorkspaceAgentPublicationPageInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'listPublicationProposals', input) as Promise<AgentSessionPublicationPageDTO>,
+			preparePublicationProposal: (input: AgentSessionPublicationPrepareInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'preparePublicationProposal', input) as Promise<AgentSessionPublicationProposalDTO>,
+			approvePublicationProposal: (input: WorkspaceAgentPublicationMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'approvePublicationProposal', input) as Promise<{ readonly approved: boolean; readonly proposal: AgentSessionPublicationProposalDTO }>,
+			publishApprovedProposal: (input: WorkspaceAgentPublicationMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'publishApprovedProposal', input) as Promise<WorkspaceAgentPublicationExecutionDTO>,
+			continuePublicationOperation: (input: WorkspaceAgentPublicationRecoveryInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'continuePublicationOperation', input) as Promise<WorkspaceAgentPublicationExecutionDTO>,
+			reconcilePublicationOperation: (input: WorkspaceAgentPublicationRecoveryInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'reconcilePublicationOperation', input) as Promise<WorkspaceAgentPublicationExecutionDTO>,
+			getPublicationOperation: (input: WorkspaceAgentPublicationMutationInput) => ipcRenderer.invoke(WORKSPACE_AGENT_SESSIONS_CHANNEL, 'getPublicationOperation', input) as Promise<AgentSessionPublicationOperationDTO | null>,
 			openDiff: (evidence, path, before, after, isCurrent) => this.openChangeDiff(context, evidence, path, before, after, isCurrent),
 		};
 		if (!this.sessionChangesController) {

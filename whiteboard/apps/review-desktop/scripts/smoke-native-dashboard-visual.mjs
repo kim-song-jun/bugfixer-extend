@@ -1799,14 +1799,30 @@ try {
 
     try {
       await verifyReviewedMergeResult(mergeDatabase, fixture);
+      fixture.reviewedPublication = await seedReviewedPublication(mergeDatabase, fixture);
     } finally {
       mergeDatabase.close();
+    }
+
+    const publicationReadbackDatabase = WorkspaceDatabase.open(path.join(userData, 'workspace.db'));
+
+    try {
+      const { proposalId, operationId } = fixture.reviewedPublication;
+      const proposal = publicationReadbackDatabase.agentSessionPublications.getProposal(proposalId);
+      const operation = publicationReadbackDatabase.agentSessionPublications.getOperationForProposal(proposalId);
+      assert.equal(proposal?.fingerprint, fixture.reviewedPublication.proposalFingerprint, 'The synthetic publication proposal must survive database reopen');
+      assert.equal(operation?.id, operationId, 'A read-only Store lookup must retrieve the exact recovery operation after normal database reopen');
+      assert.equal(operation?.state, 'recoveryRequired');
+      assert.equal(operation?.events.at(-1)?.event.type, 'recoveryRequired');
+    } finally {
+      publicationReadbackDatabase.close();
     }
 
     session = await startPackaged({ executable, userData, extensions, reviewHome, descriptor: fixture.descriptorPath });
 
     try {
       await waitForExtensionReadiness(session, `reviewed-conflict-commit-${tag}`);
+      await verifyPublicationReview(session.page, fixture, tag, screenshots, viewports);
       await verifyReviewedCommitProposal(session.page, fixture, `${tag}-conflict`, screenshots, viewports, fixture.reviewedConflictCommit);
     } catch (error) {
       await captureFailure(session.page, path.join(output, `reviewed-conflict-commit-${tag}-failure.png`), diagnostics);
@@ -3211,6 +3227,175 @@ async function verifyReviewedResolutionResult(database, fixture) {
   receipt.generationId = intent.generationId;
   receipt.generationPath = generationDirectory;
   receipt.appliedThroughUi = true;
+}
+
+async function seedReviewedPublication(database, fixture) {
+  const merge = database.agentSessionMerges.getProposal(fixture.reviewedMerge.proposalId);
+  assert.ok(merge && merge.state === 'merged', 'Publication fixture must use the successful persisted local merge');
+  assert.equal(merge.fingerprint, fixture.reviewedMerge.fingerprint);
+  const outcome = merge.outcomes.at(-1);
+  const intent = merge.artifacts.find(item => item.event.phase === 'intent')?.event;
+  assert.ok(outcome?.state === 'merged' && intent, 'Publication fixture requires the exact successful merge operation and generation');
+  const sourceCommit = outcome.receipt.resultingHead;
+  const baseCommit = merge.targetHead;
+  const generationDirectory = path.resolve(fixture.reviewedCommit.managedRoot, intent.generationPath);
+  assert.equal(await realpath(generationDirectory), generationDirectory, 'Publication diff reads only the canonical owned merge generation');
+  const gitBuffer = async (...args) => {
+    const { stdout } = await execFileAsync('git', ['-C', generationDirectory, ...args], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 });
+    return Buffer.from(stdout);
+  };
+  const diffBytes = await gitBuffer('diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-color', baseCommit, sourceCommit, '--');
+  const diffText = diffBytes.toString('utf8');
+  assert.equal(Buffer.from(diffText, 'utf8').equals(diffBytes), true, 'The locally computed full diff must be canonical UTF-8');
+  assert.equal(diffText.includes('\0'), false, 'The locally computed full diff must be NUL-free');
+  const nameBytes = await gitBuffer('diff', '--name-status', '-z', '--no-ext-diff', '--no-textconv', '--no-renames', baseCommit, sourceCommit, '--');
+  const nameFields = nameBytes.toString('utf8').split('\0');
+  assert.equal(nameFields.pop(), '', 'The local diff path list must be NUL terminated');
+  const pathStatuses = { A: 'added', M: 'modified', D: 'deleted', T: 'modified' };
+  const paths = [];
+  for (let index = 0; index < nameFields.length; index += 2) {
+    const status = nameFields[index];
+    const filePath = nameFields[index + 1];
+    assert.ok(pathStatuses[status] && filePath, 'Publication diff path metadata must be complete and supported');
+    paths.push({ path: filePath, status: pathStatuses[status], previousPath: null, explanationReferences: [], checkReferences: [],
+      unknowns: ['CI fixture에는 파일별 검토 근거와 검사 결과가 연결되지 않았습니다.'] });
+  }
+  assert.ok(paths.length > 0, 'A publication review fixture must show the actual merged Git changes');
+
+  const remoteName = 'origin';
+  const accountRef = 'ci-fixture-account-ref';
+  const baseRef = 'refs/heads/main';
+  const title = '[CI 전용] 로컬 병합 결과 검토 (외부 게시 없음)';
+  const body = '격리된 CI SQLite의 표시용 fixture입니다. GitHub 계정 조회, 네트워크 게시, 사람의 네이티브 승인은 수행하지 않았습니다.';
+  const proposal = database.agentSessionPublications.createProposal({
+    projectId: merge.projectId, sessionId: merge.sessionId, turnId: merge.turnId, sourceMergeId: merge.id,
+    remoteName, baseRef, accountRef, title, body, expectedRevision: 0,
+    sourceMerge: { projectId: merge.projectId, bindingId: merge.bindingId, sessionId: merge.sessionId, turnId: merge.turnId,
+      mergeProposalId: merge.id, mergeRevision: merge.revision, mergeFingerprint: merge.fingerprint,
+      mergeOperationId: outcome.receipt.operationId, integrationOwnerId: merge.integrationOwnerId, resultCommit: sourceCommit },
+    remote: { name: remoteName, canonicalUrl: 'https://github.com/ci-fixture/publication-preview.git', host: 'github.com',
+      repositoryId: 'ci-fixture-repository-id', owner: 'ci-fixture', repository: 'publication-preview', visibility: 'private', writable: true },
+    account: { accountRef, stableId: 'ci-fixture-account-id', login: 'ci-fixture-reviewer', host: 'github.com' },
+    base: { ref: baseRef, oid: baseCommit },
+    diff: { baseCommit, headCommit: sourceCommit, text: diffText, fingerprint: createHash('sha256').update(diffBytes).digest('hex'), paths },
+  });
+  database.agentSessionPublications.recordTrustedHumanApproval(proposal.id, proposal.revision, proposal.fingerprint);
+  let operation = database.agentSessionPublications.startOperation(proposal.id, proposal.fingerprint);
+  operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'branchWriteStarted', expectedOldRemoteOid: null });
+  operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'branchObserved', oid: sourceCommit, outcome: 'created', errorCode: 'none' });
+  operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'pullRequestWriteStarted', headOid: sourceCommit });
+  operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, { type: 'pullRequestObserved', id: null, url: null,
+    repositoryId: proposal.remote.repositoryId, headRef: proposal.publicationRef, headOid: sourceCommit, baseRef, baseOid: baseCommit,
+    title, body, draft: true, outcome: 'unknown', errorCode: 'networkUncertain' });
+  operation = database.agentSessionPublications.appendEvent(operation.id, operation.revision, {
+    type: 'recoveryRequired', reason: 'uncertainWrite', pullRequestId: null, branchOid: sourceCommit,
+  });
+  assert.equal(operation.state, 'recoveryRequired');
+
+  const originalGit = async (...args) => (await execFileAsync('git', ['-C', fixture.reviewedCommit.repository, ...args])).stdout.trim();
+  assert.equal(await originalGit('rev-parse', 'HEAD'), fixture.reviewedCommit.sourceHead, 'Publication preview must not move the original checkout HEAD');
+  assert.equal(await originalGit('rev-parse', `refs/heads/bugfixer/session/${fixture.reviewedCommit.sessionId}`), fixture.reviewedCommit.resultingHead,
+    'Publication preview must preserve the already committed session ref');
+  assert.equal(createHash('sha256').update(await readFile(path.join(fixture.reviewedCommit.repository, '.git', 'index'))).digest('hex'), fixture.reviewedCommit.originalIndexSha256,
+    'Publication diff preparation must preserve the original Git index');
+  assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'selected.txt'), 'utf8'), fixture.reviewedCommit.laterSelected,
+    'Publication diff preparation must preserve the post-commit working file');
+  assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.laterUnselected,
+    'Publication diff preparation must preserve unrelated post-commit working files');
+
+  return { fixtureOnly: true, providerExecuted: false, accountDiscoveryExecuted: false, networkWritesExecuted: false,
+    nativeHumanApprovalExercised: false, approvalSource: 'Synthetic isolated SQLite approval receipt; native approval dialog was not exercised.',
+    proposalId: proposal.id, proposalFingerprint: proposal.fingerprint, operationId: operation.id, operationRevision: operation.revision,
+    operationState: operation.state, accountRef, syntheticAccountId: proposal.account.stableId, syntheticRepositoryId: proposal.remote.repositoryId,
+    remoteName, baseRef, baseOid: baseCommit, resultCommit: sourceCommit, diffText, diffFingerprint: proposal.diff.fingerprint, changedPaths: paths.map(item => item.path),
+    partialPrState: 'Unknown PR-write outcome persisted for read-only recovery review; no provider request was issued.' };
+}
+
+async function verifyPublicationReview(page, fixture, tag, screenshots, viewports) {
+  const changes = await openReviewedCommitChanges(page, fixture);
+  const publication = changes.getByRole('region', { name: 'GitHub 초안 PR', exact: true });
+  await publication.locator('.ai-session-publication__detail').waitFor();
+  const provenance = publication.locator('details.ai-session-publication__provenance');
+  await provenance.locator('summary').click();
+  await page.waitForFunction(() => document.querySelector('details.ai-session-publication__provenance')?.open === true);
+  const receipt = fixture.reviewedPublication;
+  const detail = publication.locator('.ai-session-publication__detail');
+  const detailText = await detail.innerText();
+  assert.ok(detailText.includes(receipt.proposalId), 'The selected merged source must show its real persisted publication proposal');
+  assert.ok(detailText.includes(receipt.syntheticAccountId) && detailText.includes(receipt.syntheticRepositoryId), 'Synthetic account and repository identities must be visible');
+  assert.ok(detailText.includes(receipt.diffFingerprint) && detailText.includes(receipt.resultCommit), 'The full pinned diff and exact merged result must be visible');
+  assert.ok(detailText.includes('[CI 전용]') && detailText.includes('네이티브 승인은 수행하지 않았습니다'), 'The fixture must visibly identify its synthetic approval boundary');
+  const paths = publication.getByRole('list', { name: '고정된 변경 경로와 검토 근거', exact: true });
+  await paths.waitFor();
+  assert.ok((await paths.innerText()).includes('확인되지 않음:'), 'The proposal must disclose that file-specific evidence was not supplied');
+  const fullDiff = publication.getByLabel('고정된 전체 base부터 결과까지 diff', { exact: true });
+  assert.equal(await fullDiff.textContent(), receipt.diffText, 'The renderer must retain the exact complete locally computed Git diff');
+
+  const operation = publication.getByRole('list', { name: '초안 PR 게시 단계 기록', exact: true });
+  await operation.waitFor();
+  const operationText = await operation.innerText();
+  assert.ok(operationText.includes('PR 결과 관찰') && operationText.includes('networkUncertain') && operationText.includes(receipt.resultCommit),
+    'The read-only persisted timeline must show the exact uncertain PR observation and branch head');
+  assert.ok(operationText.includes('복구 필요'), 'The persisted operation must render as recovery-required');
+  assert.equal(await publication.getByRole('link', { name: 'GitHub PR 열기', exact: true }).count(), 0, 'An unknown PR ID must not produce an external URL');
+
+  const selectedProposal = publication.locator('.ai-session-publication__history button[aria-pressed="true"]');
+  await selectedProposal.waitFor();
+  await selectedProposal.focus();
+  await selectedProposal.press('Tab');
+  const keyboardFocus = await publication.evaluate(element => {
+    const active = document.activeElement;
+    return { inside: !!active && element.contains(active), visible: !!active && active.matches(':focus-visible'),
+      label: active?.getAttribute('aria-label') ?? active?.textContent?.trim() ?? '' };
+  });
+  assert.equal(keyboardFocus.inside, true, 'Keyboard Tab from proposal history must retain focus within the review region');
+  assert.equal(keyboardFocus.visible, true, 'The review action following proposal history must show keyboard focus');
+
+  await page.setViewportSize({ width: 1440, height: 760 });
+  await page.waitForFunction(() => window.innerWidth === 1440 && window.innerHeight === 760);
+  await verifyTheme(page, tag === 'dark', `publication-${tag}-keyboard-focus`);
+  await selectedProposal.scrollIntoViewIfNeeded();
+  const focusScreenshot = path.join(output, `ai-session-publication-${tag}-1440-keyboard-focus.png`);
+  await capturePage(page, focusScreenshot);
+  screenshots.push(focusScreenshot);
+  viewports.push({ theme: tag, state: 'publication-review-keyboard-focus-1440', width: 1440, height: 760,
+    screenshot: focusScreenshot, focus: keyboardFocus, fixtureOnly: true, providerExecuted: false,
+    accountDiscoveryExecuted: false, networkWritesExecuted: false, nativeHumanApprovalExercised: false });
+
+  const captureAtViewport = async (width, height, suffix, scrollToEnd) => {
+    await page.setViewportSize({ width, height });
+    await page.waitForFunction(({ expectedWidth, expectedHeight }) => window.innerWidth === expectedWidth && window.innerHeight === expectedHeight,
+      { expectedWidth: width, expectedHeight: height });
+    await verifyTheme(page, tag === 'dark', `publication-${tag}-${width}`);
+    await publication.evaluate(element => element.scrollIntoView({ block: 'end' }));
+    const layout = await publication.evaluate(element => {
+      const bounds = element.getBoundingClientRect();
+      const timeline = element.querySelector('.ai-session-publication__events');
+      const timelineBounds = timeline?.getBoundingClientRect();
+      const changes = element.closest('.ai-session-changes');
+      const statusBar = document.querySelector('.part.statusbar')?.getBoundingClientRect();
+      const visibleBottom = statusBar && statusBar.height > 0 ? Math.min(window.innerHeight, statusBar.top) : window.innerHeight;
+      return { horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+        changesHorizontalOverflow: !!changes && changes.scrollWidth > changes.clientWidth + 1,
+        timelineReachable: !!timelineBounds && timelineBounds.width > 0 && timelineBounds.bottom <= visibleBottom + 1,
+        sectionBottomReachable: bounds.width > 0 && bounds.bottom <= visibleBottom + 1,
+        sectionTop: bounds.top, sectionBottom: bounds.bottom };
+    });
+    assert.equal(layout.horizontalOverflow, false, `Publication review must not overflow horizontally at ${tag}/${width}`);
+    assert.equal(layout.changesHorizontalOverflow, false, `The containing review panel must not overflow horizontally at ${tag}/${width}`);
+    assert.equal(layout.timelineReachable, true, `The persisted operation timeline must be reachable at ${tag}/${width}`);
+    assert.equal(layout.sectionBottomReachable, true, `The publication section must scroll to its end at ${tag}/${width}`);
+    if (!scrollToEnd) { await fullDiff.scrollIntoViewIfNeeded(); }
+    const screenshot = path.join(output, `ai-session-publication-${tag}-${suffix}.png`);
+    await capturePage(page, screenshot);
+    screenshots.push(screenshot);
+    viewports.push({ theme: tag, state: `publication-readonly-recovery-${suffix}`, width, height, screenshot, layout,
+      screenshotContent: scrollToEnd ? 'persisted-operation-receipt-at-scroll-end' : 'pinned-proposal-and-full-diff',
+      fixtureOnly: true, providerExecuted: false, accountDiscoveryExecuted: false, networkWritesExecuted: false, nativeHumanApprovalExercised: false });
+  };
+
+  await captureAtViewport(1440, 760, '1440', false);
+  await captureAtViewport(760, 820, '760', true);
 }
 
 function compareCodeUnits(left, right) {
