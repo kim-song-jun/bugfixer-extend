@@ -288,6 +288,7 @@ function verifyLiveIdentity(expected) {
       pgid: identity.pgid, started: identity.started, stat: identity.stat,
       commandSha256: createHash('sha256').update(identity.command).digest('hex'),
     });
+
     receipt.cleanup.push({ kind: 'process-identity-mismatch', pid: expected.pid, expected: describe(expected), observed: describe(current) });
     throw new Error(`PID ${expected.pid} is live but its process start, group, or command identity changed; refusing to signal it.`);
   }
