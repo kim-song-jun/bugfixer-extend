@@ -377,7 +377,7 @@ jobs:
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         timeout-minutes: 3
         working-directory: whiteboard/apps/review-desktop
-        run: node --test --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
+        run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
 
       - name: Native project dashboard smoke
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}

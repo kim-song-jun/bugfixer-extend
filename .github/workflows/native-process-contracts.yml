@@ -1,0 +1,46 @@
+name: Native process contracts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-process-contracts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-process-contracts:
+    name: macOS process identity cleanup
+    runs-on: macos-15
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: whiteboard/apps/review-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Code OSS Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: whiteboard/apps/review-desktop/code-oss/.nvmrc
+
+      - name: Record macOS resources before process contracts
+        run: |
+          uptime
+          sysctl -n hw.ncpu
+          vm_stat
+          sysctl vm.swapusage
+          ps -axo comm= | awk '/node/ {node++} /Chrome|Chromium|Firefox|Whiteboard/ {browser++} END {print "node=" node+0, "browser=" browser+0}'
+
+      - name: Native app process identity cleanup contracts
+        timeout-minutes: 3
+        run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
+
+      - name: Record remaining Node process identities
+        if: ${{ always() }}
+        run: ps -axo pid=,ppid=,pgid=,stat=,comm= | awk '/node/ {print}'

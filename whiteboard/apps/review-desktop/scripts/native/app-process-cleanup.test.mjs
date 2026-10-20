@@ -25,6 +25,46 @@ async function waitFor(check, description, timeoutMs) {
   throw new Error(`Timed out waiting for ${description}`);
 }
 
+function collectFailureMessages(error, messages = []) {
+  if (error instanceof AggregateError) {
+    for (const nestedError of error.errors) collectFailureMessages(nestedError, messages);
+
+    return messages;
+  }
+
+  if (error instanceof Error) {
+    messages.push(error.message);
+
+    return messages;
+  }
+
+  messages.push('A non-Error failure occurred.');
+
+  return messages;
+}
+
+function writeFailureSummary(failures) {
+  const allMessages = failures.flatMap(error => collectFailureMessages(error));
+  const messageLimit = 16;
+  const characterLimit = 512;
+
+  const messages = allMessages.slice(0, messageLimit).map(message => {
+    if (/(?:Command failed:|\bspawn\s)/u.test(message)) return 'A bounded child-process operation failed.';
+
+    return message.replace(/[\r\n\t]/gu, ' ').slice(0, characterLimit);
+  });
+
+  const truncatedMessageCount = allMessages.slice(0, messageLimit)
+    .filter(message => message.length > characterLimit).length;
+
+  process.stderr.write(`${JSON.stringify({
+    event: 'native-owned-process-cleanup-failure',
+    messages,
+    omittedMessageCount: Math.max(0, allMessages.length - messageLimit),
+    truncatedMessageCount,
+  })}\n`);
+}
+
 function createOutputLines(stream, child) {
   let buffer = '';
   const lines = [];
@@ -423,5 +463,8 @@ setInterval(() => {}, 1000);`;
     }
   }
 
-  if (failures.length > 0) throw new AggregateError(failures, 'Native owned-process cleanup contract failed.');
+  if (failures.length > 0) {
+    writeFailureSummary(failures);
+    throw new AggregateError(failures, 'Native owned-process cleanup contract failed.');
+  }
 });
