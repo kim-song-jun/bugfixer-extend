@@ -2266,9 +2266,9 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
 
   await captureOnboardingViewport(page, guide, tag, 'project-first-run', screenshots, viewports);
 
-  const next = guide.getByRole('button', { name: '다음 단계', exact: true });
-
-  await next.focus();
+  await guide.getByRole('button', { name: '건너뛰기', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-onboarding-focus')), 'next', 'Keyboard tab order must reach the next onboarding step');
   await page.keyboard.press('Enter');
   await guide.getByRole('heading', { name: '설치된 CLI와 로컬 프로필 확인', exact: true }).waitFor();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
@@ -2288,6 +2288,36 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
   await toggle.click();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
   assert.equal(await guide.locator('.ai-session-onboarding__inspection').innerText(), '확인을 누르면 설치 상태와 버전을 조회합니다. 이 조회는 로그인이나 모델 실행을 검증하지 않습니다.', 'Resuming must return to the same uninspected step');
+
+  await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 3/5 · 세션·모델', { exact: true }).waitFor();
+  await guide.getByRole('button', { name: `“${fixture.taskTitle}” 작업으로 Codex 세션 만들기`, exact: true }).waitFor();
+  await guide.getByText('이 프로젝트에는 아직 저장된 AI 세션이 없습니다.', { exact: true }).waitFor();
+  await captureOnboardingViewport(page, guide, tag, 'no-saved-session', screenshots, viewports);
+
+  await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 4/5 · 작업 범위', { exact: true }).waitFor();
+  await guide.getByText('실제 세션을 선택하거나 기존 작업으로 세션을 만든 뒤 범위를 확인할 수 있습니다.', { exact: true }).waitFor();
+  await captureOnboardingViewport(page, guide, tag, 'session-not-selected', screenshots, viewports);
+
+  await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 5/5 · 첫 작업', { exact: true }).waitFor();
+  await guide.getByText('아직 선택된 실제 실행 기록이 없습니다. 실행 미리보기에서 범위를 확인한 뒤 직접 시작해야 합니다.', { exact: true }).waitFor();
+  for (const guidance of [
+    '공유 범위 · 세션은 프로젝트 안에서 저장됩니다. MCP 도구의 제공자별 범위도 미리보기 문구로 확인하세요.',
+    '로그 · 터미널 출력과 구조화 로그를 구분해 볼 수 있습니다. 로그 마스킹은 모든 민감 정보를 완벽히 제거한다고 보장하지 않으므로 공유 전 직접 확인하세요.',
+    '알림 · 앱 안의 프로젝트 알림을 확인할 수 있습니다. 운영 체제 알림 권한은 선택 사항이며, 권한이 없어도 저장된 알림 목록을 열 수 있습니다.',
+    '중단과 복구 · 현재 실행한 정확한 세션과 실행만 중단하세요. 종료 정리가 확인되지 않거나 복구가 필요하면 상태와 근거를 확인한 뒤 다시 시도하세요.',
+    '검토와 PR · 변경을 검토하고 별도 승인 후 통합하세요. PR 게시도 별도 승인이 필요합니다.',
+  ]) {
+    await guide.getByText(guidance, { exact: true }).waitFor();
+  }
+  await captureOnboardingViewport(page, guide, tag, 'no-selected-turn', screenshots, viewports);
+
+  await guide.getByRole('button', { name: '이전 단계', exact: true }).click();
+  await guide.getByRole('button', { name: '이전 단계', exact: true }).click();
+  await guide.getByRole('button', { name: '이전 단계', exact: true }).click();
+  await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
   await guide.getByRole('button', { name: '건너뛰기', exact: true }).click();
   await guide.waitFor({ state: 'hidden' });
 
@@ -4348,6 +4378,10 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
     workspaceMode: 'sharedFolder',
   });
 
+  assert.deepEqual([sender.projectId, sender.bindingId, sender.taskId], [fixture.projectId, fixture.bindingId, fixture.taskId], 'The sender fixture must use the exact project, binding, and task scope');
+
+  assert.deepEqual([recipient.projectId, recipient.bindingId, recipient.taskId], [sender.projectId, sender.bindingId, sender.taskId], 'The recipient fixture must share the sender project, binding, and task scope for the two-node workflow');
+
   const permissionPolicy = { mode: 'read-only', approval: 'never' };
 
   const snapshot = {
@@ -5303,6 +5337,16 @@ async function verifyAiSessionWorkflow(page, fixture, tag, screenshots, viewport
 
   const workspace = page.locator('.ai-session-workspace');
 
+  const senderSessionRow = workspace.locator(`button[data-session-select="${fixture.mailbox.senderSessionId}"]`);
+
+  await senderSessionRow.waitFor({ state: 'visible' });
+
+  await senderSessionRow.click();
+
+  await workspace.getByRole('heading', { name: fixture.mailbox.senderName, exact: true }).waitFor();
+
+  assert.equal(await senderSessionRow.getAttribute('aria-current'), 'true', 'The workflow journey must explicitly select the mailbox sender session before entering its task-scoped plan');
+
   const workflowTab = workspace.getByRole('tab', { name: '위임', exact: true });
 
   await workflowTab.focus();
@@ -5313,13 +5357,19 @@ async function verifyAiSessionWorkflow(page, fixture, tag, screenshots, viewport
 
   const panel = workspace.locator('.ai-session__workflow-panel');
 
+  const workflowScope = panel.locator('.ai-session-workflows__editor > .ai-session-workflows__muted').first();
+
+  await workflowScope.waitFor({ state: 'visible' });
+
+  assert.equal(await workflowScope.innerText(), `작업 ID ${fixture.taskId} · 바인딩 ${fixture.bindingId} · 프로젝트 범위`, 'The workflow candidates must stay within the selected sender task and binding');
+
   const rows = panel.locator('.ai-session-workflows__node-row');
 
   await page.waitForFunction(() => document.querySelectorAll('.ai-session-workflows__node-row').length >= 2);
 
-  const senderRow = rows.filter({ hasText: fixture.mailbox.senderName });
+  const senderRow = panel.locator(`.ai-session-workflows__node-row:has(> input[data-control-key="include-${fixture.mailbox.senderSessionId}"])`);
 
-  const recipientRow = rows.filter({ hasText: fixture.mailbox.recipientName });
+  const recipientRow = panel.locator(`.ai-session-workflows__node-row:has(> input[data-control-key="include-${fixture.mailbox.recipientSessionId}"])`);
 
   await senderRow.getByRole('checkbox', { name: `${fixture.mailbox.senderName} 세션 포함`, exact: true }).check();
 
