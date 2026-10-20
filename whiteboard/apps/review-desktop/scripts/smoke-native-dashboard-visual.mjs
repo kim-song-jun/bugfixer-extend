@@ -2303,6 +2303,7 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
   await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 5/5 · 첫 작업', { exact: true }).waitFor();
   await guide.getByText('아직 선택된 실제 실행 기록이 없습니다. 실행 미리보기에서 범위를 확인한 뒤 직접 시작해야 합니다.', { exact: true }).waitFor();
+
   for (const guidance of [
     '공유 범위 · 세션은 프로젝트 안에서 저장됩니다. MCP 도구의 제공자별 범위도 미리보기 문구로 확인하세요.',
     '로그 · 터미널 출력과 구조화 로그를 구분해 볼 수 있습니다. 로그 마스킹은 모든 민감 정보를 완벽히 제거한다고 보장하지 않으므로 공유 전 직접 확인하세요.',
@@ -2312,6 +2313,7 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
   ]) {
     await guide.getByText(guidance, { exact: true }).waitFor();
   }
+
   await captureOnboardingViewport(page, guide, tag, 'no-selected-turn', screenshots, viewports);
 
   await guide.getByRole('button', { name: '이전 단계', exact: true }).click();
