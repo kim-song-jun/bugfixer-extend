@@ -115,6 +115,7 @@ function run(argv) {
       ["pointer", "long"],
     ]);
     ObjC.bindFunction("CFArrayGetTypeID", ["unsigned long", []]);
+    ObjC.bindFunction("AXUIElementGetPid", ["int", ["pointer", "pointer"]]);
     AX = {
       windows: $("AXWindows"),
       role: $("AXRole"),
