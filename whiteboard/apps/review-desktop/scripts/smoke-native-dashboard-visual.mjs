@@ -31,6 +31,7 @@ const diagnostics = {
   apps: [],
   onboardingCliInspections: [],
   onboardingCliProfilePreflights: [],
+  nativeAccessibilityProbe: null,
   console: [],
   consoleRecords: [],
   consoleCorrelations: [],
@@ -1281,6 +1282,95 @@ async function exitedWithin(exited, timeoutMs) {
   }
 }
 
+async function runNativeAccessibilityProbe() {
+  assert.equal(process.env.GITHUB_ACTIONS, 'true', 'The native accessibility probe is CI-only');
+  assert.equal(process.platform, 'darwin', 'The native accessibility probe requires the hosted macOS runner');
+
+  const executable = '/usr/bin/osascript';
+  const script = fileURLToPath(new URL('./native-accessibility-probe.js', import.meta.url));
+  const args = ['-l', 'JavaScript', script];
+  const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const observation = {
+    pid: child.pid ?? null,
+    ppid: process.pid,
+    command: executable,
+    args,
+    cwd: process.cwd(),
+    startedAt: new Date().toISOString(),
+    exitObservedAt: null,
+    exit: null,
+    cleanupStatus: 'pending',
+    stdoutBytes: 0,
+    stderrBytes: 0,
+  };
+  diagnostics.nativeAccessibilityProbe = observation;
+
+  let stdout = '';
+  let spawnError;
+  child.once('error', error => { spawnError = error; });
+  child.stdout.on('data', chunk => {
+    observation.stdoutBytes += chunk.length;
+    if (stdout.length < 4096) stdout += chunk.toString('utf8').slice(0, 4096 - stdout.length);
+  });
+  child.stderr.on('data', chunk => { observation.stderrBytes += chunk.length; });
+
+  const exited = new Promise(resolve => child.once('close', (code, signal) => {
+    observation.exitObservedAt = new Date().toISOString();
+    observation.exit = { code, signal };
+    resolve(observation.exit);
+  }));
+
+  try {
+    const finished = await exitedWithin(exited, 5_000);
+
+    if (!finished) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      let closed = await exitedWithin(exited, 1_000);
+
+      if (!closed && child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+        closed = await exitedWithin(exited, 1_000);
+      }
+
+      if (!closed) throw new Error('Owned osascript AX probe did not exit after bounded cleanup');
+      observation.cleanupStatus = 'terminated-after-timeout';
+      throw new Error('Owned osascript AX probe exceeded its five-second bound');
+    }
+
+    if (spawnError) throw new Error('Owned osascript AX probe could not start');
+    if (observation.exit?.code !== 0 || observation.exit.signal !== null) throw new Error('Owned osascript AX probe failed');
+    if (observation.stdoutBytes > 4096 || observation.stderrBytes > 4096) throw new Error('Owned osascript AX probe exceeded its output bound');
+
+    const result = JSON.parse(stdout.trim());
+    if (Object.keys(result).length === 1 && Object.hasOwn(result, 'failurePhase')) {
+      assert.ok(['IMPORT', 'OPTIONS', 'QUERY', 'VALUE', 'SERIALIZE'].includes(result.failurePhase), 'The JXA probe failure must identify an allowlisted phase');
+      observation.failurePhase = result.failurePhase;
+      observation.failureCode = 'jxa-phase-failed';
+      throw new Error('Owned osascript AX probe failed during a recorded phase');
+    }
+
+    assert.deepEqual(Object.keys(result).sort(), [
+      'currentClientTrusted', 'currentHelperPID', 'nativePickerFlowExercised', 'promptRequested',
+    ].sort(), 'The JXA probe must emit only its allowlisted receipt fields');
+    assert.equal(result.currentHelperPID, child.pid, 'AX trust must be reported for this exact owned osascript process');
+    assert.equal(typeof result.currentClientTrusted, 'boolean', 'The current osascript process must report a boolean AX trust result');
+    assert.equal(result.promptRequested, false);
+    assert.equal(result.nativePickerFlowExercised, false);
+    observation.currentClientTrusted = result.currentClientTrusted;
+    observation.promptRequested = false;
+    observation.nativePickerFlowExercised = false;
+    observation.cleanupStatus = 'exit-observed';
+  } catch (error) {
+    if (observation.cleanupStatus === 'pending') observation.cleanupStatus = observation.exitObservedAt ? 'exit-observed' : 'exit-unverified';
+    observation.failureCode ??= error?.message === 'Owned osascript AX probe exceeded its five-second bound'
+      ? 'probe-timeout'
+      : error?.message === 'Owned osascript AX probe did not exit after bounded cleanup'
+        ? 'cleanup-unverified'
+        : 'probe-failed';
+    throw error;
+  }
+}
+
 async function isPortClosed(port) {
   const socket = net.createConnection({ host: '127.0.0.1', port });
 
@@ -1437,6 +1527,8 @@ try {
   const { computeAgentSessionChangeHunks } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionChangeHunks.js')).href);
 
   const { ManagedWorktreeService } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/managedWorktrees.js')).href);
+
+  await runNativeAccessibilityProbe();
 
   const screenshots = [];
 
@@ -2379,6 +2471,9 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
 
     assert.equal(inspectionError, false, 'Anonymous onboarding inspection must return an actual installation result; error guidance alone does not prove CLI availability');
   }
+
+  // Both inspection passes leave Claude selected; restore the Codex provider expected by this fixture's task action.
+  await guide.getByLabel('확인할 CLI').selectOption('codex');
 
   await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 3/5 · 세션·모델', { exact: true }).waitFor();
