@@ -177,7 +177,8 @@ export function createSessionPublication(): SessionPublicationState {
 		}
 	};
 
-	const render = (parent: HTMLElement, scope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, isSourceCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void, onUserSelection: () => void): void => {
+	const render = (parent: HTMLElement, inputScope: WorkspaceAgentPublicationScope, actions: SessionPublicationActions, source: AgentSessionMergeProposalDTO, isSourceCurrent: () => boolean, selectedText: WorkspaceAgentPrTextSelection | undefined, refresh: () => void, onUserSelection: () => void): void => {
+		const scope: WorkspaceAgentPublicationScope = { projectId: inputScope.projectId, sessionId: inputScope.sessionId, turnId: inputScope.turnId };
 		const nextContextKey = `${scope.projectId}:${scope.sessionId}:${scope.turnId}`;
 		const nextSourceKey = `${source.id}:${source.fingerprint}:${source.outcomes.at(-1)?.receipt.resultingHead ?? ''}`;
 		if (contextKey !== nextContextKey || sourceKey !== nextSourceKey) {
