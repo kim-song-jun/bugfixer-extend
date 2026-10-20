@@ -298,8 +298,10 @@ export function createSessionWorkflow(parent: HTMLElement, context: SessionWorkf
 		const workflow = selectedStatus?.workflow;
 		const activeWorkflow = !!workflow && ['ready', 'running', 'cancelRequested'].includes(workflow.state);
 		const nodesEligible = draftNodes.every(node => eligibleSessions().some(session => session.id === node.sessionId));
-		const savingAllowed = !operation && !activeWorkflow && draftNodes.length > 0 && nodesEligible;
-		save.disabled = !savingAllowed;
+		const savingUnavailable = activeWorkflow || draftNodes.length === 0 || !nodesEligible;
+		save.disabled = savingUnavailable;
+		save.setAttribute('aria-disabled', String(operation || savingUnavailable));
+		editor.setAttribute('aria-busy', String(operation));
 		newPlan.disabled = operation;
 		approve.hidden = !workflow || workflow.state !== 'waiting';
 		approve.disabled = operation || !workflow || draftDirty;
@@ -659,6 +661,7 @@ export function createSessionWorkflow(parent: HTMLElement, context: SessionWorkf
 		if (knowledgeError) { void loadKnowledge(); }
 	});
 	save.addEventListener('click', () => {
+		if (operation) { return; }
 		void (async () => {
 			try {
 				const plan = planInput(); validatePlan(plan);

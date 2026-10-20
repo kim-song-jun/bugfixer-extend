@@ -63,6 +63,7 @@
 .ai-session__primary:hover:not(:disabled) { filter: brightness(1.08); }
 .ai-session__secondary { border: 1px solid var(--ai-line); color: var(--ai-foreground); background: transparent; }
 .ai-session__primary:disabled, .ai-session__secondary:disabled { opacity: .55; cursor: default; }
+.ai-session-workflows__actions .ai-session__secondary[aria-disabled="true"] { opacity: .55; cursor: default; }
 .ai-session__tabs { display: flex; gap: 4px; margin-top: 10px; border-bottom: 1px solid var(--ai-line); }
 .ai-session__tab { position: relative; min-height: 39px; padding: 7px 13px; border: 0; color: var(--ai-muted); background: transparent; font: inherit; cursor: pointer; }
 .ai-session__tab[aria-selected="true"] { color: var(--ai-foreground); font-weight: 650; }

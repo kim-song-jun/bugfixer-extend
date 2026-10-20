@@ -5413,7 +5413,14 @@ async function verifyAiSessionWorkflow(page, fixture, tag, screenshots, viewport
 
   await page.waitForFunction(() => document.querySelector('.ai-session-workflows__state')?.textContent?.includes('승인 대기'));
 
-  assert.equal(await page.evaluate(() => document.activeElement?.textContent), '계획 저장', 'Saving a workflow by keyboard must keep focus on the stable save control');
+  const saveFocusDiagnostic = await page.evaluate(() => {
+    const active = document.activeElement;
+
+    return { tag: active?.tagName ?? 'none', key: active instanceof HTMLElement ? active.dataset.controlKey ?? active.id ?? '' : '' };
+  });
+
+  assert.equal(await save.evaluate(element => document.activeElement === element), true,
+    `Saving a workflow by keyboard must keep focus on the stable save control (active=${saveFocusDiagnostic.tag}/${saveFocusDiagnostic.key})`);
 
   const workflowId = await panel.locator('.ai-session-workflows__select').first().getAttribute('data-workflow-id');
 
