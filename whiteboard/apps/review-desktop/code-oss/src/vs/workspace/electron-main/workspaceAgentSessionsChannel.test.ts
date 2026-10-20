@@ -295,10 +295,14 @@ test('session IPC persists SQLite sessions and rejects project spoofing and untr
 		const logs = await channel.call<AgentSessionTranscriptPageDTO>(sender, 'readTranscript', { ...transcriptRequest, options: { kind: 'log', afterSequence: page.nextSequence } });
 		assert.equal(logs.entries.length, 1);
 		assert.equal(logs.entries[0].text, 'token=***');
+		const searchPage = await channel.call<AgentSessionTranscriptPageDTO>(sender, 'readTranscript', { ...transcriptRequest, options: { query: 'SANITIZED' } });
+		assert.deepEqual(searchPage.entries.map(entry => entry.sequence), [1]);
 		await assert.rejects(channel.call(forgedSender, 'readTranscript', transcriptRequest), /open project window/u);
 		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, projectId: otherProject.project.id }), /does not match this window/u);
 		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, sessionId: otherSession.id }), /does not belong/u);
 		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, options: { kind: 'raw' } }), /kind is invalid/u);
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, options: { query: '' } }), /search query must contain 1 to 256/u);
+		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, options: { query: 'x'.repeat(257) } }), /search query must contain 1 to 256/u);
 		await assert.rejects(channel.call(sender, 'readTranscript', { ...transcriptRequest, options: { maxOutputBytes: 8 * 1024 * 1024 } }), /byte budget/u);
 
 		const recipient = database.agentSessions.createSession({ projectId: project.project.id, bindingId: project.binding.id, name: 'Review', provider: 'claude', model: 'sonnet', workspaceMode: 'sharedFolder' });

@@ -38,6 +38,7 @@ const PAGE_ENTRIES = 100;
 const PAGE_BYTES = 512 * 1024;
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const MAX_GAP_MARKERS = 100;
+const MAX_EMPTY_SCAN_PAGES = 5;
 const CONTEXT_CONFIRMATION_TIMEOUT_MS = 10_000;
 
 type KindFilter = 'all' | 'terminal' | 'log';
@@ -76,10 +77,11 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	]);
 	const searchLabel = document.createElement('label');
 	searchLabel.className = 'ai-session-logs__search';
-	searchLabel.append(document.createTextNode('불러온 기록에서 검색'));
+	searchLabel.append(document.createTextNode('보존된 기록에서 검색'));
 	const searchInput = document.createElement('input');
 	searchInput.type = 'search';
 	searchInput.autocomplete = 'off';
+	searchInput.maxLength = 256;
 	searchInput.placeholder = '검색어';
 	searchLabel.appendChild(searchInput);
 	const followButton = makeButton('따라가기 켜짐');
@@ -120,6 +122,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	let requestGeneration = 0;
 	let contextGeneration = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let searchTimer: ReturnType<typeof setTimeout> | undefined;
 	let loading = false;
 	let hasMore = true;
 	let highestSequence = 0;
@@ -137,6 +140,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 	let severityFilter: SeverityFilter = 'all';
 	let sourceFilter: SourceFilter = 'all';
 	let searchText = '';
+	let queryText = '';
 	let confirmedContextKey: string | undefined;
 	const contextConfirmations = new Set<{ readonly key: string; readonly resolve: (confirmed: boolean) => void; readonly timer: ReturnType<typeof setTimeout> }>();
 	const contextKey = (value: SessionLogsContext): string => JSON.stringify([value.projectId, value.sessionId, value.turnId]);
@@ -152,6 +156,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		for (const pending of contextConfirmations) { clearTimeout(pending.timer); pending.resolve(false); }
 		contextConfirmations.clear();
 	};
+	const hasRetainedFilters = (): boolean => Boolean(queryText || kindFilter !== 'all' || severityFilter !== 'all' || sourceFilter !== 'all');
 
 	const render = (): void => {
 		const filtered = entries.filter(entry => matches(entry, kindFilter, severityFilter, sourceFilter, searchText));
@@ -188,7 +193,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		if (follow && nearBottom) { viewport.scrollTop = viewport.scrollHeight; }
 		else { viewport.scrollTop = oldTop; }
 		refreshStatus(filtered.length);
-		newerButton.disabled = loading || !hasMore || cursor >= highestSequence;
+		newerButton.disabled = loading || !hasMore;
 		retryButton.hidden = !lastError;
 		error.hidden = !lastError;
 		error.textContent = lastError ? `기록을 불러오지 못했습니다: ${lastError}` : '';
@@ -196,6 +201,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 
 	const fetchPage = async (direction: 'newer' | 'refresh'): Promise<void> => {
 		if (disposed || !visible || !connected || loading) { render(); return; }
+		if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
 		loading = true;
 		lastError = undefined;
 		const generation = ++requestGeneration;
@@ -203,15 +209,24 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		const requestedContextKey = contextKey(requestedContext);
 		const afterSequence = cursor;
 		const options: AgentSessionTranscriptPageOptions = {
-			afterSequence,
 			limit: PAGE_ENTRIES,
 			maxOutputBytes: PAGE_BYTES,
+			...(queryText.length > 0 ? { query: queryText } : {}),
+			...(kindFilter !== 'all' ? { kind: kindFilter } : {}),
+			...(severityFilter !== 'all' ? { severity: severityFilter } : {}),
+			...(sourceFilter !== 'all' ? { source: sourceFilter } : {}),
 		};
 		render();
 		try {
-			const page = await loadPage(options);
-			if (disposed || generation !== requestGeneration || requestedContext !== context) { return; }
-			applyPage(page, direction);
+			let pagesScanned = 0;
+			let foundEntries = false;
+			do {
+				const page = await loadPage({ ...options, afterSequence: pagesScanned ? cursor : afterSequence });
+				if (disposed || generation !== requestGeneration || requestedContext !== context) { return; }
+				foundEntries ||= page.entries.length > 0;
+				applyPage(page, direction);
+				pagesScanned++;
+			} while (hasRetainedFilters() && !foundEntries && hasMore && pagesScanned < MAX_EMPTY_SCAN_PAGES);
 			confirmedContextKey = requestedContextKey;
 		} catch (cause) {
 			if (disposed || generation !== requestGeneration) { return; }
@@ -279,9 +294,13 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		const highWater = highestSequence ? `저장된 마지막 순번 ${highestSequence}` : '저장된 기록 없음';
 		const retained = retainedStart ? `보존 시작 순번 ${retainedStart}` : '보존된 기록 없음';
 		const state = loading ? '불러오는 중' : !connected ? '연결 끊김 · 마지막으로 불러온 기록을 유지합니다.' : !follow ? '일시 정지 · 기록 저장은 계속됩니다.' : '연결됨';
-		const empty = entries.length === 0 ? ' · 아직 불러온 기록이 없습니다.' : '';
-		const localSearch = searchText ? ` · 현재 검색은 불러온 ${entries.length}개 기록에서만 수행합니다.` : '';
-		status.textContent = `${state} · ${range} · ${visibleCount}/${entries.length}개 표시 · ${highWater} · ${retained}${empty}${localSearch}`;
+		const empty = entries.length === 0
+			? hasRetainedFilters()
+				? loading ? ' · 조건에 맞는 보존 기록을 찾는 중입니다.' : hasMore ? ' · 아직 일치하는 기록을 찾지 못했습니다.' : ' · 조건에 맞는 보존 기록이 없습니다.'
+				: ' · 아직 불러온 기록이 없습니다.'
+			: '';
+		const retainedSearch = hasRetainedFilters() ? ` · 검색 조건은 선택한 실행의 보존된 기록을 검색합니다.${hasMore ? ' 다음 기록 불러오기로 계속 찾을 수 있습니다.' : ''}` : '';
+		status.textContent = `${state} · ${range} · ${visibleCount}/${entries.length}개 표시 · ${highWater} · ${retained}${empty}${retainedSearch}`;
 	};
 
 	const schedulePoll = (): void => {
@@ -293,17 +312,38 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 		}, Math.max(1000, actions.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS));
 	};
 
+	const resetForRetainedFilters = (debounce: boolean): void => {
+		if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
+		if (timer) { clearTimeout(timer); timer = undefined; }
+		requestGeneration++;
+		loading = false;
+		clearLoadedRecords();
+		render();
+		if (!visible || !connected) { return; }
+		const fetch = (): void => { void fetchPage('newer').finally(schedulePoll); };
+		if (!debounce) { fetch(); return; }
+		searchTimer = setTimeout(() => {
+			searchTimer = undefined;
+			fetch();
+		}, 250);
+	};
 	const onFilterChange = (): void => {
 		kindFilter = kindSelect.select.value as KindFilter;
 		severityFilter = severitySelect.select.value as SeverityFilter;
 		sourceFilter = sourceSelect.select.value as SourceFilter;
-		searchText = searchInput.value.trim().toLocaleLowerCase();
-		render();
+		queryText = searchInput.value.slice(0, 256);
+		searchText = queryText.toLowerCase();
+		resetForRetainedFilters(false);
+	};
+	const onSearchInput = (): void => {
+		queryText = searchInput.value.slice(0, 256);
+		searchText = queryText.toLowerCase();
+		resetForRetainedFilters(true);
 	};
 	kindSelect.select.addEventListener('change', onFilterChange);
 	severitySelect.select.addEventListener('change', onFilterChange);
 	sourceSelect.select.addEventListener('change', onFilterChange);
-	searchInput.addEventListener('input', onFilterChange);
+	searchInput.addEventListener('input', onSearchInput);
 	const pauseFollowing = (): void => {
 		follow = false;
 		requestGeneration++;
@@ -393,6 +433,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			if (!visible) {
 				cancelContextConfirmations();
 				if (timer) { clearTimeout(timer); timer = undefined; }
+				if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
 				requestGeneration++;
 				loading = false;
 			} else if (follow || entries.length === 0) {
@@ -416,6 +457,8 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			loadPage = nextLoadPage;
 			connected = true;
 			requestGeneration++;
+			if (timer) { clearTimeout(timer); timer = undefined; }
+			if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
 			loading = false;
 			clearLoadedRecords();
 			render();
@@ -444,6 +487,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			visible = false;
 			loading = false;
 			if (timer) { clearTimeout(timer); timer = undefined; }
+			if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
 			render();
 		},
 		refresh(): void { void fetchPage('refresh').finally(schedulePoll); },
@@ -454,6 +498,7 @@ export function createSessionLogs(parent: HTMLElement, initialContext: SessionLo
 			contextGeneration++;
 			requestGeneration++;
 			if (timer) { clearTimeout(timer); timer = undefined; }
+			if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
 			parent.replaceChildren();
 		},
 	};
@@ -486,7 +531,7 @@ function matches(entry: AgentSessionTranscriptEntryDTO, kind: KindFilter, severi
 	if (kind !== 'all' && entry.kind !== kind) { return false; }
 	if (severity !== 'all' && entry.severity !== severity) { return false; }
 	if (source !== 'all' && entry.source !== source) { return false; }
-	return !search || `${entry.sequence} ${entry.kind} ${entry.severity ?? ''} ${entry.source ?? ''} ${entry.text}`.toLocaleLowerCase().includes(search);
+	return !search || entry.text.toLowerCase().includes(search);
 }
 
 function serializeLoaded(entries: readonly AgentSessionTranscriptEntryDTO[], context: SessionLogsContext): string {

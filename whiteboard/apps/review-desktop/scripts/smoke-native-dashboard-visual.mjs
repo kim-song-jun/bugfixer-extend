@@ -2790,7 +2790,7 @@ async function seedTranscriptHistory(database, fixture, projectFolder, tag) {
           sanitizedTextFromTrustedPtyHost: `CI fixture terminal ${tag} run ${ordinal} entry ${sequence}\n`,
         });
       } else {
-        const text = sequence === 2
+        const text = sequence === 122
           ? `CI fixture structured ${tag} run ${ordinal}: fixture search anchor`
           : sequence === 4
             ? `CI fixture provider error ${secret} was masked before persistence`
@@ -4600,28 +4600,54 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   const kind = logs.getByRole('combobox', { name: '기록 종류', exact: true });
   const severity = logs.getByRole('combobox', { name: '심각도', exact: true });
   const source = logs.getByRole('combobox', { name: '출처', exact: true });
-  const search = logs.getByRole('searchbox', { name: '불러온 기록에서 검색', exact: true });
+  const search = logs.getByRole('searchbox', { name: '보존된 기록에서 검색', exact: true });
 
   await kind.selectOption('log');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry--log').length > 0);
 
   assert.ok(await logs.locator('.ai-session-logs__entry--log').count() > 0, 'Kind filter must show structured log entries');
   assert.equal(await logs.locator('.ai-session-logs__entry--terminal').count(), 0, 'Kind filter must hide terminal output');
   await kind.selectOption('terminal');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry--terminal').length > 0);
 
   assert.ok(await logs.locator('.ai-session-logs__entry--terminal').count() > 0, 'Kind filter must show terminal output');
   assert.equal(await logs.locator('.ai-session-logs__entry--log').count(), 0, 'Terminal filter must hide structured logs');
   await kind.selectOption('all');
   await severity.selectOption('error');
   await source.selectOption('provider');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry').length === 1);
 
   assert.equal(await logs.locator('.ai-session-logs__entry').count(), 1, 'Severity and source filters must isolate the matching structured event');
   assert.equal(await logs.locator('.ai-session-logs__entry-text').innerText(), 'CI fixture provider error *** was masked before persistence');
   await severity.selectOption('all');
   await source.selectOption('all');
+  await page.waitForFunction(() => document.querySelectorAll('.ai-session-logs__entry').length === 100);
   await search.fill('fixture search anchor');
 
-  assert.equal(await logs.locator('.ai-session-logs__entry').count(), 1, 'Search must find a loaded record');
-  assert.ok((await logs.locator('.ai-session-logs__status').innerText()).includes('불러온'), 'Search status must explain it only covers loaded records');
+  const retainedSearchResult = logs.locator('.ai-session-logs__entry').filter({ hasText: 'fixture search anchor' });
+
+  await retainedSearchResult.waitFor({ state: 'visible' });
+
+  assert.equal(await logs.locator('.ai-session-logs__entry').count(), 1, 'Retained search must find the fixture match beyond the first 100-row page');
+  assert.ok((await retainedSearchResult.innerText()).includes('#122'), 'The retained search result must preserve its exact sequence metadata');
+  assert.ok((await logs.locator('.ai-session-logs__status').innerText()).includes('보존된 기록을 검색합니다'), 'Search status must state that it queries retained history');
+  assert.equal(fixture.logHistory.providerExecuted, false, 'Retained transcript search must not invoke an AI provider');
+  assert.equal(fixture.logHistory.ptyExecuted, false, 'Retained transcript search must not start a terminal process');
+
+  const searchShot = path.join(output, `ai-session-logs-${tag}-retained-search.png`);
+
+  await capturePage(page, searchShot);
+  screenshots.push(searchShot);
+  viewports.push({ theme: tag, state: 'ai-session-logs-retained-search-result', width: 1440, height: 900, screenshot: searchShot });
+
+  await search.fill('no-retained-match');
+  await page.waitForFunction(() => {
+    const status = document.querySelector('.ai-session-logs__status')?.textContent ?? '';
+    return document.querySelectorAll('.ai-session-logs__entry').length === 0 && status.includes('조건에 맞는 보존 기록이 없습니다.');
+  });
+
+  assert.equal(await logs.locator('.ai-session-logs__entry').count(), 0, 'A query with no retained matches must finish with an empty result');
+  assert.equal((await logs.locator('.ai-session-logs__status').innerText()).includes('다음 기록 불러오기로 계속 찾을 수 있습니다.'), false, 'An exhausted empty search must report no remaining scan pages');
   await search.fill('');
 
   const historyPausedFollow = logs.getByRole('button', { name: '따라가기 일시 정지', exact: true });

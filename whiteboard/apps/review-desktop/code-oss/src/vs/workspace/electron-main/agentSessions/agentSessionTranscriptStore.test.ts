@@ -132,3 +132,53 @@ test('structured logs are fully sanitized and filter by severity/source; referen
 			text: 'bad severity', severity: 'trace' as never, source: 'host' }), /severity is invalid/i);
 	});
 });
+
+test('retained-text search advances bounded cursors through empty pages and matches only sanitized text', () => {
+	withFixture(({ database, project, session, turn }) => {
+		const store = database.agentSessionTranscripts;
+		for (let sequence = 1; sequence <= 101; sequence++) {
+			store.appendSanitizedTerminalChunk({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence, sanitizedTextFromTrustedPtyHost: `noise ${sequence}` });
+		}
+		store.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 102,
+			text: 'Final MATCH', severity: 'error', source: 'provider' });
+		const searchOptions = { query: 'match', kind: 'log' as const, severity: 'error' as const, source: 'provider' as const, limit: 10 };
+		const empty = store.readPage(project.id, session.id, turn.id, searchOptions);
+		assert.deepEqual(empty.entries, []);
+		assert.equal(empty.nextSequence, 100);
+		assert.equal(empty.hasMore, true);
+		const match = store.readPage(project.id, session.id, turn.id, { ...searchOptions, afterSequence: empty.nextSequence });
+		assert.deepEqual(match.entries.map(entry => entry.sequence), [102]);
+		assert.equal(match.nextSequence, 102);
+		assert.equal(match.hasMore, false);
+		const futureCursor = store.readPage(project.id, session.id, turn.id, { ...searchOptions, afterSequence: 500 });
+		assert.deepEqual(futureCursor.entries, []);
+		assert.equal(futureCursor.nextSequence, 500);
+		assert.equal(futureCursor.highestSequence, 102);
+		assert.equal(futureCursor.hasMore, false);
+
+		const secret = 'known-search-secret-123';
+		store.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 103,
+			text: `private ${secret}`, severity: 'error', source: 'provider', trustedKnownSecrets: [secret] });
+		assert.deepEqual(store.readPage(project.id, session.id, turn.id, { query: secret }).entries, []);
+		assert.deepEqual(store.readPage(project.id, session.id, turn.id, { query: 'PRIVATE' }).entries.map(entry => entry.sequence), [103]);
+		assert.throws(() => store.readPage(project.id, session.id, turn.id, { query: '' }), /1 to 256 UTF-16/u);
+		assert.throws(() => store.readPage(project.id, session.id, turn.id, { query: 'x'.repeat(257) }), /1 to 256 UTF-16/u);
+	});
+});
+
+test('search preserves exact ownership, structured filters, and real retention gaps', () => {
+	withFixture(({ database, project, session, turn }) => {
+		const store = new AgentSessionTranscriptStore(Reflect.get(database, 'db'), () => { }, { maxBytesPerTurn: 256 * 1024, maxEntriesPerTurn: 2 });
+		store.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 1,
+			text: 'Needle evicted', severity: 'error', source: 'provider' });
+		store.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 2,
+			text: 'unrelated retained', severity: 'warning', source: 'provider' });
+		store.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 3,
+			text: 'Needle retained', severity: 'error', source: 'provider' });
+		const page = store.readPage(project.id, session.id, turn.id, { query: 'needle', severity: 'error', source: 'provider' });
+		assert.deepEqual(page.entries.map(entry => entry.sequence), [3]);
+		assert.deepEqual(page.gaps, [{ afterSequence: 0, throughSequence: 1 }]);
+		const otherSession = database.agentSessions.createSession({ projectId: project.id, bindingId: session.bindingId, name: 'Other search scope', provider: 'claude', model: 'sonnet', workspaceMode: 'sharedFolder' });
+		assert.throws(() => store.readPage(project.id, otherSession.id, turn.id, { query: 'needle' }), /does not belong to this project and session/i);
+	});
+});

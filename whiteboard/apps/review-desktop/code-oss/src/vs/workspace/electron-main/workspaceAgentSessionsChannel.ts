@@ -1009,10 +1009,12 @@ export class WorkspaceAgentSessionsChannel {
 		if (raw.kind !== undefined && raw.kind !== 'terminal' && raw.kind !== 'log') { throw new Error('The transcript kind is invalid.'); }
 		if (raw.severity !== undefined && (typeof raw.severity !== 'string' || !['debug', 'info', 'warning', 'error'].includes(raw.severity))) { throw new Error('The transcript severity is invalid.'); }
 		if (raw.source !== undefined && (typeof raw.source !== 'string' || !['pty', 'provider', 'host', 'workspace'].includes(raw.source))) { throw new Error('The transcript source is invalid.'); }
+		if (raw.query !== undefined && (typeof raw.query !== 'string' || raw.query.length < 1 || raw.query.length > 256)) { throw new Error('The transcript search query must contain 1 to 256 UTF-16 code units.'); }
 		return {
 			afterSequence: raw.afterSequence === undefined ? 0 : this.sequence(raw.afterSequence, 'transcript cursor'),
 			limit: raw.limit === undefined ? 50 : this.integer(raw.limit, 1, 100, 'transcript page limit'),
 			maxOutputBytes: raw.maxOutputBytes === undefined ? 512 * 1024 : this.integer(raw.maxOutputBytes, 256 * 1024, 2 * 1024 * 1024, 'transcript byte budget'),
+			...(raw.query !== undefined ? { query: raw.query as string } : {}),
 			...(raw.kind !== undefined ? { kind: raw.kind as AgentSessionTranscriptPageOptions['kind'] } : {}),
 			...(raw.severity !== undefined ? { severity: raw.severity as AgentSessionTranscriptPageOptions['severity'] } : {}),
 			...(raw.source !== undefined ? { source: raw.source as AgentSessionTranscriptPageOptions['source'] } : {}),

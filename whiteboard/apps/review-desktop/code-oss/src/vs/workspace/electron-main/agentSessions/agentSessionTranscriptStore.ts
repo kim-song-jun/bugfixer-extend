@@ -23,6 +23,7 @@ const MAX_REFERENCES = 16;
 const MAX_REFERENCE_BYTES = 4096;
 const MAX_PAGE_ENTRIES = 100;
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;
+const MAX_QUERY_CODE_UNITS = 256;
 
 export interface AgentSessionTranscriptRetention {
 	/** Per-turn retained UTF-8 text bytes. Defaults to 10 MiB. */
@@ -108,6 +109,9 @@ export class AgentSessionTranscriptStore {
 		if (!cursor) { return { entries: [], nextSequence: afterSequence, highestSequence: 0, firstRetainedSequence: null, gaps: [], hasMore: false }; }
 		const highestSequence = Number(cursor.highest_sequence);
 		const firstRetainedSequence = cursor.first_retained_sequence === null ? null : Number(cursor.first_retained_sequence);
+		if (options.query !== undefined) {
+			return this.readMatchingPage(projectId, sessionId, turnId, options, afterSequence, limit, maxOutputBytes, highestSequence, firstRetainedSequence, cursor);
+		}
 		const rows = this.db.prepare(`SELECT project_id, session_id, turn_id, sequence, kind, text, byte_length, severity, source,
 			references_json, created_at, content_sha256 FROM agent_session_transcript_entries
 			WHERE project_id = ? AND session_id = ? AND turn_id = ? AND sequence > ?
@@ -128,20 +132,7 @@ export class AgentSessionTranscriptStore {
 			nextSequence = Number(row.sequence);
 		}
 		if (entries.length === 0 && rows.length === 0) { nextSequence = Math.max(afterSequence, highestSequence); }
-		const gaps: Array<{ afterSequence: number; throughSequence: number }> = [];
-		let observed = afterSequence;
-		const endSequence = nextSequence;
-		const evictedThrough = Math.min(Number(cursor.evicted_through_sequence), endSequence);
-		if (evictedThrough > observed) { gaps.push({ afterSequence: observed, throughSequence: evictedThrough }); observed = evictedThrough; }
-		if (endSequence > observed) {
-			const retainedSequences = this.db.prepare(`SELECT sequence FROM agent_session_transcript_entries WHERE turn_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence`)
-				.all(turnId, observed, endSequence).map(row => Number(row.sequence));
-			for (const retainedSequence of retainedSequences) {
-				if (retainedSequence > observed + 1) { gaps.push({ afterSequence: observed, throughSequence: retainedSequence - 1 }); }
-				observed = retainedSequence;
-			}
-			if (endSequence > observed) { gaps.push({ afterSequence: observed, throughSequence: endSequence }); }
-		}
+		const gaps = this.retentionGaps(projectId, sessionId, turnId, afterSequence, nextSequence, cursor);
 		return { entries, nextSequence, highestSequence, firstRetainedSequence, gaps, hasMore };
 	}
 
@@ -233,6 +224,70 @@ export class AgentSessionTranscriptStore {
 		if (options.kind !== undefined && !['terminal', 'log'].includes(options.kind)) { throw new Error('Transcript kind filter is invalid.'); }
 		if (options.severity !== undefined && !['debug', 'info', 'warning', 'error'].includes(options.severity)) { throw new Error('Transcript severity filter is invalid.'); }
 		if (options.source !== undefined && !['pty', 'provider', 'host', 'workspace'].includes(options.source)) { throw new Error('Transcript source filter is invalid.'); }
+		if (options.query !== undefined && (typeof options.query !== 'string' || options.query.length < 1 || options.query.length > MAX_QUERY_CODE_UNITS)) {
+			throw new Error('Transcript search query must contain 1 to 256 UTF-16 code units.');
+		}
+	}
+
+	private readMatchingPage(projectId: string, sessionId: string, turnId: string, options: AgentSessionTranscriptPageOptions,
+		afterSequence: number, limit: number, maxOutputBytes: number, highestSequence: number, firstRetainedSequence: number | null,
+		cursor: TranscriptCursorRow): AgentSessionTranscriptPageDTO {
+		const query = options.query!.toLowerCase();
+		// Read at most 100 chronological scoped entries for matching; the shared gap scan reads sequence metadata only.
+		const rows = this.db.prepare(`SELECT project_id, session_id, turn_id, sequence, kind, text, byte_length, severity, source,
+			references_json, created_at, content_sha256 FROM agent_session_transcript_entries
+			WHERE project_id = ? AND session_id = ? AND turn_id = ? AND sequence > ?
+			ORDER BY sequence LIMIT ?`).all(projectId, sessionId, turnId, afterSequence, MAX_PAGE_ENTRIES).map(projectTranscriptEntryRow);
+		const entries: AgentSessionTranscriptEntryDTO[] = [];
+		let outputBytes = 0;
+		let nextSequence = afterSequence;
+		let stoppedForPageLimit = false;
+		let stoppedForOutputLimit = false;
+		for (const row of rows) {
+			if (entries.length >= limit) { stoppedForPageLimit = true; break; }
+			const sequence = Number(row.sequence);
+			const entry = this.entryFromRow(row);
+			if ((options.kind === undefined || entry.kind === options.kind)
+				&& (options.severity === undefined || entry.severity === options.severity)
+				&& (options.source === undefined || entry.source === options.source)
+				&& entry.text.toLowerCase().includes(query)) {
+				if (outputBytes + entry.byteLength > maxOutputBytes) { stoppedForOutputLimit = true; break; }
+				entries.push(entry);
+				outputBytes += entry.byteLength;
+			}
+			nextSequence = sequence;
+		}
+
+		const hasMore = stoppedForPageLimit || stoppedForOutputLimit || this.hasTranscriptRowsAfter(projectId, sessionId, turnId, nextSequence);
+		if (!hasMore) { nextSequence = Math.max(afterSequence, highestSequence); }
+		const gaps = this.retentionGaps(projectId, sessionId, turnId, afterSequence, nextSequence, cursor);
+		return { entries, nextSequence, highestSequence, firstRetainedSequence, gaps, hasMore };
+	}
+
+	private retentionGaps(projectId: string, sessionId: string, turnId: string, afterSequence: number, endSequence: number,
+		cursor: TranscriptCursorRow): Array<{ afterSequence: number; throughSequence: number }> {
+		// This separate sequence-only scan is bounded by the transcript's configured per-turn retention policy.
+		const gaps: Array<{ afterSequence: number; throughSequence: number }> = [];
+		let observed = afterSequence;
+		const evictedThrough = Math.min(Number(cursor.evicted_through_sequence), endSequence);
+		if (evictedThrough > observed) { gaps.push({ afterSequence: observed, throughSequence: evictedThrough }); observed = evictedThrough; }
+		if (endSequence > observed) {
+			const retainedSequences = this.db.prepare(`SELECT sequence FROM agent_session_transcript_entries
+				WHERE project_id = ? AND session_id = ? AND turn_id = ? AND sequence > ? AND sequence <= ? ORDER BY sequence`)
+				.all(projectId, sessionId, turnId, observed, endSequence).map(row => Number((row as { sequence: SQLOutputValue }).sequence));
+			for (const retainedSequence of retainedSequences) {
+				if (retainedSequence > observed + 1) { gaps.push({ afterSequence: observed, throughSequence: retainedSequence - 1 }); }
+				observed = retainedSequence;
+			}
+			if (endSequence > observed) { gaps.push({ afterSequence: observed, throughSequence: endSequence }); }
+		}
+		return gaps;
+	}
+
+	private hasTranscriptRowsAfter(projectId: string, sessionId: string, turnId: string, sequence: number): boolean {
+		return !!this.db.prepare(`SELECT 1 FROM agent_session_transcript_entries
+			WHERE project_id = ? AND session_id = ? AND turn_id = ? AND sequence > ? LIMIT 1`)
+			.get(projectId, sessionId, turnId, sequence);
 	}
 
 	private cursor(projectId: string, sessionId: string, turnId: string): TranscriptCursorRow | undefined {

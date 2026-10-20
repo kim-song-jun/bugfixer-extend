@@ -225,6 +225,8 @@ export interface AgentSessionTranscriptPageOptions {
 	readonly afterSequence?: number;
 	readonly limit?: number;
 	readonly maxOutputBytes?: number;
+	/** Literal, case-insensitive search against sanitized entry text; 1–256 UTF-16 code units. */
+	readonly query?: string;
 	readonly kind?: 'terminal' | 'log';
 	readonly severity?: AgentSessionTranscriptSeverity;
 	readonly source?: AgentSessionTranscriptSource;
