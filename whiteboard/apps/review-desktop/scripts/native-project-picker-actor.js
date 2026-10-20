@@ -188,18 +188,59 @@ function run(argv) {
     assertOwnedElement(application);
 
     failurePhase = "WINDOWS";
-    const windows = copyArrayAttribute(application, AX.windows);
+    const copiedWindows = copyAttribute(application, AX.windows);
+
+    if (copiedWindows.status === Number($.kAXErrorNoValue)) {
+      failureCode = "windows-attribute-no-value";
+      throw new Error("application windows attribute has no value");
+    }
+
+    if (copiedWindows.status === Number($.kAXErrorAttributeUnsupported)) {
+      failureCode = "windows-attribute-unsupported";
+      throw new Error("application windows attribute is unsupported");
+    }
+
+    if (copiedWindows.status !== Number($.kAXErrorSuccess)) {
+      failureCode = "windows-attribute-query-failed";
+      throw new Error("application windows attribute query failed");
+    }
+
+    const windows = copyArrayValue(copiedWindows);
     windowCount = windows.length;
 
+    if (windows.length === 0) {
+      failureCode = "windows-empty";
+      throw new Error("home window unavailable");
+    }
+
     if (windows.length !== 1) {
+      failureCode = "windows-count-not-one";
       throw new Error("home window count");
     }
 
     homeWindow = windows[0];
 
-    if (readStringAttribute(homeWindow, AX.role) !== "AXWindow") {
+    failureCode = "window-role-query-failed";
+    let homeWindowRole;
+
+    try {
+      homeWindowRole = readStringAttribute(homeWindow, AX.role);
+    } catch (error) {
+      failureCode = "window-role-query-failed";
+      throw error;
+    }
+
+    if (homeWindowRole !== "AXWindow") {
+      failureCode = "window-role-mismatch";
+
+      if (homeWindowRole === undefined) {
+        failureCode = "window-role-query-failed";
+      }
+
       throw new Error("home window role");
     }
+
+    failureCode = null;
 
     failurePhase = "SHEET";
     sheet = waitForExactSheet(homeWindow, mode === "cancel" ? 2 : 10);
@@ -369,15 +410,27 @@ function run(argv) {
 }
 
 function copyAttribute(element, attribute) {
+  failureCode = "ax-output-ref-create-failed";
   const result = Ref();
+
+  failureCode = "ax-copy-call-failed";
 
   const status = Number(
     $.AXUIElementCopyAttributeValue(element, attribute, result),
   );
 
+  let value;
+
+  if (status === Number($.kAXErrorSuccess)) {
+    failureCode = "ax-copy-ref-read-failed";
+    value = result[0];
+  }
+
+  failureCode = null;
+
   return {
     status,
-    value: status === Number($.kAXErrorSuccess) ? result[0] : undefined,
+    value,
   };
 }
 
@@ -455,16 +508,6 @@ function typeIdKind(value) {
   return Number.isInteger(value) ? "unsafe-integer" : "non-integer";
 }
 
-function copyArrayAttribute(element, attribute) {
-  const copied = copyAttribute(element, attribute);
-
-  if (isOptionalAttributeMissing(copied.status)) {
-    return [];
-  }
-
-  return copyArrayValue(copied);
-}
-
 function copyRequiredArrayAttribute(element, attribute) {
   const copied = copyAttribute(element, attribute);
 
@@ -488,12 +531,15 @@ function copyDescendantChildren(element) {
 
 function copyArrayValue(copied) {
   if (copied.status !== Number($.kAXErrorSuccess)) {
+    failureCode = "ax-array-status-failed";
     throw new Error("Accessibility array query failed");
   }
 
+  failureCode = "cf-array-count-call-failed";
   const count = Number($.CFArrayGetCount(copied.value));
 
   if (!Number.isInteger(count) || count < 0 || count > 512) {
+    failureCode = "cf-array-count-invalid";
     throw new Error("Accessibility array bound exceeded");
   }
 
@@ -501,9 +547,12 @@ function copyArrayValue(copied) {
   const values = [];
 
   for (let index = 0; index < count; index++) {
+    failureCode = "cf-array-element-retrieval-failed";
     const child = $.CFArrayGetValueAtIndex(copied.value, index);
     values.push(assertOwnedElement(child));
   }
+
+  failureCode = null;
 
   return values;
 }

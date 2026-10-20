@@ -1584,6 +1584,13 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     && value <= 512;
 
   const failureCodes = new Set([
+    'ax-output-ref-create-failed',
+    'ax-copy-call-failed',
+    'ax-copy-ref-read-failed',
+    'ax-array-status-failed',
+    'cf-array-count-call-failed',
+    'cf-array-count-invalid',
+    'cf-array-element-retrieval-failed',
     'application-create-call-failed',
     'application-element-null',
     'element-null',
@@ -1593,6 +1600,13 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'element-pid-call-failed',
     'element-pid-query-failed',
     'element-pid-mismatch',
+    'windows-attribute-no-value',
+    'windows-attribute-unsupported',
+    'windows-attribute-query-failed',
+    'windows-empty',
+    'windows-count-not-one',
+    'window-role-query-failed',
+    'window-role-mismatch',
   ]);
 
   const invalidTypeIdKinds = new Set([
