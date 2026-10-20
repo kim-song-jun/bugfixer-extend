@@ -237,11 +237,20 @@ export function createSessionOnboarding(parent: HTMLElement, context: SessionOnb
 			const option = document.createElement('option'); option.value = value; option.textContent = label; select.appendChild(option);
 		}
 		select.value = provider; select.dataset.onboardingFocus = 'provider-select';
-		select.addEventListener('change', () => { provider = select.value as AgentSessionProvider; renderInspectionResult(result); });
+		select.addEventListener('change', () => {
+			provider = select.value as AgentSessionProvider;
+			inspect.dataset.onboardingFocus = `inspect-${provider}`;
+			renderInspectionResult(result);
+		});
 		const inspect = makeButton(currentContext.inspectionLoading ? 'CLI 확인 중' : '읽기 전용 CLI 확인', 'secondary');
 		inspect.dataset.onboardingFocus = `inspect-${provider}`;
-		inspect.disabled = currentContext.inspectionLoading;
-		inspect.addEventListener('click', () => currentActions.inspect(provider));
+		if (currentContext.inspectionLoading) {
+			inspect.setAttribute('aria-disabled', 'true');
+			inspect.setAttribute('aria-busy', 'true');
+		}
+		inspect.addEventListener('click', () => {
+			if (!currentContext.inspectionLoading) { currentActions.inspect(provider); }
+		});
 		const controls = document.createElement('div'); controls.className = 'ai-session-onboarding__inline-actions'; controls.append(select, inspect);
 		const result = document.createElement('div'); result.className = 'ai-session-onboarding__inspection';
 		target.append(controls, result);

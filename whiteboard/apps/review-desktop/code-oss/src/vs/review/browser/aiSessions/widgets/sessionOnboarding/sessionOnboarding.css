@@ -97,7 +97,7 @@
 .ai-session-onboarding__button--secondary:hover, .ai-session-onboarding__button--quiet:hover { background: var(--vscode-toolbar-hoverBackground); }
 .ai-session-onboarding__button--quiet { border-color: transparent; color: var(--vscode-textLink-foreground); }
 .ai-session-onboarding__button--danger { border-color: var(--vscode-errorForeground); color: var(--vscode-errorForeground); }
-.ai-session-onboarding__button:disabled { opacity: .55; cursor: default; }
+.ai-session-onboarding__button:disabled, .ai-session-onboarding__button[aria-disabled="true"] { opacity: .55; cursor: default; }
 .ai-session-onboarding__button:focus-visible, .ai-session-onboarding__progress-item button:focus-visible, .ai-session-onboarding__inline-actions select:focus-visible {
 	outline: 2px solid var(--vscode-focusBorder);
 	outline-offset: 2px;

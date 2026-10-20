@@ -2,8 +2,9 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
+import { homedir, userInfo } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -28,6 +29,8 @@ const root = await mkdtemp('/tmp/wb-native-ui-');
 
 const diagnostics = {
   apps: [],
+  onboardingCliInspections: [],
+  onboardingCliProfilePreflights: [],
   console: [],
   consoleRecords: [],
   consoleCorrelations: [],
@@ -840,6 +843,8 @@ async function waitFor(check, description, timeoutMs = 30_000) {
 }
 
 async function startPackaged({ executable, userData, extensions, reviewHome, descriptor }) {
+  await assertAnonymousCliProfilesAbsent('before-packaged-app-launch');
+
   const port = await reservePort();
 
   const args = [
@@ -1154,6 +1159,30 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
     throw error;
   }
+}
+
+async function assertAnonymousCliProfilesAbsent(stage) {
+  const home = userInfo().homedir || homedir();
+  const profileStates = {};
+
+  for (const provider of ['codex', 'claude']) {
+    try {
+      await lstat(path.join(home, `.${provider}`));
+      profileStates[provider] = 'present';
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw new Error(`Cannot verify the host ${provider} profile is absent; refusing anonymous CLI inspection.`);
+      }
+
+      profileStates[provider] = 'absent';
+    }
+  }
+
+  if (profileStates.codex !== 'absent' || profileStates.claude !== 'absent') {
+    throw new Error('A host Codex or Claude profile exists; refusing native onboarding CLI inspection.');
+  }
+
+  diagnostics.onboardingCliProfilePreflights.push({ stage, codexProfile: 'absent', claudeProfile: 'absent' });
 }
 
 function beginOwnedShutdown(owned) {
@@ -2288,6 +2317,68 @@ async function verifySessionOnboardingFirstRun(page, fixture, tag, screenshots, 
   await toggle.click();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 2/5 · CLI와 계정', { exact: true }).waitFor();
   assert.equal(await guide.locator('.ai-session-onboarding__inspection').innerText(), '확인을 누르면 설치 상태와 버전을 조회합니다. 이 조회는 로그인이나 모델 실행을 검증하지 않습니다.', 'Resuming must return to the same uninspected step');
+
+  for (const provider of ['codex', 'claude']) {
+    await assertAnonymousCliProfilesAbsent(`before-${provider}-inspection`);
+
+    await guide.getByLabel('확인할 CLI').selectOption(provider);
+
+    const inspectControl = guide.locator(`[data-onboarding-focus="inspect-${provider}"]`);
+
+    assert.equal(await inspectControl.isEnabled(), true, 'The current provider inspection control must remain keyboard reachable');
+
+    await inspectControl.focus();
+
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-onboarding-focus')), `inspect-${provider}`, 'The selected provider inspection control must receive keyboard focus');
+
+    await page.keyboard.press('Enter');
+
+    // Codex can perform three sequential probes, each bounded at 5 seconds plus both 2.5-second cleanup waits.
+    await page.waitForFunction(() => {
+      const result = document.querySelector('.ai-session-onboarding__inspection');
+
+      return result?.getAttribute('role') === 'alert' || result?.textContent?.includes('계정 ·');
+    }, undefined, { timeout: 35_000 });
+
+    await assertAnonymousCliProfilesAbsent(`after-${provider}-inspection`);
+
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-onboarding-focus')), `inspect-${provider}`, 'The inspection result must restore focus to the selected provider control');
+
+    const inspection = guide.locator('.ai-session-onboarding__inspection');
+    const inspectionText = await inspection.innerText();
+    const inspectionError = (await inspection.getAttribute('role')) === 'alert';
+    let installationOutcome = 'inspection-error';
+
+    if (inspectionError) {
+      assert.equal(inspectionText, 'CLI 상태를 확인하지 못했습니다. 다시 시도해 주세요.', 'Inspection errors must use the product error guidance');
+    } else {
+      assert.match(inspectionText, /계정 · 로그인 필요/, 'An absent host profile must be reported as signed out without claiming authentication validity');
+
+      const installationLine = inspectionText.split('\n', 1)[0];
+
+      if (installationLine.includes('CLI · 설치됨 ·')) { installationOutcome = 'available'; }
+      else if (installationLine.includes('CLI · 설치되지 않음')) { installationOutcome = 'missing'; }
+      else if (installationLine.includes('CLI · 지원하지 않는 CLI 상태')) { installationOutcome = 'unsupported'; }
+      else if (installationLine.includes('CLI · 설치 상태를 확인할 수 없음')) { installationOutcome = 'unavailable'; }
+      else { assert.fail('The native inspection returned an unrecognized installation state'); }
+    }
+
+    diagnostics.onboardingCliInspections.push({
+      theme: tag,
+      provider,
+      installationOutcome,
+      authenticationOutcome: inspectionError ? 'inspection-error' : 'signed-out-profile-absent',
+      hostProfiles: 'both-absent-before-and-after',
+      sourceExpectedProfileStatusBranch: 'unreachable-with-absent-profile',
+      runtimeCommandTraceCaptured: false,
+      modelExecutionRequested: false,
+      anonymousCapabilityArgsMayRun: provider === 'codex' ? [['--version'], ['--help'], ['resume', '--help']] : [['--version'], ['--help']],
+    });
+
+    await captureOnboardingViewport(page, guide, tag, `cli-${provider}-inspected`, screenshots, viewports);
+
+    assert.equal(inspectionError, false, 'Anonymous onboarding inspection must return an actual installation result; error guidance alone does not prove CLI availability');
+  }
 
   await guide.getByRole('button', { name: '다음 단계', exact: true }).click();
   await guide.locator('.ai-session-onboarding__status').getByText('진행 단계 3/5 · 세션·모델', { exact: true }).waitFor();
