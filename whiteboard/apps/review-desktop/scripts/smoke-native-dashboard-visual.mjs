@@ -32,6 +32,7 @@ const diagnostics = {
   onboardingCliInspections: [],
   onboardingCliProfilePreflights: [],
   nativeAccessibilityProbe: null,
+  nativeProjectPickerActors: [],
   console: [],
   consoleRecords: [],
   consoleCorrelations: [],
@@ -96,6 +97,46 @@ const scannerNodeErrorCodes = new Set([
   'ESPIPE',
   'ETXTBSY',
   'EXDEV',
+]);
+
+const nativePickerRoles = new Set([
+  'AXApplication',
+  'AXWindow',
+  'AXSheet',
+  'AXGroup',
+  'AXTextField',
+  'AXButton',
+  'AXStaticText',
+  'AXToolbar',
+  'AXScrollArea',
+  'AXOutline',
+  'AXTable',
+  'AXRow',
+  'AXCell',
+  'AXColumn',
+  'AXImage',
+  'AXPopUpButton',
+  'AXRadioButton',
+  'AXCheckBox',
+  'AXSplitGroup',
+  'AXDisclosureTriangle',
+  'AXList',
+  'AXBrowser',
+  'AXProgressIndicator',
+  'AXComboBox',
+  'AXMenuButton',
+  'AXSlider',
+  'AXValueIndicator',
+  'AXTokenField',
+  'AXSecureTextField',
+  'AXTextArea',
+  'AXIncrementor',
+  'AXTabGroup',
+  'AXTab',
+  'AXMenu',
+  'AXMenuItem',
+  'AXUnknown',
+  'AXOther',
 ]);
 
 const MAX_NATIVE_DIAGNOSTIC_RECORDS = 2048;
@@ -1043,6 +1084,10 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
           const entry = `PID ${child.pid}: ${message}`;
           const scanError = extensionScanErrorDiagnostic(event.args);
 
+          const executionContextId = Number.isInteger(event.executionContextId) && event.executionContextId > 0
+            ? event.executionContextId
+            : null;
+
           if (scanError) {
             if (diagnostics.extensionScanErrors.length < 32) {
               diagnostics.extensionScanErrors.push({
@@ -1051,6 +1096,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
                 recordId: capture.cdpConsoleErrors.length,
                 originTimestampEpochMilliseconds: event.timestamp ?? null,
                 targetIndex: capture.targetIndex,
+                executionContextId,
                 remoteType: scanError.remoteType,
                 remoteSubtype: scanError.remoteSubtype,
                 errorClass: scanError.errorClass,
@@ -1073,6 +1119,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
             observedHostEpochMilliseconds: Date.now(),
             observedHostMonotonicNanoseconds: process.hrtime.bigint().toString(),
             targetIndex: capture.targetIndex,
+            executionContextId,
           });
         });
         listen('Runtime.executionContextsCleared', () => {
@@ -1507,6 +1554,445 @@ async function runNativeAccessibilityProbe() {
   }
 }
 
+async function runNativeProjectPickerActor(session, targetFolder, tag) {
+  assert.equal(
+    process.env.GITHUB_ACTIONS,
+    'true',
+    'The native folder picker actor is CI-only',
+  );
+  assert.equal(
+    process.env.RUNNER_ENVIRONMENT,
+    'github-hosted',
+    'The native folder picker actor requires a hosted runner',
+  );
+  assert.equal(
+    process.platform,
+    'darwin',
+    'The native folder picker actor requires macOS',
+  );
+
+  const executable = '/usr/bin/osascript';
+  const script = fileURLToPath(
+    new URL('./native-project-picker-actor.js', import.meta.url),
+  );
+  const observations = [];
+  const validCount = value => Number.isInteger(value)
+    && value >= 0
+    && value <= 512;
+  const validRoleCounts = value => {
+    if (value === null || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) {
+      return false;
+    }
+
+    return Object.entries(value).every(([role, count]) =>
+      nativePickerRoles.has(role) && validCount(count))
+      && Object.values(value).reduce((sum, count) => sum + count, 0) <= 512;
+  };
+
+  const launch = async mode => {
+    const args = ['-l', 'JavaScript', script, mode, String(session.child.pid)];
+    const payload = JSON.stringify({
+      targetPath: mode === 'select' ? targetFolder : null,
+    });
+
+    if (Buffer.byteLength(payload) > 16_384) {
+      throw new Error(
+        'Native folder picker input exceeded its bounded stdin payload',
+      );
+    }
+
+    const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdinFailed = false;
+
+    child.stdin.on('error', () => { stdinFailed = true; });
+
+    const observation = {
+      mode,
+      tag,
+      pid: child.pid ?? null,
+      ppid: process.pid,
+      targetAppPID: session.child.pid,
+      command: executable,
+      cwd: process.cwd(),
+      startedAt: new Date().toISOString(),
+      exitObservedAt: null,
+      exit: null,
+      cleanupStatus: 'pending',
+      stdinBytes: Buffer.byteLength(payload),
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      trustPromptRequested: false,
+    };
+    observations.push(observation);
+
+    let stdout = '';
+    let spawnFailed = false;
+    child.once('error', () => { spawnFailed = true; });
+    child.stdin.end(payload);
+    child.stdout.on('data', chunk => {
+      observation.stdoutBytes += chunk.length;
+
+      if (stdout.length < 4096) {
+        stdout += chunk.toString('utf8').slice(0, 4096 - stdout.length);
+      }
+    });
+    child.stderr.on('data', chunk => {
+      observation.stderrBytes += chunk.length;
+    });
+
+    const exited = new Promise(resolve => {
+      child.once('close', (code, signal) => {
+        observation.exitObservedAt = new Date().toISOString();
+        observation.exit = { code, signal };
+        resolve(observation.exit);
+      });
+    });
+
+    const stopOwnedActor = async () => {
+      let closed = false;
+
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGTERM');
+      }
+
+      closed = await exitedWithin(exited, 1_000);
+
+      if (!closed && child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+      }
+
+      if (!closed) closed = await exitedWithin(exited, 1_000);
+
+      return closed;
+    };
+
+    // Selection permits 10s sheet discovery + 10s dismissal + 5s exact-sheet
+    // cancellation with 5s for AX operations. Cancellation permits 2s discovery
+    // and 5s dismissal plus 1s for AX calls.
+    const timeoutMs = mode === 'select' ? 30_000 : 8_000;
+    const finished = await exitedWithin(exited, timeoutMs);
+
+    if (!finished) {
+      const closed = await stopOwnedActor();
+      observation.cleanupStatus = closed
+        ? 'terminated-after-timeout'
+        : 'exit-unverified';
+      observation.failureCode = closed
+        ? 'actor-timeout'
+        : 'actor-cleanup-unverified';
+      return { observation, result: undefined };
+    }
+
+    observation.cleanupStatus = 'exit-observed';
+
+    if (spawnFailed || stdinFailed || observation.exit?.code !== 0
+      || observation.exit.signal !== null
+      || observation.stdoutBytes > 4096 || observation.stderrBytes > 4096) {
+      observation.failureCode = 'actor-process-failed';
+
+      return { observation, result: undefined };
+    }
+
+    let result;
+
+    try {
+      result = JSON.parse(stdout.trim());
+    } catch {
+      observation.failureCode = 'actor-receipt-invalid';
+
+      return { observation, result: undefined };
+    }
+
+    if (result === null || Array.isArray(result)
+      || Object.getPrototypeOf(result) !== Object.prototype) {
+      observation.failureCode = 'actor-receipt-invalid';
+
+      return { observation, result: undefined };
+    }
+
+    if (result.appPID !== session.child.pid) {
+      observation.failureCode = 'actor-app-pid-mismatch';
+
+      return { observation, result: undefined };
+    }
+
+    const preTrustFailure = result.status === 'failed'
+      && ['IMPORT', 'INPUT'].includes(result.failurePhase)
+      && result.currentHelperPID === null
+      && result.currentClientTrusted === null;
+    const trustFailure = result.status === 'failed'
+      && result.failurePhase === 'TRUST'
+      && result.currentHelperPID === child.pid
+      && [null, false].includes(result.currentClientTrusted);
+    const postTrustFailure = result.status === 'failed'
+      && [
+        'APPLICATION', 'WINDOWS', 'SHEET', 'DISCOVER', 'SET_VALUE',
+        'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL', 'SERIALIZE',
+      ].includes(result.failurePhase)
+      && result.currentHelperPID === child.pid
+      && result.currentClientTrusted === true;
+    const success = ['selected', 'canceled', 'no-sheet'].includes(result.status)
+      && result.currentHelperPID === child.pid
+      && result.currentClientTrusted === true;
+
+    if ((!preTrustFailure && !trustFailure && !postTrustFailure && !success)
+      || result.promptRequested !== false) {
+      observation.failureCode = 'actor-client-proof-invalid';
+
+      return { observation, result: undefined };
+    }
+
+    observation.currentHelperPID = result.currentHelperPID;
+    observation.currentClientTrusted = result.currentClientTrusted;
+    observation.trustPromptRequested = false;
+
+    if (mode === 'select' && result.status === 'selected') {
+      const allowedKeys = [
+        'actionCount',
+        'appPID',
+        'cleanupStatus',
+        'currentClientTrusted',
+        'currentHelperPID',
+        'defaultActionCount',
+        'pathFieldRole',
+        'pathValueMatched',
+        'promptRequested',
+        'roleCounts',
+        'semanticPathFieldCount',
+        'settableTextFieldCount',
+        'sheetCount',
+        'status',
+        'textFieldCount',
+        'windowCount',
+      ];
+      const observedKeys = Object.keys(result).sort();
+      const expectedKeys = allowedKeys.sort();
+
+      if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)
+        || result.windowCount !== 1
+        || result.sheetCount !== 0
+        || result.semanticPathFieldCount !== 1
+        || result.settableTextFieldCount < result.semanticPathFieldCount
+        || result.textFieldCount < result.settableTextFieldCount
+        || result.defaultActionCount !== 1
+        || result.pathFieldRole !== 'AXTextField'
+        || result.pathValueMatched !== true
+        || result.actionCount !== 1
+        || result.cleanupStatus !== 'sheet-dismissed'
+        || result.currentClientTrusted !== true
+        || result.promptRequested !== false
+        || !validCount(result.textFieldCount)
+        || !validCount(result.settableTextFieldCount)
+        || !validCount(result.semanticPathFieldCount)
+        || !validCount(result.defaultActionCount)
+        || !validRoleCounts(result.roleCounts)) {
+        observation.failureCode = 'selection-receipt-invalid';
+
+        return { observation, result: undefined };
+      }
+
+      observation.result = 'selected';
+      observation.roleCounts = result.roleCounts;
+      observation.textFieldCount = result.textFieldCount;
+      observation.settableTextFieldCount = result.settableTextFieldCount;
+      observation.semanticPathFieldCount = result.semanticPathFieldCount;
+      observation.defaultActionCount = result.defaultActionCount;
+      observation.actionCount = result.actionCount;
+
+      return { observation, result };
+    }
+
+    if (mode === 'select' && result.status === 'failed') {
+      const allowedKeys = [
+        'actionCount',
+        'appPID',
+        'cleanupStatus',
+        'currentClientTrusted',
+        'currentHelperPID',
+        'defaultActionCount',
+        'failurePhase',
+        'promptRequested',
+        'roleCounts',
+        'semanticPathFieldCount',
+        'settableTextFieldCount',
+        'sheetCount',
+        'status',
+        'textFieldCount',
+        'windowCount',
+      ];
+      const observedKeys = Object.keys(result).sort();
+      const expectedKeys = allowedKeys.sort();
+
+      if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)
+        || ![
+          'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
+          'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
+          'SERIALIZE',
+        ].includes(result.failurePhase)
+        || ![
+          'not-needed',
+          'sheet-canceled-and-drained',
+          'unverified',
+        ].includes(result.cleanupStatus)
+        || result.promptRequested !== false
+        || ![
+          result.actionCount,
+          result.windowCount,
+          result.sheetCount,
+          result.textFieldCount,
+          result.settableTextFieldCount,
+          result.semanticPathFieldCount,
+          result.defaultActionCount,
+        ].every(validCount)
+        || !validRoleCounts(result.roleCounts)) {
+        observation.failureCode = 'selection-failure-receipt-invalid';
+
+        return { observation, result: undefined };
+      }
+
+      observation.failurePhase = result.failurePhase;
+      observation.currentHelperPID = result.currentHelperPID;
+      observation.currentClientTrusted = result.currentClientTrusted;
+      observation.result = 'failed';
+      observation.sheetCleanup = result.cleanupStatus;
+      observation.roleCounts = result.roleCounts;
+      observation.windowCount = result.windowCount;
+      observation.sheetCount = result.sheetCount;
+      observation.textFieldCount = result.textFieldCount;
+      observation.settableTextFieldCount = result.settableTextFieldCount;
+      observation.semanticPathFieldCount = result.semanticPathFieldCount;
+      observation.defaultActionCount = result.defaultActionCount;
+      observation.actionCount = result.actionCount;
+
+      return { observation, result };
+    }
+
+    if (mode === 'cancel' && result.status === 'failed') {
+      const expectedKeys = [
+        'actionCount',
+        'appPID',
+        'cleanupStatus',
+        'currentClientTrusted',
+        'currentHelperPID',
+        'defaultActionCount',
+        'failurePhase',
+        'promptRequested',
+        'roleCounts',
+        'semanticPathFieldCount',
+        'settableTextFieldCount',
+        'sheetCount',
+        'status',
+        'textFieldCount',
+        'windowCount',
+      ];
+      const observedKeys = Object.keys(result).sort();
+
+      if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
+        || ![
+          'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
+          'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
+          'SERIALIZE',
+        ].includes(result.failurePhase)
+        || ![
+          'not-needed',
+          'sheet-canceled-and-drained',
+          'unverified',
+        ].includes(result.cleanupStatus)
+        || result.promptRequested !== false
+        || ![
+          result.actionCount,
+          result.windowCount,
+          result.sheetCount,
+          result.textFieldCount,
+          result.settableTextFieldCount,
+          result.semanticPathFieldCount,
+          result.defaultActionCount,
+        ].every(validCount)
+        || !validRoleCounts(result.roleCounts)) {
+        observation.failureCode = 'cancel-failure-receipt-invalid';
+
+        return { observation, result: undefined };
+      }
+
+      observation.failurePhase = result.failurePhase;
+      observation.result = 'failed';
+      observation.sheetCleanup = result.cleanupStatus;
+      observation.windowCount = result.windowCount;
+      observation.sheetCount = result.sheetCount;
+      observation.textFieldCount = result.textFieldCount;
+      observation.settableTextFieldCount = result.settableTextFieldCount;
+      observation.semanticPathFieldCount = result.semanticPathFieldCount;
+      observation.defaultActionCount = result.defaultActionCount;
+      observation.actionCount = result.actionCount;
+
+      return { observation, result };
+    }
+
+    if (mode === 'cancel' && ['canceled', 'no-sheet'].includes(result.status)) {
+      const expectedKeys = [
+        'actionCount',
+        'appPID',
+        'cleanupStatus',
+        'currentClientTrusted',
+        'currentHelperPID',
+        'promptRequested',
+        'status',
+      ];
+      const observedKeys = Object.keys(result).sort();
+
+      if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
+        || result.cleanupStatus !== (result.status === 'canceled' ? 'sheet-canceled-and-drained' : 'no-sheet-attached')
+        || result.currentClientTrusted !== true
+        || result.promptRequested !== false
+        || !validCount(result.actionCount)
+        || (result.status === 'canceled' && result.actionCount !== 1)
+        || (result.status === 'no-sheet' && result.actionCount !== 0)) {
+        observation.failureCode = 'cancel-receipt-invalid';
+
+        return { observation, result: undefined };
+      }
+
+      observation.result = result.status;
+      observation.sheetCleanup = result.cleanupStatus;
+      observation.currentHelperPID = result.currentHelperPID;
+      observation.currentClientTrusted = result.currentClientTrusted;
+      observation.actionCount = result.actionCount;
+
+      return { observation, result };
+    }
+
+    observation.failureCode = 'actor-result-invalid';
+
+    return { observation, result: undefined };
+  };
+
+  const selected = await launch('select');
+  let cleanup;
+
+  if (selected.result?.status === 'selected') {
+    diagnostics.nativeProjectPickerActors.push(...observations);
+
+    return selected.result;
+  }
+
+  if (selected.observation.cleanupStatus === 'exit-unverified') {
+    diagnostics.nativeProjectPickerActors.push(...observations);
+    throw new Error('Owned native picker actor process could not be verified stopped');
+  }
+
+  cleanup = await launch('cancel');
+  diagnostics.nativeProjectPickerActors.push(...observations);
+
+  if (!cleanup.result || !['canceled', 'no-sheet'].includes(cleanup.result.status)) {
+    throw new Error('Native project picker did not verify exact chooser cancellation or sheet absence');
+  }
+
+  const phase = selected.result?.failurePhase ?? selected.observation.failureCode ?? 'actor-failed';
+
+  throw new Error(`Native project picker failed at ${phase}; exact chooser cleanup was verified`);
+}
+
 async function isPortClosed(port) {
   const socket = net.createConnection({ host: '127.0.0.1', port });
 
@@ -1656,8 +2142,6 @@ try {
 
   const { WorkspaceDatabase } = await import(pathToFileURL(path.join(outRoot, 'workspaceDatabase.js')).href);
 
-  const { ProjectWorkspaceService } = await import(pathToFileURL(path.join(outRoot, 'projectWorkspaceService.js')).href);
-
   const { AgentSessionCollaborationService } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionCollaborationService.js')).href);
 
   const { computeAgentSessionChangeHunks } = await import(pathToFileURL(path.join(outRoot, 'agentSessions/agentSessionChangeHunks.js')).href);
@@ -1720,6 +2204,42 @@ try {
       await capturePage(session.page, onboardingShot);
 
       screenshots.push(onboardingShot);
+
+      await session.page.getByRole('button', { name: '프로젝트 폴더를 선택해 작업 시작', exact: true }).click();
+      await runNativeProjectPickerActor(session, projectFolder, tag);
+
+      const projectPage = await waitFor(async () => {
+        const candidates = [];
+
+        for (const candidate of session.browser.contexts().flatMap(context => context.pages())) {
+          if (candidate.isClosed() || !await candidate.locator('.project-dashboard #project-dashboard-title').isVisible()) {
+            continue;
+          }
+
+          candidates.push(candidate);
+        }
+
+        return candidates.length === 1 && candidates[0] !== session.page ? candidates[0] : undefined;
+      }, 'the actual project window opened by the native folder picker', 90_000);
+
+      await projectPage.locator('.project-dashboard').waitFor();
+      await projectPage.getByRole('heading', { name: path.basename(projectFolder), exact: true }).waitFor();
+      const projectWorkspace = await openSessionWorkspace(projectPage);
+      const projectGuide = projectWorkspace.locator('.ai-session-onboarding');
+
+      await projectGuide.waitFor({ state: 'visible' });
+      await projectGuide.getByRole('heading', { name: 'AI 세션 시작 안내', exact: true }).waitFor();
+      await projectGuide.getByRole('heading', { name: '현재 프로젝트', exact: true }).waitFor();
+      const canonicalProjectFolder = await realpath(projectFolder);
+
+      await projectGuide.getByText(canonicalProjectFolder, { exact: true }).waitFor();
+      await projectGuide.locator('.ai-session-onboarding__status').getByText('진행 단계 1/5 · 프로젝트', { exact: true }).waitFor();
+
+      const projectOnboardingShot = path.join(output, `project-picker-onboarding-${tag}.png`);
+
+      await capturePage(projectPage, projectOnboardingShot);
+
+      screenshots.push(projectOnboardingShot);
     } catch (error) {
 
       await captureFailure(session.page, path.join(output, `onboarding-${tag}-failure.png`), diagnostics);
@@ -1735,18 +2255,33 @@ try {
 
     try {
 
-      const service = new ProjectWorkspaceService(database, userData);
+      const projectFolderPath = await realpath(projectFolder);
+      const profilePath = await realpath(userData);
+      const projects = database.listProjects();
 
-      const project = service.createProject('CI 대시보드 프로젝트', projectFolder);
+      assert.equal(projects.length, 1, 'The real native picker journey must register exactly one project');
+
+      const project = projects[0];
+      const bindings = database.listFolderBindings(project.id);
+      const view = database.getProjectView(project.id);
+      const descriptorPath = path.join(profilePath, 'projects', `${project.id}.code-workspace`);
+
+      assert.equal(bindings.length, 1, 'The native folder selection must persist exactly one folder binding');
+      assert.equal(bindings[0].path, projectFolderPath, 'The registered folder binding must use the selected canonical folder');
+      assert.ok(view, 'The native project must persist its workspace descriptor view');
+      assert.equal(view.descriptorUri, pathToFileURL(descriptorPath).toString(), 'The project view must reference its canonical profile descriptor');
+      assert.deepEqual(JSON.parse(await readFile(descriptorPath, 'utf8')), {
+        folders: [{ path: projectFolderPath }],
+      }, 'The real project descriptor must point only to the selected canonical folder');
 
       const task = database.createTask({
-        projectId: project.project.id,
-        bindingId: project.binding.id,
+        projectId: project.id,
+        bindingId: bindings[0].id,
         title: '키보드 상태 변경 확인',
         description: '패키지 앱의 task 상태 버튼과 포커스를 확인합니다.',
       });
 
-      fixture = { projectId: project.project.id, bindingId: project.binding.id, projectName: project.project.name, projectFolder: project.binding.path, descriptorPath: project.descriptorPath, taskId: task.id, taskTitle: task.title, initialState: task.state };
+      fixture = { projectId: project.id, bindingId: bindings[0].id, projectName: project.name, projectFolder: bindings[0].path, descriptorPath, taskId: task.id, taskTitle: task.title, initialState: task.state };
     } finally {
       database.close();
     }
