@@ -3098,6 +3098,10 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
 
   const originalIndexSha256 = createHash('sha256').update(await readFile(path.join(repository, '.git', 'index'))).digest('hex');
 
+  const originalSelected = await readFile(path.join(repository, 'selected.txt'), 'utf8');
+
+  const originalUnselected = await readFile(path.join(repository, 'unselected.txt'), 'utf8');
+
   const bindingId = options.bindingId ?? database.createFolderBinding({ projectId: fixture.projectId, path: repository, vcsKind: 'git', vcsRoot: repository }).id;
 
   const session = database.agentSessions.createSession({
@@ -3175,7 +3179,7 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
     fixtureOnly: true, providerExecuted: false, ptyExecuted: false, nativeHumanApprovalExercised: false,
     proofLimit: 'Actual disposable Git and retained-file application path; any approval seeded by this fixture is synthetic and does not prove native human confirmation.',
     ...scope, name: session.name, provider: session.provider, model: session.model, workspaceMode: session.workspaceMode,
-    repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256,
+    repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256, originalSelected, originalUnselected,
     evidenceVersion: immutableEvidence.version, fingerprint: immutableEvidence.fingerprint, explanationRevision: explanation.revision,
     retainedAfter, laterSelected, laterUnselected, unselectedBase: `unselected base ${tag}\n`, commitMessage: `CI reviewed selected content ${tag}`,
   };
@@ -3846,9 +3850,13 @@ async function seedReviewedPublication(database, fixture) {
     'Publication preview must preserve the already committed session ref');
   assert.equal(createHash('sha256').update(await readFile(path.join(fixture.reviewedCommit.repository, '.git', 'index'))).digest('hex'), fixture.reviewedCommit.originalIndexSha256,
     'Publication diff preparation must preserve the original Git index');
-  assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'selected.txt'), 'utf8'), fixture.reviewedCommit.laterSelected,
+  assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'selected.txt'), 'utf8'), fixture.reviewedCommit.originalSelected,
+    'Publication diff preparation must preserve the original checkout file');
+  assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.originalUnselected,
+    'Publication diff preparation must preserve unrelated original checkout files');
+  assert.equal(await readFile(path.join(fixture.reviewedCommit.worktreePath, 'selected.txt'), 'utf8'), fixture.reviewedCommit.laterSelected,
     'Publication diff preparation must preserve the post-commit working file');
-  assert.equal(await readFile(path.join(fixture.reviewedCommit.repository, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.laterUnselected,
+  assert.equal(await readFile(path.join(fixture.reviewedCommit.worktreePath, 'unselected.txt'), 'utf8'), fixture.reviewedCommit.laterUnselected,
     'Publication diff preparation must preserve unrelated post-commit working files');
 
   return {
