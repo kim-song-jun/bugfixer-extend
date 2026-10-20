@@ -1718,7 +1718,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     // Selection permits 10s sheet discovery + 10s dismissal + 5s exact-sheet
     // cancellation with 5s for AX operations. Cancellation permits 2s discovery
     // and 5s dismissal plus 1s for AX calls.
-    const timeoutMs = mode === 'select' ? 30_000 : 8_000;
+    const timeoutMs = mode === 'select' ? 30_000 : mode === 'cancel' ? 8_000 : 5_000;
     const finished = await exitedWithin(exited, timeoutMs);
 
     if (!finished) {
@@ -1764,6 +1764,86 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.failureCode = 'actor-app-pid-mismatch';
 
       return { observation, result: undefined };
+    }
+
+    if (mode === 'type-probe') {
+      const expectedKeys = [
+        'appPID', 'currentClientTrusted', 'currentHelperPID', 'expectedTypeId',
+        'expectedTypeKind', 'failureCode', 'importedTypeId', 'importedTypeKind',
+        'observedPID', 'pidStatus', 'promptRequested', 'status', 'typedTypeId',
+        'typedTypeKind',
+      ];
+
+      const typeKinds = new Set([
+        'safe-integer', 'non-finite', 'negative', 'non-integer', 'unsafe-integer',
+      ]);
+
+      const typeIdPairValid = (id, kind) => kind === 'safe-integer'
+        ? Number.isSafeInteger(id) && id >= 0
+        : id === null && typeKinds.has(kind);
+
+      const probeFailureCodes = new Set([
+        null, 'probe-import-failed', 'probe-invalid-input',
+        'probe-input-read-failed',
+        'probe-trust-check-failed', 'probe-trust-result-invalid', 'probe-client-untrusted',
+        'probe-application-create-failed', 'probe-application-null',
+        'probe-imported-type-call-failed', 'probe-expected-type-call-failed',
+        'probe-pid-call-failed', 'probe-pid-query-failed', 'probe-pid-mismatch',
+        'probe-bind-failed', 'probe-typed-call-failed',
+      ]);
+
+      if (JSON.stringify(Object.keys(result).sort()) !== JSON.stringify(expectedKeys.sort())
+        || !['completed', 'failed'].includes(result.status)
+        || ![child.pid, null].includes(result.currentHelperPID)
+        || (result.currentHelperPID === null && result.failureCode !== 'probe-import-failed')
+        || ![true, false, null].includes(result.currentClientTrusted)
+        || (result.currentClientTrusted === null && ![
+          'probe-import-failed', 'probe-input-read-failed', 'probe-invalid-input',
+          'probe-trust-check-failed', 'probe-trust-result-invalid',
+        ].includes(result.failureCode))
+        || (result.currentClientTrusted === false && result.failureCode !== 'probe-client-untrusted')
+        || result.promptRequested !== false
+        || !typeIdPairValid(result.importedTypeId, result.importedTypeKind)
+        || !typeIdPairValid(result.expectedTypeId, result.expectedTypeKind)
+        || !typeIdPairValid(result.typedTypeId, result.typedTypeKind)
+        || !probeFailureCodes.has(result.failureCode)
+        || !['not-checked', 'success', 'query-failed', 'mismatch'].includes(result.pidStatus)
+        || (result.observedPID !== null && (!Number.isSafeInteger(result.observedPID) || result.observedPID < 0))
+        || (result.pidStatus === 'not-checked' && result.observedPID !== null)
+        || (result.pidStatus !== 'not-checked'
+          && (!Number.isSafeInteger(result.typedTypeId)
+            || !Number.isSafeInteger(result.expectedTypeId)
+            || result.typedTypeId !== result.expectedTypeId))
+        || (result.pidStatus === 'query-failed' && result.observedPID !== null)
+        || (result.pidStatus === 'mismatch'
+          && (result.observedPID === null || result.observedPID === session.child.pid
+            || result.failureCode !== 'probe-pid-mismatch'))
+        || (result.pidStatus === 'query-failed'
+          && result.failureCode !== 'probe-pid-query-failed')
+        || (result.pidStatus === 'success' && (result.observedPID !== session.child.pid
+          || result.failureCode !== null))
+        || (result.status === 'completed' && result.failureCode !== null)
+        || (result.status === 'failed' && result.failureCode === null)
+        || (result.failureCode === 'probe-client-untrusted' && result.currentClientTrusted !== false)) {
+        observation.failureCode = 'type-probe-receipt-invalid';
+
+        return { observation, result: undefined };
+      }
+
+      observation.probeStatus = result.status;
+      observation.probeFailureCode = result.failureCode;
+      observation.importedTypeId = result.importedTypeId;
+      observation.importedTypeKind = result.importedTypeKind;
+      observation.expectedTypeId = result.expectedTypeId;
+      observation.expectedTypeKind = result.expectedTypeKind;
+      observation.typedTypeId = result.typedTypeId;
+      observation.typedTypeKind = result.typedTypeKind;
+      observation.pidStatus = result.pidStatus;
+      observation.observedPID = result.observedPID;
+      observation.currentHelperPID = result.currentHelperPID;
+      observation.currentClientTrusted = result.currentClientTrusted;
+
+      return { observation, result };
     }
 
     const preTrustFailure = result.status === 'failed'
@@ -2049,16 +2129,24 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     throw new Error('Owned native picker actor process could not be verified stopped');
   }
 
+  let typeProbe;
+
+  if (selected.result?.failureCode === 'element-type-mismatch') {
+    typeProbe = await launch('type-probe');
+  }
+
   cleanup = await launch('cancel');
   diagnostics.nativeProjectPickerActors.push(...observations);
 
+  const phase = selected.result?.failurePhase ?? selected.observation.failureCode ?? 'actor-failed';
+  const probeFailure = typeProbe?.observation.failureCode ?? typeProbe?.result?.failureCode;
+  const probeDetail = probeFailure ? `; type probe failed at ${probeFailure}` : '';
+
   if (!cleanup.result || !['canceled', 'no-sheet'].includes(cleanup.result.status)) {
-    throw new Error('Native project picker did not verify exact chooser cancellation or sheet absence');
+    throw new Error(`Native project picker failed at ${phase}${probeDetail}; exact chooser cancellation or sheet absence was not verified`);
   }
 
-  const phase = selected.result?.failurePhase ?? selected.observation.failureCode ?? 'actor-failed';
-
-  throw new Error(`Native project picker failed at ${phase}; exact chooser cleanup was verified`);
+  throw new Error(`Native project picker failed at ${phase}${probeDetail}; exact chooser cleanup was verified`);
 }
 
 async function isPortClosed(port) {

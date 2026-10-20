@@ -82,6 +82,10 @@ let failureCode;
 let typeIdDiagnostic;
 
 function run(argv) {
+  if (argv[0] === "type-probe") {
+    return runTypeProbe(argv);
+  }
+
   let failurePhase = "IMPORT";
   let appPID = null;
   let currentHelperPID = null;
@@ -365,6 +369,144 @@ function run(argv) {
       roleCounts,
     });
   }
+}
+
+function runTypeProbe(argv) {
+  const appPID = Number(argv[1]);
+  const promptRequested = false;
+  let currentHelperPID = null;
+  let currentClientTrusted = null;
+  let importedTypeId = null;
+  let expectedTypeId = null;
+  let typedTypeId = null;
+  let pidStatus = "not-checked";
+  let observedPID = null;
+  let probeStatus = "completed";
+  let failureCode = "probe-import-failed";
+
+  try {
+    ObjC.import("ApplicationServices");
+    ObjC.import("Foundation");
+    currentHelperPID = Number($.NSProcessInfo.processInfo.processIdentifier);
+
+    failureCode = "probe-input-read-failed";
+    const inputHandle = $.NSFileHandle.fileHandleWithStandardInput;
+    const payloadData = inputHandle.readDataToEndOfFile;
+
+    const payloadText = ObjC.unwrap(
+      $.NSString.alloc.initWithDataEncoding(
+        payloadData,
+        $.NSUTF8StringEncoding,
+      ),
+    );
+
+    const payload = JSON.parse(payloadText);
+
+    if (
+      !Number.isInteger(appPID) ||
+      appPID < 1 ||
+      payload === null ||
+      Array.isArray(payload) ||
+      Object.getPrototypeOf(payload) !== Object.prototype ||
+      JSON.stringify(Object.keys(payload).sort()) !==
+        JSON.stringify(["targetPath"]) ||
+      payload.targetPath !== null ||
+      Number(payloadData.length) > 16_384
+    ) {
+      failureCode = "probe-invalid-input";
+      throw new Error("invalid probe input");
+    }
+
+    failureCode = "probe-trust-check-failed";
+
+    const options = $.NSDictionary.dictionaryWithObjectForKey(
+      $.NSNumber.numberWithBool(promptRequested),
+      $.kAXTrustedCheckOptionPrompt,
+    );
+
+    const trusted = $.AXIsProcessTrustedWithOptions(options);
+
+    if (![true, false, 0, 1].includes(trusted)) {
+      failureCode = "probe-trust-result-invalid";
+      throw new Error("invalid trust result");
+    }
+
+    currentClientTrusted = trusted === true || trusted === 1;
+
+    if (!currentClientTrusted) {
+      failureCode = "probe-client-untrusted";
+      throw new Error("untrusted probe client");
+    }
+
+    failureCode = "probe-application-create-failed";
+    const application = $.AXUIElementCreateApplication(appPID);
+
+    if (!application) {
+      failureCode = "probe-application-null";
+      throw new Error("application unavailable");
+    }
+
+    failureCode = "probe-imported-type-call-failed";
+    importedTypeId = Number($.CFGetTypeID(application));
+    failureCode = "probe-expected-type-call-failed";
+    expectedTypeId = Number($.AXUIElementGetTypeID());
+    failureCode = "probe-bind-failed";
+
+    ObjC.bindFunction("CFGetTypeID", ["unsigned long", ["pointer"]]);
+
+    failureCode = "probe-typed-call-failed";
+    typedTypeId = Number($.CFGetTypeID(application));
+
+    if (
+      safeTypeIdValue(typedTypeId) !== null &&
+      safeTypeIdValue(expectedTypeId) !== null &&
+      typedTypeId === expectedTypeId
+    ) {
+      const pid = Ref();
+      failureCode = "probe-pid-call-failed";
+      const status = Number($.AXUIElementGetPid(application, pid));
+
+      if (status !== Number($.kAXErrorSuccess)) {
+        pidStatus = "query-failed";
+        failureCode = "probe-pid-query-failed";
+        throw new Error("application PID query failed");
+      }
+
+      pidStatus = "success";
+      observedPID = Number(pid[0]);
+
+      if (observedPID !== appPID) {
+        pidStatus = "mismatch";
+        failureCode = "probe-pid-mismatch";
+        throw new Error("application PID mismatch");
+      }
+    }
+
+    failureCode = null;
+  } catch {
+    probeStatus = "failed";
+  }
+
+  if (!Number.isSafeInteger(observedPID) || observedPID < 0) {
+    observedPID = null;
+  }
+
+  return JSON.stringify({
+    status: probeStatus,
+    appPID,
+    currentHelperPID,
+    currentClientTrusted,
+    promptRequested,
+    importedTypeId: safeTypeIdValue(importedTypeId),
+    importedTypeKind: typeIdKind(importedTypeId),
+    expectedTypeId: safeTypeIdValue(expectedTypeId),
+    expectedTypeKind: typeIdKind(expectedTypeId),
+    typedTypeId: safeTypeIdValue(typedTypeId),
+    typedTypeKind: typeIdKind(typedTypeId),
+    pidStatus,
+    observedPID,
+    failureCode,
+  });
 }
 
 function copyAttribute(element, attribute) {
