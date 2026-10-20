@@ -5171,7 +5171,13 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
   await firstMessagePage.focus();
   await page.waitForTimeout(4_000);
 
-  assert.equal(await page.evaluate(() => document.activeElement?.textContent), '처음 메시지 다시 읽기', 'Visible mailbox refresh must not steal focus after notification navigation');
+  const historyActionFocus = await firstMessagePage.evaluate(button => ({
+    retained: button.ownerDocument.activeElement === button,
+    activeTag: button.ownerDocument.activeElement?.tagName,
+    activeId: button.ownerDocument.activeElement?.id,
+  }));
+
+  assert.equal(historyActionFocus.retained, true, `Visible mailbox refresh must not steal focus after notification navigation: ${JSON.stringify(historyActionFocus)}`);
 
   await page.setViewportSize({ width: 760, height: 820 });
   await page.waitForFunction(() => window.innerWidth === 760);

@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { createRequire, registerHooks } from 'node:module';
 import test from 'node:test';
+import type { WorkspaceAgentSessionMailboxPage } from '../../../../../workspace/common/workspaceAgentCommunicationProtocol.js';
 
 const { JSDOM } = createRequire(import.meta.url)('jsdom');
 const dom = new JSDOM('<html><body></body></html>', { pretendToBeVisual: true });
@@ -56,6 +57,53 @@ test('missing exact mailbox targets fail navigation and can never acknowledge as
 	controller.setVisible(true);
 	try {
 		assert.equal(await controller.revealMessage('missing-exact-message'), false);
+	} finally {
+		controller.dispose();
+		parent.remove();
+	}
+});
+
+test('mailbox polling keeps the focused first-page action focused while refreshing messages', async () => {
+	const parent = document.createElement('div');
+	document.body.append(parent);
+	let pageLoads = 0;
+	let finishRefresh!: (page: WorkspaceAgentSessionMailboxPage) => void;
+	const refreshPage = new Promise<WorkspaceAgentSessionMailboxPage>(resolve => { finishRefresh = resolve; });
+	const controller = createSessionMessages(parent, 'project', 'recipient', {
+		loadPage: async () => {
+			pageLoads++;
+			return pageLoads === 1
+				? { messages: [message], nextCursor: 1, hasMore: true }
+				: refreshPage;
+		},
+		loadMessage: async () => null,
+		sessions: [],
+	});
+	controller.setVisible(true);
+	try {
+		await new Promise(resolve => setTimeout(resolve, 0));
+		const [firstPage, nextPage] = parent.querySelectorAll<HTMLButtonElement>('.ai-session-messages__toolbar button');
+		assert.ok(firstPage);
+		assert.ok(nextPage);
+		firstPage.focus();
+		controller.refresh();
+		assert.equal(pageLoads, 2, 'the explicit refresh must start one request after the initial mailbox load');
+		assert.equal(firstPage.disabled, false, 'the focused first-page action must remain natively focusable during refresh');
+		assert.equal(firstPage.getAttribute('aria-disabled'), 'true', 'the first-page action must announce that activation is temporarily unavailable');
+		assert.equal(nextPage.disabled, false, 'a page action that remains available after refresh must remain natively focusable');
+		assert.equal(nextPage.getAttribute('aria-disabled'), 'true', 'the next-page action must announce the in-flight request');
+		assert.equal(parent.getAttribute('aria-busy'), 'true', 'the mailbox must expose its busy state');
+		assert.equal(document.activeElement, firstPage, 'starting a background refresh must not disable and blur the focused history action');
+		firstPage.click();
+		nextPage.click();
+		assert.equal(pageLoads, 2, 'activating either paging action during refresh must not start a duplicate request');
+		assert.equal(parent.querySelectorAll('.ai-session-messages__message').length, 1, 'paging input during refresh must not clear the loaded mailbox window');
+		finishRefresh({ messages: [message], nextCursor: 1, hasMore: true });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.equal(parent.getAttribute('aria-busy'), 'false', 'the mailbox must clear busy state when refresh completes');
+		assert.equal(firstPage.getAttribute('aria-disabled'), 'false');
+		assert.equal(nextPage.getAttribute('aria-disabled'), 'false');
+		assert.equal(document.activeElement, firstPage, 'completing a background refresh must preserve focus on the history action');
 	} finally {
 		controller.dispose();
 		parent.remove();

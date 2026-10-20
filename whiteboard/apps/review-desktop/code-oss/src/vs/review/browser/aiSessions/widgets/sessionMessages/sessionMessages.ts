@@ -107,6 +107,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 	const totalBytes = (): number => messages.reduce((sum, message) => sum + utf8Bytes(message.body), 0);
 
 	const render = (): void => {
+		parent.setAttribute('aria-busy', String(loading));
 		if (listDirty) {
 			const workspace = parent.closest<HTMLElement>('.ai-session-workspace');
 			const workspaceScrollTop = workspace?.scrollTop;
@@ -137,8 +138,9 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 		retryButton.hidden = !errorMessage;
 		empty.hidden = messages.length > 0 || loading || !!errorMessage;
 		empty.textContent = '이 세션의 받은 메시지가 없습니다.';
-		firstButton.disabled = loading;
-		nextButton.disabled = loading || !hasMore || messages.length >= MAX_MESSAGES || bytes >= MAX_BYTES;
+		nextButton.disabled = !hasMore || messages.length >= MAX_MESSAGES || bytes >= MAX_BYTES;
+		firstButton.setAttribute('aria-disabled', String(loading));
+		nextButton.setAttribute('aria-disabled', String(loading || nextButton.disabled));
 	};
 
 	const focusTarget = (): boolean => {
@@ -375,6 +377,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 	};
 
 	firstButton.addEventListener('click', () => {
+		if (loading) { return; }
 		finishTargetReveal(false);
 		if (timer) { clearTimeout(timer); timer = undefined; }
 		requestGeneration++;
@@ -394,7 +397,7 @@ export function createSessionMessages(parent: HTMLElement, projectId: string, re
 		targetNotice = undefined;
 		void fetchPage(0);
 	});
-	nextButton.addEventListener('click', () => { void fetchPage(cursor); });
+	nextButton.addEventListener('click', () => { if (!loading) { void fetchPage(cursor); } });
 	retryButton.addEventListener('click', () => {
 		connected = true;
 		if (currentTargetMessageId && targetLookupFailed) {
