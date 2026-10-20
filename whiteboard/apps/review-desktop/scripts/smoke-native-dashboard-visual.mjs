@@ -3507,6 +3507,7 @@ async function prepareReviewedConflictResolution(fixture) {
   assert.equal((await git('status', '--porcelain', '--untracked-files=all')).trim(), 'M  selected.txt');
 
   const indexBytes = await readFile(path.join(gitDirectory, 'index'));
+
   const resolution = {
     actor: 'CI fixture human-resolution simulation; no AI provider was executed.',
     text: resolvedText,

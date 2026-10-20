@@ -1065,40 +1065,48 @@ try {
   };
 
   let immediateTurnPollCount = 0;
+
   const immediateTerminal = await until(() => {
     const current = serviceDatabase.agentSessionTurns.getTurn(project.id, immediateSession.id, immediateTurn.id);
     immediateTurnPollCount++;
-    receipt.immediateExitTurnObservation = {
+
+    const observation = {
       observedAt: new Date().toISOString(),
       pollCount: immediateTurnPollCount,
       projectId: project.id,
       sessionId: immediateSession.id,
       turnId: immediateTurn.id,
       turnPresent: !!current,
-      ...(current ? {
-        state: current.state,
-        revision: current.revision,
-        updatedAt: current.updatedAt,
-        cleanupVerified: current.cleanupVerified,
-        exitCode: current.exitCode,
-        exitSignal: current.exitSignal,
-        errorSummaryPresent: typeof current.errorSummary === 'string' && current.errorSummary.length > 0,
-      } : {}),
     };
+
+    if (current) {
+      observation.state = current.state;
+      observation.revision = current.revision;
+      observation.updatedAt = current.updatedAt;
+      observation.cleanupVerified = current.cleanupVerified;
+      observation.exitCode = current.exitCode;
+      observation.exitSignal = current.exitSignal;
+      observation.errorSummaryPresent = current.errorSummary !== null && current.errorSummary.length > 0;
+    }
+
+    receipt.immediateExitTurnObservation = observation;
 
     return current?.state === 'exited' && current.cleanupVerified ? current : false;
   }, 'service immediate exit replay and cleanup');
 
   assert.equal(immediateTerminal.state, 'exited');
   assert.equal(resourceEvents.get(immediateTurn.id).join(','), 'access-revoked,private-config-released');
+
   const immediateTranscript = readCompleteTranscript(options =>
     serviceDatabase.agentSessionTranscripts.readPage(project.id, immediateSession.id, immediateTurn.id, {
       ...options, kind: 'terminal', maxOutputBytes: 256 * 1024,
     }));
+
   const immediateTerminalText = immediateTranscript.entries
     .filter(entry => entry.kind === 'terminal')
     .map(entry => entry.text)
     .join('');
+
   const immediateMarkerRetained = immediateTerminalText.includes('IMMEDIATE_WITHOUT_NEWLINE');
   receipt.immediateExitOutputProof = {
     status: 'evaluated-after-verified-exit',
