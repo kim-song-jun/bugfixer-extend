@@ -77,6 +77,8 @@ let expectedAXPID;
 
 let retainedArrays;
 
+let failureCode;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -94,6 +96,8 @@ function run(argv) {
   let semanticPathFieldCount = 0;
   let defaultActionCount = 0;
   let cleanupStatus = "not-needed";
+  failureCode = null;
+
   const mode = argv[0];
   appPID = Number(argv[1]);
 
@@ -167,7 +171,16 @@ function run(argv) {
 
     failurePhase = "APPLICATION";
     expectedAXPID = appPID;
+    failureCode = "application-create-call-failed";
+
     const application = $.AXUIElementCreateApplication(appPID);
+
+    if (!application) {
+      failureCode = "application-element-null";
+      throw new Error("application element unavailable");
+    }
+
+    failureCode = null;
     assertOwnedElement(application);
 
     failurePhase = "WINDOWS";
@@ -316,6 +329,8 @@ function run(argv) {
       roleCounts,
     });
   } catch {
+    const primaryFailureCode = failureCode;
+
     if (sheet && homeWindow) {
       try {
         cleanupStatus = cancelExactSheet(homeWindow, sheet)
@@ -333,6 +348,7 @@ function run(argv) {
       currentClientTrusted,
       promptRequested,
       failurePhase,
+      failureCode: primaryFailureCode,
       actionCount,
       windowCount,
       sheetCount,
@@ -367,22 +383,40 @@ function isOptionalAttributeMissing(status) {
 }
 
 function assertOwnedElement(element) {
-  if (
-    !element ||
-    Number($.CFGetTypeID(element)) !== Number($.AXUIElementGetTypeID())
-  ) {
+  if (!element) {
+    failureCode = "element-null";
+    throw new Error("Accessibility element unavailable");
+  }
+
+  failureCode = "element-cf-type-call-failed";
+
+  const typeID = Number($.CFGetTypeID(element));
+
+  failureCode = "element-ax-type-call-failed";
+
+  const expectedTypeID = Number($.AXUIElementGetTypeID());
+
+  if (typeID !== expectedTypeID) {
+    failureCode = "element-type-mismatch";
     throw new Error("Accessibility element type mismatch");
   }
+
+  failureCode = "element-pid-call-failed";
 
   const pid = Ref();
   const status = Number($.AXUIElementGetPid(element, pid));
 
-  if (
-    status !== Number($.kAXErrorSuccess) ||
-    Number(pid[0]) !== expectedAXPID
-  ) {
+  if (status !== Number($.kAXErrorSuccess)) {
+    failureCode = "element-pid-query-failed";
+    throw new Error("Accessibility element process query failed");
+  }
+
+  if (Number(pid[0]) !== expectedAXPID) {
+    failureCode = "element-pid-mismatch";
     throw new Error("Accessibility element process ownership mismatch");
   }
+
+  failureCode = null;
 
   return element;
 }

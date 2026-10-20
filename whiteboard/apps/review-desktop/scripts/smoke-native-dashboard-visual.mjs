@@ -1583,6 +1583,18 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     && value >= 0
     && value <= 512;
 
+  const failureCodes = new Set([
+    'application-create-call-failed',
+    'application-element-null',
+    'element-null',
+    'element-cf-type-call-failed',
+    'element-ax-type-call-failed',
+    'element-type-mismatch',
+    'element-pid-call-failed',
+    'element-pid-query-failed',
+    'element-pid-mismatch',
+  ]);
+
   const validRoleCounts = value => {
     if (value === null || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -1822,6 +1834,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'currentClientTrusted',
         'currentHelperPID',
         'defaultActionCount',
+        'failureCode',
         'failurePhase',
         'promptRequested',
         'roleCounts',
@@ -1837,6 +1850,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       const expectedKeys = allowedKeys.sort();
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)
+        || (result.failureCode !== null && !failureCodes.has(result.failureCode))
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
           'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
@@ -1864,6 +1878,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       }
 
       observation.failurePhase = result.failurePhase;
+      observation.actorFailureCode = result.failureCode;
       observation.currentHelperPID = result.currentHelperPID;
       observation.currentClientTrusted = result.currentClientTrusted;
       observation.result = 'failed';
@@ -1888,6 +1903,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'currentClientTrusted',
         'currentHelperPID',
         'defaultActionCount',
+        'failureCode',
         'failurePhase',
         'promptRequested',
         'roleCounts',
@@ -1902,6 +1918,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       const observedKeys = Object.keys(result).sort();
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
+        || (result.failureCode !== null && !failureCodes.has(result.failureCode))
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
           'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
@@ -1929,6 +1946,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       }
 
       observation.failurePhase = result.failurePhase;
+      observation.actorFailureCode = result.failureCode;
       observation.result = 'failed';
       observation.sheetCleanup = result.cleanupStatus;
       observation.windowCount = result.windowCount;
