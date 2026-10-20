@@ -159,8 +159,13 @@ test('retained-text search advances bounded cursors through empty pages and matc
 		const secret = 'known-search-secret-123';
 		store.appendStructuredLog({ projectId: project.id, sessionId: session.id, turnId: turn.id, sequence: 103,
 			text: `private ${secret}`, severity: 'error', source: 'provider', trustedKnownSecrets: [secret] });
-		assert.deepEqual(store.readPage(project.id, session.id, turn.id, { query: secret }).entries, []);
-		assert.deepEqual(store.readPage(project.id, session.id, turn.id, { query: 'PRIVATE' }).entries.map(entry => entry.sequence), [103]);
+		const secretSearch = store.readPage(project.id, session.id, turn.id, { query: secret, afterSequence: 102 });
+		assert.deepEqual(secretSearch.entries, []);
+		assert.equal(secretSearch.nextSequence, 103);
+		assert.equal(secretSearch.hasMore, false);
+		const visibleTextSearch = store.readPage(project.id, session.id, turn.id, { query: 'PRIVATE', afterSequence: 102 });
+		assert.deepEqual(visibleTextSearch.entries.map(entry => entry.sequence), [103]);
+		assert.equal(visibleTextSearch.entries[0].text, 'private ***');
 		assert.throws(() => store.readPage(project.id, session.id, turn.id, { query: '' }), /1 to 256 UTF-16/u);
 		assert.throws(() => store.readPage(project.id, session.id, turn.id, { query: 'x'.repeat(257) }), /1 to 256 UTF-16/u);
 	});
