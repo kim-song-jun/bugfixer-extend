@@ -1,5 +1,15 @@
 # Product acceptance map
 
+## Current execution evidence
+
+[CI 39469104677](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39469104677) on `90cb5fa` passed 374 agent contracts (26 skipped), Desktop build/typecheck and 249 session UI tests, scripts with 132 passed and two skipped, and 11 separate Desktop checks. Native worktree/content/runtime/IPC/PR-text/ownership contracts passed, as did all 25 PTY checks and the complete two-terminal fixture flow. The terminal and PTY receipts record verified cleanup and all owned processes gone; authenticated providers were not executed.
+
+The packaged dashboard completed its selected light/dark fixture flows and saved 133 viewport records. Both themes include anonymous Codex/Claude installation and signed-out guidance, onboarding focus/navigation checks, historical proposal selection, and workflow plan creation/revision to saved version 2. Workflow records show no overflow and reachable actions at 1440 and 760 px. The saved plans remain waiting for native approval; no workflow provider launch or task completion is claimed. Independent visual review passed the selected narrow workflow and dark onboarding captures. These results do not establish all product states, actual account behavior or native approval interaction.
+
+The bounded JXA probe returned `currentClientTrusted: true` for its exact owned `osascript` PID, with permission prompting disabled and exit/cleanup observed. It did not exercise the native folder picker. The overall native job failed its final console check: the receipt contains 22 unserved `localPty` channel timeouts and two extension-scan cancellation errors, all before app shutdown. Runtime error and failed-network-request arrays are empty. A source-reviewed correction removes the Review-only generic backend/proxy registration that requested a PTY service absent from Review's main process; the approved custom PTY path is retained and requires exact-commit CI. The cancellation errors are still being investigated. No native acceptance or whole-product completion is claimed.
+
+## Earlier execution history
+
 The next [CI 39468032199](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39468032199) on `41fb16f` passed lint and 374 agent contracts (26 skipped), plus the separate onboarding, reference-guard, migration and anonymous CLI-help suites. Desktop then stopped at formatting of the new JXA file before building; the macOS job was skipped. Matching its string quotes to the repository's existing formatter configuration is a source-only correction pending CI. This run produced no JXA or later native UI evidence.
 
 Follow-up status: [CI 39467646741](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39467646741) on `5bd68eb` stopped at lint before contract tests; Desktop and macOS jobs were skipped. The reported JXA/receipt validation and spacing corrections preserve explicit allowlisted scalar values and still require CI. No accessibility-trust, folder-picker or later workflow result was produced by this run.
