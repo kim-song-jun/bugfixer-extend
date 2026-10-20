@@ -373,6 +373,12 @@ jobs:
           --test --test-concurrency=1
           code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionContentCapture.test.ts
 
+      - name: Native app process identity cleanup contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 3
+        working-directory: whiteboard/apps/review-desktop
+        run: node --test --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
+
       - name: Native project dashboard smoke
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         run: node apps/review-desktop/scripts/smoke-native-dashboard-visual.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-ui-smoke"

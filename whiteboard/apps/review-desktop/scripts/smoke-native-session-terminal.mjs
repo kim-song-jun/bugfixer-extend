@@ -1,6 +1,6 @@
 /** Drive two real app-created Codex custom PTYs through the packaged native UI. */
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, readlinkSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
@@ -10,6 +10,17 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { chromium } from 'playwright';
+import {
+  captureOwnedProcessTree,
+  lineageToRoot,
+  ProcessIdentityRefusal,
+  processAlive,
+  processGroupAlive,
+  processInventory,
+  sameProcessIdentity,
+  stopOwnedProcessTree,
+  verifyLiveIdentity,
+} from './native/app-process-cleanup.mjs';
 
 const [appArgument, outputArgument] = process.argv.slice(2);
 
@@ -142,42 +153,6 @@ async function absent(filePath) {
   catch (error) { if (error?.code === 'ENOENT') return true; throw error; }
 }
 
-function processInventory() {
-  const output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart=,command='], {
-    encoding: 'utf8', timeout: 3_000, maxBuffer: 8 * 1024 * 1024,
-  });
-
-  const inventory = new Map();
-
-  for (const line of output.split('\n')) {
-    const fields = line.trim().split(/\s+/);
-
-    if (fields.length < 10) continue;
-    const pid = Number(fields[0]);
-    const ppid = Number(fields[1]);
-    const pgid = Number(fields[2]);
-
-    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isSafeInteger(pgid)) continue;
-    inventory.set(pid, { pid, ppid, pgid, stat: fields[3], started: fields.slice(4, 9).join(' '), command: fields.slice(9).join(' ') });
-  }
-
-  return inventory;
-}
-
-function processAlive(pid) {
-  try { process.kill(pid, 0);
-
- return true; }
-  catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
-}
-
-function processGroupAlive(pgid) {
-  try { process.kill(-pgid, 0);
-
- return true; }
-  catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
-}
-
 const safeHostJournalLabels = new Map([
   ['Session turn starting.', 'session.turn-starting'],
   ['Provider process started.', 'session.provider-started'],
@@ -275,75 +250,20 @@ function captureStopObservation(session, stage) {
   }
 }
 
-function sameProcessIdentity(expected, actual) {
-  return !!actual && expected.pid === actual.pid && expected.pgid === actual.pgid
-    && expected.started === actual.started && expected.command === actual.command;
-}
-
-function lineageToRoot(inventory, pid, rootPid) {
-  const lineage = [];
-  const seen = new Set();
-  let currentPid = pid;
-
-  while (currentPid > 1 && !seen.has(currentPid)) {
-    seen.add(currentPid);
-    const current = inventory.get(currentPid);
-
-    if (!current) return undefined;
-    lineage.push(current);
-
-    if (currentPid === rootPid) return lineage;
-    currentPid = current.ppid;
-  }
-
-  return undefined;
-}
-
 function captureAppProcessTree() {
-  if (!appChild?.pid || appExited) return false;
-  const inventory = processInventory();
-  const rootIdentity = inventory.get(appChild.pid);
+  const state = { rootIdentity: appProcessIdentity, identities: appProcessIdentities, captured: appProcessTreeCaptured };
+  const captured = captureOwnedProcessTree({
+    rootPid: appChild?.pid,
+    executablePath: appExecutablePath,
+    appExited,
+    state,
+  });
 
-  if (!rootIdentity) throw new Error('The app PID disappeared before its final owned-process snapshot.');
+  appProcessIdentity = state.rootIdentity;
+  appProcessIdentities = state.identities;
+  appProcessTreeCaptured = state.captured;
 
-  if (appExecutablePath && !rootIdentity.command.includes(appExecutablePath)) {
-    throw new Error('The spawned app PID command does not match the exact packaged executable; refusing process ownership capture.');
-  }
-
-  if (appProcessIdentity && !sameProcessIdentity(appProcessIdentity, rootIdentity)) {
-    throw new Error('The app PID no longer matches its captured process start, group, and command identity.');
-  }
-
-  appProcessIdentity ??= rootIdentity;
-  const tree = [];
-
-  for (const candidate of inventory.values()) {
-    const lineage = lineageToRoot(inventory, candidate.pid, appChild.pid);
-
-    if (lineage) tree.push(candidate);
-  }
-
-  const groupMembers = [...inventory.values()].filter(candidate => candidate.pgid === appChild.pid);
-
-  for (const member of groupMembers) {
-    if (!lineageToRoot(inventory, member.pid, appChild.pid)) {
-      throw new Error(`App process group ${appChild.pid} contains an unowned member; teardown is unsafe.`);
-    }
-  }
-
-  for (const candidate of tree) {
-    const previous = appProcessIdentities.get(candidate.pid);
-
-    if (previous && !sameProcessIdentity(previous, candidate)) {
-      throw new Error(`App descendant PID ${candidate.pid} changed identity during the smoke.`);
-    }
-
-    appProcessIdentities.set(candidate.pid, candidate);
-  }
-
-  appProcessTreeCaptured = true;
-
-  return true;
+  return captured;
 }
 
 function captureFixtureIdentity(pid) {
@@ -370,38 +290,13 @@ function captureFixtureIdentity(pid) {
   return { ...identity, originalLineage: lineage };
 }
 
-function verifyLiveIdentity(expected) {
-  const alive = processAlive(expected.pid);
-
-  if (!alive) return false;
-  const inventory = processInventory();
-  const current = inventory.get(expected.pid);
-
-  if (!current) {
-    if (!processAlive(expected.pid)) return false;
-    throw new Error(`PID ${expected.pid} is live but absent from the process inventory; refusing to signal it.`);
+function verifyFixtureIdentity(expected) {
+  try {
+    return verifyLiveIdentity(expected, { rootPid: appChild.pid });
+  } catch (error) {
+    if (error instanceof ProcessIdentityRefusal) receipt.cleanup.push(error.diagnostic);
+    throw error;
   }
-
-  if (!sameProcessIdentity(expected, current)) {
-    const describe = identity => ({
-      pgid: identity.pgid, started: identity.started, stat: identity.stat,
-      commandSha256: createHash('sha256').update(identity.command).digest('hex'),
-    });
-
-    receipt.cleanup.push({ kind: 'process-identity-mismatch', pid: expected.pid, expected: describe(expected), observed: describe(current) });
-    throw new Error(`PID ${expected.pid} is live but its process start, group, or command identity changed; refusing to signal it.`);
-  }
-
-  if (expected.originalLineage) {
-    const lineage = lineageToRoot(inventory, expected.pid, appChild.pid);
-
-    if (!lineage || lineage.length !== expected.originalLineage.length
-      || lineage.some((member, index) => !sameProcessIdentity(expected.originalLineage[index], member))) {
-      throw new Error(`Fixture PID ${expected.pid} no longer has its captured app-owned process lineage; refusing to signal it.`);
-    }
-  }
-
-  return true;
 }
 
 async function portClosed(port) {
@@ -424,7 +319,7 @@ async function terminateOwnedFixture(session) {
 
   if (!expected) throw new Error(`Fixture PID ${pid} has no captured command/start/lineage identity; refusing cleanup signal.`);
 
-  if (!(verifyLiveIdentity(expected))) return;
+  if (!(verifyFixtureIdentity(expected))) return;
   receipt.cleanup.push({ kind: 'fixture-process-signal', pid, signal: 'SIGTERM' });
 
   try { process.kill(pid, 'SIGTERM'); }
@@ -432,86 +327,29 @@ async function terminateOwnedFixture(session) {
 
   const deadline = Date.now() + 5_000;
 
-  while (Date.now() < deadline && verifyLiveIdentity(expected)) await new Promise(resolve => setTimeout(resolve, 100));
+  while (Date.now() < deadline && verifyFixtureIdentity(expected)) await new Promise(resolve => setTimeout(resolve, 100));
 
-  if (verifyLiveIdentity(expected)) {
-    verifyLiveIdentity(expected);
+  if (verifyFixtureIdentity(expected)) {
+    verifyFixtureIdentity(expected);
     receipt.cleanup.push({ kind: 'fixture-process-signal', pid, signal: 'SIGKILL' });
 
     try { process.kill(pid, 'SIGKILL'); }
     catch (error) { if (error?.code !== 'ESRCH') throw error; }
 
-    await waitFor(() => !verifyLiveIdentity(expected), `owned fixture process ${pid} after SIGKILL`, 5_000);
+    await waitFor(() => !verifyFixtureIdentity(expected), `owned fixture process ${pid} after SIGKILL`, 5_000);
   }
 }
 
 async function stopOwnedApp() {
-  if (!appChild?.pid) return;
-
-  if (!appProcessTreeCaptured) throw new Error('No complete owned app process tree was captured; refusing broad teardown.');
-  const identities = [...appProcessIdentities.values()].sort((a, b) => Number(b.pid === appChild.pid) - Number(a.pid === appChild.pid));
-
-  const identitiesGone = () => identities.every(expected => !processAlive(expected.pid));
-
-  const groupGone = () => {
-    const inventory = processInventory();
-
-    if ([...inventory.values()].some(candidate => candidate.pgid === appChild.pid)) return false;
-
-    return !processGroupAlive(appChild.pid);
-  };
-
-  const root = appProcessIdentity;
-
-  if (!root) throw new Error('No exact app root identity was captured; refusing shutdown.');
-
-  if (verifyLiveIdentity(root)) {
-    receipt.cleanup.push({ kind: 'app-process-signal', pid: root.pid, signal: 'SIGTERM', phase: 'root-first' });
-
-    try { process.kill(root.pid, 'SIGTERM'); }
-    catch (error) { if (error?.code !== 'ESRCH') throw error; }
-  }
-
-  try {
-    await waitFor(() => identitiesGone() && groupGone(), `app-owned graceful shutdown ${appChild.pid}`, 2_000);
-
-    if (!appExited) await waitFor(() => appExited, `owned app leader ${appChild.pid} close event`, 5_000);
-
-    return true;
-  } catch (error) {
-    receipt.cleanup.push({ kind: 'app-root-grace-expired', error: error.message });
-  }
-
-  for (const expected of identities) {
-    if (!verifyLiveIdentity(expected)) continue;
-    receipt.cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal: 'SIGTERM' });
-
-    try { process.kill(expected.pid, 'SIGTERM'); }
-    catch (error) { if (error?.code !== 'ESRCH') throw error; }
-  }
-
-  let graceful = false;
-
-  try {
-    await waitFor(() => identitiesGone() && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGTERM`, 10_000);
-    graceful = true;
-  } catch (gracefulError) {
-    receipt.cleanup.push({ kind: 'app-graceful-shutdown-escalation', error: gracefulError.message });
-
-    for (const expected of identities) {
-      if (!verifyLiveIdentity(expected)) continue;
-      receipt.cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal: 'SIGKILL' });
-
-      try { process.kill(expected.pid, 'SIGKILL'); }
-      catch (error) { if (error?.code !== 'ESRCH') throw error; }
-    }
-
-    await waitFor(() => identitiesGone() && groupGone(), `owned app descendants and process group ${appChild.pid} after SIGKILL`, 5_000);
-  }
-
-  if (!appExited) await waitFor(() => appExited, `owned app leader ${appChild.pid} close event`, 5_000);
-
-  return graceful;
+  return stopOwnedProcessTree({
+    rootPid: appChild?.pid,
+    rootIdentity: appProcessIdentity,
+    identities: appProcessIdentities.values(),
+    captured: appProcessTreeCaptured,
+    isAppExited: () => appExited,
+    cleanup: receipt.cleanup,
+    waitFor,
+  });
 }
 
 async function readTerminalText(page) {
