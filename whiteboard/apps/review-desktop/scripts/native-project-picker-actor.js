@@ -107,7 +107,14 @@ function run(argv) {
   try {
     ObjC.import("ApplicationServices");
     ObjC.import("Foundation");
+    ObjC.import("CoreFoundation");
     ObjC.bindFunction("CFGetTypeID", ["unsigned long", ["pointer"]]);
+    ObjC.bindFunction("CFArrayGetCount", ["long", ["pointer"]]);
+    ObjC.bindFunction("CFArrayGetValueAtIndex", [
+      "pointer",
+      ["pointer", "long"],
+    ]);
+    ObjC.bindFunction("CFArrayGetTypeID", ["unsigned long", []]);
     AX = {
       windows: $("AXWindows"),
       role: $("AXRole"),
@@ -535,6 +542,8 @@ function copyArrayValue(copied) {
     throw new Error("Accessibility array query failed");
   }
 
+  assertCFArray(copied.value);
+
   failureCode = "cf-array-count-call-failed";
   const count = Number($.CFArrayGetCount(copied.value));
 
@@ -555,6 +564,41 @@ function copyArrayValue(copied) {
   failureCode = null;
 
   return values;
+}
+
+function assertCFArray(value) {
+  typeIdDiagnostic = null;
+
+  if (!value) {
+    failureCode = "cf-array-value-null";
+    throw new Error("Accessibility array unavailable");
+  }
+
+  failureCode = "cf-array-cf-type-call-failed";
+  const typeID = Number($.CFGetTypeID(value));
+
+  failureCode = "cf-array-type-id-call-failed";
+  const expectedTypeID = Number($.CFArrayGetTypeID());
+
+  if (
+    safeTypeIdValue(typeID) === null ||
+    safeTypeIdValue(expectedTypeID) === null ||
+    typeID !== expectedTypeID
+  ) {
+    typeIdDiagnostic = {
+      actualTypeId: safeTypeIdValue(typeID),
+      actualKind: typeIdKind(typeID),
+      expectedTypeId: safeTypeIdValue(expectedTypeID),
+      expectedKind: typeIdKind(expectedTypeID),
+    };
+    failureCode = "cf-array-type-mismatch";
+    throw new Error("Accessibility value is not a CFArray");
+  }
+
+  typeIdDiagnostic = null;
+  failureCode = null;
+
+  return value;
 }
 
 function copyElementAttribute(element, attribute) {
@@ -626,18 +670,26 @@ function hasPressAction(element) {
     return false;
   }
 
-  const actionList = actions[0];
+  const actionList = assertCFArray(actions[0]);
   retainedArrays.push(actionList);
+  failureCode = "cf-array-count-call-failed";
   const count = Number($.CFArrayGetCount(actionList));
 
   if (!Number.isInteger(count) || count < 0 || count > 64) {
+    failureCode = "cf-array-count-invalid";
     return false;
   }
 
-  for (let index = 0; index < count; index++) {
-    const action = $.CFArrayGetValueAtIndex(actionList, index);
+  failureCode = null;
 
-    if (ObjC.unwrap(action) === "AXPress") {
+  for (let index = 0; index < count; index++) {
+    failureCode = "cf-array-element-retrieval-failed";
+    const action = $.CFArrayGetValueAtIndex(actionList, index);
+    failureCode = "cf-array-action-name-read-failed";
+    const actionName = ObjC.unwrap(action);
+    failureCode = null;
+
+    if (actionName === "AXPress") {
       return true;
     }
   }

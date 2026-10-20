@@ -372,7 +372,7 @@ setInterval(() => {}, 1000);`;
     if (root.pid && rootConstructionFrozen && processState.rootIdentity) {
       try {
         if (processAlive(root.pid)) {
-          assert.equal(verifyLiveIdentity(processState.rootIdentity), true, 'The live root must still match its original captured identity before final descendant capture.');
+          assert.equal(verifyLiveIdentity(processState.rootIdentity, { rootPid: root.pid }), true, 'The live root must still match its original captured identity before final descendant capture.');
           captureOwnedProcessTree({ rootPid: root.pid, state: processState });
           rememberCapturedIdentities();
           finalTreeCaptured = true;
@@ -395,7 +395,7 @@ setInterval(() => {}, 1000);`;
 
       try {
         if (!processAlive(identity.pid)) continue;
-        assert.equal(verifyLiveIdentity(identity), true, `Test-owned PID ${identity.pid} must still match its captured identity before exact cleanup.`);
+        assert.equal(verifyLiveIdentity(identity, { rootPid: root.pid }), true, `Test-owned PID ${identity.pid} must still match its captured identity before exact cleanup.`);
         process.kill(identity.pid, 'SIGKILL');
       } catch (error) {
         if (error?.code !== 'ESRCH') cleanupErrors.push(`Exact test-owned PID ${identity.pid} cleanup failed: ${error.message}`);

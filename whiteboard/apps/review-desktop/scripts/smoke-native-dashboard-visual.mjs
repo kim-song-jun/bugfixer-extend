@@ -1591,6 +1591,11 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'cf-array-count-call-failed',
     'cf-array-count-invalid',
     'cf-array-element-retrieval-failed',
+    'cf-array-action-name-read-failed',
+    'cf-array-value-null',
+    'cf-array-cf-type-call-failed',
+    'cf-array-type-id-call-failed',
+    'cf-array-type-mismatch',
     'application-create-call-failed',
     'application-element-null',
     'element-null',
@@ -1623,7 +1628,10 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
   const validTypeIdDiagnostic = result => {
     const value = result.typeIdDiagnostic;
 
-    if (result.failureCode !== 'element-type-mismatch') return value === null;
+    const typeMismatch = ['element-type-mismatch', 'cf-array-type-mismatch']
+      .includes(result.failureCode);
+
+    if (!typeMismatch) return value === null;
 
     if (value === null || value === undefined || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) return false;
