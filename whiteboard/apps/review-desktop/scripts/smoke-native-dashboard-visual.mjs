@@ -4643,6 +4643,7 @@ async function verifyAiSessionTranscriptLogs(page, fixture, tag, screenshots, vi
   await search.fill('no-retained-match');
   await page.waitForFunction(() => {
     const status = document.querySelector('.ai-session-logs__status')?.textContent ?? '';
+
     return document.querySelectorAll('.ai-session-logs__entry').length === 0 && status.includes('조건에 맞는 보존 기록이 없습니다.');
   });
 
