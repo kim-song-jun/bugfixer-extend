@@ -70,8 +70,11 @@ const LEAF_ROLES = new Set([
   "AXTokenField",
   "AXValueIndicator",
 ]);
+
 let AX;
+
 let expectedAXPID;
+
 let retainedArrays;
 
 function run(argv) {
@@ -120,6 +123,7 @@ function run(argv) {
     const payloadText = ObjC.unwrap(
       $.NSString.alloc.initWithDataEncoding(payloadData, $.NSUTF8StringEncoding),
     );
+
     const payload = JSON.parse(payloadText);
     const targetPath = payload.targetPath;
 
@@ -145,6 +149,7 @@ function run(argv) {
       $.NSNumber.numberWithBool(promptRequested),
       $.kAXTrustedCheckOptionPrompt,
     );
+
     const trusted = $.AXIsProcessTrustedWithOptions(options);
 
     if (![true, false, 0, 1].includes(trusted)) {
@@ -236,6 +241,7 @@ function run(argv) {
     const pathFields = settableTextFields.filter((element) =>
       isPathSemantic(element),
     );
+
     textFieldCount = textFields.length;
     settableTextFieldCount = settableTextFields.length;
     semanticPathFieldCount = pathFields.length;
@@ -249,6 +255,7 @@ function run(argv) {
       [sheet, homeWindow],
       AX.defaultButton,
     );
+
     defaultActionCount = openButtons.length;
 
     if (openButtons.length !== 1) {

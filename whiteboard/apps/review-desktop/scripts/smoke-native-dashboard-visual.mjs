@@ -1572,13 +1572,17 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
   );
 
   const executable = '/usr/bin/osascript';
+
   const script = fileURLToPath(
     new URL('./native-project-picker-actor.js', import.meta.url),
   );
+
   const observations = [];
+
   const validCount = value => Number.isInteger(value)
     && value >= 0
     && value <= 512;
+
   const validRoleCounts = value => {
     if (value === null || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -1592,6 +1596,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
   const launch = async mode => {
     const args = ['-l', 'JavaScript', script, mode, String(session.child.pid)];
+
     const payload = JSON.stringify({
       targetPath: mode === 'select' ? targetFolder : null,
     });
@@ -1624,6 +1629,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       stderrBytes: 0,
       trustPromptRequested: false,
     };
+
     observations.push(observation);
 
     let stdout = '';
@@ -1681,6 +1687,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.failureCode = closed
         ? 'actor-timeout'
         : 'actor-cleanup-unverified';
+
       return { observation, result: undefined };
     }
 
@@ -1721,10 +1728,12 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       && ['IMPORT', 'INPUT'].includes(result.failurePhase)
       && result.currentHelperPID === null
       && result.currentClientTrusted === null;
+
     const trustFailure = result.status === 'failed'
       && result.failurePhase === 'TRUST'
       && result.currentHelperPID === child.pid
       && [null, false].includes(result.currentClientTrusted);
+
     const postTrustFailure = result.status === 'failed'
       && [
         'APPLICATION', 'WINDOWS', 'SHEET', 'DISCOVER', 'SET_VALUE',
@@ -1732,6 +1741,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       ].includes(result.failurePhase)
       && result.currentHelperPID === child.pid
       && result.currentClientTrusted === true;
+
     const success = ['selected', 'canceled', 'no-sheet'].includes(result.status)
       && result.currentHelperPID === child.pid
       && result.currentClientTrusted === true;
@@ -1766,6 +1776,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'textFieldCount',
         'windowCount',
       ];
+
       const observedKeys = Object.keys(result).sort();
       const expectedKeys = allowedKeys.sort();
 
@@ -1821,6 +1832,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'textFieldCount',
         'windowCount',
       ];
+
       const observedKeys = Object.keys(result).sort();
       const expectedKeys = allowedKeys.sort();
 
@@ -1886,6 +1898,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'textFieldCount',
         'windowCount',
       ];
+
       const observedKeys = Object.keys(result).sort();
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
@@ -1939,6 +1952,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'promptRequested',
         'status',
       ];
+
       const observedKeys = Object.keys(result).sort();
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
