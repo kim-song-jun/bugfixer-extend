@@ -3497,10 +3497,16 @@ async function prepareReviewedConflictResolution(fixture) {
   assert.equal((await git('ls-files', '-u', '--', 'selected.txt')).trim(), '', 'The selected conflict must be resolved in the index');
 
   const gitDirectory = (await git('rev-parse', '--absolute-git-dir')).trim();
-  const indexBytes = await readFile(path.join(gitDirectory, 'index'));
   const stagedTree = (await git('write-tree')).trim();
   const fullDiff = await git('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames', receipt.targetHead, stagedTree);
+  const indexDigest = createHash('sha256').update(await git('ls-files', '--stage', '-z')).digest('hex');
+  const treeDigest = createHash('sha256').update(await git('ls-tree', '-r', '-z', '--full-tree', stagedTree)).digest('hex');
 
+  assert.equal((await git('rev-parse', 'HEAD')).trim(), receipt.targetHead, 'Manual staging must not advance the detached generation HEAD');
+  assert.ok(fullDiff.includes(resolvedText.trim()));
+  assert.equal((await git('status', '--porcelain', '--untracked-files=all')).trim(), 'M  selected.txt');
+
+  const indexBytes = await readFile(path.join(gitDirectory, 'index'));
   const resolution = {
     actor: 'CI fixture human-resolution simulation; no AI provider was executed.',
     text: resolvedText,
@@ -3508,14 +3514,10 @@ async function prepareReviewedConflictResolution(fixture) {
     stagedTree,
     fullDiff,
     fullDiffFingerprint: createHash('sha256').update(fullDiff).digest('hex'),
-    indexDigest: createHash('sha256').update(await git('ls-files', '--stage', '-z')).digest('hex'),
+    indexDigest,
+    treeDigest,
   };
 
-  resolution.treeDigest = createHash('sha256').update(await git('ls-tree', '-r', '-z', '--full-tree', resolution.stagedTree)).digest('hex');
-
-  assert.equal((await git('rev-parse', 'HEAD')).trim(), receipt.targetHead, 'Manual staging must not advance the detached generation HEAD');
-  assert.ok(resolution.fullDiff.includes(resolvedText.trim()));
-  assert.equal((await git('status', '--porcelain', '--untracked-files=all')).trim(), 'M  selected.txt');
   receipt.manualResolution = resolution;
 }
 
