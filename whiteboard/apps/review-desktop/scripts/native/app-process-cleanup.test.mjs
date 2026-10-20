@@ -163,6 +163,7 @@ setInterval(() => {}, 1000);`;
     detached: true,
     stdio: ['pipe', 'pipe', 'ignore'],
   });
+
   let rootInputError;
 
   root.stdin.on('error', error => { rootInputError = error; });
@@ -224,6 +225,8 @@ setInterval(() => {}, 1000);`;
       reject(new Error('Unable to close owned fixture root input.'));
     }
   });
+
+  const failures = [];
 
   try {
     await waitFor(() => processInventory().has(root.pid), 'the owned root identity to appear', 3_000);
@@ -300,6 +303,8 @@ setInterval(() => {}, 1000);`;
     assert.equal(processAlive(fixture.verifiedPid), false);
     assert.equal(processAlive(root.pid), false);
     assert.equal(processGroupAlive(root.pid), true);
+  } catch (error) {
+    failures.push(error);
   } finally {
     const cleanupErrors = [];
     let finalTreeCaptured = false;
@@ -324,20 +329,25 @@ setInterval(() => {}, 1000);`;
 
     const rootConstructionFrozen = fixtureConstructionComplete || outputLines.hasLine('EOF_RECEIVED');
 
-    if (root.pid && rootConstructionFrozen
-      && processState.rootIdentity && processAlive(root.pid)) {
+    if (root.pid && rootConstructionFrozen && processState.rootIdentity) {
       try {
-        assert.equal(verifyLiveIdentity(processState.rootIdentity), true, 'The live root must still match its original captured identity before final descendant capture.');
-        captureOwnedProcessTree({ rootPid: root.pid, state: processState });
-        rememberCapturedIdentities();
-        finalTreeCaptured = true;
+        if (processAlive(root.pid)) {
+          assert.equal(verifyLiveIdentity(processState.rootIdentity), true, 'The live root must still match its original captured identity before final descendant capture.');
+          captureOwnedProcessTree({ rootPid: root.pid, state: processState });
+          rememberCapturedIdentities();
+          finalTreeCaptured = true;
+        }
       } catch (error) {
         cleanupErrors.push(`Final exact-lineage capture failed: ${error.message}`);
       }
     }
 
-    if (root.pid && processAlive(root.pid) && !rootConstructionFrozen) {
-      cleanupErrors.push('Fixture construction could not be closed safely; refusing to signal a root with unknown pending children.');
+    if (root.pid && !rootConstructionFrozen) {
+      try {
+        if (processAlive(root.pid)) cleanupErrors.push('Fixture construction could not be closed safely; refusing to signal a root with unknown pending children.');
+      } catch (error) {
+        cleanupErrors.push(`Cannot verify the fixture root while construction is unknown: ${error.message}`);
+      }
     }
 
     for (const identity of [...fixtureIdentities.values()].reverse()) {
@@ -408,6 +418,10 @@ setInterval(() => {}, 1000);`;
       }
     }
 
-    if (cleanupErrors.length > 0) throw new Error(cleanupErrors.join(' '));
+    if (cleanupErrors.length > 0) {
+      failures.push(new AggregateError(cleanupErrors.map(message => new Error(message)), 'Owned test fixture cleanup failed.'));
+    }
   }
+
+  if (failures.length > 0) throw new AggregateError(failures, 'Native owned-process cleanup contract failed.');
 });

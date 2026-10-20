@@ -11,9 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { chromium } from 'playwright';
 import {
+  ProcessIdentityRefusal,
   captureOwnedProcessTree,
   lineageToRoot,
-  ProcessIdentityRefusal,
   processAlive,
   processGroupAlive,
   processInventory,
@@ -252,6 +252,7 @@ function captureStopObservation(session, stage) {
 
 function captureAppProcessTree() {
   const state = { rootIdentity: appProcessIdentity, identities: appProcessIdentities, captured: appProcessTreeCaptured };
+
   const captured = captureOwnedProcessTree({
     rootPid: appChild?.pid,
     executablePath: appExecutablePath,

@@ -225,7 +225,12 @@ export async function stopOwnedProcessTree({
 
   const signalVerified = (expected, signal, phase) => {
     if (!verifyForCleanup(expected)) return;
-    cleanup.push({ kind: 'app-process-signal', pid: expected.pid, signal, ...(phase ? { phase } : {}) });
+
+    const observation = { kind: 'app-process-signal', pid: expected.pid, signal };
+
+    if (phase) observation.phase = phase;
+
+    cleanup.push(observation);
 
     try {
       signalProcess(expected.pid, signal);
