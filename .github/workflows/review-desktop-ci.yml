@@ -181,18 +181,18 @@ jobs:
         id: formatting
         run: pnpm format:check
 
-      - name: Prepare owned settings formatting repair
+      - name: Prepare owned source formatting repair
         if: failure() && steps.formatting.conclusion == 'failure'
         run: |
-          pnpm exec oxfmt --write packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts
-          git diff --binary -- packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts > "$RUNNER_TEMP/review-settings-format.patch"
+          pnpm exec oxfmt --write packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts apps/review-desktop/scripts/native-project-picker-actor.js
+          git diff --binary -- packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts apps/review-desktop/scripts/native-project-picker-actor.js > "$RUNNER_TEMP/review-source-format.patch"
 
-      - name: Upload owned settings formatting repair
+      - name: Upload owned source formatting repair
         if: failure() && steps.formatting.conclusion == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: review-settings-format-repair
-          path: ${{ runner.temp }}/review-settings-format.patch
+          name: review-source-format-repair
+          path: ${{ runner.temp }}/review-source-format.patch
           if-no-files-found: error
           retention-days: 1
 

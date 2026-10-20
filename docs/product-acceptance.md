@@ -2,7 +2,9 @@
 
 ## Current execution evidence
 
-The new picker-fixture [CI 39482598641](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39482598641) on `305997f` stopped at 21 blank-line lint violations before contract tests; Desktop and macOS were skipped. Its CI-generated whitespace-only repair has been applied and still needs CI. This run provides no new native-picker or scanner-context runtime evidence.
+The latest picker-fixture [CI 39482877603](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39482877603) on `0bec986` passed lint and 374 agent contracts (26 skipped), plus separate onboarding, reference-guard, migration and anonymous CLI-help suites. Desktop stopped at formatting of the new JXA actor before building, and macOS was skipped. The existing CI repair covered only two settings files and produced an empty patch. Its explicit file list now includes the actor; the next CI must produce its canonical formatting patch. There is no new native-picker or scanner-context runtime evidence.
+
+The preceding [CI 39482598641](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39482598641) on `305997f` stopped at 21 blank-line lint violations before contract tests. Its CI-generated whitespace-only repair is verified by the current lint pass.
 
 [CI 39475609610](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39475609610) on `67f7226` passed lint and 374 agent contracts (26 skipped), Desktop build/typecheck and 249 session UI tests, scripts with 132 passed and two skipped, and 11 separate Desktop checks. Its first macOS attempt stopped on an upstream Electron-download HTTP 500 before native tests. A failed-only second attempt at the same commit passed package assembly, the native worktree/content/runtime/IPC/PR-text/ownership contracts, all 25 PTY checks and the complete four-check two-terminal fixture flow. Both terminal receipts record verified cleanup and all owned fixture processes gone; authenticated providers were not executed.
 
