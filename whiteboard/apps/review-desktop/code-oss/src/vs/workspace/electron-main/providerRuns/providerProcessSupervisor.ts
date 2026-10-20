@@ -192,18 +192,26 @@ async function launch(
 	let resolveResult!: (result: ProviderRunResult) => void;
 	const result = new Promise<ProviderRunResult>((resolve) => resolveResult = resolve);
 	let guardianStreamDrainTimer: ReturnType<typeof setTimeout> | undefined;
-	const guardianIsGone = (): boolean => guardianExited || closeSeen || child.exitCode !== null || child.signalCode !== null;
+	let guardianExitDeadline: number | undefined;
+	const getGuardianExitDeadline = (): number => guardianExitDeadline ??= Date.now() + GROUP_CLEANUP_TIMEOUT_MS;
+	const guardianIsGone = (): boolean => {
+		const isGone = guardianExited || closeSeen || child.exitCode !== null || child.signalCode !== null;
+		if (isGone) { getGuardianExitDeadline(); }
+		return isGone;
+	};
 	const requestTermination = (): Promise<GroupCleanupResult> => {
 		if (ownerLifetimeInput && !ownerLifetimeEndRequested) {
 			ownerLifetimeEndRequested = true;
 			ownerLifetimeInput.end();
 		}
 		if (guardianIsGone()) {
-			cleanupPromise ??= Promise.resolve(child.pid ? verifyProcessGroupAfterGuardianExit(child.pid) : { verified: true });
+			cleanupPromise ??= child.pid
+				? verifyProcessGroupAfterGuardianExit(child.pid, getGuardianExitDeadline())
+				: Promise.resolve({ verified: true });
 			return cleanupPromise;
 		}
 		cleanupPromise ??= child.pid
-			? terminateOwnedGroup(child.pid, cancelGraceMs, guardianIsGone)
+			? terminateOwnedGroup(child.pid, cancelGraceMs, guardianIsGone, getGuardianExitDeadline)
 			: Promise.resolve({ verified: true });
 		return cleanupPromise;
 	};
@@ -306,6 +314,7 @@ async function launch(
 	}
 	child.once('exit', () => {
 		guardianExited = true;
+		const deadline = getGuardianExitDeadline();
 		// A descendant can inherit stdout/stderr and keep Node's `close` event
 		// pending forever after the guardian exits. Let buffered output drain,
 		// then close only our local pipe ends; never signal the now-unowned PGID.
@@ -313,21 +322,30 @@ async function launch(
 			for (const stream of child.stdio) {
 				if (stream && 'destroy' in stream && typeof stream.destroy === 'function') stream.destroy();
 			}
-		}, GROUP_CLEANUP_TIMEOUT_MS);
+		}, Math.max(0, deadline - Date.now()));
 	});
 	child.once('close', (code, signal) => {
 		if (guardianStreamDrainTimer) clearTimeout(guardianStreamDrainTimer);
 		closeSeen = true;
-			exitCode = providerExitCode ?? code;
+		const deadline = getGuardianExitDeadline();
+		exitCode = providerExitCode ?? code;
 		exitSignal = signal;
 		void (async () => {
 			// The guardian owns the PGID until termination completes. Never signal
 			// after close: at that point a numeric PGID may identify another group.
-			const cleanup: GroupCleanupResult = cleanupPromise
+			let cleanup: GroupCleanupResult = cleanupPromise
 				? await cleanupPromise
 				: child.pid !== undefined
-					? await verifyProcessGroupAfterGuardianExit(child.pid)
+					? await verifyProcessGroupAfterGuardianExit(child.pid, deadline)
 					: { verified: true };
+			if (child.pid !== undefined) {
+				if (!cleanup.verified && Date.now() < deadline) {
+					cleanup = await verifyProcessGroupAfterGuardianExit(child.pid, deadline);
+				}
+				cleanup = isOwnedProcessGroupGone(child.pid)
+					? { verified: true }
+					: { verified: false, error: cleanup.error ?? 'Provider process group cleanup could not be verified after its guardian exited.' };
+			}
 			const state: ProviderTerminalState = !cleanup.verified
 				? 'interrupted'
 				: cancelled
@@ -459,12 +477,13 @@ export function isOwnedProcessGroupGone(pgid: number): boolean {
 	return !ownedGroupExists(pgid);
 }
 
-async function verifyProcessGroupAfterGuardianExit(pgid: number): Promise<GroupCleanupResult> {
+async function verifyProcessGroupAfterGuardianExit(pgid: number, deadline: number): Promise<GroupCleanupResult> {
 	if (process.platform === 'win32' || !Number.isSafeInteger(pgid) || pgid < 2) {
 		return { verified: false, error: 'The provider guardian exited before its process group cleanup was verified.' };
 	}
 
-	return await waitForOwnedGroupExit(pgid, GROUP_CLEANUP_TIMEOUT_MS)
+	await waitForOwnedGroupExit(pgid, Math.max(0, deadline - Date.now()));
+	return isOwnedProcessGroupGone(pgid)
 		? { verified: true }
 		: { verified: false, error: 'The provider guardian exited before its process group cleanup was verified.' };
 }
@@ -477,17 +496,17 @@ async function waitForOwnedGroupExit(pgid: number, timeoutMs: number): Promise<b
 	return !ownedGroupExists(pgid);
 }
 
-async function terminateOwnedGroup(pgid: number, graceMs: number, guardianIsGone: () => boolean): Promise<GroupCleanupResult> {
-	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid); }
+async function terminateOwnedGroup(pgid: number, graceMs: number, guardianIsGone: () => boolean, guardianExitDeadline: () => number): Promise<GroupCleanupResult> {
+	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid, guardianExitDeadline()); }
 	if (!ownedGroupExists(pgid)) { return { verified: true }; }
-	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid); }
+	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid, guardianExitDeadline()); }
 	try { process.kill(-pgid, 'SIGTERM'); }
 	catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ESRCH') { return { verified: true }; }
 		return { verified: false, error: 'The owned provider process group could not be signalled.' };
 	}
 	if (await waitForOwnedGroupExit(pgid, graceMs)) { return { verified: true }; }
-	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid); }
+	if (guardianIsGone()) { return verifyProcessGroupAfterGuardianExit(pgid, guardianExitDeadline()); }
 	try { process.kill(-pgid, 'SIGKILL'); }
 	catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ESRCH') { return { verified: true }; }

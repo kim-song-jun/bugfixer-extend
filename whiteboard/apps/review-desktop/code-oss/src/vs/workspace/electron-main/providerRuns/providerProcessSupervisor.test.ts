@@ -362,10 +362,12 @@ test('in-flight group termination does not escalate after guardian loss', { skip
 	const heartbeatCountAfterTerm = heartbeatCount;
 	await delay(300);
 	assert.ok(heartbeatCount > heartbeatCountAfterTerm, 'the helper must remain alive after guardian loss and the cleanup grace period');
+	assert.doesNotThrow(() => process.kill(-guardianPid!, 0), 'the owned group must remain live while its inherited helper is running');
 	const result = await Promise.race([handle.result, delay(3_500).then(() => undefined)]);
+	assert.doesNotThrow(() => process.kill(-guardianPid!, 0), 'the owned group must still be live when cleanup settles');
 	assert.ok(result, 'guardian exit must settle after the bounded stdio drain');
-	assert.equal(result.state, 'interrupted');
 	assert.equal(result.cleanupVerified, false);
+	assert.equal(result.state, 'interrupted');
 });
 
 test('a closed launch gate is handled as a failed launch without executing provider input', { skip: process.platform === 'win32' }, async (t) => {
