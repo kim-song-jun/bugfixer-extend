@@ -65,7 +65,7 @@ export class CachedExtensionScanner {
 				scannedSystemExtensions = result[0].value;
 			} else {
 				hasErrors = true;
-				this._logService.error(`Error scanning system extensions:`, getErrorMessage(result[0].reason));
+				this._logService.error(`Error scanning system extensions:`, result[0].reason);
 			}
 
 			let scannedUserExtensions: IScannedExtension[] = [];
@@ -73,7 +73,7 @@ export class CachedExtensionScanner {
 				scannedUserExtensions = result[1].value;
 			} else {
 				hasErrors = true;
-				this._logService.error(`Error scanning user extensions:`, getErrorMessage(result[1].reason));
+				this._logService.error(`Error scanning user extensions:`, result[1].reason);
 			}
 
 			let workspaceExtensions: IExtension[] = [];

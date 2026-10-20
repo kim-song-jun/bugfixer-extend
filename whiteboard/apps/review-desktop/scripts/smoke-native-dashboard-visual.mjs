@@ -35,6 +35,7 @@ const diagnostics = {
   console: [],
   consoleRecords: [],
   consoleCorrelations: [],
+  extensionScanErrors: [],
   canceledThemeLoads: [],
   teardownCancellations: [],
   readinessMarks: [],
@@ -53,8 +54,49 @@ const diagnostics = {
     processOutput: 0,
     processOutputBytes: 0,
     startupFailures: 0,
+    extensionScanErrors: 0,
   },
 };
+
+const scannerErrorClasses = new Set([
+  'AbortError',
+  'AggregateError',
+  'Canceled',
+  'CancellationError',
+  'Error',
+  'ErrorNoTelemetry',
+  'FileOperationError',
+  'FileSystemProviderError',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+]);
+
+const scannerNodeErrorCodes = new Set([
+  'EACCES',
+  'EAGAIN',
+  'EBADF',
+  'EBUSY',
+  'EEXIST',
+  'EFAULT',
+  'EIO',
+  'EISDIR',
+  'ELOOP',
+  'EMFILE',
+  'ENAMETOOLONG',
+  'ENFILE',
+  'ENOENT',
+  'ENOTDIR',
+  'ENOTEMPTY',
+  'EPERM',
+  'EROFS',
+  'ESPIPE',
+  'ETXTBSY',
+  'EXDEV',
+]);
 
 const MAX_NATIVE_DIAGNOSTIC_RECORDS = 2048;
 
@@ -682,6 +724,65 @@ function renderCDPConsoleArgument(argument) {
   return argument.description;
 }
 
+function normalizeExtensionScanErrorMessage(message) {
+  if (!/^(?:%c\s+ERR(?:\s+color:\s*#f33)?\s+|ERR\s+)?Error scanning (?:system|user) extensions:(?:\s|$)/.test(message)) {
+    return message;
+  }
+
+  return message.split(/\r?\n/, 1)[0];
+}
+
+function extensionScanErrorDiagnostic(args) {
+  const labelArgument = args.find(argument => argument.type === 'string'
+    && (argument.value === 'Error scanning system extensions:' || argument.value === 'Error scanning user extensions:'));
+
+  if (!labelArgument) return undefined;
+
+  const errorArgument = args.find(argument => argument.subtype === 'error');
+  const description = errorArgument?.description?.slice(0, 8_192) ?? '';
+  const descriptionLines = description.split(/\r?\n/);
+  const descriptionClass = descriptionLines[0]?.match(/^([A-Za-z_$][A-Za-z0-9_$.-]{0,63})(?::|$)/)?.[1];
+  const previewProperties = errorArgument?.preview?.properties ?? [];
+  const previewName = previewProperties.find(property => property.name === 'name');
+  const previewCode = previewProperties.find(property => property.name === 'code');
+  const candidateClass = previewName?.type === 'string' ? previewName.value : descriptionClass;
+  const errorClass = scannerErrorClasses.has(candidateClass) ? candidateClass : 'unavailable';
+  const candidateCode = previewCode?.type === 'string' ? previewCode.value : undefined;
+  const code = scannerNodeErrorCodes.has(candidateCode) ? candidateCode : null;
+  const stackFrames = [];
+
+  for (const line of descriptionLines.slice(1)) {
+    const trimmed = line.trim();
+
+    if (!trimmed.startsWith('at ')) continue;
+
+    const location = trimmed.slice(3);
+    const suffix = location.match(/:(\d+):(\d+)\)?$/);
+
+    if (!suffix) continue;
+
+    const withoutPosition = location.slice(0, -suffix[0].length);
+    const openParenthesis = withoutPosition.lastIndexOf('(');
+    const rawPath = openParenthesis >= 0 ? withoutPosition.slice(openParenthesis + 1) : withoutPosition;
+    const basename = rawPath.split(/[\\/]/).pop() ?? '';
+    const safeBasename = /^[A-Za-z0-9_.-]{1,120}$/.test(basename) ? basename : 'redacted';
+
+    stackFrames.push({ file: safeBasename, line: Number(suffix[1]), column: Number(suffix[2]) });
+
+    if (stackFrames.length === 5) break;
+  }
+
+  return {
+    scanKind: labelArgument.value === 'Error scanning system extensions:' ? 'system' : 'user',
+    remoteType: errorArgument?.type ?? 'unavailable',
+    remoteSubtype: errorArgument?.subtype ?? 'unavailable',
+    errorClass,
+    code,
+    codeUnavailable: code === null,
+    stackFrames,
+  };
+}
+
 function isCanceledExtensionScan(entry) {
   return /\(Canceled: Canceled\)/.test(entry)
     && (/Error scanning user extensions:/.test(entry)
@@ -930,9 +1031,35 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
           if (event.type !== 'error') return;
 
           const previews = event.args.map(renderCDPConsoleArgument);
-          const renderedMessage = previews.every(value => value !== undefined) ? previews.join(' ') : null;
-          const message = renderedMessage ?? event.args.map(arg => arg.description ?? String(arg.value ?? '')).join(' ');
+          const renderedMessage = previews.every(value => value !== undefined)
+            ? normalizeExtensionScanErrorMessage(previews.join(' '))
+            : null;
+          const message = renderedMessage ?? normalizeExtensionScanErrorMessage(
+            event.args.map(arg => arg.description ?? String(arg.value ?? '')).join(' '),
+          );
           const entry = `PID ${child.pid}: ${message}`;
+          const scanError = extensionScanErrorDiagnostic(event.args);
+
+          if (scanError) {
+            if (diagnostics.extensionScanErrors.length < 32) {
+              diagnostics.extensionScanErrors.push({
+                pid: child.pid,
+                scanKind: scanError.scanKind,
+                recordId: capture.cdpConsoleErrors.length,
+                originTimestampEpochMilliseconds: event.timestamp ?? null,
+                targetIndex: capture.targetIndex,
+                remoteType: scanError.remoteType,
+                remoteSubtype: scanError.remoteSubtype,
+                errorClass: scanError.errorClass,
+                code: scanError.code,
+                codeUnavailable: scanError.codeUnavailable,
+                stackFrames: scanError.stackFrames,
+              });
+            } else {
+              diagnostics.instrumentationDrops.extensionScanErrors++;
+            }
+          }
+
           capture.cdpConsoleErrors.push({
             recordId: capture.cdpConsoleErrors.length,
             pid: child.pid,
@@ -1039,7 +1166,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
       page.on('console', message => {
         if (message.type() !== 'error') return;
 
-        const renderedMessage = message.text();
+        const renderedMessage = normalizeExtensionScanErrorMessage(message.text());
         const entry = `PID ${child.pid}: ${renderedMessage}`;
         capture.pageConsoleErrors.push({
           recordId: capture.pageConsoleErrors.length,
