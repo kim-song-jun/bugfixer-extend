@@ -5263,9 +5263,12 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
 
     await exactProposal.waitFor({ state: 'visible' });
     const evidenceVersion = historicalAlerts.evidenceVersions[kind];
-    const exactEvidence = changes.locator(`[data-focus-key="version:${evidenceVersion}"][aria-pressed="true"]`);
+    const evidenceFingerprint = historicalAlerts.targetEvidenceFingerprints[kind];
+    const exactEvidence = changes.locator('.ai-session-changes__fingerprint');
 
     await exactEvidence.waitFor({ state: 'visible' });
+    const selectedEvidence = (await exactEvidence.innerText()).trim();
+    assert.equal(selectedEvidence, `v${evidenceVersion} · ${evidenceFingerprint}`, `The ${kind} alert must select its exact stored evidence version and full fingerprint`);
 
     if (kind === 'merge') {
       await changes.locator(`[data-focus-key="proposal:${historicalAlerts.parentIds.mergeCommit}"][aria-pressed="true"]`).waitFor({ state: 'visible' });
@@ -5286,7 +5289,7 @@ async function verifyAiSessionMailbox(page, fixture, tag, screenshots, viewports
     screenshots.push(screenshot);
     viewports.push({ theme: tag, state: `historical-${kind}-proposal-exact-target`, width: 1440, height: 900, screenshot,
       destination: { ...destination, proposalId: target.id, evidenceVersion, parentIds: historicalAlerts.parentIds,
-        selectedProposal: await exactProposal.getAttribute('data-focus-key'), selectedEvidence: await exactEvidence.getAttribute('data-focus-key') },
+        selectedProposal: await exactProposal.getAttribute('data-focus-key'), selectedEvidence },
       fixtureOnly: true, providerExecuted: false, externalWritesExecuted: false });
   }
 
