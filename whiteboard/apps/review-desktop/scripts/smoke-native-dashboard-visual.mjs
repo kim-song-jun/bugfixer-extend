@@ -3181,7 +3181,7 @@ async function seedReviewedCommit(database, fixture, projectFolder, userData, ta
     ...scope, name: session.name, provider: session.provider, model: session.model, workspaceMode: session.workspaceMode,
     repository, bindingId, worktreePath: managed.worktreePath, managedRoot, sourceHead, originalIndexSha256, originalSelected, originalUnselected,
     evidenceVersion: immutableEvidence.version, fingerprint: immutableEvidence.fingerprint, explanationRevision: explanation.revision,
-    retainedAfter, laterSelected, laterUnselected, unselectedBase: `unselected base ${tag}\n`, commitMessage: `CI reviewed selected content ${tag}`,
+    retainedAfter, laterSelected, laterUnselected, unselectedBase: originalUnselected, commitMessage: `CI reviewed selected content ${tag}`,
   };
 }
 
