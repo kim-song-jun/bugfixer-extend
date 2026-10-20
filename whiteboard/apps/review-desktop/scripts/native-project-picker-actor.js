@@ -121,7 +121,10 @@ function run(argv) {
     const payloadData = inputHandle.readDataToEndOfFile;
 
     const payloadText = ObjC.unwrap(
-      $.NSString.alloc.initWithDataEncoding(payloadData, $.NSUTF8StringEncoding),
+      $.NSString.alloc.initWithDataEncoding(
+        payloadData,
+        $.NSUTF8StringEncoding,
+      ),
     );
 
     const payload = JSON.parse(payloadText);
@@ -374,7 +377,10 @@ function assertOwnedElement(element) {
   const pid = Ref();
   const status = Number($.AXUIElementGetPid(element, pid));
 
-  if (status !== Number($.kAXErrorSuccess) || Number(pid[0]) !== expectedAXPID) {
+  if (
+    status !== Number($.kAXErrorSuccess) ||
+    Number(pid[0]) !== expectedAXPID
+  ) {
     throw new Error("Accessibility element process ownership mismatch");
   }
 
@@ -639,7 +645,7 @@ function descendantsWithInitialChildren(root, initialChildren) {
 }
 
 function waitForExactSheet(homeWindow, seconds) {
-  const deadline = Date.now() + (seconds * 1_000);
+  const deadline = Date.now() + seconds * 1_000;
 
   while (Date.now() <= deadline) {
     const sheets = attachedSheets(homeWindow);
@@ -659,7 +665,7 @@ function waitForExactSheet(homeWindow, seconds) {
 }
 
 function waitForNoAttachedSheets(homeWindow, seconds) {
-  const deadline = Date.now() + (seconds * 1_000);
+  const deadline = Date.now() + seconds * 1_000;
 
   while (Date.now() <= deadline) {
     if (attachedSheets(homeWindow).length === 0) {
@@ -678,7 +684,10 @@ function buttonsFromAttributes(elements, owners, attribute) {
   for (const owner of owners) {
     const button = copyElementAttribute(owner, attribute);
 
-    if (button && !references.some((reference) => $.CFEqual(reference, button))) {
+    if (
+      button &&
+      !references.some((reference) => $.CFEqual(reference, button))
+    ) {
       references.push(button);
     }
   }
