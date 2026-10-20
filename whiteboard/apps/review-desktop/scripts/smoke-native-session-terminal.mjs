@@ -201,13 +201,17 @@ const safeHostJournalLabels = new Map([
 function captureFixtureProcessObservation(session) {
   const expected = session.processIdentity;
   const processGroupId = expected.pgid;
+
   if (!processAlive(session.fixturePid)) {
     return { state: 'absent', processGroupId, processGroupAlive: processGroupAlive(processGroupId) };
   }
+
   const current = processInventory().get(session.fixturePid);
+
   if (!current) {
     return { state: processAlive(session.fixturePid) ? 'live-identity-unavailable' : 'absent', processGroupId, processGroupAlive: processGroupAlive(processGroupId) };
   }
+
   return {
     state: sameProcessIdentity(expected, current) ? 'live-matching-identity' : 'live-identity-mismatch',
     processGroupId,
@@ -221,13 +225,16 @@ function captureFixtureProcessObservation(session) {
 function captureStopObservation(session, stage) {
   try {
     const turn = database?.agentSessionTurns.getTurn(receipt.project.projectId, session.id, session.turnId);
+
     const transcript = database?.agentSessionTranscripts.readPage(receipt.project.projectId, session.id, session.turnId, {
       kind: 'log', source: 'host', limit: 100, maxOutputBytes: 256 * 1024,
     });
+
     const hostJournalEvents = (transcript?.entries ?? [])
       .filter(entry => entry.kind === 'log' && entry.source === 'host' && safeHostJournalLabels.has(entry.text))
       .slice(-20)
       .map(entry => ({ sequence: entry.sequence, eventId: safeHostJournalLabels.get(entry.text) }));
+
     receipt.stopObservations.push({
       stage,
       observedAt: new Date().toISOString(),
@@ -825,6 +832,7 @@ try {
     session.stopPhase = 'waiting-durable-cleanup';
     await waitFor(() => {
       const turn = database.agentSessionTurns.getTurn(receipt.project.projectId, session.id, session.turnId);
+
       return turn?.state === 'exited' && turn.cleanupVerified === true && turn.providerConversationId === null;
     },
     `${session.name} durable cleanupVerified turn after UI stop`, 10_000);
