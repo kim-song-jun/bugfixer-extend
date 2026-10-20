@@ -677,6 +677,7 @@ function hasPressAction(element) {
 
   if (!Number.isInteger(count) || count < 0 || count > 64) {
     failureCode = "cf-array-count-invalid";
+
     return false;
   }
 
