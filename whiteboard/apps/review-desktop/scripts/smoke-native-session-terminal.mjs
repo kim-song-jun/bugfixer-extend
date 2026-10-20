@@ -61,6 +61,8 @@ const receipt = {
   authEnvironmentKeysPresent: [],
   checks: [],
   sessions: [],
+  stopObservations: [],
+  stopObservationErrors: [],
   ownedProcesses: [],
   processBaseline: { scriptPid: process.pid, scriptPpid: process.ppid, capturedAt: new Date().toISOString(), ownedChildrenBeforeLaunch: 0 },
   cleanup: [],
@@ -174,6 +176,82 @@ function processGroupAlive(pgid) {
 
  return true; }
   catch (error) { if (error?.code === 'ESRCH') return false; throw error; }
+}
+
+const safeHostJournalLabels = new Map([
+  ['Session turn starting.', 'session.turn-starting'],
+  ['Provider process started.', 'session.provider-started'],
+  ['Provider process exited.', 'session.provider-exited'],
+  ['Session turn stopped.', 'session.turn-stopped'],
+  ['Terminal output gap detected; the retained transcript is incomplete.', 'pty.output-gap'],
+  ['Transcript persistence failed; further terminal output was withheld.', 'pty.transcript-persistence-failed'],
+  ['Session stop could not verify launch access revocation.', 'session.turn-stop-unverified.access-revocation'],
+  ['Session stop could not verify the owned process group.', 'session.turn-stop-unverified.process-group-unavailable'],
+  ['Session stop could not inspect the owned process group.', 'session.turn-stop-unverified.process-group-inspection'],
+  ['The owned process group remained live after the stop request.', 'session.turn-stop-unverified.process-group-live'],
+  ['Session stop could not observe PTY exit and output drain.', 'session.turn-stop-unverified.pty-exit-unobserved'],
+  ['Session stop could not verify the PTY control listener state.', 'session.turn-stop-unverified.control-server-not-listening'],
+  ['Session stop timed out while closing PTY control resources.', 'session.turn-stop-unverified.control-server-timeout'],
+  ['Session stop could not close PTY control resources.', 'session.turn-stop-unverified.control-server-close'],
+  ['The PTY host could not verify session cleanup.', 'session.turn-stop-unverified.host-stop'],
+  ['Session stop could not verify private launch configuration cleanup.', 'session.turn-stop-unverified.private-config-unavailable'],
+  ['Session stop could not release private launch configuration.', 'session.turn-stop-unverified.private-config-release'],
+]);
+
+function captureFixtureProcessObservation(session) {
+  const expected = session.processIdentity;
+  const processGroupId = expected.pgid;
+  if (!processAlive(session.fixturePid)) {
+    return { state: 'absent', processGroupId, processGroupAlive: processGroupAlive(processGroupId) };
+  }
+  const current = processInventory().get(session.fixturePid);
+  if (!current) {
+    return { state: processAlive(session.fixturePid) ? 'live-identity-unavailable' : 'absent', processGroupId, processGroupAlive: processGroupAlive(processGroupId) };
+  }
+  return {
+    state: sameProcessIdentity(expected, current) ? 'live-matching-identity' : 'live-identity-mismatch',
+    processGroupId,
+    processGroupAlive: processGroupAlive(processGroupId),
+    stat: current.stat,
+    started: current.started,
+    commandSha256: createHash('sha256').update(current.command).digest('hex'),
+  };
+}
+
+function captureStopObservation(session, stage) {
+  try {
+    const turn = database?.agentSessionTurns.getTurn(receipt.project.projectId, session.id, session.turnId);
+    const transcript = database?.agentSessionTranscripts.readPage(receipt.project.projectId, session.id, session.turnId, {
+      kind: 'log', source: 'host', limit: 100, maxOutputBytes: 256 * 1024,
+    });
+    const hostJournalEvents = (transcript?.entries ?? [])
+      .filter(entry => entry.kind === 'log' && entry.source === 'host' && safeHostJournalLabels.has(entry.text))
+      .slice(-20)
+      .map(entry => ({ sequence: entry.sequence, eventId: safeHostJournalLabels.get(entry.text) }));
+    receipt.stopObservations.push({
+      stage,
+      observedAt: new Date().toISOString(),
+      sessionId: session.id,
+      turnId: session.turnId,
+      turn: turn ? {
+        state: turn.state,
+        revision: turn.revision,
+        cleanupVerified: turn.cleanupVerified,
+        exitCode: turn.exitCode,
+        exitSignal: turn.exitSignal,
+      } : null,
+      fixtureProcess: captureFixtureProcessObservation(session),
+      hostJournalEvents,
+    });
+  } catch {
+    receipt.stopObservationErrors.push({
+      stage,
+      observedAt: new Date().toISOString(),
+      sessionId: session.id,
+      turnId: session.turnId,
+      errorCode: 'stop-observation-unavailable',
+    });
+  }
 }
 
 function sameProcessIdentity(expected, actual) {
@@ -486,6 +564,8 @@ async function createAndStartSession(page, name, model, parentSessionId) {
   Object.defineProperty(session, 'processIdentity', { value: captureFixtureIdentity(pid) });
   session.id = database.agentSessions.listSessions(receipt.project.projectId).find(candidate => candidate.name === name)?.id;
   assert.ok(session.id, `The real workspace database must contain UI-created session ${name}.`);
+  session.turnId = database.agentSessionTurns.listTurns(receipt.project.projectId, session.id).at(-1)?.id;
+  assert.ok(session.turnId, `The real workspace database must contain the started turn for ${name}.`);
   assert.equal(database.agentSessions.getSession(receipt.project.projectId, session.id)?.parentSessionId, parentSessionId ?? null,
     'The app database must persist the exact human-selected parent ownership link.');
   receipt.ownedProcesses.push({ kind: 'codex-fixture', pid, owner: 'owned app session terminal', observedAt: session.observedAt });
@@ -735,11 +815,21 @@ try {
     await waitTerminalText(page, `READY pid=${session.fixturePid}`, `${session.name} selected for UI stop`);
     const terminalText = await readTerminalText(page);
     assert.ok(terminalText.includes(`READY pid=${session.fixturePid}`));
+    session.stopPhase = 'before-ui-stop';
+    captureStopObservation(session, session.stopPhase);
     await workspace.getByRole('button', { name: `${session.name} 중단`, exact: true }).click();
+    session.stopPhase = 'waiting-fixture-pid-exit';
     await waitFor(() => !processAlive(session.fixturePid), `${session.name} fixture PID exit after UI stop`, 20_000);
-    await waitFor(() => database.agentSessionTurns.listTurns(receipt.project.projectId, session.id)
-      .some(turn => turn.state === 'exited' && turn.cleanupVerified === true && turn.providerConversationId === null),
+    session.stopPhase = 'after-fixture-pid-exit';
+    captureStopObservation(session, session.stopPhase);
+    session.stopPhase = 'waiting-durable-cleanup';
+    await waitFor(() => {
+      const turn = database.agentSessionTurns.getTurn(receipt.project.projectId, session.id, session.turnId);
+      return turn?.state === 'exited' && turn.cleanupVerified === true && turn.providerConversationId === null;
+    },
     `${session.name} durable cleanupVerified turn after UI stop`, 10_000);
+    session.stopPhase = 'durable-cleanup-verified';
+    captureStopObservation(session, session.stopPhase);
     session.stopped = true;
 
     if (session.id === second.id) assert.equal(processAlive(first.fixturePid), true, 'Stopping the child must leave its parent PTY alive.');
@@ -757,6 +847,10 @@ try {
   receipt.checks.push('registered parent tree, collapse without termination, node logs and explicit terminal instruction focus, and child-only stop verified');
 } catch (error) {
   receipt.failure = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+
+  for (const session of receipt.sessions) {
+    captureStopObservation(session, `${session.stopPhase ?? 'session-active'}-failure-before-app-teardown`);
+  }
 
   if (browser) {
     try {
@@ -794,7 +888,7 @@ try {
         receipt.finalTurns = sessionRows.map(session => ({
           sessionId: session.id,
           turns: database.agentSessionTurns.listTurns(receipt.project.projectId, session.id)
-            .map(turn => ({ id: turn.id, state: turn.state, cleanupVerified: turn.cleanupVerified, providerConversationId: turn.providerConversationId, errorSummary: turn.errorSummary })),
+            .map(turn => ({ id: turn.id, state: turn.state, cleanupVerified: turn.cleanupVerified, providerConversationId: turn.providerConversationId })),
         }));
       }
 

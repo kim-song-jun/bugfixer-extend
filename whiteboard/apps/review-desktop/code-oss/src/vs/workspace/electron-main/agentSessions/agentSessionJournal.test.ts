@@ -40,12 +40,16 @@ test('journal serializes sanitized host events and terminal output durably with 
 		journal.appendTerminal(sanitizer.push(`${secret.slice(11)} suffix`));
 		journal.appendTerminal(sanitizer.flush());
 		journal.appendGap();
+		journal.appendCleanupFailure('processGroupStillLive');
 		const page = database.agentSessionTranscripts.readPage(project.id, session.id, turn.id);
-		assert.deepEqual(page.entries.map(entry => entry.sequence), [1, 2, 3, 4, 5]);
+		assert.deepEqual(page.entries.map(entry => entry.sequence), [1, 2, 3, 4, 5, 6]);
 		assert.equal(page.entries[0].kind, 'log');
 		assert.equal(page.entries[4].severity, 'warning');
+		assert.equal(page.entries[5].severity, 'error');
+		assert.equal(page.entries[5].text, 'The owned process group remained live after the stop request.');
 		assert.ok(page.entries.filter(entry => entry.kind === 'terminal').every(entry => !entry.text.includes(secret)));
 		assert.ok(page.entries.some(entry => entry.kind === 'terminal' && entry.text.includes('***')));
+		assert.equal(page.entries.some(entry => entry.text.includes('PGID') || entry.text.includes('PID')), false);
 		database.close();
 		database = WorkspaceDatabase.open(databasePath);
 		assert.deepEqual(database.agentSessionTranscripts.readPage(project.id, session.id, turn.id).entries, page.entries);

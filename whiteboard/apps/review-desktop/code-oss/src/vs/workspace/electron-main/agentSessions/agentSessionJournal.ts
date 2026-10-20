@@ -5,6 +5,7 @@
 
 import type { AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
 import type { AgentSessionTranscriptStore } from './agentSessionTranscriptStore.js';
+import type { AgentPtyCleanupFailureReason } from './agentPtyHost.js';
 
 /** Synchronous, main-process-only journal. Its sequence is independent of the attachable PTY cursor. */
 export class AgentSessionJournal {
@@ -14,6 +15,17 @@ export class AgentSessionJournal {
 		'session.provider-started': 'Provider process started.',
 		'session.provider-exited': 'Provider process exited.',
 		'session.turn-stopped': 'Session turn stopped.',
+		'session.turn-stop-unverified.access-revocation': 'Session stop could not verify launch access revocation.',
+		'session.turn-stop-unverified.process-group-unavailable': 'Session stop could not verify the owned process group.',
+		'session.turn-stop-unverified.process-group-inspection': 'Session stop could not inspect the owned process group.',
+		'session.turn-stop-unverified.process-group-live': 'The owned process group remained live after the stop request.',
+		'session.turn-stop-unverified.pty-exit-unobserved': 'Session stop could not observe PTY exit and output drain.',
+		'session.turn-stop-unverified.control-server-not-listening': 'Session stop could not verify the PTY control listener state.',
+		'session.turn-stop-unverified.control-server-timeout': 'Session stop timed out while closing PTY control resources.',
+		'session.turn-stop-unverified.control-server-close': 'Session stop could not close PTY control resources.',
+		'session.turn-stop-unverified.host-stop': 'The PTY host could not verify session cleanup.',
+		'session.turn-stop-unverified.private-config-unavailable': 'Session stop could not verify private launch configuration cleanup.',
+		'session.turn-stop-unverified.private-config-release': 'Session stop could not release private launch configuration.',
 		'pty.output-gap': 'Terminal output gap detected; the retained transcript is incomplete.',
 		'pty.transcript-persistence-failed': 'Transcript persistence failed; further terminal output was withheld.',
 	};
@@ -40,6 +52,12 @@ export class AgentSessionJournal {
 		this.appendEvent('warning', 'pty', 'pty.output-gap');
 	}
 
+	appendCleanupFailure(reason: AgentPtyCleanupFailureReason): void {
+		const event = cleanupFailureEvent[reason];
+		if (!event) { throw new Error('Cleanup failure reason must be a trusted static event identifier.'); }
+		this.appendEvent('error', 'host', event);
+	}
+
 	appendEvent(severity: 'debug' | 'info' | 'warning' | 'error', source: 'pty' | 'provider' | 'host' | 'workspace', event: string): void {
 		const text = AgentSessionJournal.eventText[event];
 		if (!text) { throw new Error('Transcript event must be a trusted static event identifier.'); }
@@ -57,3 +75,17 @@ export class AgentSessionJournal {
 		return sequence;
 	}
 }
+
+const cleanupFailureEvent: Readonly<Record<AgentPtyCleanupFailureReason, string>> = {
+	accessRevocationFailed: 'session.turn-stop-unverified.access-revocation',
+	processGroupUnavailable: 'session.turn-stop-unverified.process-group-unavailable',
+	processGroupInspectionUnknown: 'session.turn-stop-unverified.process-group-inspection',
+	processGroupStillLive: 'session.turn-stop-unverified.process-group-live',
+	ptyExitUnobserved: 'session.turn-stop-unverified.pty-exit-unobserved',
+	controlServerNotListening: 'session.turn-stop-unverified.control-server-not-listening',
+	controlServerCloseTimedOut: 'session.turn-stop-unverified.control-server-timeout',
+	controlServerCloseFailed: 'session.turn-stop-unverified.control-server-close',
+	hostStopFailed: 'session.turn-stop-unverified.host-stop',
+	privateConfigUnavailable: 'session.turn-stop-unverified.private-config-unavailable',
+	privateConfigReleaseFailed: 'session.turn-stop-unverified.private-config-release',
+};

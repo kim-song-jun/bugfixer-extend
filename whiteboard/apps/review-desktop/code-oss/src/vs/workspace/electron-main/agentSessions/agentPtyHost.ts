@@ -87,7 +87,21 @@ export interface AgentPtyStopResult {
 	readonly state: 'stopped' | 'cleanupUnverified';
 	readonly cleanupVerified: boolean;
 	readonly error?: string;
+	readonly failureReasons?: readonly AgentPtyCleanupFailureReason[];
 }
+
+export type AgentPtyCleanupFailureReason =
+	| 'accessRevocationFailed'
+	| 'processGroupUnavailable'
+	| 'processGroupInspectionUnknown'
+	| 'processGroupStillLive'
+	| 'ptyExitUnobserved'
+	| 'controlServerNotListening'
+	| 'controlServerCloseTimedOut'
+	| 'controlServerCloseFailed'
+	| 'hostStopFailed'
+	| 'privateConfigUnavailable'
+	| 'privateConfigReleaseFailed';
 
 export interface AgentPtyAttachment extends IDisposable {
 	readonly snapshot: AgentPtySnapshot;
@@ -436,7 +450,7 @@ export class AgentPtyHost {
 	async release(handle: AgentPtyHandle): Promise<void> {
 		const record = this.requireOwned(handle);
 		if (record.state !== 'stopped' || !record.accessRevoked || record.listeners.size > 0 || record.exitListeners.size > 0) { throw new Error('A PTY handle can be released only after verified stop and detach.'); }
-		if (!(await this.cleanupControlResources(record))) { throw new Error('PTY control resources could not be closed safely.'); }
+		if (await this.cleanupControlResources(record)) { throw new Error('PTY control resources could not be closed safely.'); }
 		record.output.length = 0;
 		record.outputBytes = 0;
 		this.owned.delete(handle);
@@ -553,6 +567,7 @@ export class AgentPtyHost {
 
 	private async stopOwned(record: OwnedPty): Promise<AgentPtyStopResult> {
 		let revocationError: string | undefined;
+		const failureReasons: AgentPtyCleanupFailureReason[] = [];
 		if (!record.accessRevoked) {
 			try {
 				this.options.revokeAccess();
@@ -561,31 +576,32 @@ export class AgentPtyHost {
 			} catch {
 				record.accessRevocationFailed = true;
 				revocationError = 'Launch-scoped access revocation failed.';
+				failureReasons.push('accessRevocationFailed');
 			}
 		}
 		if (record.state === 'starting') { record.rejectStartup(new Error('PTY stopped while starting')); }
 		const child = record.pty;
-		if (!child) { return this.finishStop(record, true, undefined, revocationError); }
-		if (record.state === 'stopped') { return this.finishStop(record, true, undefined, revocationError); }
+		if (!child) { return this.finishStop(record, true, undefined, revocationError, failureReasons); }
+		if (record.state === 'stopped') { return this.finishStop(record, true, undefined, revocationError, failureReasons); }
 		record.state = 'stopping';
 		const pgid = record.processGroupId;
 		if (typeof pgid !== 'number' || !Number.isSafeInteger(pgid) || pgid <= 0) {
-			return this.finishStop(record, false, 'The PTY process group identifier is unavailable.', revocationError);
+			return this.finishStop(record, false, 'The PTY process group identifier is unavailable.', revocationError, [...failureReasons, 'processGroupUnavailable']);
 		}
 		const before = inspectProcessGroup(pgid);
-		if (before.state === 'gone') { return this.waitForGroupCleanup(record, pgid, revocationError); }
+		if (before.state === 'gone') { return this.waitForGroupCleanup(record, pgid, revocationError, failureReasons); }
 		if (before.state === 'unknown') {
-			return this.finishStop(record, false, describeProcessGroupInspection(record, pgid, before.errorCode), revocationError);
+			return this.finishStop(record, false, describeProcessGroupInspection(record, pgid, before.errorCode), revocationError, [...failureReasons, 'processGroupInspectionUnknown']);
 		}
 		if (!record.controlDisconnected && !record.guardianCleanup && record.controlSocket && !record.controlSocket.destroyed) {
 			this.sendControl(record.controlSocket, { command: 'stop' });
 		} else {
 			for (const socket of record.controlSockets) { socket.destroy(); }
 		}
-		return this.waitForGroupCleanup(record, pgid, revocationError);
+		return this.waitForGroupCleanup(record, pgid, revocationError, failureReasons);
 	}
 
-	private async waitForGroupCleanup(record: OwnedPty, pgid: number, revocationError?: string): Promise<AgentPtyStopResult> {
+	private async waitForGroupCleanup(record: OwnedPty, pgid: number, revocationError?: string, failureReasons: readonly AgentPtyCleanupFailureReason[] = []): Promise<AgentPtyStopResult> {
 		const deadline = Date.now() + this.stopVerifyMs;
 		let inspection = inspectProcessGroup(pgid);
 		while (inspection.state === 'live' && Date.now() < deadline) {
@@ -596,19 +612,19 @@ export class AgentPtyHost {
 			const error = inspection.state === 'unknown'
 				? describeProcessGroupInspection(record, pgid, inspection.errorCode)
 				: `The owned PTY process group is still live (launch PGID ${pgid}; inspection code LIVE).`;
-			return this.finishStop(record, false, error, revocationError);
+			return this.finishStop(record, false, error, revocationError, [...failureReasons, inspection.state === 'unknown' ? 'processGroupInspectionUnknown' : 'processGroupStillLive']);
 		}
 		if (record.pty && !record.ptyExited && !(await waitForPromise(record.ptyExitPromise, this.stopVerifyMs))) {
 			if (!record.outputDrainGapAdded) {
 				record.outputDrainGapAdded = true;
 				this.appendOutput(record, '', true);
 			}
-			return this.finishStop(record, false, 'The PTY exit event did not confirm output drain.', revocationError);
+			return this.finishStop(record, false, 'The PTY exit event did not confirm output drain.', revocationError, [...failureReasons, 'ptyExitUnobserved']);
 		}
-		return this.finishStop(record, true, undefined, revocationError);
+		return this.finishStop(record, true, undefined, revocationError, failureReasons);
 	}
 
-	private async finishStop(record: OwnedPty, verified: boolean, error?: string, revocationError?: string): Promise<AgentPtyStopResult> {
+	private async finishStop(record: OwnedPty, verified: boolean, error?: string, revocationError?: string, failureReasons: readonly AgentPtyCleanupFailureReason[] = []): Promise<AgentPtyStopResult> {
 		record.state = 'stopping';
 		if (verified && record.ptyExited) {
 			this.finishSanitizer(record);
@@ -616,24 +632,26 @@ export class AgentPtyHost {
 		}
 		if (verified) {
 			try {
-				if (!(await this.cleanupControlResources(record))) {
+				const controlCleanupFailure = await this.cleanupControlResources(record);
+				if (controlCleanupFailure) {
 					record.state = 'cleanupUnverified';
 					this.notifyExitListeners(record);
-					return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources did not close within the bounded cleanup window.', revocationError].filter(Boolean).join(' ') };
+					return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources could not be verified closed.', revocationError].filter(Boolean).join(' '), failureReasons: [...failureReasons, controlCleanupFailure] };
 				}
 			} catch {
 				record.state = 'cleanupUnverified';
 				this.notifyExitListeners(record);
-				return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources could not be closed.', revocationError].filter(Boolean).join(' ') };
+				return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources could not be closed.', revocationError].filter(Boolean).join(' '), failureReasons: [...failureReasons, 'controlServerCloseFailed'] };
 			}
 		}
-		const state: AgentPtyStopResult['state'] = verified && !revocationError ? 'stopped' : 'cleanupUnverified';
+		const cleanupVerified = verified && failureReasons.length === 0;
+		const state: AgentPtyStopResult['state'] = cleanupVerified ? 'stopped' : 'cleanupUnverified';
 		record.state = state;
 		this.notifyExitListeners(record);
-		return { state, cleanupVerified: verified && !revocationError, ...([error, revocationError].filter(Boolean).length ? { error: [error, revocationError].filter(Boolean).join(' ') } : {}) };
+		return { state, cleanupVerified, ...([error, revocationError].filter(Boolean).length ? { error: [error, revocationError].filter(Boolean).join(' ') } : {}), ...(!cleanupVerified ? { failureReasons: [...failureReasons] } : {}) };
 	}
 
-	private async cleanupControlResources(record: OwnedPty): Promise<boolean> {
+	private async cleanupControlResources(record: OwnedPty): Promise<AgentPtyCleanupFailureReason | undefined> {
 		record.controlClosing = true;
 		for (const timer of record.controlSocketTimers.values()) { clearTimeout(timer); }
 		record.controlSocketTimers.clear();
@@ -643,9 +661,9 @@ export class AgentPtyHost {
 		if (record.controlServerBindFailed) {
 			// listen rejected before binding, so there was no active server to close.
 		} else if (!record.controlServerWasListening) {
-			return false;
+			return 'controlServerNotListening';
 		} else if (!record.controlServer.listening && record.controlSockets.size === 0) {
-			return true;
+			return undefined;
 		} else {
 			if (!record.controlServerClosePromise) {
 				record.controlServerClosePromise = new Promise<void>((resolve, reject) => {
@@ -655,9 +673,9 @@ export class AgentPtyHost {
 					throw error;
 				});
 			}
-			if (!(await waitForPromise(record.controlServerClosePromise, CONTROL_CLOSE_TIMEOUT_MS))) { return false; }
+			if (!(await waitForPromise(record.controlServerClosePromise, CONTROL_CLOSE_TIMEOUT_MS))) { return 'controlServerCloseTimedOut'; }
 		}
-		return true;
+		return undefined;
 	}
 
 	private acceptPtyData(record: OwnedPty, data: string): void {

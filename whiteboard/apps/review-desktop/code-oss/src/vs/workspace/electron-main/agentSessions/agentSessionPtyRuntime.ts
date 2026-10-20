@@ -6,7 +6,7 @@
 import { isAbsolute } from 'node:path';
 import type { IDisposable } from '../../../base/common/lifecycle.js';
 import type { AgentSessionPermissionPolicy, AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
-import { AgentPtyHost, AgentPtyStartError, type AgentPtyAttachment, type AgentPtyHandle, type AgentPtyHostOptions, type AgentPtyLaunch, type AgentPtyOutputChunk, type AgentPtySnapshot, type AgentPtyStopResult } from './agentPtyHost.js';
+import { AgentPtyHost, AgentPtyStartError, type AgentPtyAttachment, type AgentPtyCleanupFailureReason, type AgentPtyHandle, type AgentPtyHostOptions, type AgentPtyLaunch, type AgentPtyOutputChunk, type AgentPtySnapshot, type AgentPtyStopResult } from './agentPtyHost.js';
 import { createAgentPtyOutputSanitizer } from './agentOutputRedactor.js';
 import { AGENT_CLI_COMMAND_SPEC_VERSION } from './agentCliCapabilities.js';
 import type { AgentSessionCommandSpec } from './agentSessionCommands.js';
@@ -198,28 +198,46 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 	async stop(handle: AgentSessionRuntimeHandle): Promise<AgentPtyStopResult> {
 		const record = this.requireRecord(handle);
 		if (!record.hostHandle && !this.tryRevokePreparedAccess(record)) {
-			return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Launch-scoped access revocation failed.' };
+			return this.unverifiedStop(record, 'accessRevocationFailed', 'Launch-scoped access revocation failed.');
 		}
 		let hostResult: AgentPtyStopResult = { state: 'stopped', cleanupVerified: true };
 		if (record.hostHandle && record.host) {
 			try { hostResult = await record.host.stop(record.hostHandle); }
-			catch { return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Owned PTY cleanup could not be verified.' }; }
+			catch { return this.unverifiedStop(record, 'hostStopFailed', 'Owned PTY cleanup could not be verified.'); }
+		}
+		if (!hostResult.cleanupVerified) {
+			const failureReasons = hostResult.failureReasons ?? ['hostStopFailed'];
+			this.recordCleanupFailures(record, failureReasons);
+			return hostResult.failureReasons ? hostResult : { ...hostResult, failureReasons };
+		}
+		if (!record.privateConfigReleased) {
+			if (!record.releasePrivateConfig) {
+				return this.unverifiedStop(record, 'privateConfigUnavailable', 'Private launch resource cleanup is unavailable.');
+			}
+			try {
+				await record.releasePrivateConfig();
+				record.privateConfigReleased = true;
+			} catch {
+				return this.unverifiedStop(record, 'privateConfigReleaseFailed', 'Private launch configuration could not be released.');
+			}
 		}
 		if (!record.stopEventRecorded) {
 			try { record.journal?.appendEvent('info', 'host', 'session.turn-stopped'); record.stopEventRecorded = true; }
 			catch { record.transcriptPersistenceFailed = true; }
 		}
-		if (!hostResult.cleanupVerified) { return hostResult; }
-		if (!record.privateConfigReleased) {
-			try {
-				if (!record.releasePrivateConfig) { return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Private launch resource cleanup is unavailable.' }; }
-				await record.releasePrivateConfig();
-				record.privateConfigReleased = true;
-			} catch {
-				return { state: 'cleanupUnverified', cleanupVerified: false, error: 'Private launch configuration could not be released.' };
-			}
-		}
 		return { state: 'stopped', cleanupVerified: true };
+	}
+
+	private unverifiedStop(record: RuntimeRecord, reason: AgentPtyCleanupFailureReason, error: string): AgentPtyStopResult {
+		this.recordCleanupFailures(record, [reason]);
+		return { state: 'cleanupUnverified', cleanupVerified: false, error, failureReasons: [reason] };
+	}
+
+	private recordCleanupFailures(record: RuntimeRecord, reasons: readonly AgentPtyCleanupFailureReason[]): void {
+		for (const reason of reasons) {
+			try { record.journal?.appendCleanupFailure(reason); }
+			catch { record.transcriptPersistenceFailed = true; }
+		}
 	}
 
 	async release(handle: AgentSessionRuntimeHandle): Promise<void> {

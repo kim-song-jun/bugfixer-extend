@@ -382,6 +382,18 @@ jobs:
         timeout-minutes: 5
         run: ELECTRON_RUN_AS_NODE=1 "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app/Contents/MacOS/Whiteboard" apps/review-desktop/scripts/smoke-native-agent-pty.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-pty-smoke"
 
+      - name: Native PTY runtime cleanup journal contracts
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 5
+        working-directory: whiteboard/apps/review-desktop
+        run: |
+          app="$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app"
+          export BUGFIXER_NATIVE_PTY_NODE="$app/Contents/Resources/app/review-runtime/bin/node"
+          export BUGFIXER_NATIVE_PTY_GUARDIAN="$app/Contents/Resources/app/out/vs/workspace/electron-main/agentSessions/pty/agentPtyGuardian.mjs"
+          test -x "$BUGFIXER_NATIVE_PTY_NODE"
+          test -f "$BUGFIXER_NATIVE_PTY_GUARDIAN"
+          ELECTRON_RUN_AS_NODE=1 TSX_TSCONFIG_PATH=tsconfig.test.json "$app/Contents/MacOS/Whiteboard" --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPtyRuntime.native.ts
+
       - name: Native session terminal UI contracts
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         timeout-minutes: 8
