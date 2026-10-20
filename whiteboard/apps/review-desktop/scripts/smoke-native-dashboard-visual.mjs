@@ -1595,6 +1595,36 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'element-pid-mismatch',
   ]);
 
+  const invalidTypeIdKinds = new Set([
+    'non-finite',
+    'negative',
+    'non-integer',
+    'unsafe-integer',
+  ]);
+
+  const validTypeIdValue = (value, kind) => kind === 'safe-integer'
+    ? Number.isSafeInteger(value) && value >= 0
+    : value === null && invalidTypeIdKinds.has(kind);
+
+  const validTypeIdDiagnostic = result => {
+    const value = result.typeIdDiagnostic;
+
+    if (result.failureCode !== 'element-type-mismatch') return value === null;
+
+    if (value === null || value === undefined || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) return false;
+
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([
+      'actualKind', 'actualTypeId', 'expectedKind', 'expectedTypeId',
+    ])) return false;
+
+    if (!validTypeIdValue(value.actualTypeId, value.actualKind)
+      || !validTypeIdValue(value.expectedTypeId, value.expectedKind)) return false;
+
+    return value.actualKind !== 'safe-integer' || value.expectedKind !== 'safe-integer'
+      || value.actualTypeId !== value.expectedTypeId;
+  };
+
   const validRoleCounts = value => {
     if (value === null || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -1843,6 +1873,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'sheetCount',
         'status',
         'textFieldCount',
+        'typeIdDiagnostic',
         'windowCount',
       ];
 
@@ -1851,6 +1882,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)
         || (result.failureCode !== null && !failureCodes.has(result.failureCode))
+        || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
           'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
@@ -1879,6 +1911,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
       observation.failurePhase = result.failurePhase;
       observation.actorFailureCode = result.failureCode;
+      observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.currentHelperPID = result.currentHelperPID;
       observation.currentClientTrusted = result.currentClientTrusted;
       observation.result = 'failed';
@@ -1912,6 +1945,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'sheetCount',
         'status',
         'textFieldCount',
+        'typeIdDiagnostic',
         'windowCount',
       ];
 
@@ -1919,6 +1953,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
         || (result.failureCode !== null && !failureCodes.has(result.failureCode))
+        || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
           'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
@@ -1947,6 +1982,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
       observation.failurePhase = result.failurePhase;
       observation.actorFailureCode = result.failureCode;
+      observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.result = 'failed';
       observation.sheetCleanup = result.cleanupStatus;
       observation.windowCount = result.windowCount;

@@ -79,6 +79,8 @@ let retainedArrays;
 
 let failureCode;
 
+let typeIdDiagnostic;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -97,6 +99,7 @@ function run(argv) {
   let defaultActionCount = 0;
   let cleanupStatus = "not-needed";
   failureCode = null;
+  typeIdDiagnostic = null;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -330,6 +333,7 @@ function run(argv) {
     });
   } catch {
     const primaryFailureCode = failureCode;
+    const primaryTypeIdDiagnostic = typeIdDiagnostic;
 
     if (sheet && homeWindow) {
       try {
@@ -349,6 +353,7 @@ function run(argv) {
       promptRequested,
       failurePhase,
       failureCode: primaryFailureCode,
+      typeIdDiagnostic: primaryTypeIdDiagnostic,
       actionCount,
       windowCount,
       sheetCount,
@@ -383,6 +388,8 @@ function isOptionalAttributeMissing(status) {
 }
 
 function assertOwnedElement(element) {
+  typeIdDiagnostic = null;
+
   if (!element) {
     failureCode = "element-null";
     throw new Error("Accessibility element unavailable");
@@ -397,6 +404,12 @@ function assertOwnedElement(element) {
   const expectedTypeID = Number($.AXUIElementGetTypeID());
 
   if (typeID !== expectedTypeID) {
+    typeIdDiagnostic = {
+      actualTypeId: safeTypeIdValue(typeID),
+      actualKind: typeIdKind(typeID),
+      expectedTypeId: safeTypeIdValue(expectedTypeID),
+      expectedKind: typeIdKind(expectedTypeID),
+    };
     failureCode = "element-type-mismatch";
     throw new Error("Accessibility element type mismatch");
   }
@@ -419,6 +432,22 @@ function assertOwnedElement(element) {
   failureCode = null;
 
   return element;
+}
+
+function safeTypeIdValue(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function typeIdKind(value) {
+  if (!Number.isFinite(value)) {
+    return "non-finite";
+  }
+
+  if (Number.isSafeInteger(value)) {
+    return value < 0 ? "negative" : "safe-integer";
+  }
+
+  return Number.isInteger(value) ? "unsafe-integer" : "non-integer";
 }
 
 function copyArrayAttribute(element, attribute) {

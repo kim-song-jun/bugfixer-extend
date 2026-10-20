@@ -323,9 +323,12 @@ async function launch(
 		void (async () => {
 			// The guardian owns the PGID until termination completes. Never signal
 			// after close: at that point a numeric PGID may identify another group.
-			const unexpectedDescendants = !cleanupPromise && child.pid !== undefined && ownedGroupExists(child.pid);
-			const cleanup: GroupCleanupResult = cleanupPromise ? await cleanupPromise : { verified: !unexpectedDescendants };
-			const state: ProviderTerminalState = !cleanup.verified || unexpectedDescendants
+			const cleanup: GroupCleanupResult = cleanupPromise
+				? await cleanupPromise
+				: child.pid !== undefined
+					? await verifyProcessGroupAfterGuardianExit(child.pid)
+					: { verified: true };
+			const state: ProviderTerminalState = !cleanup.verified
 				? 'interrupted'
 				: cancelled
 				? 'cancelled'
@@ -341,7 +344,15 @@ async function launch(
 				cleanupVerified: cleanup.verified,
 				exitCode,
 				signal: exitSignal,
-				error: cleanup.error ?? parserError ?? (unexpectedDescendants ? 'Owned provider process group remained after its guardian exited.' : !cancelled && launchGateFailed ? 'Provider launch gate closed before execution was authorized.' : spawnFailed ? 'Provider process failed to start.' : undefined),
+				error: cleanup.error
+					?? parserError
+					?? (!cleanup.verified
+						? 'Provider process group cleanup could not be verified after its guardian exited.'
+						: !cancelled && launchGateFailed
+							? 'Provider launch gate closed before execution was authorized.'
+							: spawnFailed
+								? 'Provider process failed to start.'
+								: undefined),
 				...(request.captureFinalText && finalText !== undefined ? { finalText } : {}),
 			});
 		})().catch(() => resolveResult({
@@ -448,8 +459,12 @@ export function isOwnedProcessGroupGone(pgid: number): boolean {
 	return !ownedGroupExists(pgid);
 }
 
-function verifyProcessGroupAfterGuardianExit(pgid: number): GroupCleanupResult {
-	return isOwnedProcessGroupGone(pgid)
+async function verifyProcessGroupAfterGuardianExit(pgid: number): Promise<GroupCleanupResult> {
+	if (process.platform === 'win32' || !Number.isSafeInteger(pgid) || pgid < 2) {
+		return { verified: false, error: 'The provider guardian exited before its process group cleanup was verified.' };
+	}
+
+	return await waitForOwnedGroupExit(pgid, GROUP_CLEANUP_TIMEOUT_MS)
 		? { verified: true }
 		: { verified: false, error: 'The provider guardian exited before its process group cleanup was verified.' };
 }
