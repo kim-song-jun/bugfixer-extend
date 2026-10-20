@@ -196,6 +196,14 @@ const safeHostJournalLabels = new Map([
   ['The PTY host could not verify session cleanup.', 'session.turn-stop-unverified.host-stop'],
   ['Session stop could not verify private launch configuration cleanup.', 'session.turn-stop-unverified.private-config-unavailable'],
   ['Session stop could not release private launch configuration.', 'session.turn-stop-unverified.private-config-release'],
+  ['Process-group inspection before authenticated stop returned EACCES.', 'session.process-group-inspection.before-stop.eacces'],
+  ['Process-group inspection before authenticated stop returned EINVAL.', 'session.process-group-inspection.before-stop.einval'],
+  ['Process-group inspection before authenticated stop returned EPERM.', 'session.process-group-inspection.before-stop.eperm'],
+  ['Process-group inspection before authenticated stop returned an unknown error.', 'session.process-group-inspection.before-stop.unknown'],
+  ['Process-group inspection while verifying stop returned EACCES.', 'session.process-group-inspection.verifying-stop.eacces'],
+  ['Process-group inspection while verifying stop returned EINVAL.', 'session.process-group-inspection.verifying-stop.einval'],
+  ['Process-group inspection while verifying stop returned EPERM.', 'session.process-group-inspection.verifying-stop.eperm'],
+  ['Process-group inspection while verifying stop returned an unknown error.', 'session.process-group-inspection.verifying-stop.unknown'],
 ]);
 
 function captureFixtureProcessObservation(session) {
@@ -225,24 +233,30 @@ function captureFixtureProcessObservation(session) {
 function captureStopObservation(session, stage) {
   try {
     const turn = database?.agentSessionTurns.getTurn(receipt.project.projectId, session.id, session.turnId);
+    const transcriptLatestSequence = database?.agentSessionTranscripts.highestSequence(receipt.project.projectId, session.id, session.turnId) ?? 0;
 
     const transcript = database?.agentSessionTranscripts.readPage(receipt.project.projectId, session.id, session.turnId, {
+      afterSequence: Math.max(0, transcriptLatestSequence - 100),
       kind: 'log', source: 'host', limit: 100, maxOutputBytes: 256 * 1024,
     });
 
     const hostJournalEvents = (transcript?.entries ?? [])
       .filter(entry => entry.kind === 'log' && entry.source === 'host' && safeHostJournalLabels.has(entry.text))
       .slice(-20)
-      .map(entry => ({ sequence: entry.sequence, eventId: safeHostJournalLabels.get(entry.text) }));
+      .map(entry => ({ sequence: entry.sequence, createdAt: entry.createdAt, eventId: safeHostJournalLabels.get(entry.text) }));
 
     receipt.stopObservations.push({
       stage,
       observedAt: new Date().toISOString(),
       sessionId: session.id,
       turnId: session.turnId,
+      transcriptLatestSequence,
+      transcriptWindowAfterSequence: Math.max(0, transcriptLatestSequence - 100),
+      processGroupInspectionObservations: hostJournalEvents.filter(event => event.eventId.startsWith('session.process-group-inspection.')).length,
       turn: turn ? {
         state: turn.state,
         revision: turn.revision,
+        updatedAt: turn.updatedAt,
         cleanupVerified: turn.cleanupVerified,
         exitCode: turn.exitCode,
         exitSignal: turn.exitSignal,

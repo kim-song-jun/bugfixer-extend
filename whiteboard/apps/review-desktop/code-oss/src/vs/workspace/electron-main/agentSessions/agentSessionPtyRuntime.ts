@@ -122,6 +122,13 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 				revokeAccess: () => {
 					if (!this.tryRevokePreparedAccess(record)) { throw new Error('Launch-scoped access revocation failed.'); }
 				},
+				onProcessGroupInspection: (phase, code) => {
+					try { record.journal?.appendProcessGroupInspection(phase, code); }
+					catch {
+						record.transcriptPersistenceFailed = true;
+						throw new Error('Process-group inspection diagnostics could not be persisted.');
+					}
+				},
 			});
 			validatePreparedLaunch(snapshot, prepared);
 			if (signal.aborted) { throw new Error('The session launch was cancelled before PTY creation.'); }
@@ -205,6 +212,7 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 			try { hostResult = await record.host.stop(record.hostHandle); }
 			catch { return this.unverifiedStop(record, 'hostStopFailed', 'Owned PTY cleanup could not be verified.'); }
 		}
+		if (hostResult.inspectionDiagnosticsFailed) { record.transcriptPersistenceFailed = true; }
 		if (!hostResult.cleanupVerified) {
 			const failureReasons = hostResult.failureReasons ?? ['hostStopFailed'];
 			this.recordCleanupFailures(record, failureReasons);
@@ -225,7 +233,7 @@ export class AgentSessionPtyRuntimeFactory implements AgentSessionRuntimeFactory
 			try { record.journal?.appendEvent('info', 'host', 'session.turn-stopped'); record.stopEventRecorded = true; }
 			catch { record.transcriptPersistenceFailed = true; }
 		}
-		return { state: 'stopped', cleanupVerified: true };
+		return { state: 'stopped', cleanupVerified: true, ...(hostResult.inspectionDiagnosticsFailed ? { inspectionDiagnosticsFailed: true } : {}) };
 	}
 
 	private unverifiedStop(record: RuntimeRecord, reason: AgentPtyCleanupFailureReason, error: string): AgentPtyStopResult {

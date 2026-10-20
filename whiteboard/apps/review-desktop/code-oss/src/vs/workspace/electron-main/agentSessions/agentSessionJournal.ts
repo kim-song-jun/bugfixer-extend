@@ -5,7 +5,7 @@
 
 import type { AgentSessionTurnSnapshot } from '../../common/workspaceAgentSessionProtocol.js';
 import type { AgentSessionTranscriptStore } from './agentSessionTranscriptStore.js';
-import type { AgentPtyCleanupFailureReason } from './agentPtyHost.js';
+import type { AgentPtyCleanupFailureReason, AgentPtyProcessGroupInspectionErrorCode, AgentPtyProcessGroupInspectionPhase } from './agentPtyHost.js';
 
 /** Synchronous, main-process-only journal. Its sequence is independent of the attachable PTY cursor. */
 export class AgentSessionJournal {
@@ -26,6 +26,14 @@ export class AgentSessionJournal {
 		'session.turn-stop-unverified.host-stop': 'The PTY host could not verify session cleanup.',
 		'session.turn-stop-unverified.private-config-unavailable': 'Session stop could not verify private launch configuration cleanup.',
 		'session.turn-stop-unverified.private-config-release': 'Session stop could not release private launch configuration.',
+		'session.process-group-inspection.before-stop.eacces': 'Process-group inspection before authenticated stop returned EACCES.',
+		'session.process-group-inspection.before-stop.einval': 'Process-group inspection before authenticated stop returned EINVAL.',
+		'session.process-group-inspection.before-stop.eperm': 'Process-group inspection before authenticated stop returned EPERM.',
+		'session.process-group-inspection.before-stop.unknown': 'Process-group inspection before authenticated stop returned an unknown error.',
+		'session.process-group-inspection.verifying-stop.eacces': 'Process-group inspection while verifying stop returned EACCES.',
+		'session.process-group-inspection.verifying-stop.einval': 'Process-group inspection while verifying stop returned EINVAL.',
+		'session.process-group-inspection.verifying-stop.eperm': 'Process-group inspection while verifying stop returned EPERM.',
+		'session.process-group-inspection.verifying-stop.unknown': 'Process-group inspection while verifying stop returned an unknown error.',
 		'pty.output-gap': 'Terminal output gap detected; the retained transcript is incomplete.',
 		'pty.transcript-persistence-failed': 'Transcript persistence failed; further terminal output was withheld.',
 	};
@@ -58,6 +66,11 @@ export class AgentSessionJournal {
 		this.appendEvent('error', 'host', event);
 	}
 
+	appendProcessGroupInspection(phase: AgentPtyProcessGroupInspectionPhase, code: AgentPtyProcessGroupInspectionErrorCode): void {
+		const event = processGroupInspectionEvent[phase][code];
+		this.appendEvent('warning', 'host', event);
+	}
+
 	appendEvent(severity: 'debug' | 'info' | 'warning' | 'error', source: 'pty' | 'provider' | 'host' | 'workspace', event: string): void {
 		const text = AgentSessionJournal.eventText[event];
 		if (!text) { throw new Error('Transcript event must be a trusted static event identifier.'); }
@@ -88,4 +101,19 @@ const cleanupFailureEvent: Readonly<Record<AgentPtyCleanupFailureReason, string>
 	hostStopFailed: 'session.turn-stop-unverified.host-stop',
 	privateConfigUnavailable: 'session.turn-stop-unverified.private-config-unavailable',
 	privateConfigReleaseFailed: 'session.turn-stop-unverified.private-config-release',
+};
+
+const processGroupInspectionEvent: Readonly<Record<AgentPtyProcessGroupInspectionPhase, Readonly<Record<AgentPtyProcessGroupInspectionErrorCode, string>>>> = {
+	'before-stop': {
+		EACCES: 'session.process-group-inspection.before-stop.eacces',
+		EINVAL: 'session.process-group-inspection.before-stop.einval',
+		EPERM: 'session.process-group-inspection.before-stop.eperm',
+		UNKNOWN: 'session.process-group-inspection.before-stop.unknown',
+	},
+	'verifying-stop': {
+		EACCES: 'session.process-group-inspection.verifying-stop.eacces',
+		EINVAL: 'session.process-group-inspection.verifying-stop.einval',
+		EPERM: 'session.process-group-inspection.verifying-stop.eperm',
+		UNKNOWN: 'session.process-group-inspection.verifying-stop.unknown',
+	},
 };

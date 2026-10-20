@@ -86,9 +86,13 @@ export interface AgentPtySnapshot {
 export interface AgentPtyStopResult {
 	readonly state: 'stopped' | 'cleanupUnverified';
 	readonly cleanupVerified: boolean;
+	readonly inspectionDiagnosticsFailed?: boolean;
 	readonly error?: string;
 	readonly failureReasons?: readonly AgentPtyCleanupFailureReason[];
 }
+
+export type AgentPtyProcessGroupInspectionPhase = 'before-stop' | 'verifying-stop';
+export type AgentPtyProcessGroupInspectionErrorCode = 'EACCES' | 'EINVAL' | 'EPERM' | 'UNKNOWN';
 
 export type AgentPtyCleanupFailureReason =
 	| 'accessRevocationFailed'
@@ -115,6 +119,8 @@ export interface AgentPtyHostOptions {
 	readonly revokeAccess: () => void;
 	/** Synchronously persists already-sanitized output before any ring-buffer or listener publication. */
 	readonly persistOutput?: (text: string, gap: boolean) => void;
+	/** Persists only a bounded enum describing an owned process-group inspection. */
+	readonly onProcessGroupInspection?: (phase: AgentPtyProcessGroupInspectionPhase, code: AgentPtyProcessGroupInspectionErrorCode) => void;
 	/** Trusted standalone Node executable used only for the guardian process. */
 	readonly guardianNodeExecutable: string;
 	/** Packaged path to agentPtyGuardian.mjs. */
@@ -190,6 +196,7 @@ interface OwnedPty {
 	failedExitListeners: number;
 	accessRevoked: boolean;
 	accessRevocationFailed: boolean;
+	processGroupInspectionDiagnosticsFailed: boolean;
 }
 
 type ProcessGroupInspection =
@@ -197,7 +204,7 @@ type ProcessGroupInspection =
 	| { readonly state: 'live' }
 	| { readonly state: 'unknown'; readonly errorCode: ProcessGroupInspectionErrorCode };
 
-type ProcessGroupInspectionErrorCode = 'EACCES' | 'EINVAL' | 'EPERM' | 'UNKNOWN';
+type ProcessGroupInspectionErrorCode = AgentPtyProcessGroupInspectionErrorCode;
 
 /** Main-process owner for interactive PTYs. This foundation is not wired to app launch. */
 export class AgentPtyHost {
@@ -271,6 +278,7 @@ export class AgentPtyHost {
 			failedExitListeners: 0,
 			accessRevoked: false,
 			accessRevocationFailed: false,
+			processGroupInspectionDiagnosticsFailed: false,
 		};
 		server.on('connection', socket => this.acceptControlConnection(record, socket, launch));
 		server.on('error', () => {
@@ -437,9 +445,14 @@ export class AgentPtyHost {
 		if (record.stopPromise) { return record.stopPromise; }
 		const operation = this.stopOwned(record);
 		record.stopPromise = operation;
-		const result = await operation;
-		if (!result.cleanupVerified) { record.stopPromise = undefined; }
-		return result;
+		try {
+			const result = await operation;
+			if (!result.cleanupVerified) { record.stopPromise = undefined; }
+			return result;
+		} catch (error) {
+			if (record.stopPromise === operation) { record.stopPromise = undefined; }
+			throw error;
+		}
 	}
 
 	async shutdown(): Promise<readonly AgentPtyStopResult[]> {
@@ -588,33 +601,49 @@ export class AgentPtyHost {
 		if (typeof pgid !== 'number' || !Number.isSafeInteger(pgid) || pgid <= 0) {
 			return this.finishStop(record, false, 'The PTY process group identifier is unavailable.', revocationError, [...failureReasons, 'processGroupUnavailable']);
 		}
+		const deadline = Date.now() + this.stopVerifyMs;
+		const recordedInspections = new Set<string>();
+		const recordInspection = (phase: AgentPtyProcessGroupInspectionPhase, code: AgentPtyProcessGroupInspectionErrorCode): void => {
+			const key = `${phase}:${code}`;
+			if (recordedInspections.has(key)) { return; }
+			recordedInspections.add(key);
+			try { this.options.onProcessGroupInspection?.(phase, code); }
+			catch { record.processGroupInspectionDiagnosticsFailed = true; }
+		};
 		const before = inspectProcessGroup(pgid);
-		if (before.state === 'gone') { return this.waitForGroupCleanup(record, pgid, revocationError, failureReasons); }
-		if (before.state === 'unknown') {
-			return this.finishStop(record, false, describeProcessGroupInspection(record, pgid, before.errorCode), revocationError, [...failureReasons, 'processGroupInspectionUnknown']);
-		}
-		if (!record.controlDisconnected && !record.guardianCleanup && record.controlSocket && !record.controlSocket.destroyed) {
+		if (before.state === 'gone') { return this.waitForGroupCleanup(record, pgid, deadline, recordInspection, revocationError, failureReasons); }
+		if (before.state === 'unknown') { recordInspection('before-stop', before.errorCode); }
+		if (record.controlAuthenticated && !record.controlDisconnected && !record.guardianCleanup && record.controlSocket && !record.controlSocket.destroyed) {
 			this.sendControl(record.controlSocket, { command: 'stop' });
+		} else if (record.controlAuthenticated && record.guardianCleanup) {
+			// The authenticated guardian already reported that its owned cleanup is underway.
 		} else {
+			// A partially accepted connection cannot issue commands; closing only these host-owned
+			// sockets lets the guardian's disconnect cleanup run without trusting an unauthenticated peer.
 			for (const socket of record.controlSockets) { socket.destroy(); }
 		}
-		return this.waitForGroupCleanup(record, pgid, revocationError, failureReasons);
+		return this.waitForGroupCleanup(record, pgid, deadline, recordInspection, revocationError, failureReasons);
 	}
 
-	private async waitForGroupCleanup(record: OwnedPty, pgid: number, revocationError?: string, failureReasons: readonly AgentPtyCleanupFailureReason[] = []): Promise<AgentPtyStopResult> {
-		const deadline = Date.now() + this.stopVerifyMs;
+	private async waitForGroupCleanup(record: OwnedPty, pgid: number, deadline: number, recordInspection: (phase: AgentPtyProcessGroupInspectionPhase, code: AgentPtyProcessGroupInspectionErrorCode) => void, revocationError?: string, failureReasons: readonly AgentPtyCleanupFailureReason[] = []): Promise<AgentPtyStopResult> {
 		let inspection = inspectProcessGroup(pgid);
-		while (inspection.state === 'live' && Date.now() < deadline) {
+		while (inspection.state !== 'gone' && Date.now() < deadline) {
+			if (inspection.state === 'unknown') {
+				recordInspection('verifying-stop', inspection.errorCode);
+			}
 			await delay(PROCESS_GROUP_POLL_MS);
 			inspection = inspectProcessGroup(pgid);
 		}
 		if (inspection.state !== 'gone') {
+			if (inspection.state === 'unknown') {
+				recordInspection('verifying-stop', inspection.errorCode);
+			}
 			const error = inspection.state === 'unknown'
 				? describeProcessGroupInspection(record, pgid, inspection.errorCode)
 				: `The owned PTY process group is still live (launch PGID ${pgid}; inspection code LIVE).`;
 			return this.finishStop(record, false, error, revocationError, [...failureReasons, inspection.state === 'unknown' ? 'processGroupInspectionUnknown' : 'processGroupStillLive']);
 		}
-		if (record.pty && !record.ptyExited && !(await waitForPromise(record.ptyExitPromise, this.stopVerifyMs))) {
+		if (record.pty && !record.ptyExited && !(await waitForPromise(record.ptyExitPromise, Math.max(0, deadline - Date.now())))) {
 			if (!record.outputDrainGapAdded) {
 				record.outputDrainGapAdded = true;
 				this.appendOutput(record, '', true);
@@ -636,19 +665,19 @@ export class AgentPtyHost {
 				if (controlCleanupFailure) {
 					record.state = 'cleanupUnverified';
 					this.notifyExitListeners(record);
-					return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources could not be verified closed.', revocationError].filter(Boolean).join(' '), failureReasons: [...failureReasons, controlCleanupFailure] };
+					return { state: 'cleanupUnverified', cleanupVerified: false, ...(record.processGroupInspectionDiagnosticsFailed ? { inspectionDiagnosticsFailed: true } : {}), error: ['PTY control resources could not be verified closed.', revocationError].filter(Boolean).join(' '), failureReasons: [...failureReasons, controlCleanupFailure] };
 				}
 			} catch {
 				record.state = 'cleanupUnverified';
 				this.notifyExitListeners(record);
-				return { state: 'cleanupUnverified', cleanupVerified: false, error: ['PTY control resources could not be closed.', revocationError].filter(Boolean).join(' '), failureReasons: [...failureReasons, 'controlServerCloseFailed'] };
+				return { state: 'cleanupUnverified', cleanupVerified: false, ...(record.processGroupInspectionDiagnosticsFailed ? { inspectionDiagnosticsFailed: true } : {}), error: ['PTY control resources could not be closed.', revocationError].filter(Boolean).join(' '), failureReasons: [...failureReasons, 'controlServerCloseFailed'] };
 			}
 		}
 		const cleanupVerified = verified && failureReasons.length === 0;
 		const state: AgentPtyStopResult['state'] = cleanupVerified ? 'stopped' : 'cleanupUnverified';
 		record.state = state;
 		this.notifyExitListeners(record);
-		return { state, cleanupVerified, ...([error, revocationError].filter(Boolean).length ? { error: [error, revocationError].filter(Boolean).join(' ') } : {}), ...(!cleanupVerified ? { failureReasons: [...failureReasons] } : {}) };
+		return { state, cleanupVerified, ...(record.processGroupInspectionDiagnosticsFailed ? { inspectionDiagnosticsFailed: true } : {}), ...([error, revocationError].filter(Boolean).length ? { error: [error, revocationError].filter(Boolean).join(' ') } : {}), ...(!cleanupVerified ? { failureReasons: [...failureReasons] } : {}) };
 	}
 
 	private async cleanupControlResources(record: OwnedPty): Promise<AgentPtyCleanupFailureReason | undefined> {

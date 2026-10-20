@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -43,7 +44,8 @@ function createFixture(releasePrivateConfig: () => Promise<void>, revokeAccess: 
 		permissionPolicy: { mode: 'read-only', approval: 'never' }, convention: null, references: [],
 	};
 	const turn = database.agentSessionTurns.createTurn({ projectId: project.id, sessionId: session.id, expectedSessionRevision: session.revision, snapshot });
-	const args = ['-e', 'setInterval(() => {}, 1000)'];
+	const providerPidFile = join(directory, 'provider.pid');
+	const args = ['-e', "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);", providerPidFile];
 	const profileDirectoryReal = realpathSync(profileDirectory);
 	const commandEnv = { CODEX_HOME: profileDirectoryReal };
 	const launchEnv = {
@@ -70,7 +72,27 @@ function createFixture(releasePrivateConfig: () => Promise<void>, revokeAccess: 
 			knownSecrets: [], revokeAccess, releasePrivateConfig,
 		}),
 	});
-	return { directory, database, project, session, snapshot, turn, runtime };
+	return { directory, database, project, session, snapshot, turn, runtime, providerPidFile };
+}
+
+async function fixtureProcessGroupId(providerPidFile: string): Promise<number> {
+	const deadline = Date.now() + 5_000;
+	let providerPid: number | undefined;
+	while (Date.now() < deadline && providerPid === undefined) {
+		try {
+			const value = readFileSync(providerPidFile, 'utf8');
+			if (/^[1-9][0-9]*$/.test(value)) { providerPid = Number(value); }
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
+		}
+		if (providerPid === undefined) { await new Promise(resolve => setTimeout(resolve, 10)); }
+	}
+	if (typeof providerPid !== 'number' || !Number.isSafeInteger(providerPid) || providerPid <= 0) {
+		throw new Error('The owned provider fixture did not publish a valid PID.');
+	}
+	const processGroupOutput = execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(providerPid)], { encoding: 'utf8' }).trim();
+	assert.match(processGroupOutput, /^[1-9][0-9]*$/, 'the owned provider process must have a numeric process group');
+	return Number(processGroupOutput);
 }
 
 async function startRetainingRecoveryHandle(
@@ -140,6 +162,83 @@ test('PTY runtime records the stopped event only after verified host and private
 		await fixture.runtime.release(handle);
 		handle = undefined;
 	} finally {
+		await disposeFixture(fixture, handle);
+	}
+});
+
+function injectOwnedGroupInspectionError(ownedGroupId: number, persistent: boolean) {
+	assert.ok(Number.isSafeInteger(ownedGroupId) && ownedGroupId > 0);
+	const originalKill = process.kill;
+	let injected = false;
+	const patchedKill = (pid: number, signal?: NodeJS.Signals | number): boolean => {
+		if (typeof pid === 'number' && pid === -ownedGroupId && signal === 0) {
+			if (persistent || !injected) {
+				injected = true;
+				const error = new Error('test-only exact owned-group inspection denial') as NodeJS.ErrnoException;
+				error.code = 'EPERM';
+				throw error;
+			}
+		}
+		return originalKill.call(process, pid, signal);
+	};
+	Object.defineProperty(process, 'kill', { configurable: true, writable: true, value: patchedKill });
+	return {
+		ownedGroupId,
+		get injected() { return injected; },
+		restore() { Object.defineProperty(process, 'kill', { configurable: true, writable: true, value: originalKill }); },
+	};
+}
+
+test('native stop authenticates guardian cleanup after a transient EPERM process-group inspection', { skip: process.platform !== 'darwin' && 'The process-group EPERM regression requires the macOS native CI host.' }, async () => {
+	const fixture = createFixture(async () => { });
+	let handle: AgentSessionRuntimeHandle | undefined;
+	let injection: ReturnType<typeof injectOwnedGroupInspectionError> | undefined;
+	try {
+		handle = await startRetainingRecoveryHandle(fixture.runtime, fixture.snapshot, fixture.turn.id, value => { handle = value; });
+		const expectedGroupId = await fixtureProcessGroupId(fixture.providerPidFile);
+		const activeInjection = injectOwnedGroupInspectionError(expectedGroupId, false);
+		injection = activeInjection;
+		try {
+			const result = await fixture.runtime.stop(handle);
+			assert.equal(activeInjection.injected, true, 'the native host inspected the exact owned provider process group');
+			assert.equal(result.cleanupVerified, true, 'authenticated guardian stop plus eventual ESRCH must verify cleanup');
+			const entries = fixture.database.agentSessionTranscripts.readPage(fixture.project.id, fixture.session.id, fixture.turn.id).entries;
+			assert.ok(entries.some(entry => entry.kind === 'log' && entry.text === 'Process-group inspection before authenticated stop returned EPERM.'));
+			assert.ok(entries.some(entry => entry.kind === 'log' && entry.text === 'Session turn stopped.'));
+		} finally { injection.restore(); injection = undefined; }
+		await fixture.runtime.release(handle);
+		handle = undefined;
+	} finally {
+		injection?.restore();
+		await disposeFixture(fixture, handle);
+	}
+});
+
+test('native stop preserves unverified status while process-group inspection remains EPERM, then reclaims only after inspection recovers', { skip: process.platform !== 'darwin' && 'The process-group EPERM regression requires the macOS native CI host.' }, async () => {
+	const fixture = createFixture(async () => { });
+	let handle: AgentSessionRuntimeHandle | undefined;
+	let injection: ReturnType<typeof injectOwnedGroupInspectionError> | undefined;
+	try {
+		handle = await startRetainingRecoveryHandle(fixture.runtime, fixture.snapshot, fixture.turn.id, value => { handle = value; });
+		const expectedGroupId = await fixtureProcessGroupId(fixture.providerPidFile);
+		const activeInjection = injectOwnedGroupInspectionError(expectedGroupId, true);
+		injection = activeInjection;
+		const result = await fixture.runtime.stop(handle);
+		assert.equal(activeInjection.injected, true, 'the native host inspected the exact owned provider process group');
+		assert.equal(result.cleanupVerified, false, 'persistent EPERM must never be treated as proof that the group is gone');
+		assert.equal(result.state, 'cleanupUnverified');
+		activeInjection.restore();
+		injection = undefined;
+		assert.throws(() => process.kill(-expectedGroupId, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH', 'the guardian must actually remove the exact owned group before recovery is attempted');
+		const recovered = await fixture.runtime.stop(handle);
+		assert.equal(recovered.cleanupVerified, true, 'the retained owned handle must permit a later positively verified cleanup');
+		const entries = fixture.database.agentSessionTranscripts.readPage(fixture.project.id, fixture.session.id, fixture.turn.id).entries;
+		assert.ok(entries.some(entry => entry.kind === 'log' && entry.text === 'Process-group inspection while verifying stop returned EPERM.'));
+		assert.ok(entries.some(entry => entry.kind === 'log' && entry.text === 'Session turn stopped.'));
+		await fixture.runtime.release(handle);
+		handle = undefined;
+	} finally {
+		injection?.restore();
 		await disposeFixture(fixture, handle);
 	}
 });
