@@ -4375,8 +4375,10 @@ async function seedMailboxNotificationHistory(database, fixture, projectFolder, 
     snapshot,
   });
 
+  const startingSession = database.agentSessions.getSession(fixture.projectId, sender.id);
+
   const running = database.agentSessionTurns.transitionTurn(
-    fixture.projectId, sender.id, turn.id, turn.revision, sender.revision, { state: 'running' },
+    fixture.projectId, sender.id, turn.id, turn.revision, startingSession.revision, { state: 'running' },
   );
 
   const collaboration = new CollaborationService(database);
