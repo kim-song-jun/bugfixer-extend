@@ -5535,9 +5535,13 @@ async function verifyAiSessionWorkflow(page, fixture, tag, screenshots, viewport
 
   const approve = panel.getByRole('button', { name: '승인 요청', exact: true });
 
-  const start = panel.getByRole('button', { name: '실행 시작', exact: true });
+  const start = panel.getByText('실행 시작', { exact: true });
 
   assert.equal(await approve.isDisabled(), true, 'Approval must be disabled while the visible plan draft is unsaved');
+
+  assert.equal(await start.innerText(), '실행 시작', 'The hidden start control must retain its exact action label in the DOM');
+
+  assert.equal(await start.isVisible(), false, 'Start must remain hidden until the saved workflow is ready');
 
   assert.equal(await start.isDisabled(), true, 'Start must be disabled while the visible plan draft is unsaved');
 
