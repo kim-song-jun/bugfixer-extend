@@ -3,11 +3,13 @@
 
 function run() {
   let failurePhase = 'IMPORT';
+
   try {
     ObjC.import('ApplicationServices');
     ObjC.import('Foundation');
 
     failurePhase = 'OPTIONS';
+
     const options = $.NSDictionary.dictionaryWithObjectForKey(
       $.NSNumber.numberWithBool(false),
       $.kAXTrustedCheckOptionPrompt,
@@ -17,11 +19,13 @@ function run() {
     const trustedResult = $.AXIsProcessTrustedWithOptions(options);
 
     failurePhase = 'VALUE';
-    if (typeof trustedResult !== 'boolean' && !(typeof trustedResult === 'number' && (trustedResult === 0 || trustedResult === 1))) {
+
+    if (![true, false, 0, 1].includes(trustedResult)) {
       throw new Error('AX trust API returned an unsupported scalar type');
     }
 
     failurePhase = 'SERIALIZE';
+
     return JSON.stringify({
       currentHelperPID: Number($.NSProcessInfo.processInfo.processIdentifier),
       currentClientTrusted: trustedResult === true || trustedResult === 1,

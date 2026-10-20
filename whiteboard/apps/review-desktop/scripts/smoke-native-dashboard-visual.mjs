@@ -1290,6 +1290,7 @@ async function runNativeAccessibilityProbe() {
   const script = fileURLToPath(new URL('./native-accessibility-probe.js', import.meta.url));
   const args = ['-l', 'JavaScript', script];
   const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
   const observation = {
     pid: child.pid ?? null,
     ppid: process.pid,
@@ -1303,6 +1304,7 @@ async function runNativeAccessibilityProbe() {
     stdoutBytes: 0,
     stderrBytes: 0,
   };
+
   diagnostics.nativeAccessibilityProbe = observation;
 
   let stdout = '';
@@ -1310,6 +1312,7 @@ async function runNativeAccessibilityProbe() {
   child.once('error', error => { spawnError = error; });
   child.stdout.on('data', chunk => {
     observation.stdoutBytes += chunk.length;
+
     if (stdout.length < 4096) stdout += chunk.toString('utf8').slice(0, 4096 - stdout.length);
   });
   child.stderr.on('data', chunk => { observation.stderrBytes += chunk.length; });
@@ -1338,10 +1341,13 @@ async function runNativeAccessibilityProbe() {
     }
 
     if (spawnError) throw new Error('Owned osascript AX probe could not start');
+
     if (observation.exit?.code !== 0 || observation.exit.signal !== null) throw new Error('Owned osascript AX probe failed');
+
     if (observation.stdoutBytes > 4096 || observation.stderrBytes > 4096) throw new Error('Owned osascript AX probe exceeded its output bound');
 
     const result = JSON.parse(stdout.trim());
+
     if (Object.keys(result).length === 1 && Object.hasOwn(result, 'failurePhase')) {
       assert.ok(['IMPORT', 'OPTIONS', 'QUERY', 'VALUE', 'SERIALIZE'].includes(result.failurePhase), 'The JXA probe failure must identify an allowlisted phase');
       observation.failurePhase = result.failurePhase;
@@ -1353,7 +1359,7 @@ async function runNativeAccessibilityProbe() {
       'currentClientTrusted', 'currentHelperPID', 'nativePickerFlowExercised', 'promptRequested',
     ].sort(), 'The JXA probe must emit only its allowlisted receipt fields');
     assert.equal(result.currentHelperPID, child.pid, 'AX trust must be reported for this exact owned osascript process');
-    assert.equal(typeof result.currentClientTrusted, 'boolean', 'The current osascript process must report a boolean AX trust result');
+    assert.ok([true, false].includes(result.currentClientTrusted), 'The current osascript process must report a boolean AX trust result');
     assert.equal(result.promptRequested, false);
     assert.equal(result.nativePickerFlowExercised, false);
     observation.currentClientTrusted = result.currentClientTrusted;
