@@ -26,7 +26,21 @@ test('publication requests strip structural context extras from proposal and acc
 	const accountRequests: unknown[] = [];
 	const baseScope: WorkspaceAgentPublicationScope = { projectId: 'project-exact', sessionId: 'session-exact', turnId: 'turn-exact' };
 	const extendedContext = { ...baseScope, knowledgeReferences: [{ kind: 'reference', id: 'private-context' }], evidenceVersion: 3 };
-	const source = { id: 'merge-exact', fingerprint: 'fingerprint-exact', state: 'merged', outcomes: [], artifacts: [] } as AgentSessionMergeProposalDTO;
+	const source: AgentSessionMergeProposalDTO = {
+		kind: 'merge', id: 'merge-exact', projectId: baseScope.projectId, bindingId: 'binding-exact', sessionId: baseScope.sessionId, turnId: baseScope.turnId,
+		revision: 1, commitProposalId: 'commit-exact', commitProposalRevision: 1, commitProposalFingerprint: 'commit-fingerprint-exact',
+		sessionOwnerId: 'session-owner-exact', integrationOwnerId: 'integration-owner-exact', sourceHead: 'a'.repeat(40), targetHead: 'b'.repeat(40), mergeBase: 'c'.repeat(40),
+		diffFingerprint: 'diff-fingerprint-exact', diffText: '', commitMessage: 'Reviewed merge',
+		author: { name: 'Author', email: 'author@example.test', date: '1792416000 +0900' },
+		committer: { name: 'Committer', email: 'committer@example.test', date: '1792416060 +0900' }, paths: [], fingerprint: 'fingerprint-exact',
+		createdAt: '2026-10-20T00:00:00.000Z', expiresAt: '2026-10-20T01:00:00.000Z', approval: null, state: 'merged',
+		outcomes: [{ id: 'outcome-exact', proposalId: 'merge-exact', revision: 1, state: 'merged', retryOfOutcomeId: null, recordedAt: '2026-10-20T00:01:00.000Z', receipt: {
+			operationId: 'operation-exact', proposalId: 'merge-exact', proposalFingerprint: 'fingerprint-exact', integrationOwnerId: 'integration-owner-exact', sessionOwnerId: 'session-owner-exact',
+			sourceHead: 'a'.repeat(40), targetHead: 'b'.repeat(40), mergeBase: 'c'.repeat(40), diffFingerprint: 'diff-fingerprint-exact', commitMessage: 'Reviewed merge',
+			author: { name: 'Author', email: 'author@example.test', date: '1792416000 +0900' }, committer: { name: 'Committer', email: 'committer@example.test', date: '1792416060 +0900' },
+			resultingHead: 'd'.repeat(40), changedPaths: [], conflictedPaths: [], failureCode: null,
+		} }], artifacts: [],
+	};
 	const publication = createSessionPublication();
 	publication.render(parent, extendedContext, {
 		listPublicationAccounts: async scope => {
