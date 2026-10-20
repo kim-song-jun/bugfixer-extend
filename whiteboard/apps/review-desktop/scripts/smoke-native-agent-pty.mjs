@@ -122,6 +122,8 @@ const receipt = {
   checks: [],
   cleanup: [],
   ownedProcesses: identities,
+  immediateExitTurnObservation: null,
+  immediateExitOutputProof: null,
 };
 
 const abortController = new AbortController();
@@ -1054,16 +1056,63 @@ try {
   const immediatePreview = await previewSession(immediateSession, 'immediate');
   const immediateTurn = await service.start({ projectId: project.id, sessionId: immediateSession.id, ticketId: immediatePreview.ticketId });
   await recordOwnedIdentity(immediateTurn.id, 'service-immediate-exit');
+  receipt.immediateExitOutputProof = {
+    status: 'pending-verified-exit',
+    projectId: project.id,
+    sessionId: immediateSession.id,
+    turnId: immediateTurn.id,
+    markerRetained: null,
+  };
 
+  let immediateTurnPollCount = 0;
   const immediateTerminal = await until(() => {
     const current = serviceDatabase.agentSessionTurns.getTurn(project.id, immediateSession.id, immediateTurn.id);
+    immediateTurnPollCount++;
+    receipt.immediateExitTurnObservation = {
+      observedAt: new Date().toISOString(),
+      pollCount: immediateTurnPollCount,
+      projectId: project.id,
+      sessionId: immediateSession.id,
+      turnId: immediateTurn.id,
+      turnPresent: !!current,
+      ...(current ? {
+        state: current.state,
+        revision: current.revision,
+        updatedAt: current.updatedAt,
+        cleanupVerified: current.cleanupVerified,
+        exitCode: current.exitCode,
+        exitSignal: current.exitSignal,
+        errorSummaryPresent: typeof current.errorSummary === 'string' && current.errorSummary.length > 0,
+      } : {}),
+    };
 
     return current?.state === 'exited' && current.cleanupVerified ? current : false;
   }, 'service immediate exit replay and cleanup');
 
   assert.equal(immediateTerminal.state, 'exited');
   assert.equal(resourceEvents.get(immediateTurn.id).join(','), 'access-revoked,private-config-released');
-  receipt.checks.push('service immediate-exit replay without renderer polling or TTY inference');
+  const immediateTranscript = readCompleteTranscript(options =>
+    serviceDatabase.agentSessionTranscripts.readPage(project.id, immediateSession.id, immediateTurn.id, {
+      ...options, kind: 'terminal', maxOutputBytes: 256 * 1024,
+    }));
+  const immediateTerminalText = immediateTranscript.entries
+    .filter(entry => entry.kind === 'terminal')
+    .map(entry => entry.text)
+    .join('');
+  const immediateMarkerRetained = immediateTerminalText.includes('IMMEDIATE_WITHOUT_NEWLINE');
+  receipt.immediateExitOutputProof = {
+    status: 'evaluated-after-verified-exit',
+    observedAt: new Date().toISOString(),
+    projectId: project.id,
+    sessionId: immediateSession.id,
+    turnId: immediateTurn.id,
+    pageCount: immediateTranscript.pageCount,
+    terminalEntryCount: immediateTranscript.entries.filter(entry => entry.kind === 'terminal').length,
+    highestSequence: immediateTranscript.highestSequence,
+    markerRetained: immediateMarkerRetained,
+  };
+  assert.equal(immediateMarkerRetained, true, 'The immediate-exit fixture marker must be present in the retained terminal transcript.');
+  receipt.checks.push('service immediate-exit durable turn state and verified cleanup', 'service immediate-exit fixed output marker retained in the turn transcript');
 
   const startingSession = await createSession('Service stop during preparation');
   const startingPreview = await previewSession(startingSession, 'hold-until-abort');
