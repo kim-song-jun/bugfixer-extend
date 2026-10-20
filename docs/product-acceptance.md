@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+The follow-up [CI 39475423805](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39475423805) on `74a3cf7` stopped at three spacing violations in the diagnostic collector before contract tests. Desktop and macOS jobs were skipped. The spacing correction still needs CI; this run produced no PTY-fix or scanner-diagnostic runtime evidence.
+
 [CI 39469104677](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39469104677) on `90cb5fa` passed 374 agent contracts (26 skipped), Desktop build/typecheck and 249 session UI tests, scripts with 132 passed and two skipped, and 11 separate Desktop checks. Native worktree/content/runtime/IPC/PR-text/ownership contracts passed, as did all 25 PTY checks and the complete two-terminal fixture flow. The terminal and PTY receipts record verified cleanup and all owned processes gone; authenticated providers were not executed.
 
 The packaged dashboard completed its selected light/dark fixture flows and saved 133 viewport records. Both themes include anonymous Codex/Claude installation and signed-out guidance, onboarding focus/navigation checks, historical proposal selection, and workflow plan creation/revision to saved version 2. Workflow records show no overflow and reachable actions at 1440 and 760 px. The saved plans remain waiting for native approval; no workflow provider launch or task completion is claimed. Independent visual review passed the selected narrow workflow and dark onboarding captures. These results do not establish all product states, actual account behavior or native approval interaction.

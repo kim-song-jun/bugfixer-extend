@@ -1031,12 +1031,15 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
           if (event.type !== 'error') return;
 
           const previews = event.args.map(renderCDPConsoleArgument);
+
           const renderedMessage = previews.every(value => value !== undefined)
             ? normalizeExtensionScanErrorMessage(previews.join(' '))
             : null;
+
           const message = renderedMessage ?? normalizeExtensionScanErrorMessage(
             event.args.map(arg => arg.description ?? String(arg.value ?? '')).join(' '),
           );
+
           const entry = `PID ${child.pid}: ${message}`;
           const scanError = extensionScanErrorDiagnostic(event.args);
 
