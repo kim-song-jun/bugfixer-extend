@@ -15,9 +15,14 @@ import { AgentSessionJournal } from './agentSessionJournal.js';
 import { AgentSessionPtyRuntimeFactory } from './agentSessionPtyRuntime.js';
 import { AgentSessionRuntimeStartError, type AgentSessionRuntimeHandle } from './agentSessionService.js';
 
-const nativePtyNode = process.env.BUGFIXER_NATIVE_PTY_NODE;
-const nativePtyGuardian = process.env.BUGFIXER_NATIVE_PTY_GUARDIAN;
-if (!nativePtyNode || !nativePtyGuardian) { throw new Error('Native PTY runtime contracts require the packaged Node executable and guardian.'); }
+function requiredNativePath(name: 'BUGFIXER_NATIVE_PTY_NODE' | 'BUGFIXER_NATIVE_PTY_GUARDIAN'): string {
+	const value = process.env[name];
+	if (!value) { throw new Error(`Native PTY runtime contracts require ${name}.`); }
+	return value;
+}
+
+const nativePtyNode = requiredNativePath('BUGFIXER_NATIVE_PTY_NODE');
+const nativePtyGuardian = requiredNativePath('BUGFIXER_NATIVE_PTY_GUARDIAN');
 
 function createFixture(releasePrivateConfig: () => Promise<void>, revokeAccess: () => void = () => { }) {
 	const directory = mkdtempSync(join(tmpdir(), 'agent-session-pty-runtime-'));
