@@ -849,7 +849,7 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
     ...(descriptor ? [descriptor] : []),
   ];
 
-  const env = { ...process.env, DEV_REVIEW_HOME: reviewHome, DEV_REVIEW_IMPORT_FROM: 'none', ELECTRON_ENABLE_LOGGING: '1' };
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', DEV_REVIEW_HOME: reviewHome, DEV_REVIEW_IMPORT_FROM: 'none', ELECTRON_ENABLE_LOGGING: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.VSCODE_DEV;
   delete env.VSCODE_CLI;
