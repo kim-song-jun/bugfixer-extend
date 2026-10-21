@@ -11,15 +11,20 @@ import {
 } from './app-process-cleanup.mjs';
 
 const GUARD_TIMEOUT_MS = 14_000;
+
 const MAX_GUARD_OUTPUT_BYTES = 4096;
+
 const MAX_REQUESTS = 16;
+
 const MAX_FRAME_BYTES = 1024;
+
 const REQUEST_CONTEXTS = new Set([
   'discovery',
   'set-value',
   'press-open',
   'cancel',
 ]);
+
 const GUARD_ERROR_CODES = new Set([
   'invalid-target-pid',
   'parent-handshake-invalid',
@@ -68,6 +73,7 @@ function startGuard(guardPath, targetPid) {
     detached: true,
     stdio: ['pipe', 'pipe', 'ignore'],
   });
+
   const record = {
     child,
     pid: child.pid,
@@ -263,6 +269,7 @@ function parseGuardOutput(record) {
   }
 
   const receipt = JSON.parse(lines[1]);
+
   const receiptKeys =
     'appleStatus,birthMicroseconds,birthSeconds,birthStable,errorCode,ownPID,panelRequirementStatus,pathMatchesSystemService,targetPID,verified,version';
 
@@ -278,8 +285,10 @@ function parseGuardOutput(record) {
 function validReceipt(receipt, guardPid, targetPid) {
   const validStatus = value => value === null ||
     (Number.isInteger(value) && value >= -2_147_483_648 && value <= 2_147_483_647);
+
   const validBirthSeconds = value => value === null ||
     (Number.isSafeInteger(value) && value > 0);
+
   const validBirthMicroseconds = value => value === null ||
     (Number.isInteger(value) && value >= 0 && value <= 999999);
 
@@ -345,6 +354,7 @@ export async function runPanelProcessGuard({
     Math.max(1, Math.min(3000, deadline - Date.now())), 'guard-ready-timeout');
 
     if (signal?.aborted) throw new Error('guard-aborted');
+
     if (!record.stdout.includes('\n')) throw new Error('guard-ready-invalid');
 
     const readyLine = record.stdout.split('\n')[0];
@@ -357,6 +367,7 @@ export async function runPanelProcessGuard({
     }
 
     ownership = await captureGuardIdentity(record, guardPath);
+
     if (signal?.aborted) throw new Error('guard-aborted');
 
     record.child.stdin.end('RUN\n');
@@ -364,6 +375,7 @@ export async function runPanelProcessGuard({
       Math.max(1, deadline - Date.now()), 'guard-execution-timeout');
 
     if (signal?.aborted) throw new Error('guard-aborted');
+
     if (record.spawnFailed || record.stdinFailed || record.exitCode !== 0 ||
         record.signal !== null || record.closeResult?.code !== 0 ||
         record.closeResult?.signal !== null) {
@@ -389,6 +401,7 @@ export async function runPanelProcessGuard({
   }
 
   const after = processInventory().get(targetPid);
+
   const targetIdentityStable = !!after && sameProcessIdentity(targetIdentity, after) &&
     verifyLiveIdentity(targetIdentity, { rootPid: targetPid });
 
@@ -397,7 +410,9 @@ export async function runPanelProcessGuard({
   const expectedBirthMatches = expectedBirthSeconds === null ||
     (receipt?.birthSeconds === expectedBirthSeconds &&
      receipt?.birthMicroseconds === expectedBirthMicroseconds);
+
   const verified = failureCode === null && receipt?.verified === true && expectedBirthMatches;
+
   const errorCode = verified
     ? null
     : expectedBirthMatches
@@ -498,12 +513,14 @@ export function runPanelProcessBroker({
   let pinnedBirthMicroseconds = null;
   let resolveDone;
   let rejectDone;
+
   const done = new Promise((resolve, reject) => {
     resolveDone = resolve;
     rejectDone = reject;
   });
 
   const controller = new AbortController();
+
   const settleFailure = () => {
     if (!failed || active || completed) return;
     completed = true;
@@ -591,8 +608,10 @@ export function runPanelProcessBroker({
       }
 
       const initialRequest = nextRequestId === 1;
+
       const initialDiscovery = request.context === 'discovery' &&
         request.expectedBirthSec === null && request.expectedBirthUsec === null;
+
       const pinnedRequest = pinnedTargetPid !== null &&
         request.targetPid === pinnedTargetPid &&
         request.expectedBirthSec === pinnedBirthSeconds &&

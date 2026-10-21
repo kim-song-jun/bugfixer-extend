@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+The integration [CI 39604003232](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39604003232) on `4557dd1` stopped at 45 required blank lines before contract tests; Desktop and macOS were skipped. Its CI-generated repair adds exactly those 45 blank lines across the actor, broker, real-process fixture and smoke wrapper, without changing nonblank content. The corrected integration still needs CI.
+
 The latest full [CI 39594059398](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39594059398) on `57cb3b0` passed the Agent and Desktop jobs and macOS assembly. Its 25 PTY checks and four-check two-terminal fixture flow completed with verified cleanup and all owned processes gone. The fixture reports no provider execution or authentication. The only failing step was the native project dashboard smoke.
 
 The preceding full [CI 39590459094](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39590459094) on `66771d9` passed 374 agent contracts (26 skipped), focused groups of 3/2/11/8 checks, and Desktop formatting, build, typecheck, all 249 session UI tests, scripts with 132 passed and three skipped, and 11 separate release checks. macOS passed assembly, 11 worktree, five content, one real-process identity cleanup, four runtime, 12 IPC/publication, 14 PR-text recovery and nine ownership/recovery checks. All 25 PTY checks and the four-check two-terminal fixture flow passed; both terminal receipts confirm verified cleanup and all owned processes gone. The fixture explicitly reports no provider execution or authentication. The only failing step was the native project dashboard smoke.

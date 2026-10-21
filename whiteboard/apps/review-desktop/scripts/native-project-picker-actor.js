@@ -200,6 +200,7 @@ function run(argv) {
     failurePhase = "INPUT";
     const inputHandle = $.NSFileHandle.fileHandleWithStandardInput;
     guardResponseHandle = inputHandle;
+
     const inputHeader = decodeTransportData(
       readTransportData(inputHandle, 5),
       $.NSASCIIStringEncoding,
@@ -220,6 +221,7 @@ function run(argv) {
     }
 
     const payloadData = readTransportData(inputHandle, inputLength);
+
     const payloadText = decodeTransportData(
       payloadData,
       $.NSUTF8StringEncoding,
@@ -542,6 +544,7 @@ function ensureGuardTransport() {
   }
 
   failureCode = "panel-guard-failed";
+
   if (!guardRequestHandle) {
     guardRequestHandle = $.NSFileHandle.alloc.initWithFileDescriptorCloseOnDealloc(
       3,
@@ -568,9 +571,11 @@ function sendGuardFrame(value) {
 
   const lengthText = String(body.length);
   const frame = `${"0000".slice(lengthText.length)}${lengthText}${body}`;
+
   const data = $.NSString.stringWithString(frame).dataUsingEncoding(
     $.NSASCIIStringEncoding,
   );
+
   const error = Ref("id");
 
   failureCode = "panel-guard-failed";
@@ -648,6 +653,7 @@ function receiveGuardFrame() {
 
   const body = readGuardBytes(length);
   const response = JSON.parse(body);
+
   const expectedKeys = [
     "birthMicroseconds",
     "birthSeconds",
@@ -887,6 +893,7 @@ function assertPanelElement(element) {
   }
 
   failureCode = null;
+
   return element;
 }
 
@@ -1254,6 +1261,7 @@ function captureElementPathToSheet(element, expectedSheet, homeWindow) {
 
       assertChildListedExactlyOnce(homeWindow, current);
       chain.push(sheetParent);
+
       return chain;
     }
 

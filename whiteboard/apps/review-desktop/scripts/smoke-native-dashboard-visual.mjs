@@ -1631,6 +1631,7 @@ async function captureNativeActorOwnership(child, observation) {
 
     return processInventory().get(child.pid);
   }, 'the native actor process identity', 3_000);
+
   const ownership = { captured: false, identities: new Map(), rootIdentity };
 
   captureOwnedProcessTree({
@@ -1655,10 +1656,13 @@ function inspectNativeActorAbsence(pid, ownership) {
 
   try {
     const inventory = processInventory();
+
     const pidsAbsent = [...ownership.identities.values()].every(identity =>
       !inventory.has(identity.pid) && !processAlive(identity.pid));
+
     const groupAbsent = ![...inventory.values()].some(identity => identity.pgid === pid)
       && !processGroupAlive(pid);
+
     const errorCode = !pidsAbsent
       ? 'actor-processes-remain'
       : groupAbsent ? null : 'actor-process-group-remains';
@@ -1887,6 +1891,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     const payload = JSON.stringify({
       targetPath: mode === 'select' ? targetFolder : null,
     });
+
     const payloadFrame = frameNativeActorPayload(payload);
 
     const child = spawn(executable, args, {
@@ -1898,6 +1903,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'pipe',
       ],
     });
+
     let stdinFailed = false;
 
     const observation = {
@@ -2077,6 +2083,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'apple-signature-rejected',
       'panel-signature-rejected',
     ]);
+
     const requestRecordsValid = observation.panelGuardRequests.every(request =>
       Number.isSafeInteger(request.requestId) && request.requestId >= 1
         && request.requestId <= 16

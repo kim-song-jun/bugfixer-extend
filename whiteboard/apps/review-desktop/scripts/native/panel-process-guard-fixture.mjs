@@ -10,15 +10,22 @@ import {
 import { runPanelProcessGuard } from './panel-process-broker.mjs';
 
 const guardPath = process.argv[2];
+
 const failures = [];
+
 const cleanupResults = [];
+
 let sleepRecord;
+
 let sleepOwnership;
+
 let guardReceipt = null;
+
 let guardCleanup;
 
 function startChild(command, args, stdio) {
   const child = spawn(command, args, { detached: true, stdio });
+
   const record = {
     child,
     pid: child.pid,
@@ -264,11 +271,13 @@ async function run() {
 
   sleepRecord = startChild('/bin/sleep', ['45'], 'ignore');
   sleepOwnership = await captureIdentity(sleepRecord, '/bin/sleep');
+
   const guardResult = await runPanelProcessGuard({
     guardPath,
     targetPid: sleepRecord.pid,
     targetIdentity: sleepOwnership.rootIdentity,
   });
+
   guardReceipt = guardResult.receipt;
   guardCleanup = guardResult.guardCleanup;
 
@@ -276,6 +285,7 @@ async function run() {
     sleepOwnership.rootIdentity,
     { rootPid: sleepRecord.pid },
   );
+
   const sleepGroupStillLive = processGroupAlive(sleepRecord.pid);
 
   if (!targetIdentityStillLive || !sleepGroupStillLive ||
@@ -322,6 +332,7 @@ if (cleanupResults.some(result => result.verified !== true)) {
 }
 
 const passed = failures.length === 0;
+
 process.stdout.write(`${JSON.stringify({
   event: 'panel-process-guard-fixture',
   passed,
