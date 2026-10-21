@@ -47,6 +47,7 @@ const expectedFailureKeys = [
   'inputPayloadByteCount',
   'inputTargetPathLength',
   'inputTransportStage',
+  'panelPidMismatchDiagnostic',
   'pidMismatchDiagnostic',
   'pidQueryStatus',
   'promptRequested',
@@ -201,6 +202,7 @@ function parseReceipt(stdout, stdoutBytes) {
       receipt.windowCount !== 0 || receipt.cleanupStatus !== 'not-needed' ||
       receipt.guardTransportStage !== null || receipt.sheetPIDRelation !== null ||
       receipt.cancelCandidateCount !== null || receipt.cancelControlStage !== null ||
+      receipt.panelPidMismatchDiagnostic !== null ||
       receipt.pidQueryStatus !== null || receipt.pidMismatchDiagnostic !== null ||
       receipt.typeIdDiagnostic !== null || receipt.windowRoleFailureStage !== null ||
       receipt.windowRoleAXErrorStatus !== null ||

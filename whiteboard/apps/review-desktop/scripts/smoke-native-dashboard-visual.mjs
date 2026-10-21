@@ -1817,6 +1817,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'element-pid-query-failed',
     'element-pid-invalid',
     'element-pid-mismatch',
+    'panel-element-pid-mismatch',
+    'panel-child-parent-mismatch',
+    'panel-descendant-count-exceeded',
     'panel-guard-failed',
     'windows-attribute-no-value',
     'windows-attribute-unsupported',
@@ -1960,6 +1963,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'inputPayloadByteCount',
       'inputTargetPathLength',
       'inputTransportStage',
+      'panelPidMismatchDiagnostic',
       'pidMismatchDiagnostic',
       'pidQueryStatus',
       'promptRequested',
@@ -1998,6 +2002,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       || (!preTrustFailure && !trustFailure && !postTrustFailure)
       || candidate.promptRequested !== false
       || (candidate.failureCode !== null && !failureCodes.has(candidate.failureCode))
+      || (candidate.failureCode === 'panel-element-pid-mismatch'
+        ? !validPanelPidMismatchDiagnostic(candidate.panelPidMismatchDiagnostic)
+        : candidate.panelPidMismatchDiagnostic !== null)
       || !['not-needed', 'sheet-canceled-and-drained', 'unverified'].includes(candidate.cleanupStatus)
       || (candidate.failurePhase === 'INPUT'
         && (candidate.cleanupStatus !== 'not-needed'
@@ -2024,6 +2031,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     observation.failurePhase = candidate.failurePhase;
     observation.actorFailurePhase = candidate.failurePhase;
     observation.actorFailureCode = candidate.failureCode;
+    observation.panelPidMismatchDiagnostic = candidate.panelPidMismatchDiagnostic;
     observation.inputTransportStage = candidate.inputTransportStage;
     observation.inputPayloadByteCount = candidate.inputPayloadByteCount;
     observation.inputTargetPathLength = candidate.inputTargetPathLength;
@@ -2086,6 +2094,19 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     return [value.actualPID, value.expectedPID].every(pid =>
       Number.isSafeInteger(pid) && pid >= 1 && pid <= 2_147_483_647)
       && value.expectedPID === session.child.pid
+      && value.actualPID !== value.expectedPID;
+  };
+
+  const validPanelPidMismatchDiagnostic = value => {
+    if (value === null || value === undefined || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) return false;
+
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([
+      'actualPID', 'expectedPID',
+    ])) return false;
+
+    return [value.actualPID, value.expectedPID].every(pid =>
+      Number.isSafeInteger(pid) && pid >= 1 && pid <= 2_147_483_647)
       && value.actualPID !== value.expectedPID;
   };
 
@@ -2294,6 +2315,23 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       session,
     });
 
+    if (observation.actorFailureReceiptStatus === 'valid-failure-receipt'
+      && observation.panelPidMismatchDiagnostic !== null) {
+      try {
+        observation.panelPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
+          observation.panelPidMismatchDiagnostic.actualPID,
+        );
+      } catch {
+        observation.panelPidMismatchProcessSnapshot = {
+          status: 'collection-error',
+          pid: observation.panelPidMismatchDiagnostic.actualPID,
+          ppid: null,
+          command: null,
+          identityVerified: false,
+        };
+      }
+    }
+
     const guardErrors = new Set([
       'invalid-target-pid',
       'parent-handshake-invalid',
@@ -2469,6 +2507,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
+        'panelPidMismatchDiagnostic',
         'promptRequested',
         'pidQueryStatus',
         'pidMismatchDiagnostic',
@@ -2501,6 +2540,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'element-pid-mismatch'
           ? !validPidMismatchDiagnostic(result.pidMismatchDiagnostic)
           : result.pidMismatchDiagnostic !== null)
+        || (result.failureCode === 'panel-element-pid-mismatch'
+          ? !validPanelPidMismatchDiagnostic(result.panelPidMismatchDiagnostic)
+          : result.panelPidMismatchDiagnostic !== null)
         || ![
           null,
           'copy',
@@ -2565,6 +2607,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
+      observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
@@ -2607,6 +2650,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
+        'panelPidMismatchDiagnostic',
         'promptRequested',
         'pidQueryStatus',
         'pidMismatchDiagnostic',
@@ -2638,6 +2682,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'element-pid-mismatch'
           ? !validPidMismatchDiagnostic(result.pidMismatchDiagnostic)
           : result.pidMismatchDiagnostic !== null)
+        || (result.failureCode === 'panel-element-pid-mismatch'
+          ? !validPanelPidMismatchDiagnostic(result.panelPidMismatchDiagnostic)
+          : result.panelPidMismatchDiagnostic !== null)
         || ![
           null,
           'copy',
@@ -2702,6 +2749,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
+      observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(

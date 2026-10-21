@@ -93,6 +93,8 @@ let windowsAttributeAXErrorStatus;
 
 let pidMismatchDiagnostic;
 
+let panelPidMismatchDiagnostic;
+
 let guardRequestHandle;
 
 let guardResponseHandle;
@@ -148,6 +150,7 @@ function run(argv) {
   readingHomeWindowRole = false;
   windowsAttributeAXErrorStatus = null;
   pidMismatchDiagnostic = null;
+  panelPidMismatchDiagnostic = null;
   guardRequestHandle = null;
   guardResponseHandle = null;
   guardRequestId = 0;
@@ -560,6 +563,7 @@ function run(argv) {
     const primaryWindowRoleAXErrorStatus = windowRoleAXErrorStatus;
     const primaryWindowsAttributeAXErrorStatus = windowsAttributeAXErrorStatus;
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
+    const primaryPanelPidMismatchDiagnostic = panelPidMismatchDiagnostic;
     const primarySheetPIDRelation = sheetPIDRelation;
 
     const primaryCancelCandidateCount =
@@ -607,6 +611,7 @@ function run(argv) {
       windowRoleAXErrorStatus: primaryWindowRoleAXErrorStatus,
       windowsAttributeAXErrorStatus: primaryWindowsAttributeAXErrorStatus,
       pidMismatchDiagnostic: primaryPidMismatchDiagnostic,
+      panelPidMismatchDiagnostic: primaryPanelPidMismatchDiagnostic,
       actionCount,
       windowCount,
       sheetCount,
@@ -1015,7 +1020,11 @@ function assertPanelElement(element) {
   const pid = readElementPID(element);
 
   if (pid !== panelPID) {
-    failureCode = "panel-guard-failed";
+    panelPidMismatchDiagnostic = {
+      expectedPID: panelPID,
+      actualPID: pid,
+    };
+    failureCode = "panel-element-pid-mismatch";
     throw new Error(
       "Accessibility element is outside the attached panel process",
     );
@@ -1066,7 +1075,7 @@ function copyDescendantChildren(element) {
     const parent = copyRequiredElementAttribute(child, AX.parent);
 
     if (!sameAXElement(parent, element)) {
-      failureCode = "panel-guard-failed";
+      failureCode = "panel-child-parent-mismatch";
       throw new Error("Panel child ancestry mismatch");
     }
   }
@@ -1443,6 +1452,7 @@ function descendants(root) {
     found.push(current.element);
 
     if (found.length > 512) {
+      failureCode = "panel-descendant-count-exceeded";
       throw new Error("Accessibility hierarchy bound exceeded");
     }
 
