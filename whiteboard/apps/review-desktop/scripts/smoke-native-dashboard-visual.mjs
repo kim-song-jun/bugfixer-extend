@@ -1899,6 +1899,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'typeIdDiagnostic',
         'windowRoleAXErrorStatus',
         'windowRoleFailureStage',
+        'windowsAttributeAXErrorStatus',
         'windowCount',
       ];
 
@@ -1931,6 +1932,16 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
           : result.windowRoleAXErrorStatus !== null)
         || (result.windowRoleFailureStage !== null
           && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 1))
+        || !(result.windowsAttributeAXErrorStatus === null
+          || (Number.isInteger(result.windowsAttributeAXErrorStatus)
+            && result.windowsAttributeAXErrorStatus >= -2_147_483_648
+            && result.windowsAttributeAXErrorStatus <= 2_147_483_647))
+        || (['windows-attribute-no-value', 'windows-attribute-unsupported',
+          'windows-attribute-query-failed'].includes(result.failureCode)
+          ? result.windowsAttributeAXErrorStatus === null
+          : result.windowsAttributeAXErrorStatus !== null)
+        || (result.windowsAttributeAXErrorStatus !== null
+          && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 0))
         || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
@@ -1964,6 +1975,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.actorWindowRoleFailureStage = result.windowRoleFailureStage;
       observation.actorWindowRoleAXErrorStatus = result.windowRoleAXErrorStatus;
+      observation.actorWindowsAttributeAXErrorStatus = result.windowsAttributeAXErrorStatus;
       observation.currentHelperPID = result.currentHelperPID;
       observation.currentClientTrusted = result.currentClientTrusted;
       observation.result = 'failed';
@@ -2001,6 +2013,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'typeIdDiagnostic',
         'windowRoleAXErrorStatus',
         'windowRoleFailureStage',
+        'windowsAttributeAXErrorStatus',
         'windowCount',
       ];
 
@@ -2032,6 +2045,16 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
           : result.windowRoleAXErrorStatus !== null)
         || (result.windowRoleFailureStage !== null
           && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 1))
+        || !(result.windowsAttributeAXErrorStatus === null
+          || (Number.isInteger(result.windowsAttributeAXErrorStatus)
+            && result.windowsAttributeAXErrorStatus >= -2_147_483_648
+            && result.windowsAttributeAXErrorStatus <= 2_147_483_647))
+        || (['windows-attribute-no-value', 'windows-attribute-unsupported',
+          'windows-attribute-query-failed'].includes(result.failureCode)
+          ? result.windowsAttributeAXErrorStatus === null
+          : result.windowsAttributeAXErrorStatus !== null)
+        || (result.windowsAttributeAXErrorStatus !== null
+          && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 0))
         || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
@@ -2065,6 +2088,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.actorWindowRoleFailureStage = result.windowRoleFailureStage;
       observation.actorWindowRoleAXErrorStatus = result.windowRoleAXErrorStatus;
+      observation.actorWindowsAttributeAXErrorStatus = result.windowsAttributeAXErrorStatus;
       observation.result = 'failed';
       observation.sheetCleanup = result.cleanupStatus;
       observation.windowCount = result.windowCount;

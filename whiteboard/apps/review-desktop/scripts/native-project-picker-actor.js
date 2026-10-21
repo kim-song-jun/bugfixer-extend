@@ -89,6 +89,8 @@ let windowRoleAXErrorStatus;
 
 let readingHomeWindowRole;
 
+let windowsAttributeAXErrorStatus;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -112,6 +114,7 @@ function run(argv) {
   windowRoleFailureStage = null;
   windowRoleAXErrorStatus = null;
   readingHomeWindowRole = false;
+  windowsAttributeAXErrorStatus = null;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -130,7 +133,7 @@ function run(argv) {
     ObjC.bindFunction("AXUIElementGetPid", ["int", ["pointer", "pointer"]]);
     ObjC.bindFunction("AXUIElementCopyAttributeValue", [
       "int",
-      ["pointer", "pointer", "pointer"],
+      ["pointer", "id", "pointer"],
     ]);
     AX = {
       windows: $("AXWindows"),
@@ -213,6 +216,10 @@ function run(argv) {
 
     failurePhase = "WINDOWS";
     const copiedWindows = copyAttribute(application, AX.windows);
+
+    if (copiedWindows.status !== Number($.kAXErrorSuccess)) {
+      windowsAttributeAXErrorStatus = copiedWindows.status;
+    }
 
     if (copiedWindows.status === Number($.kAXErrorNoValue)) {
       failureCode = "windows-attribute-no-value";
@@ -411,6 +418,7 @@ function run(argv) {
     const primaryPidQueryStatus = pidQueryStatus;
     const primaryWindowRoleFailureStage = windowRoleFailureStage;
     const primaryWindowRoleAXErrorStatus = windowRoleAXErrorStatus;
+    const primaryWindowsAttributeAXErrorStatus = windowsAttributeAXErrorStatus;
 
     if (sheet && homeWindow) {
       try {
@@ -434,6 +442,7 @@ function run(argv) {
       pidQueryStatus: primaryPidQueryStatus,
       windowRoleFailureStage: primaryWindowRoleFailureStage,
       windowRoleAXErrorStatus: primaryWindowRoleAXErrorStatus,
+      windowsAttributeAXErrorStatus: primaryWindowsAttributeAXErrorStatus,
       actionCount,
       windowCount,
       sheetCount,
