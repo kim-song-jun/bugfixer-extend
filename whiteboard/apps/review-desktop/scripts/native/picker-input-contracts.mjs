@@ -41,6 +41,9 @@ const expectedFailureKeys = [
   'defaultActionCount',
   'failureCode',
   'failurePhase',
+  'guardTransportStage',
+  'cancelCandidateCount',
+  'cancelControlStage',
   'inputPayloadByteCount',
   'inputTargetPathLength',
   'inputTransportStage',
@@ -50,6 +53,7 @@ const expectedFailureKeys = [
   'roleCounts',
   'semanticPathFieldCount',
   'settableTextFieldCount',
+  'sheetPIDRelation',
   'sheetCount',
   'status',
   'textFieldCount',
@@ -195,6 +199,8 @@ function parseReceipt(stdout, stdoutBytes) {
       receipt.promptRequested !== false || receipt.failurePhase !== 'INPUT' ||
       receipt.failureCode !== 'panel-guard-failed' || receipt.actionCount !== 0 ||
       receipt.windowCount !== 0 || receipt.cleanupStatus !== 'not-needed' ||
+      receipt.guardTransportStage !== null || receipt.sheetPIDRelation !== null ||
+      receipt.cancelCandidateCount !== null || receipt.cancelControlStage !== null ||
       receipt.pidQueryStatus !== null || receipt.pidMismatchDiagnostic !== null ||
       receipt.typeIdDiagnostic !== null || receipt.windowRoleFailureStage !== null ||
       receipt.windowRoleAXErrorStatus !== null ||

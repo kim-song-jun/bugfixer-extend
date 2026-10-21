@@ -1845,6 +1845,38 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'schema',
   ]);
 
+  const guardTransportStages = new Set([
+    'transport-init',
+    'request-encode',
+    'request-write',
+    'response-header',
+    'response-body',
+    'response-parse',
+    'response-schema',
+  ]);
+
+  const cancelControlStages = new Set([
+    'collect-controls',
+    'resolve-control',
+    'press-control',
+    'wait-sheet-absence',
+  ]);
+
+  const actorFailurePhases = new Set([
+    'IMPORT',
+    'INPUT',
+    'TRUST',
+    'APPLICATION',
+    'WINDOWS',
+    'SHEET',
+    'DISCOVER',
+    'SET_VALUE',
+    'PRESS_OPEN',
+    'SHEET_DRAIN',
+    'CANCEL',
+    'SERIALIZE',
+  ]);
+
   const validInputDiagnostics = result => {
     const boundedNullableCount = (value, maximum) => value === null
       || (Number.isSafeInteger(value) && value >= 0 && value <= maximum);
@@ -1852,7 +1884,11 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     if (result.failurePhase === 'INPUT') {
       return inputTransportStages.has(result.inputTransportStage)
         && boundedNullableCount(result.inputPayloadByteCount, 16_384)
-        && boundedNullableCount(result.inputTargetPathLength, 4_096);
+        && boundedNullableCount(result.inputTargetPathLength, 4_096)
+        && result.sheetPIDRelation === null
+        && result.cancelCandidateCount === null
+        && result.cancelControlStage === null
+        && result.guardTransportStage === null;
     }
 
     return result.inputTransportStage === null
@@ -1860,14 +1896,27 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       && result.inputTargetPathLength === null;
   };
 
-  const captureInputFailureDiagnostics = ({
+  const validFailureDiagnosticFields = result => {
+    const validNullableCount = (value, maximum) => value === null
+      || (Number.isSafeInteger(value) && value >= 0 && value <= maximum);
+
+    return (result.sheetPIDRelation === null
+        || ['owned-app', 'foreign-candidate'].includes(result.sheetPIDRelation))
+      && validNullableCount(result.cancelCandidateCount, 512)
+      && (result.failurePhase === 'CANCEL'
+        ? result.cancelControlStage === null || cancelControlStages.has(result.cancelControlStage)
+        : result.cancelCandidateCount === null && result.cancelControlStage === null)
+      && (result.guardTransportStage === null || guardTransportStages.has(result.guardTransportStage));
+  };
+
+  const captureActorFailureDiagnostics = ({
     observation,
     stdout,
     spawnFailed,
     stdinFailed,
     session,
   }) => {
-    observation.actorInputReceiptStatus = 'unavailable';
+    observation.actorFailureReceiptStatus = 'unavailable';
 
     if (spawnFailed || stdinFailed || observation.exit?.code !== 0
       || observation.exit.signal !== null
@@ -1878,20 +1927,20 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     try {
       candidate = JSON.parse(stdout.trim());
     } catch {
-      observation.actorInputReceiptStatus = 'invalid-json';
+      observation.actorFailureReceiptStatus = 'invalid-json';
 
       return;
     }
 
     if (candidate === null || Array.isArray(candidate)
       || Object.getPrototypeOf(candidate) !== Object.prototype) {
-      observation.actorInputReceiptStatus = 'invalid-shape';
+      observation.actorFailureReceiptStatus = 'invalid-shape';
 
       return;
     }
 
-    if (candidate.status !== 'failed' || candidate.failurePhase !== 'INPUT') {
-      observation.actorInputReceiptStatus = 'not-input-failure';
+    if (candidate.status !== 'failed') {
+      observation.actorFailureReceiptStatus = 'not-failure-receipt';
 
       return;
     }
@@ -1905,6 +1954,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'defaultActionCount',
       'failureCode',
       'failurePhase',
+      'guardTransportStage',
+      'cancelCandidateCount',
+      'cancelControlStage',
       'inputPayloadByteCount',
       'inputTargetPathLength',
       'inputTransportStage',
@@ -1914,6 +1966,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'roleCounts',
       'semanticPathFieldCount',
       'settableTextFieldCount',
+      'sheetPIDRelation',
       'sheetCount',
       'status',
       'textFieldCount',
@@ -1925,30 +1978,65 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     ].sort();
 
     const observedKeys = Object.keys(candidate).sort();
+    const preTrustFailure = ['IMPORT', 'INPUT'].includes(candidate.failurePhase)
+      && candidate.currentHelperPID === null
+      && candidate.currentClientTrusted === null;
+    const trustFailure = candidate.failurePhase === 'TRUST'
+      && candidate.currentHelperPID === observation.pid
+      && [null, false].includes(candidate.currentClientTrusted);
+    const postTrustFailure = actorFailurePhases.has(candidate.failurePhase)
+      && !['IMPORT', 'INPUT', 'TRUST'].includes(candidate.failurePhase)
+      && candidate.currentHelperPID === observation.pid
+      && candidate.currentClientTrusted === true;
 
     if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)
       || candidate.appPID !== session.child.pid
-      || candidate.currentHelperPID !== null
-      || candidate.currentClientTrusted !== null
+      || !actorFailurePhases.has(candidate.failurePhase)
+      || (!preTrustFailure && !trustFailure && !postTrustFailure)
       || candidate.promptRequested !== false
-      || candidate.failureCode !== 'panel-guard-failed'
-      || !failureCodes.has(candidate.failureCode)
-      || candidate.cleanupStatus !== 'not-needed'
-      || candidate.actionCount !== 0
-      || candidate.windowCount !== 0
-      || !validInputDiagnostics(candidate)) {
-      observation.actorInputReceiptStatus = 'invalid-input-failure';
+      || (candidate.failureCode !== null && !failureCodes.has(candidate.failureCode))
+      || !['not-needed', 'sheet-canceled-and-drained', 'unverified'].includes(candidate.cleanupStatus)
+      || (candidate.failurePhase === 'INPUT'
+        && (candidate.cleanupStatus !== 'not-needed'
+          || candidate.actionCount !== 0
+          || candidate.windowCount !== 0))
+      || ![
+        candidate.actionCount,
+        candidate.windowCount,
+        candidate.sheetCount,
+        candidate.textFieldCount,
+        candidate.settableTextFieldCount,
+        candidate.semanticPathFieldCount,
+        candidate.defaultActionCount,
+      ].every(validCount)
+      || !validInputDiagnostics(candidate)
+      || !validFailureDiagnosticFields(candidate)
+      || !validRoleCounts(candidate.roleCounts)) {
+      observation.actorFailureReceiptStatus = 'invalid-failure-receipt';
 
       return;
     }
 
-    observation.actorInputReceiptStatus = 'valid-input-failure';
+    observation.actorFailureReceiptStatus = 'valid-failure-receipt';
     observation.failurePhase = candidate.failurePhase;
     observation.actorFailurePhase = candidate.failurePhase;
     observation.actorFailureCode = candidate.failureCode;
     observation.inputTransportStage = candidate.inputTransportStage;
     observation.inputPayloadByteCount = candidate.inputPayloadByteCount;
     observation.inputTargetPathLength = candidate.inputTargetPathLength;
+    observation.guardTransportStage = candidate.guardTransportStage;
+    observation.sheetPIDRelation = candidate.sheetPIDRelation;
+    observation.cancelCandidateCount = candidate.cancelCandidateCount;
+    observation.cancelControlStage = candidate.cancelControlStage;
+    observation.actorActionCount = candidate.actionCount;
+    observation.actorWindowCount = candidate.windowCount;
+    observation.actorSheetCount = candidate.sheetCount;
+    observation.actorTextFieldCount = candidate.textFieldCount;
+    observation.actorSettableTextFieldCount = candidate.settableTextFieldCount;
+    observation.actorSemanticPathFieldCount = candidate.semanticPathFieldCount;
+    observation.actorDefaultActionCount = candidate.defaultActionCount;
+    observation.currentHelperPID = candidate.currentHelperPID;
+    observation.currentClientTrusted = candidate.currentClientTrusted;
   };
 
   const invalidTypeIdKinds = new Set([
@@ -2195,7 +2283,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       ? 'panel-guard-broker-failed'
       : null);
 
-    captureInputFailureDiagnostics({
+    captureActorFailureDiagnostics({
       observation,
       stdout,
       spawnFailed,
@@ -2372,6 +2460,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'defaultActionCount',
         'failureCode',
         'failurePhase',
+        'guardTransportStage',
+        'cancelCandidateCount',
+        'cancelControlStage',
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
@@ -2381,6 +2472,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'roleCounts',
         'semanticPathFieldCount',
         'settableTextFieldCount',
+        'sheetPIDRelation',
         'sheetCount',
         'status',
         'textFieldCount',
@@ -2435,6 +2527,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
           && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 0))
         || !validTypeIdDiagnostic(result)
         || !validInputDiagnostics(result)
+        || !validFailureDiagnosticFields(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
           'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',
@@ -2505,6 +2598,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'defaultActionCount',
         'failureCode',
         'failurePhase',
+        'guardTransportStage',
+        'cancelCandidateCount',
+        'cancelControlStage',
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
@@ -2514,6 +2610,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'roleCounts',
         'semanticPathFieldCount',
         'settableTextFieldCount',
+        'sheetPIDRelation',
         'sheetCount',
         'status',
         'textFieldCount',
@@ -2567,6 +2664,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
           && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 0))
         || !validTypeIdDiagnostic(result)
         || !validInputDiagnostics(result)
+        || !validFailureDiagnosticFields(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
           'DISCOVER', 'SET_VALUE', 'PRESS_OPEN', 'SHEET_DRAIN', 'CANCEL',

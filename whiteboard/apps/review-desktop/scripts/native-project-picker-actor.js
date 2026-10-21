@@ -115,6 +115,14 @@ let inputPayloadByteCount;
 
 let inputTargetPathLength;
 
+let sheetPIDRelation;
+
+let cancelCandidateCount;
+
+let cancelControlStage;
+
+let guardTransportStage;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -151,6 +159,10 @@ function run(argv) {
   inputTransportStage = null;
   inputPayloadByteCount = null;
   inputTargetPathLength = null;
+  sheetPIDRelation = null;
+  cancelCandidateCount = null;
+  cancelControlStage = null;
+  guardTransportStage = null;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -411,9 +423,17 @@ function run(argv) {
       const canceled = pressUniqueCancel(sheet, homeWindow);
       actionCount += canceled ? 1 : 0;
 
-      if (!canceled || !waitForNoAttachedSheets(homeWindow, 5)) {
+      if (!canceled) {
         throw new Error("owned sheet cancellation unverified");
       }
+
+      cancelControlStage = "wait-sheet-absence";
+
+      if (!waitForNoAttachedSheets(homeWindow, 5)) {
+        throw new Error("owned sheet cancellation unverified");
+      }
+
+      cancelControlStage = null;
 
       cleanupStatus = "sheet-canceled-and-drained";
       failurePhase = "SERIALIZE";
@@ -540,6 +560,15 @@ function run(argv) {
     const primaryWindowRoleAXErrorStatus = windowRoleAXErrorStatus;
     const primaryWindowsAttributeAXErrorStatus = windowsAttributeAXErrorStatus;
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
+    const primarySheetPIDRelation = sheetPIDRelation;
+
+    const primaryCancelCandidateCount =
+      failurePhase === "CANCEL" ? cancelCandidateCount : null;
+
+    const primaryCancelControlStage =
+      failurePhase === "CANCEL" ? cancelControlStage : null;
+
+    const primaryGuardTransportStage = guardTransportStage;
 
     if (sheet && homeWindow) {
       try {
@@ -568,6 +597,10 @@ function run(argv) {
       inputTransportStage: primaryInputTransportStage,
       inputPayloadByteCount: primaryInputPayloadByteCount,
       inputTargetPathLength: primaryInputTargetPathLength,
+      sheetPIDRelation: primarySheetPIDRelation,
+      cancelCandidateCount: primaryCancelCandidateCount,
+      cancelControlStage: primaryCancelControlStage,
+      guardTransportStage: primaryGuardTransportStage,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
       pidQueryStatus: primaryPidQueryStatus,
       windowRoleFailureStage: primaryWindowRoleFailureStage,
@@ -593,6 +626,7 @@ function ensureGuardTransport() {
   }
 
   failureCode = "panel-guard-failed";
+  guardTransportStage = "transport-init";
 
   if (!guardRequestHandle) {
     guardRequestHandle =
@@ -606,9 +640,13 @@ function ensureGuardTransport() {
   if (!guardRequestHandle || !guardResponseHandle) {
     throw new Error("Panel guard transport unavailable");
   }
+
+  guardTransportStage = null;
 }
 
 function sendGuardFrame(value) {
+  guardTransportStage = "request-encode";
+
   const body = JSON.stringify(value);
 
   if (body.length < 1 || body.length > 1024) {
@@ -626,14 +664,20 @@ function sendGuardFrame(value) {
   const error = Ref("id");
 
   failureCode = "panel-guard-failed";
+  guardTransportStage = "request-write";
+
   const written = guardRequestHandle.writeDataError(data, error);
 
   if (written !== true && written !== 1) {
     throw new Error("Panel guard request write failed");
   }
+
+  guardTransportStage = null;
 }
 
-function readGuardBytes(length) {
+function readGuardBytes(length, stage) {
+  guardTransportStage = stage;
+
   return decodeTransportData(
     readTransportData(guardResponseHandle, length),
     $.NSASCIIStringEncoding,
@@ -710,7 +754,7 @@ function decodeTransportData(data, encoding, segment) {
 }
 
 function receiveGuardFrame() {
-  const header = readGuardBytes(4);
+  const header = readGuardBytes(4, "response-header");
 
   if (!/^[0-9]{4}$/.test(header)) {
     failureCode = "panel-guard-failed";
@@ -724,8 +768,12 @@ function receiveGuardFrame() {
     throw new Error("Panel guard response bound exceeded");
   }
 
-  const body = readGuardBytes(length);
+  const body = readGuardBytes(length, "response-body");
+  guardTransportStage = "response-parse";
+
   const response = JSON.parse(body);
+
+  guardTransportStage = "response-schema";
 
   const expectedKeys = [
     "birthMicroseconds",
@@ -815,6 +863,8 @@ function requestPanelAttestation(targetPid, context) {
     panelBirthMicroseconds = response.birthMicroseconds;
     panelGuardRequired = true;
   }
+
+  guardTransportStage = null;
 }
 
 function closeGuardTransport() {
@@ -1449,6 +1499,8 @@ function attachedSheets(homeWindow) {
     if (pid === expectedAXPID) {
       assertOwnedElement(element);
     } else if (panelPID === null) {
+      sheetPIDRelation = "foreign-candidate";
+
       requestPanelAttestation(pid, "discovery");
     } else if (pid !== panelPID) {
       failureCode = "panel-guard-failed";
@@ -1460,6 +1512,10 @@ function attachedSheets(homeWindow) {
     }
 
     const role = readStringAttribute(element, AX.role);
+
+    if (pid === expectedAXPID && role === "AXSheet") {
+      sheetPIDRelation = "owned-app";
+    }
 
     if (newlyAttestedForeignChild && role !== "AXSheet") {
       failureCode = "panel-guard-failed";
@@ -1555,15 +1611,25 @@ function buttonsFromAttributes(elements, owners, attribute) {
 }
 
 function pressUniqueCancel(sheet, homeWindow) {
+  cancelControlStage = "collect-controls";
+
+  const elements = descendants(sheet);
+
+  cancelControlStage = "resolve-control";
+
   const cancelButtons = buttonsFromAttributes(
-    descendants(sheet),
+    elements,
     [sheet, homeWindow],
     AX.cancelButton,
   );
 
+  cancelCandidateCount = cancelButtons.length;
+
   if (cancelButtons.length !== 1) {
     return false;
   }
+
+  cancelControlStage = "press-control";
 
   return press(cancelButtons[0], sheet, homeWindow, "cancel");
 }
