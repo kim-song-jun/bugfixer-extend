@@ -1335,6 +1335,7 @@ function isAttributeSettable(element, attribute) {
 
 function hasAction(element, requestedAction) {
   const actions = Ref("pointer");
+  failureCode = "ax-action-names-query-failed";
   const status = Number($.AXUIElementCopyActionNames(element, actions));
 
   if (status !== Number($.kAXErrorSuccess)) {

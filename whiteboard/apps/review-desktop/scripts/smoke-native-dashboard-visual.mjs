@@ -2171,6 +2171,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     && value <= 512;
 
   const failureCodes = new Set([
+    'ax-action-names-query-failed',
     'ax-output-ref-create-failed',
     'ax-copy-call-failed',
     'ax-copy-ref-read-failed',
