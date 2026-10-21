@@ -27,11 +27,7 @@ function run(argv) {
     phase = "OWN_PID";
     ownPID = Number($.NSProcessInfo.processInfo.processIdentifier);
 
-    if (
-      !Number.isSafeInteger(ownPID) ||
-      ownPID < 1 ||
-      ownPID > 2_147_483_647
-    ) {
+    if (!Number.isSafeInteger(ownPID) || ownPID < 1 || ownPID > 2_147_483_647) {
       ownPID = null;
       errorCode = "own-pid-unavailable";
 

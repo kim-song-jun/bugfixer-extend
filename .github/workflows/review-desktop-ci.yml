@@ -184,8 +184,8 @@ jobs:
       - name: Prepare owned source formatting repair
         if: failure() && steps.formatting.conclusion == 'failure'
         run: |
-          pnpm exec oxfmt --write packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts apps/review-desktop/scripts/native-project-picker-actor.js
-          git diff --binary -- packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts apps/review-desktop/scripts/native-project-picker-actor.js > "$RUNNER_TEMP/review-source-format.patch"
+          pnpm exec oxfmt --write packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts apps/review-desktop/scripts/native-project-picker-actor.js apps/review-desktop/scripts/native/ax-pid-bridge-probe.js
+          git diff --binary -- packages/review/app/src/settings-page.tsx packages/review-protocol/src/contracts.ts apps/review-desktop/scripts/native-project-picker-actor.js apps/review-desktop/scripts/native/ax-pid-bridge-probe.js > "$RUNNER_TEMP/review-source-format.patch"
 
       - name: Upload owned source formatting repair
         if: failure() && steps.formatting.conclusion == 'failure'
