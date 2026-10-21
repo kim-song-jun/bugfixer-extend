@@ -2,7 +2,21 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, open, opendir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  opendir,
+  readFile,
+  realpath,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import net from 'node:net';
 import { homedir, userInfo } from 'node:os';
 import path from 'node:path';
@@ -15,6 +29,7 @@ import {
   processAlive,
   processGroupAlive,
   processInventory,
+  sameProcessIdentity,
   stopOwnedProcessTree,
   verifyLiveIdentity,
 } from './native/app-process-cleanup.mjs';
@@ -625,44 +640,396 @@ async function captureStartupFailureDiagnostics(port, userData, child, stdout, s
 }
 
 async function captureStartupFailureScreenshot(child) {
-  const relativePath = `startup-timeout-${child.pid ?? 'unknown'}.png`;
+  return captureNativeDesktopScreenshot({
+    relativePath: `startup-timeout-${child.pid ?? 'unknown'}.png`,
+    targetApp: child,
+  });
+}
+
+async function captureNativeDesktopScreenshot({ relativePath, targetApp, expectedAppIdentity }) {
+  const processCleanup = {
+    pid: null,
+    identityCaptured: false,
+    exitObserved: false,
+    closeObserved: false,
+    exitCode: null,
+    signal: null,
+    pidAbsent: false,
+    groupAbsent: false,
+    verified: false,
+    errorCode: null,
+    commandDurationMs: null,
+    identityCaptureDurationMs: null,
+    cleanupDurationMs: null,
+    totalElapsedMs: null,
+    stagingQuarantined: false,
+  };
+  const result = {
+    relativePath,
+    status: 'failed',
+    bytes: 0,
+    reason: 'capture-failed',
+    processCleanup,
+  };
 
   if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'darwin') {
-    return { relativePath, status: 'skipped', bytes: 0, reason: 'ci-macos-only' };
+    result.status = 'skipped';
+    result.reason = 'ci-macos-only';
+
+    return result;
   }
 
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { relativePath, status: 'skipped', bytes: 0, reason: 'app-exited' };
+  const appIsAlive = () => targetApp.exitCode === null && targetApp.signalCode === null;
+
+  if (!appIsAlive()) {
+    result.status = 'skipped';
+    result.reason = 'app-exited';
+
+    return result;
+  }
+
+  if (expectedAppIdentity) {
+    try {
+      if (!verifyLiveIdentity(expectedAppIdentity, { rootPid: targetApp.pid })) {
+        result.reason = 'app-identity-unverified';
+
+        return result;
+      }
+    } catch {
+      result.reason = 'app-identity-unverified';
+
+      return result;
+    }
   }
 
   const screenshotPath = path.join(output, relativePath);
 
   try {
-    await execFileAsync('/usr/sbin/screencapture', ['-x', '-m', screenshotPath], {
-      encoding: 'utf8',
-      maxBuffer: 4 * 1024,
-      timeout: 2_000,
-    });
+    await lstat(screenshotPath);
+    result.reason = 'capture-path-exists';
 
-    const screenshotStat = await stat(screenshotPath);
+    return result;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      result.reason = 'capture-path-unavailable';
 
-    if (!screenshotStat.isFile()) {
-      return { relativePath, status: 'failed', bytes: 0, reason: 'capture-output-missing' };
+      return result;
     }
-
-    if (screenshotStat.size > MAX_STARTUP_SCREENSHOT_BYTES) {
-      await rm(screenshotPath, { force: true });
-
-      return { relativePath, status: 'discarded', bytes: 0, reason: 'size-limit-exceeded' };
-    }
-
-    return { relativePath, status: 'captured', bytes: screenshotStat.size, reason: null };
-  } catch {
-    try { await rm(screenshotPath, { force: true }); }
-    catch { return { relativePath, status: 'failed', bytes: 0, reason: 'capture-cleanup-failed' }; }
-
-    return { relativePath, status: 'failed', bytes: 0, reason: 'capture-failed' };
   }
+
+  let stagingDirectory;
+
+  try {
+    stagingDirectory = await mkdtemp('/tmp/wb-native-capture-');
+  } catch {
+    result.reason = 'capture-staging-unavailable';
+
+    return result;
+  }
+
+  const stagingPath = path.join(stagingDirectory, path.basename(relativePath));
+
+  const startedAt = Date.now();
+  let captureChild;
+
+  try {
+    captureChild = spawn('/usr/sbin/screencapture', ['-x', '-m', stagingPath], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    result.reason = 'capture-spawn-failed';
+
+    try {
+      await rmdir(stagingDirectory);
+    } catch {
+      result.reason = 'capture-staging-cleanup-failed';
+      processCleanup.stagingQuarantined = true;
+    }
+
+    return result;
+  }
+
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let exitResult = null;
+  let closeResult = null;
+  let closeObservedAtMs = null;
+  let spawnFailed = false;
+  let stdoutFailed = false;
+  let stderrFailed = false;
+  const ownership = { captured: false, identities: new Map() };
+  const cleanupEvents = [];
+  const commandDeadline = startedAt + 2_000;
+
+  processCleanup.pid = captureChild.pid ?? null;
+  captureChild.stdout.on('data', chunk => { stdoutBytes += chunk.length; });
+  captureChild.stderr.on('data', chunk => { stderrBytes += chunk.length; });
+  captureChild.stdout.once('error', () => { stdoutFailed = true; });
+  captureChild.stderr.once('error', () => { stderrFailed = true; });
+  captureChild.once('error', () => { spawnFailed = true; });
+  captureChild.once('exit', (code, signal) => {
+    exitResult = { code, signal };
+    processCleanup.exitObserved = true;
+    processCleanup.exitCode = code;
+    processCleanup.signal = signal;
+  });
+
+  const closed = new Promise(resolve => {
+    captureChild.once('close', (code, signal) => {
+      closeResult = { code, signal };
+      closeObservedAtMs = Date.now();
+      processCleanup.closeObserved = true;
+      resolve(closeResult);
+    });
+  });
+
+  const identityCaptureStartedAt = Date.now();
+
+  try {
+    if (!Number.isSafeInteger(captureChild.pid) || captureChild.pid < 1) {
+      processCleanup.errorCode = 'capture-pid-unavailable';
+    } else {
+      const initialIdentity = await waitFor(() => {
+        if (closeResult !== null) return { closed: true };
+
+        const candidate = processInventory().get(captureChild.pid);
+
+        if (!candidate || candidate.ppid !== process.pid || candidate.pgid !== captureChild.pid
+          || !candidate.command.includes('/usr/sbin/screencapture')) {
+          return undefined;
+        }
+
+        return candidate;
+      },
+        'the native screenshot process identity', 1_000);
+
+      if (closeResult !== null || initialIdentity.closed) {
+        processCleanup.errorCode = 'capture-exited-before-identity';
+      } else {
+        captureOwnedProcessTree({
+          rootPid: captureChild.pid,
+          executablePath: '/usr/sbin/screencapture',
+          appExited: false,
+          state: ownership,
+        });
+
+        if (!ownership.captured || !ownership.rootIdentity
+          || !sameProcessIdentity(initialIdentity, ownership.rootIdentity)) {
+          processCleanup.errorCode = 'capture-identity-unavailable';
+        } else {
+          if (verifyLiveIdentity(ownership.rootIdentity, { rootPid: captureChild.pid }) === true) {
+            processCleanup.identityCaptured = true;
+          } else {
+            processCleanup.errorCode = 'capture-identity-unverified';
+          }
+        }
+      }
+    }
+  } catch {
+    processCleanup.errorCode ??= 'capture-identity-unverified';
+  } finally {
+    processCleanup.identityCaptureDurationMs = Date.now() - identityCaptureStartedAt;
+  }
+
+  let finished = await exitedWithin(closed, Math.max(0, commandDeadline - Date.now()));
+  const commandTimedOut = !finished
+    || (closeObservedAtMs !== null && closeObservedAtMs > commandDeadline);
+
+  if (!finished && processCleanup.identityCaptured && ownership.captured) {
+    const cleanupStartedAt = Date.now();
+
+    try {
+      await stopOwnedProcessTree({
+        rootPid: captureChild.pid,
+        rootIdentity: ownership.rootIdentity,
+        identities: [...ownership.identities.values()],
+        captured: ownership.captured,
+        isAppExited: () => closeResult !== null,
+        cleanup: cleanupEvents,
+        waitFor,
+      });
+      finished = closeResult !== null;
+    } catch {
+      processCleanup.errorCode ??= 'capture-owned-stop-unverified';
+    } finally {
+      processCleanup.cleanupDurationMs = Date.now() - cleanupStartedAt;
+    }
+  }
+
+  if (!finished && processCleanup.identityCaptured && ownership.captured && closeResult === null) {
+    try {
+      await waitFor(() => closeResult !== null, 'the native screenshot process close', 5_000);
+      finished = true;
+    } catch {
+      processCleanup.errorCode ??= 'capture-close-unverified';
+    }
+  }
+
+  if (spawnFailed) processCleanup.errorCode ??= 'capture-spawn-failed';
+  if (stdoutFailed || stderrFailed) processCleanup.errorCode ??= 'capture-output-stream-failed';
+  if (!exitResult || !closeResult) processCleanup.errorCode ??= 'capture-close-unverified';
+  processCleanup.commandDurationMs = closeObservedAtMs === null
+    ? Date.now() - startedAt
+    : closeObservedAtMs - startedAt;
+
+  try {
+    const inventory = processInventory();
+    const identities = ownership.captured
+      ? [...ownership.identities.values()]
+      : [{ pid: captureChild.pid }];
+    const pidsAbsent = identities.every(identity =>
+      !inventory.has(identity.pid) && !processAlive(identity.pid));
+    const groupAbsent = ![...inventory.values()].some(identity => identity.pgid === captureChild.pid)
+      && !processGroupAlive(captureChild.pid);
+
+    processCleanup.pidAbsent = pidsAbsent;
+    processCleanup.groupAbsent = groupAbsent;
+    processCleanup.verified = processCleanup.exitObserved && processCleanup.closeObserved
+      && pidsAbsent && groupAbsent;
+  } catch {
+    processCleanup.errorCode ??= 'capture-absence-unverified';
+  }
+
+  if (!processCleanup.verified) processCleanup.errorCode ??= 'capture-cleanup-unverified';
+  processCleanup.totalElapsedMs = Date.now() - startedAt;
+
+  if (!processCleanup.verified) {
+    processCleanup.stagingQuarantined = true;
+    result.reason = processCleanup.errorCode;
+
+    return result;
+  }
+
+  let ownedOutput = false;
+  let outputBytes = 0;
+
+  try {
+    const file = await lstat(stagingPath);
+    ownedOutput = file.isFile() && !file.isSymbolicLink();
+    outputBytes = ownedOutput ? file.size : 0;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') result.reason = 'capture-output-unavailable';
+  }
+
+  if (expectedAppIdentity) {
+    try {
+      if (!appIsAlive()
+        || !verifyLiveIdentity(expectedAppIdentity, { rootPid: targetApp.pid })) {
+        result.reason = 'app-identity-changed';
+      }
+    } catch {
+      result.reason = 'app-identity-changed';
+    }
+  } else if (!appIsAlive()) {
+    result.reason = 'app-exited-during-capture';
+  }
+
+  if (stdoutBytes > 4_096 || stderrBytes > 4_096) result.reason = 'capture-output-bound-exceeded';
+  if (commandTimedOut) result.reason = 'capture-timeout';
+  if (!exitResult || !closeResult || exitResult.code !== 0 || exitResult.signal !== null) {
+    result.reason = 'capture-command-failed';
+  }
+  if (!processCleanup.identityCaptured) {
+    result.reason = processCleanup.errorCode ?? 'capture-identity-unavailable';
+  }
+  if (processCleanup.errorCode !== null) result.reason = processCleanup.errorCode;
+  if (!ownedOutput) result.reason = 'capture-output-missing';
+  if (ownedOutput && outputBytes === 0) result.reason = 'capture-output-empty';
+  if (outputBytes > MAX_STARTUP_SCREENSHOT_BYTES) result.reason = 'size-limit-exceeded';
+
+  if (result.reason !== 'capture-failed') {
+    try {
+      await unlink(stagingPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        result.reason = 'capture-cleanup-failed';
+        processCleanup.stagingQuarantined = true;
+      }
+    }
+
+    try {
+      await rmdir(stagingDirectory);
+    } catch {
+      result.reason = 'capture-staging-cleanup-failed';
+      processCleanup.stagingQuarantined = true;
+    }
+
+    result.status = result.reason === 'size-limit-exceeded' ? 'discarded' : 'failed';
+
+    return result;
+  }
+
+  let outputCreated = false;
+
+  try {
+    if (expectedAppIdentity
+      && (!appIsAlive() || verifyLiveIdentity(expectedAppIdentity, { rootPid: targetApp.pid }) !== true)) {
+      result.reason = 'app-identity-changed';
+    } else {
+      await link(stagingPath, screenshotPath);
+      outputCreated = true;
+      await unlink(stagingPath);
+      await rmdir(stagingDirectory);
+    }
+  } catch {
+    if (outputCreated) {
+      try {
+        await unlink(screenshotPath);
+      } catch {
+        result.reason = 'capture-output-cleanup-failed';
+      }
+    }
+
+    try {
+      await unlink(stagingPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        result.reason = 'capture-staging-cleanup-failed';
+        processCleanup.stagingQuarantined = true;
+      }
+    }
+
+    try {
+      await rmdir(stagingDirectory);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        result.reason = 'capture-staging-cleanup-failed';
+        processCleanup.stagingQuarantined = true;
+      }
+    }
+
+    if (result.reason === 'capture-failed') result.reason = 'capture-promotion-failed';
+    result.status = 'failed';
+
+    return result;
+  }
+
+  if (result.reason !== 'capture-failed') {
+    try {
+      await unlink(stagingPath);
+    } catch {
+      result.reason = 'capture-staging-cleanup-failed';
+      processCleanup.stagingQuarantined = true;
+    }
+
+    try {
+      await rmdir(stagingDirectory);
+    } catch {
+      result.reason = 'capture-staging-cleanup-failed';
+      processCleanup.stagingQuarantined = true;
+    }
+
+    result.status = 'failed';
+
+    return result;
+  }
+
+  result.status = 'captured';
+  result.reason = null;
+  result.bytes = outputBytes;
+
+  return result;
 }
 
 function recordNativeLifecycle(capture, event, details = {}) {
@@ -2036,6 +2403,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     observation.failurePhase = candidate.failurePhase;
     observation.actorFailurePhase = candidate.failurePhase;
     observation.actorFailureCode = candidate.failureCode;
+    observation.actorReportedSheetCleanupStatus = candidate.cleanupStatus;
     observation.panelPidMismatchDiagnostic = candidate.panelPidMismatchDiagnostic;
     observation.arrayQueryDiagnostic = candidate.arrayQueryDiagnostic;
     observation.inputTransportStage = candidate.inputTransportStage;
@@ -2338,6 +2706,36 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       stdinFailed,
       session,
     });
+
+    if (observation.actorFailureReceiptStatus === 'valid-failure-receipt'
+      && ['DISCOVER', 'CANCEL'].includes(observation.actorFailurePhase)
+      && observation.actorActionCount === 0
+      && observation.actorSheetCount > 0
+      && observation.actorReportedSheetCleanupStatus !== 'sheet-canceled-and-drained'
+      && actorCleanup.verified
+      && session.child.exitCode === null
+      && session.child.signalCode === null) {
+      const relativePath = `picker-failure-${mode}-${child.pid}.png`;
+
+      try {
+        observation.desktopCapture = await captureNativeDesktopScreenshot({
+          relativePath,
+          targetApp: session.child,
+          expectedAppIdentity: session.appProcessIdentity,
+        });
+      } catch {
+        observation.desktopCapture = {
+          relativePath,
+          status: 'failed',
+          bytes: 0,
+          reason: 'capture-diagnostic-failed',
+          processCleanup: {
+            verified: false,
+            errorCode: 'capture-diagnostic-failed',
+          },
+        };
+      }
+    }
 
     if (observation.actorFailureReceiptStatus === 'valid-failure-receipt'
       && observation.panelPidMismatchDiagnostic !== null) {
