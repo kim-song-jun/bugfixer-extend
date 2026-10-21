@@ -1,17 +1,13 @@
 /* global ObjC, $, Ref */
 /* exported run */
 
-const MODES = new Set([
-  "metadata-ref",
-  "bound-untyped-ref",
-  "bound-pointer-ref",
-  "bound-id-ref",
-]);
+const MODES = new Set(["bound-id-ref", "bound-pointer-ref"]);
 
 function run(argv) {
   const mode = argv[0];
   let phase = "IMPORT";
   let ownPID = null;
+  let fixtureVerified = false;
   let found = null;
   let valueTypeMatches = null;
   let valuesEqual = null;
@@ -26,6 +22,7 @@ function run(argv) {
         mode,
         ownPID,
         phase,
+        fixtureVerified,
         found,
         valueTypeMatches,
         valuesEqual,
@@ -49,6 +46,7 @@ function run(argv) {
         mode,
         ownPID,
         phase,
+        fixtureVerified,
         found,
         valueTypeMatches,
         valuesEqual,
@@ -62,34 +60,87 @@ function run(argv) {
     const expected = $.NSString.stringWithString("abi-fixture-value");
 
     const dictionary = $.NSDictionary.dictionaryWithObjectForKey(expected, key);
+    phase = "FIXTURE_READBACK";
+    const fixtureValue = dictionary.objectForKey(key);
 
-    if (mode !== "metadata-ref") {
-      phase = "FUNCTION_BINDING";
-      ObjC.bindFunction("CFDictionaryGetValueIfPresent", [
-        "bool",
-        ["pointer", "pointer", "pointer"],
-      ]);
-    }
-
-    phase = "OUTPUT_REF";
-    let output = Ref();
-
-    if (mode === "bound-pointer-ref") {
-      output = Ref("pointer");
-    } else if (mode === "bound-id-ref") {
-      output = Ref("id");
-    }
-
-    phase = "DICTIONARY_LOOKUP";
-    const present = $.CFDictionaryGetValueIfPresent(dictionary, key, output);
-
-    if (present !== true && present !== 1) {
-      errorCode = "fixture-key-not-found";
+    if (fixtureValue === null || fixtureValue === undefined) {
+      errorCode = "fixture-value-unavailable";
 
       return makeReceipt(
         mode,
         ownPID,
         phase,
+        fixtureVerified,
+        found,
+        valueTypeMatches,
+        valuesEqual,
+        errorCode,
+      );
+    }
+
+    const fixtureTypeID = Number($.CFGetTypeID(fixtureValue));
+    const fixtureExpectedTypeID = Number($.CFStringGetTypeID());
+
+    if (
+      !Number.isSafeInteger(fixtureTypeID) ||
+      fixtureTypeID < 1 ||
+      !Number.isSafeInteger(fixtureExpectedTypeID) ||
+      fixtureExpectedTypeID < 1 ||
+      fixtureTypeID !== fixtureExpectedTypeID
+    ) {
+      errorCode = "fixture-value-not-cfstring";
+
+      return makeReceipt(
+        mode,
+        ownPID,
+        phase,
+        fixtureVerified,
+        found,
+        valueTypeMatches,
+        valuesEqual,
+        errorCode,
+      );
+    }
+
+    const fixtureEqual = $.CFEqual(fixtureValue, expected);
+
+    if (fixtureEqual !== true && fixtureEqual !== 1) {
+      errorCode = "fixture-value-mismatch";
+
+      return makeReceipt(
+        mode,
+        ownPID,
+        phase,
+        fixtureVerified,
+        found,
+        valueTypeMatches,
+        valuesEqual,
+        errorCode,
+      );
+    }
+
+    fixtureVerified = true;
+
+    phase = "FUNCTION_BINDING";
+    ObjC.bindFunction("CFDictionaryGetValueIfPresent", [
+      "bool",
+      ["pointer", "pointer", "pointer"],
+    ]);
+
+    phase = "OUTPUT_REF";
+    const output = mode === "bound-id-ref" ? Ref("id") : Ref("pointer");
+
+    phase = "DICTIONARY_LOOKUP";
+    const present = $.CFDictionaryGetValueIfPresent(dictionary, key, output);
+
+    if (present !== true && present !== 1) {
+      errorCode = "cf-lookup-key-not-found";
+
+      return makeReceipt(
+        mode,
+        ownPID,
+        phase,
+        fixtureVerified,
         false,
         valueTypeMatches,
         valuesEqual,
@@ -109,6 +160,7 @@ function run(argv) {
         mode,
         ownPID,
         phase,
+        fixtureVerified,
         found,
         valueTypeMatches,
         valuesEqual,
@@ -134,6 +186,7 @@ function run(argv) {
         mode,
         ownPID,
         phase,
+        fixtureVerified,
         found,
         valueTypeMatches,
         valuesEqual,
@@ -153,6 +206,7 @@ function run(argv) {
         mode,
         ownPID,
         phase,
+        fixtureVerified,
         found,
         valueTypeMatches,
         valuesEqual,
@@ -166,6 +220,7 @@ function run(argv) {
       mode,
       ownPID,
       phase,
+      fixtureVerified,
       found,
       valueTypeMatches,
       valuesEqual,
@@ -178,6 +233,7 @@ function run(argv) {
       mode,
       ownPID,
       phase,
+      fixtureVerified,
       found,
       valueTypeMatches,
       valuesEqual,
@@ -190,6 +246,7 @@ function makeReceipt(
   mode,
   ownPID,
   phase,
+  fixtureVerified,
   found,
   valueTypeMatches,
   valuesEqual,
@@ -199,6 +256,7 @@ function makeReceipt(
     mode,
     ownPID,
     phase,
+    fixtureVerified,
     found,
     valueTypeMatches,
     valuesEqual,

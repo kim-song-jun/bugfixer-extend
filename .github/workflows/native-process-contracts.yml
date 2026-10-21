@@ -41,7 +41,7 @@ jobs:
         timeout-minutes: 3
         run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
 
-      - name: AX PID and CF output-pointer bridge ABI diagnostics
+      - name: AX PID and CF output-pointer bridge ABI diagnostic
         timeout-minutes: 2
         run: |
           node --input-type=module <<'NODE'
@@ -61,22 +61,12 @@ jobs:
             {
               kind: 'cf-output',
               script: 'cf-output-bridge-probe.js',
-              mode: 'metadata-ref',
-            },
-            {
-              kind: 'cf-output',
-              script: 'cf-output-bridge-probe.js',
-              mode: 'bound-untyped-ref',
+              mode: 'bound-id-ref',
             },
             {
               kind: 'cf-output',
               script: 'cf-output-bridge-probe.js',
               mode: 'bound-pointer-ref',
-            },
-            {
-              kind: 'cf-output',
-              script: 'cf-output-bridge-probe.js',
-              mode: 'bound-id-ref',
             },
           ];
           const allowedPhases = new Set([
@@ -91,6 +81,7 @@ jobs:
             'PID_QUERY',
             'PID_VALUE',
             'OUTPUT_REF',
+            'FIXTURE_READBACK',
             'DICTIONARY_LOOKUP',
             'OUTPUT_VALUE',
             'VALUE_TYPE',
@@ -211,7 +202,7 @@ jobs:
 
             const expectedKeys = kind === 'ax-pid'
               ? 'errorCode,mode,ownPID,phase,returnedPID,status'
-              : 'errorCode,found,mode,ownPID,phase,valueTypeMatches,valuesEqual';
+              : 'errorCode,fixtureVerified,found,mode,ownPID,phase,valueTypeMatches,valuesEqual';
             const validShape = probe !== null &&
               Object.keys(probe).sort().join(',') === expectedKeys &&
               probe.mode === mode &&
@@ -229,7 +220,10 @@ jobs:
                   'returned-pid-invalid',
                   'returned-pid-mismatch',
                   'bridge-operation-threw',
-                  'fixture-key-not-found',
+                  'fixture-value-unavailable',
+                  'fixture-value-not-cfstring',
+                  'fixture-value-mismatch',
+                  'cf-lookup-key-not-found',
                   'output-value-unavailable',
                   'output-value-not-cfstring',
                   'output-value-mismatch',
@@ -247,6 +241,8 @@ jobs:
                     probe.returnedPID <= 2_147_483_647)));
             const cfOutputShapeValid = kind !== 'cf-output' ||
               (probe !== null &&
+                (probe.fixtureVerified === true ||
+                  probe.fixtureVerified === false) &&
                 (probe.found === null || probe.found === true ||
                   probe.found === false) &&
                 (probe.valueTypeMatches === null ||
@@ -296,14 +292,10 @@ jobs:
                 finalSignal === null && !parseFailed);
             const cfOutputContractPassed = kind !== 'cf-output' ||
               (receiptShapeValid && probe.phase === 'COMPLETE' &&
+                probe.fixtureVerified === true &&
                 probe.found === true && probe.valueTypeMatches === true &&
                 probe.valuesEqual === true && probe.errorCode === null &&
                 finalExitCode === 0 && finalSignal === null && !parseFailed);
-
-            if (kind === 'cf-output' && mode === 'metadata-ref' &&
-                !cfOutputContractPassed) {
-              process.exitCode = 1;
-            }
 
             if (kind === 'cf-output' &&
                 (mode === 'bound-pointer-ref' || mode === 'bound-id-ref') &&
@@ -319,26 +311,13 @@ jobs:
             if (!processLifecycleVerified) break;
           }
 
-          const cfOutputBaselinePassed = results.some(result =>
-            result.kind === 'cf-output' && result.mode === 'metadata-ref' &&
-            result.identityMatches && result.cleanupVerified &&
-            result.probe !== null && result.probe.phase === 'COMPLETE' &&
-            result.probe.found === true &&
-            result.probe.valueTypeMatches === true &&
-            result.probe.valuesEqual === true &&
-            result.probe.errorCode === null &&
-            result.exitCode === 0 && result.signal === null &&
-            !result.timedOut && !result.outputTooLarge && !result.spawnFailed &&
-            !result.parseFailed);
-
-          if (!cfOutputBaselinePassed || !cfOutputTypedContractPassed) {
+          if (!cfOutputTypedContractPassed) {
             process.exitCode = 1;
           }
 
           process.stdout.write(`${JSON.stringify({
-            event: 'native-bridge-output-pointer-probe-summary',
+            event: 'cf-output-pointer-probe-summary',
             parentPID: process.pid,
-            cfOutputBaselinePassed,
             cfOutputTypedContractPassed,
             results,
           })}\n`);
