@@ -103,13 +103,17 @@ let guardRequestId;
 
 let guardRequestCount;
 
-let panelPID;
+let sheetOwnerPID;
 
-let panelBirthSeconds;
+let servicePID;
 
-let panelBirthMicroseconds;
+let serviceDiscoveryAttempted;
 
-let panelGuardRequired;
+let cleanupInProgress;
+
+let serviceBirthSeconds;
+
+let serviceBirthMicroseconds;
 
 let inputTransportStage;
 
@@ -155,10 +159,12 @@ function run(argv) {
   guardResponseHandle = null;
   guardRequestId = 0;
   guardRequestCount = 0;
-  panelPID = null;
-  panelBirthSeconds = null;
-  panelBirthMicroseconds = null;
-  panelGuardRequired = false;
+  sheetOwnerPID = null;
+  servicePID = null;
+  serviceDiscoveryAttempted = false;
+  cleanupInProgress = false;
+  serviceBirthSeconds = null;
+  serviceBirthMicroseconds = null;
   inputTransportStage = null;
   inputPayloadByteCount = null;
   inputTargetPathLength = null;
@@ -455,7 +461,7 @@ function run(argv) {
     }
 
     failurePhase = "DISCOVER";
-    const elements = descendants(sheet);
+    const elements = descendants(sheet, homeWindow);
     roleCounts = countRoles(elements);
 
     const textFields = elements.filter(
@@ -575,6 +581,8 @@ function run(argv) {
     const primaryGuardTransportStage = guardTransportStage;
 
     if (sheet && homeWindow) {
+      cleanupInProgress = true;
+
       try {
         cleanupStatus = cancelExactSheet(homeWindow, sheet)
           ? "sheet-canceled-and-drained"
@@ -824,7 +832,7 @@ function requestPanelAttestation(targetPid, context) {
     throw new Error("Panel guard discovery order invalid");
   }
 
-  if (!initial && targetPid !== panelPID) {
+  if (!initial && targetPid !== servicePID) {
     failureCode = "panel-guard-failed";
     throw new Error("Panel guard target changed");
   }
@@ -835,8 +843,8 @@ function requestPanelAttestation(targetPid, context) {
     version: 1,
     requestId: guardRequestId,
     targetPid,
-    expectedBirthSec: initial ? null : panelBirthSeconds,
-    expectedBirthUsec: initial ? null : panelBirthMicroseconds,
+    expectedBirthSec: initial ? null : serviceBirthSeconds,
+    expectedBirthUsec: initial ? null : serviceBirthMicroseconds,
     context,
   });
 
@@ -855,18 +863,17 @@ function requestPanelAttestation(targetPid, context) {
     response.birthMicroseconds < 0 ||
     response.birthMicroseconds > 999_999 ||
     (!initial &&
-      (response.birthSeconds !== panelBirthSeconds ||
-        response.birthMicroseconds !== panelBirthMicroseconds))
+      (response.birthSeconds !== serviceBirthSeconds ||
+        response.birthMicroseconds !== serviceBirthMicroseconds))
   ) {
     failureCode = "panel-guard-failed";
     throw new Error("Panel process attestation failed");
   }
 
   if (initial) {
-    panelPID = targetPid;
-    panelBirthSeconds = response.birthSeconds;
-    panelBirthMicroseconds = response.birthMicroseconds;
-    panelGuardRequired = true;
+    servicePID = targetPid;
+    serviceBirthSeconds = response.birthSeconds;
+    serviceBirthMicroseconds = response.birthMicroseconds;
   }
 
   guardTransportStage = null;
@@ -1015,24 +1022,46 @@ function readElementPID(element) {
   return actualPID;
 }
 
-function assertPanelElement(element) {
+function assertTreeElement(element) {
   assertAXElement(element);
   const pid = readElementPID(element);
 
-  if (pid !== panelPID) {
+  assertTreePID(pid);
+
+  failureCode = null;
+
+  return pid;
+}
+
+function assertTreePID(pid) {
+  if (pid === expectedAXPID || (servicePID !== null && pid === servicePID)) {
+    return pid;
+  }
+
+  panelPidMismatchDiagnostic = {
+    expectedPID: servicePID ?? expectedAXPID,
+    actualPID: pid,
+  };
+  failureCode = "panel-element-pid-mismatch";
+  throw new Error("Accessibility element is outside the app and panel process");
+}
+
+function assertServiceElement(element) {
+  assertAXElement(element);
+  const pid = readElementPID(element);
+
+  if (servicePID === null || pid !== servicePID) {
     panelPidMismatchDiagnostic = {
-      expectedPID: panelPID,
+      expectedPID: servicePID ?? expectedAXPID,
       actualPID: pid,
     };
     failureCode = "panel-element-pid-mismatch";
-    throw new Error(
-      "Accessibility element is outside the attached panel process",
-    );
+    throw new Error("Accessibility element is outside the attested panel service");
   }
 
   failureCode = null;
 
-  return element;
+  return pid;
 }
 
 function safeTypeIdValue(value) {
@@ -1058,10 +1087,12 @@ function copyRequiredArrayAttributeUnscoped(element, attribute) {
     throw new Error("Required accessibility array unavailable");
   }
 
-  return copyArrayElements(copied, false);
+  return copyArrayElements(copied);
 }
 
-function copyDescendantChildren(element) {
+function copyDescendantChildren(element, expectedSheet, homeWindow) {
+  captureElementPathToSheet(element, expectedSheet, homeWindow);
+
   const role = readStringAttribute(element, AX.role);
   const copied = copyAttribute(element, AX.children, "pointer");
 
@@ -1069,9 +1100,33 @@ function copyDescendantChildren(element) {
     return [];
   }
 
-  const children = copyArrayElements(copied, true);
+  const children = copyArrayElements(copied);
 
   for (const child of children) {
+    const childPID = readElementPID(child);
+    assertArrayListsChildExactlyOnce(children, child);
+
+    if (childPID !== expectedAXPID) {
+      if (servicePID === null) {
+        if (serviceDiscoveryAttempted || cleanupInProgress) {
+          failureCode = "panel-guard-failed";
+          throw new Error("Panel service discovery is not permitted");
+        }
+
+        captureElementPathToSheet(element, expectedSheet, homeWindow);
+        assertChildListedExactlyOnce(element, child);
+
+        serviceDiscoveryAttempted = true;
+        requestPanelAttestation(childPID, "discovery");
+
+        captureElementPathToSheet(element, expectedSheet, homeWindow);
+        assertChildListedExactlyOnce(element, child);
+      } else if (childPID !== servicePID) {
+        assertTreePID(childPID);
+      }
+    }
+
+    assertTreePID(childPID);
     const parent = copyRequiredElementAttribute(child, AX.parent);
 
     if (!sameAXElement(parent, element)) {
@@ -1084,10 +1139,10 @@ function copyDescendantChildren(element) {
 }
 
 function copyArrayValue(copied) {
-  return copyArrayElements(copied, true, assertOwnedElement);
+  return copyArrayElements(copied, assertOwnedElement);
 }
 
-function copyArrayElements(copied, requirePID, validateElement) {
+function copyArrayElements(copied, validateElement) {
   if (copied.status !== Number($.kAXErrorSuccess)) {
     failureCode = "ax-array-status-failed";
     throw new Error("Accessibility array query failed");
@@ -1112,8 +1167,6 @@ function copyArrayElements(copied, requirePID, validateElement) {
 
     if (validateElement) {
       values.push(validateElement(child));
-    } else if (requirePID) {
-      values.push(assertPanelElement(child));
     } else {
       values.push(assertAXElement(child));
     }
@@ -1173,12 +1226,7 @@ function copyElementAttribute(element, attribute) {
   assertAXElement(copied.value);
   const pid = readElementPID(copied.value);
 
-  if (pid !== expectedAXPID && pid !== panelPID) {
-    failureCode = "panel-guard-failed";
-    throw new Error(
-      "Accessibility reference is outside the owned project window and panel",
-    );
-  }
+  assertTreePID(pid);
 
   return copied.value;
 }
@@ -1346,8 +1394,8 @@ function performPress(element, sheet, homeWindow, context) {
 }
 
 function authorizeMutation(element, expectedSheet, homeWindow, context) {
-  if (panelGuardRequired) {
-    requestPanelAttestation(panelPID, context);
+  if (servicePID !== null) {
+    requestPanelAttestation(servicePID, context);
   }
 
   const sheets = attachedSheets(homeWindow);
@@ -1363,16 +1411,17 @@ function authorizeMutation(element, expectedSheet, homeWindow, context) {
     homeWindow,
   );
 
-  if (panelGuardRequired) {
-    requestPanelAttestation(panelPID, context);
+  if (servicePID !== null) {
+    requestPanelAttestation(servicePID, context);
   }
 
   const targetPID = readElementPID(element);
   const targetParent = copyRequiredElementAttribute(element, AX.parent);
   const expectedParent = capturedChain[1];
 
+  assertTreePID(targetPID);
+
   if (
-    targetPID !== panelPID ||
     !expectedParent ||
     !sameAXElement(targetParent, expectedParent)
   ) {
@@ -1388,9 +1437,14 @@ function captureElementPathToSheet(element, expectedSheet, homeWindow) {
   let current = element;
 
   for (let depth = 0; depth <= 8; depth++) {
-    assertPanelElement(current);
+    const currentPID = assertTreeElement(current);
 
     if (sameAXElement(current, expectedSheet)) {
+      if (currentPID !== sheetOwnerPID) {
+        failureCode = "panel-guard-failed";
+        throw new Error("Attached sheet owner changed");
+      }
+
       const sheetParent = copyRequiredElementAttribute(current, AX.parent);
       assertOwnedElement(sheetParent);
 
@@ -1406,7 +1460,7 @@ function captureElementPathToSheet(element, expectedSheet, homeWindow) {
     }
 
     const parent = copyRequiredElementAttribute(current, AX.parent);
-    assertPanelElement(parent);
+    assertTreeElement(parent);
 
     if (chain.some((ancestor) => sameAXElement(ancestor, parent))) {
       failureCode = "panel-guard-failed";
@@ -1424,6 +1478,11 @@ function captureElementPathToSheet(element, expectedSheet, homeWindow) {
 
 function assertChildListedExactlyOnce(parent, child) {
   const children = copyRequiredArrayAttributeUnscoped(parent, AX.children);
+
+  assertArrayListsChildExactlyOnce(children, child);
+}
+
+function assertArrayListsChildExactlyOnce(children, child) {
   let matches = 0;
 
   for (const candidate of children) {
@@ -1438,7 +1497,7 @@ function assertChildListedExactlyOnce(parent, child) {
   }
 }
 
-function descendants(root) {
+function descendants(root, homeWindow) {
   const found = [];
   const pending = [{ element: root, depth: 0 }];
 
@@ -1456,7 +1515,7 @@ function descendants(root) {
       throw new Error("Accessibility hierarchy bound exceeded");
     }
 
-    const children = copyDescendantChildren(current.element);
+    const children = copyDescendantChildren(current.element, root, homeWindow);
 
     for (const child of children) {
       pending.push({ element: child, depth: current.depth + 1 });
@@ -1502,23 +1561,26 @@ function attachedSheets(homeWindow) {
 
   for (const element of homeChildren) {
     const pid = readElementPID(element);
-
-    const newlyAttestedForeignChild =
-      pid !== expectedAXPID && panelPID === null;
-
     if (pid === expectedAXPID) {
       assertOwnedElement(element);
-    } else if (panelPID === null) {
+    } else if (servicePID === null) {
+      assertArrayListsChildExactlyOnce(homeChildren, element);
+
+      if (serviceDiscoveryAttempted || cleanupInProgress) {
+        failureCode = "panel-guard-failed";
+        throw new Error("Panel service discovery is not permitted");
+      }
+
       sheetPIDRelation = "foreign-candidate";
+      serviceDiscoveryAttempted = true;
 
       requestPanelAttestation(pid, "discovery");
-    } else if (pid !== panelPID) {
-      failureCode = "panel-guard-failed";
-      throw new Error("Unexpected process in the owned window child list");
+    } else if (pid !== servicePID) {
+      assertTreePID(pid);
     }
 
     if (pid !== expectedAXPID) {
-      assertPanelElement(element);
+      assertServiceElement(element);
     }
 
     const role = readStringAttribute(element, AX.role);
@@ -1527,10 +1589,10 @@ function attachedSheets(homeWindow) {
       sheetPIDRelation = "owned-app";
     }
 
-    if (newlyAttestedForeignChild && role !== "AXSheet") {
+    if (pid !== expectedAXPID && role !== "AXSheet") {
       failureCode = "panel-guard-failed";
       throw new Error(
-        "The first attested foreign window child is not its sheet",
+        "A foreign home-window child is not its sheet",
       );
     }
 
@@ -1538,13 +1600,9 @@ function attachedSheets(homeWindow) {
       continue;
     }
 
-    if (panelPID === null) {
-      panelPID = expectedAXPID;
-    }
-
-    if (pid !== panelPID) {
+    if (sheetOwnerPID !== null && pid !== sheetOwnerPID) {
       failureCode = "panel-guard-failed";
-      throw new Error("Attached sheet process changed");
+      throw new Error("Attached sheet owner changed");
     }
 
     const parent = copyRequiredElementAttribute(element, AX.parent);
@@ -1556,6 +1614,10 @@ function attachedSheets(homeWindow) {
       failureCode = "panel-guard-failed";
       throw new Error("AXSheet parent does not match the owned home window");
     }
+
+    assertArrayListsChildExactlyOnce(homeChildren, element);
+
+    sheetOwnerPID = pid;
 
     sheets.push(element);
   }
@@ -1623,7 +1685,7 @@ function buttonsFromAttributes(elements, owners, attribute) {
 function pressUniqueCancel(sheet, homeWindow) {
   cancelControlStage = "collect-controls";
 
-  const elements = descendants(sheet);
+  const elements = descendants(sheet, homeWindow);
 
   cancelControlStage = "resolve-control";
 
