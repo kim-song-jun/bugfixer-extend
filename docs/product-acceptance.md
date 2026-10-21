@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+The full [CI 39664376508](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39664376508) on `a4fb2a6` passed Agent session contracts, then stopped at three statement layouts in Desktop formatting. The exact CI-generated formatting repair is applied without changing behavior; native execution was skipped.
+
 The focused [CI 39663797283](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39663797283) on `4a4463a` passed the real input, AX/CF and process-guard contracts with the new Cancel diagnostic required to be null before trust. The full [CI 39664030246](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39664030246) stopped at three required blank lines; its exact generated repair is applied. Desktop and native jobs were skipped, so the post-trust Cancel diagnostic still needs runtime validation.
 
 A new failure-only Cancel diagnostic reuses the existing root attribute reads, exact reference comparisons, roles and action-availability checks. It reports six bounded counts, with incomplete stages left null and the primary values copied before cleanup. The original per-element read order, target authority, success receipts and fatal checks are preserved. All three strict failure parsers and the real INPUT fixture share the exact contract. Independent source review and focused input CI passed; full native CI validation remains pending.

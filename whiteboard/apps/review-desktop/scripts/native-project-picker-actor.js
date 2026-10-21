@@ -1693,7 +1693,8 @@ function buttonsFromAttributes(
   const references = [];
   let appOwnerAttributePresentCount = 0;
 
-  const sheetOwnerKnown = ownerContext &&
+  const sheetOwnerKnown =
+    ownerContext &&
     ["owned-app", "foreign-candidate"].includes(ownerContext.sheetPIDRelation);
 
   let serviceOwnerAttributePresentCount = sheetOwnerKnown ? 0 : null;
@@ -1704,7 +1705,8 @@ function buttonsFromAttributes(
     if (diagnostic && button) {
       if (
         owner === ownerContext.homeWindow ||
-        (owner === ownerContext.sheet && ownerContext.sheetPIDRelation === "owned-app")
+        (owner === ownerContext.sheet &&
+          ownerContext.sheetPIDRelation === "owned-app")
       ) {
         appOwnerAttributePresentCount += 1;
       } else if (
@@ -1725,7 +1727,8 @@ function buttonsFromAttributes(
 
   if (diagnostic) {
     diagnostic.appOwnerAttributePresentCount = appOwnerAttributePresentCount;
-    diagnostic.serviceOwnerAttributePresentCount = serviceOwnerAttributePresentCount;
+    diagnostic.serviceOwnerAttributePresentCount =
+      serviceOwnerAttributePresentCount;
     diagnostic.uniqueReferenceCount = references.length;
   }
 
