@@ -1978,12 +1978,15 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     ].sort();
 
     const observedKeys = Object.keys(candidate).sort();
+
     const preTrustFailure = ['IMPORT', 'INPUT'].includes(candidate.failurePhase)
       && candidate.currentHelperPID === null
       && candidate.currentClientTrusted === null;
+
     const trustFailure = candidate.failurePhase === 'TRUST'
       && candidate.currentHelperPID === observation.pid
       && [null, false].includes(candidate.currentClientTrusted);
+
     const postTrustFailure = actorFailurePhases.has(candidate.failurePhase)
       && !['IMPORT', 'INPUT', 'TRUST'].includes(candidate.failurePhase)
       && candidate.currentHelperPID === observation.pid
