@@ -664,6 +664,7 @@ async function captureNativeDesktopScreenshot({ relativePath, targetApp, expecte
     totalElapsedMs: null,
     stagingQuarantined: false,
   };
+
   const result = {
     relativePath,
     status: 'failed',
@@ -833,6 +834,7 @@ async function captureNativeDesktopScreenshot({ relativePath, targetApp, expecte
   }
 
   let finished = await exitedWithin(closed, Math.max(0, commandDeadline - Date.now()));
+
   const commandTimedOut = !finished
     || (closeObservedAtMs !== null && closeObservedAtMs > commandDeadline);
 
@@ -867,7 +869,9 @@ async function captureNativeDesktopScreenshot({ relativePath, targetApp, expecte
   }
 
   if (spawnFailed) processCleanup.errorCode ??= 'capture-spawn-failed';
+
   if (stdoutFailed || stderrFailed) processCleanup.errorCode ??= 'capture-output-stream-failed';
+
   if (!exitResult || !closeResult) processCleanup.errorCode ??= 'capture-close-unverified';
   processCleanup.commandDurationMs = closeObservedAtMs === null
     ? Date.now() - startedAt
@@ -875,11 +879,14 @@ async function captureNativeDesktopScreenshot({ relativePath, targetApp, expecte
 
   try {
     const inventory = processInventory();
+
     const identities = ownership.captured
       ? [...ownership.identities.values()]
       : [{ pid: captureChild.pid }];
+
     const pidsAbsent = identities.every(identity =>
       !inventory.has(identity.pid) && !processAlive(identity.pid));
+
     const groupAbsent = ![...inventory.values()].some(identity => identity.pgid === captureChild.pid)
       && !processGroupAlive(captureChild.pid);
 
@@ -926,16 +933,23 @@ async function captureNativeDesktopScreenshot({ relativePath, targetApp, expecte
   }
 
   if (stdoutBytes > 4_096 || stderrBytes > 4_096) result.reason = 'capture-output-bound-exceeded';
+
   if (commandTimedOut) result.reason = 'capture-timeout';
+
   if (!exitResult || !closeResult || exitResult.code !== 0 || exitResult.signal !== null) {
     result.reason = 'capture-command-failed';
   }
+
   if (!processCleanup.identityCaptured) {
     result.reason = processCleanup.errorCode ?? 'capture-identity-unavailable';
   }
+
   if (processCleanup.errorCode !== null) result.reason = processCleanup.errorCode;
+
   if (!ownedOutput) result.reason = 'capture-output-missing';
+
   if (ownedOutput && outputBytes === 0) result.reason = 'capture-output-empty';
+
   if (outputBytes > MAX_STARTUP_SCREENSHOT_BYTES) result.reason = 'size-limit-exceeded';
 
   if (result.reason !== 'capture-failed') {
