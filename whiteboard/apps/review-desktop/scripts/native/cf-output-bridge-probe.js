@@ -32,8 +32,6 @@ function run(argv) {
 
     ObjC.import("Foundation");
     ObjC.import("CoreFoundation");
-    ObjC.bindFunction("CFGetTypeID", ["unsigned long", ["pointer"]]);
-    ObjC.bindFunction("CFEqual", ["bool", ["pointer", "pointer"]]);
 
     phase = "OWN_PID";
     ownPID = Number($.NSProcessInfo.processInfo.processIdentifier);
@@ -81,18 +79,11 @@ function run(argv) {
       );
     }
 
-    phase = "FIXTURE_TYPE";
+    phase = "FIXTURE_CLASS";
     emitProgress(mode, ownPID, phase);
-    const fixtureTypeID = Number($.CFGetTypeID(fixtureValue));
-    const fixtureExpectedTypeID = Number($.CFStringGetTypeID());
+    const fixtureClassMatches = fixtureValue.isKindOfClass($.NSString);
 
-    if (
-      !Number.isSafeInteger(fixtureTypeID) ||
-      fixtureTypeID < 1 ||
-      !Number.isSafeInteger(fixtureExpectedTypeID) ||
-      fixtureExpectedTypeID < 1 ||
-      fixtureTypeID !== fixtureExpectedTypeID
-    ) {
+    if (fixtureClassMatches !== true && fixtureClassMatches !== 1) {
       errorCode = "fixture-value-not-cfstring";
 
       return makeReceipt(
@@ -109,7 +100,7 @@ function run(argv) {
 
     phase = "FIXTURE_EQUALITY";
     emitProgress(mode, ownPID, phase);
-    const fixtureEqual = $.CFEqual(fixtureValue, expected);
+    const fixtureEqual = fixtureValue.isEqualToString(expected);
 
     if (fixtureEqual !== true && fixtureEqual !== 1) {
       errorCode = "fixture-value-mismatch";
@@ -130,9 +121,13 @@ function run(argv) {
 
     phase = "FUNCTION_BINDING";
     emitProgress(mode, ownPID, phase);
+    const outputValueType = mode === "bound-id-ref" ? "id" : "pointer";
+
+    ObjC.bindFunction("CFGetTypeID", ["unsigned long", [outputValueType]]);
+    ObjC.bindFunction("CFEqual", ["bool", [outputValueType, "id"]]);
     ObjC.bindFunction("CFDictionaryGetValueIfPresent", [
       "bool",
-      ["pointer", "pointer", "pointer"],
+      ["id", "id", "pointer"],
     ]);
 
     phase = "OUTPUT_REF";
