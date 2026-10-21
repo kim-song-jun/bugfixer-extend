@@ -35,6 +35,7 @@ const allowedInputStages = new Set([
 const expectedFailureKeys = [
   'actionCount',
   'appPID',
+  'arrayQueryDiagnostic',
   'cleanupStatus',
   'currentClientTrusted',
   'currentHelperPID',
@@ -203,6 +204,7 @@ function parseReceipt(stdout, stdoutBytes) {
       receipt.guardTransportStage !== null || receipt.sheetPIDRelation !== null ||
       receipt.cancelCandidateCount !== null || receipt.cancelControlStage !== null ||
       receipt.panelPidMismatchDiagnostic !== null ||
+      receipt.arrayQueryDiagnostic !== null ||
       receipt.pidQueryStatus !== null || receipt.pidMismatchDiagnostic !== null ||
       receipt.typeIdDiagnostic !== null || receipt.windowRoleFailureStage !== null ||
       receipt.windowRoleAXErrorStatus !== null ||

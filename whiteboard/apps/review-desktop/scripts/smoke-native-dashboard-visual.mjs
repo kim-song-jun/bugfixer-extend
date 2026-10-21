@@ -1951,6 +1951,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     const expectedKeys = [
       'actionCount',
       'appPID',
+      'arrayQueryDiagnostic',
       'cleanupStatus',
       'currentClientTrusted',
       'currentHelperPID',
@@ -2005,6 +2006,10 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       || (candidate.failureCode === 'panel-element-pid-mismatch'
         ? !validPanelPidMismatchDiagnostic(candidate.panelPidMismatchDiagnostic)
         : candidate.panelPidMismatchDiagnostic !== null)
+      || (candidate.failureCode === 'ax-array-status-failed'
+        && ['DISCOVER', 'CANCEL'].includes(candidate.failurePhase)
+        ? !validArrayQueryDiagnostic(candidate.arrayQueryDiagnostic)
+        : candidate.arrayQueryDiagnostic !== null)
       || !['not-needed', 'sheet-canceled-and-drained', 'unverified'].includes(candidate.cleanupStatus)
       || (candidate.failurePhase === 'INPUT'
         && (candidate.cleanupStatus !== 'not-needed'
@@ -2032,6 +2037,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     observation.actorFailurePhase = candidate.failurePhase;
     observation.actorFailureCode = candidate.failureCode;
     observation.panelPidMismatchDiagnostic = candidate.panelPidMismatchDiagnostic;
+    observation.arrayQueryDiagnostic = candidate.arrayQueryDiagnostic;
     observation.inputTransportStage = candidate.inputTransportStage;
     observation.inputPayloadByteCount = candidate.inputPayloadByteCount;
     observation.inputTargetPathLength = candidate.inputTargetPathLength;
@@ -2108,6 +2114,24 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     return [value.actualPID, value.expectedPID].every(pid =>
       Number.isSafeInteger(pid) && pid >= 1 && pid <= 2_147_483_647)
       && value.actualPID !== value.expectedPID;
+  };
+
+  const validArrayQueryDiagnostic = value => {
+    if (value === null) return true;
+
+    if (Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) return false;
+
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([
+      'role', 'source', 'status',
+    ])) return false;
+
+    return value.source === 'descendant-children'
+      && Number.isInteger(value.status)
+      && value.status >= -2_147_483_648
+      && value.status <= 2_147_483_647
+      && value.status !== 0
+      && (value.role === null || nativePickerRoles.has(value.role));
   };
 
   const validRoleCounts = value => {
@@ -2438,6 +2462,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       const allowedKeys = [
         'actionCount',
         'appPID',
+        'arrayQueryDiagnostic',
         'cleanupStatus',
         'currentClientTrusted',
         'currentHelperPID',
@@ -2543,6 +2568,10 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'panel-element-pid-mismatch'
           ? !validPanelPidMismatchDiagnostic(result.panelPidMismatchDiagnostic)
           : result.panelPidMismatchDiagnostic !== null)
+        || (result.failureCode === 'ax-array-status-failed'
+          && ['DISCOVER', 'CANCEL'].includes(result.failurePhase)
+          ? !validArrayQueryDiagnostic(result.arrayQueryDiagnostic)
+          : result.arrayQueryDiagnostic !== null)
         || ![
           null,
           'copy',
@@ -2608,6 +2637,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
+      observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
@@ -2638,6 +2668,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       const expectedKeys = [
         'actionCount',
         'appPID',
+        'arrayQueryDiagnostic',
         'cleanupStatus',
         'currentClientTrusted',
         'currentHelperPID',
@@ -2685,6 +2716,10 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'panel-element-pid-mismatch'
           ? !validPanelPidMismatchDiagnostic(result.panelPidMismatchDiagnostic)
           : result.panelPidMismatchDiagnostic !== null)
+        || (result.failureCode === 'ax-array-status-failed'
+          && ['DISCOVER', 'CANCEL'].includes(result.failurePhase)
+          ? !validArrayQueryDiagnostic(result.arrayQueryDiagnostic)
+          : result.arrayQueryDiagnostic !== null)
         || ![
           null,
           'copy',
@@ -2750,6 +2785,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
+      observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(

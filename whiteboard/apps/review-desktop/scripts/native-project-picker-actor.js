@@ -95,6 +95,8 @@ let pidMismatchDiagnostic;
 
 let panelPidMismatchDiagnostic;
 
+let arrayQueryDiagnostic;
+
 let guardRequestHandle;
 
 let guardResponseHandle;
@@ -155,6 +157,7 @@ function run(argv) {
   windowsAttributeAXErrorStatus = null;
   pidMismatchDiagnostic = null;
   panelPidMismatchDiagnostic = null;
+  arrayQueryDiagnostic = null;
   guardRequestHandle = null;
   guardResponseHandle = null;
   guardRequestId = 0;
@@ -571,6 +574,11 @@ function run(argv) {
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
     const primaryPanelPidMismatchDiagnostic = panelPidMismatchDiagnostic;
     const primarySheetPIDRelation = sheetPIDRelation;
+    const primaryArrayQueryDiagnostic =
+      primaryFailureCode === "ax-array-status-failed" &&
+      ["DISCOVER", "CANCEL"].includes(failurePhase)
+        ? arrayQueryDiagnostic
+        : null;
 
     const primaryCancelCandidateCount =
       failurePhase === "CANCEL" ? cancelCandidateCount : null;
@@ -620,6 +628,7 @@ function run(argv) {
       windowsAttributeAXErrorStatus: primaryWindowsAttributeAXErrorStatus,
       pidMismatchDiagnostic: primaryPidMismatchDiagnostic,
       panelPidMismatchDiagnostic: primaryPanelPidMismatchDiagnostic,
+      arrayQueryDiagnostic: primaryArrayQueryDiagnostic,
       actionCount,
       windowCount,
       sheetCount,
@@ -1100,6 +1109,25 @@ function copyDescendantChildren(element, expectedSheet, homeWindow) {
 
   if (isOptionalAttributeMissing(copied.status) && LEAF_ROLES.has(role)) {
     return [];
+  }
+
+  if (
+    copied.status !== Number($.kAXErrorSuccess) &&
+    Number.isInteger(copied.status) &&
+    copied.status >= -2_147_483_648 &&
+    copied.status <= 2_147_483_647
+  ) {
+    let diagnosticRole = null;
+
+    if (role !== null && role !== undefined) {
+      diagnosticRole = ALLOWED_ROLES.has(role) ? role : "AXOther";
+    }
+
+    arrayQueryDiagnostic = {
+      source: "descendant-children",
+      status: copied.status,
+      role: diagnosticRole,
+    };
   }
 
   const children = copyArrayElements(copied);
