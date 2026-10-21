@@ -41,35 +41,72 @@ jobs:
         timeout-minutes: 3
         run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
 
-      - name: AX PID bridge ABI diagnostic
-        timeout-minutes: 1
+      - name: AX PID and CF output-pointer bridge ABI diagnostics
+        timeout-minutes: 2
         run: |
           node --input-type=module <<'NODE'
           import { spawn } from 'node:child_process';
 
-          const modes = [
-            'metadata-ref',
-            'bound-int-ref',
+          const probes = [
+            {
+              kind: 'ax-pid',
+              script: 'ax-pid-bridge-probe.js',
+              mode: 'metadata-ref',
+            },
+            {
+              kind: 'ax-pid',
+              script: 'ax-pid-bridge-probe.js',
+              mode: 'bound-int-ref',
+            },
+            {
+              kind: 'cf-output',
+              script: 'cf-output-bridge-probe.js',
+              mode: 'metadata-ref',
+            },
+            {
+              kind: 'cf-output',
+              script: 'cf-output-bridge-probe.js',
+              mode: 'bound-untyped-ref',
+            },
+            {
+              kind: 'cf-output',
+              script: 'cf-output-bridge-probe.js',
+              mode: 'bound-pointer-ref',
+            },
+            {
+              kind: 'cf-output',
+              script: 'cf-output-bridge-probe.js',
+              mode: 'bound-id-ref',
+            },
           ];
           const allowedPhases = new Set([
             'IMPORT',
             'INPUT',
             'OWN_PID',
+            'FIXTURE',
+            'FUNCTION_BINDING',
             'APPLICATION',
             'ELEMENT_TYPE',
             'PID_BINDING',
             'PID_QUERY',
             'PID_VALUE',
+            'OUTPUT_REF',
+            'DICTIONARY_LOOKUP',
+            'OUTPUT_VALUE',
+            'VALUE_TYPE',
+            'VALUE_EQUALITY',
             'COMPLETE',
           ]);
           const results = [];
+          let cfOutputTypedContractPassed = false;
 
-          for (const mode of modes) {
+          for (const probeCase of probes) {
+            const { kind, script, mode } = probeCase;
             const startedAt = Date.now();
             const child = spawn('/usr/bin/osascript', [
               '-l',
               'JavaScript',
-              'scripts/native/ax-pid-bridge-probe.js',
+              `scripts/native/${script}`,
               mode,
             ], {
               stdio: ['ignore', 'pipe', 'ignore'],
@@ -172,21 +209,15 @@ jobs:
               }
             }
 
+            const expectedKeys = kind === 'ax-pid'
+              ? 'errorCode,mode,ownPID,phase,returnedPID,status'
+              : 'errorCode,found,mode,ownPID,phase,valueTypeMatches,valuesEqual';
             const validShape = probe !== null &&
-              Object.keys(probe).sort().join(',') ===
-                'errorCode,mode,ownPID,phase,returnedPID,status' &&
+              Object.keys(probe).sort().join(',') === expectedKeys &&
               probe.mode === mode &&
               (probe.ownPID === null ||
                 (Number.isSafeInteger(probe.ownPID) &&
                   probe.ownPID > 0 && probe.ownPID <= 2_147_483_647)) &&
-              (probe.status === null ||
-                (Number.isSafeInteger(probe.status) &&
-                  probe.status >= -2_147_483_648 &&
-                  probe.status <= 2_147_483_647)) &&
-              (probe.returnedPID === null ||
-                (Number.isSafeInteger(probe.returnedPID) &&
-                  probe.returnedPID > 0 &&
-                  probe.returnedPID <= 2_147_483_647)) &&
               allowedPhases.has(probe.phase) &&
               (probe.errorCode === null ||
                 [
@@ -198,13 +229,40 @@ jobs:
                   'returned-pid-invalid',
                   'returned-pid-mismatch',
                   'bridge-operation-threw',
+                  'fixture-key-not-found',
+                  'output-value-unavailable',
+                  'output-value-not-cfstring',
+                  'output-value-mismatch',
                 ].includes(probe.errorCode));
 
-            const identityMatches = validShape &&
+            const axPIDShapeValid = kind !== 'ax-pid' ||
+              (probe !== null &&
+                (probe.status === null ||
+                  (Number.isSafeInteger(probe.status) &&
+                    probe.status >= -2_147_483_648 &&
+                    probe.status <= 2_147_483_647)) &&
+                (probe.returnedPID === null ||
+                  (Number.isSafeInteger(probe.returnedPID) &&
+                    probe.returnedPID > 0 &&
+                    probe.returnedPID <= 2_147_483_647)));
+            const cfOutputShapeValid = kind !== 'cf-output' ||
+              (probe !== null &&
+                (probe.found === null || probe.found === true ||
+                  probe.found === false) &&
+                (probe.valueTypeMatches === null ||
+                  probe.valueTypeMatches === true ||
+                  probe.valueTypeMatches === false) &&
+                (probe.valuesEqual === null ||
+                  probe.valuesEqual === true || probe.valuesEqual === false));
+            const receiptShapeValid = validShape && axPIDShapeValid &&
+              cfOutputShapeValid;
+
+            const identityMatches = receiptShapeValid &&
               probe.ownPID === childPID;
             const invocation = {
               mode,
-              command: 'osascript -l JavaScript scripts/native/ax-pid-bridge-probe.js',
+              kind,
+              command: `osascript -l JavaScript scripts/native/${script}`,
               cwd: 'whiteboard/apps/review-desktop',
               parentPID: process.pid,
               childPID: Number.isSafeInteger(childPID) ? childPID : null,
@@ -221,37 +279,67 @@ jobs:
               spawnFailed,
               parseFailed,
               identityMatches,
-              probe: validShape ? probe : null,
+              probe: receiptShapeValid ? probe : null,
             };
             results.push(invocation);
             process.stdout.write(`${JSON.stringify(invocation)}\n`);
 
-            if (
-              !validShape ||
-              !identityMatches ||
-              !outcome.closed ||
-              !exitObserved ||
-              finalExitCode !== 0 ||
-              finalSignal !== null ||
-              !cleanupVerified ||
-              timedOut ||
-              outputTooLarge ||
-              spawnFailed ||
-              parseFailed ||
-              probe.phase !== 'COMPLETE' ||
-              probe.status !== 0 ||
-              probe.errorCode !== null ||
-              probe.returnedPID !== probe.ownPID
-            ) {
+            const processLifecycleVerified = receiptShapeValid &&
+              identityMatches && outcome.closed && exitObserved &&
+              finalExitCode === 0 && finalSignal === null &&
+              cleanupVerified && !timedOut && !outputTooLarge &&
+              !spawnFailed && !parseFailed;
+            const axPIDContractPassed = kind !== 'ax-pid' ||
+              (receiptShapeValid && probe.phase === 'COMPLETE' &&
+                probe.status === 0 && probe.errorCode === null &&
+                probe.returnedPID === probe.ownPID && finalExitCode === 0 &&
+                finalSignal === null && !parseFailed);
+            const cfOutputContractPassed = kind !== 'cf-output' ||
+              (receiptShapeValid && probe.phase === 'COMPLETE' &&
+                probe.found === true && probe.valueTypeMatches === true &&
+                probe.valuesEqual === true && probe.errorCode === null &&
+                finalExitCode === 0 && finalSignal === null && !parseFailed);
+
+            if (kind === 'cf-output' && mode === 'metadata-ref' &&
+                !cfOutputContractPassed) {
               process.exitCode = 1;
             }
 
-            if (!outcome.closed || !exitObserved) break;
+            if (kind === 'cf-output' &&
+                (mode === 'bound-pointer-ref' || mode === 'bound-id-ref') &&
+                cfOutputContractPassed) {
+              cfOutputTypedContractPassed = true;
+            }
+
+            if (!processLifecycleVerified ||
+                (kind === 'ax-pid' && !axPIDContractPassed)) {
+              process.exitCode = 1;
+            }
+
+            if (!processLifecycleVerified) break;
+          }
+
+          const cfOutputBaselinePassed = results.some(result =>
+            result.kind === 'cf-output' && result.mode === 'metadata-ref' &&
+            result.identityMatches && result.cleanupVerified &&
+            result.probe !== null && result.probe.phase === 'COMPLETE' &&
+            result.probe.found === true &&
+            result.probe.valueTypeMatches === true &&
+            result.probe.valuesEqual === true &&
+            result.probe.errorCode === null &&
+            result.exitCode === 0 && result.signal === null &&
+            !result.timedOut && !result.outputTooLarge && !result.spawnFailed &&
+            !result.parseFailed);
+
+          if (!cfOutputBaselinePassed || !cfOutputTypedContractPassed) {
+            process.exitCode = 1;
           }
 
           process.stdout.write(`${JSON.stringify({
-            event: 'ax-pid-bridge-probe-summary',
+            event: 'native-bridge-output-pointer-probe-summary',
             parentPID: process.pid,
+            cfOutputBaselinePassed,
+            cfOutputTypedContractPassed,
             results,
           })}\n`);
           NODE
