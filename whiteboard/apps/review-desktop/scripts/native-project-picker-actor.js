@@ -128,6 +128,10 @@ function run(argv) {
     ]);
     ObjC.bindFunction("CFArrayGetTypeID", ["unsigned long", []]);
     ObjC.bindFunction("AXUIElementGetPid", ["int", ["pointer", "pointer"]]);
+    ObjC.bindFunction("AXUIElementCopyAttributeValue", [
+      "int",
+      ["pointer", "pointer", "pointer"],
+    ]);
     AX = {
       windows: $("AXWindows"),
       role: $("AXRole"),
