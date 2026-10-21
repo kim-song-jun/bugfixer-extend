@@ -41,6 +41,15 @@ jobs:
         timeout-minutes: 3
         run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
 
+      - name: Compile and verify native panel process identity guard
+        timeout-minutes: 2
+        run: |
+          clang -std=c11 scripts/native/panel-process-guard.c \
+            -framework Security -framework CoreFoundation \
+            -o "$RUNNER_TEMP/panel-process-guard"
+          node scripts/native/panel-process-guard-fixture.mjs \
+            "$RUNNER_TEMP/panel-process-guard"
+
       - name: AX PID and CF output-pointer bridge ABI diagnostic
         timeout-minutes: 2
         run: |
