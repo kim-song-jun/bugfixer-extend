@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+The next [CI 39605589462](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39605589462) on `f941f6e` stopped before tests at two blank lines required after the formatter expanded declarations. Its exact two-line repair is applied; no native runtime result was produced.
+
 The following [CI 39604509530](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39604509530) on `e584605` passed the Agent job, then stopped at formatting of the native picker actor. Desktop build and macOS did not run. The CI-generated eight-hunk actor formatting repair is applied without changing its control flow and still needs a matching CI run.
 
 The integration [CI 39604003232](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39604003232) on `4557dd1` stopped at 45 required blank lines before contract tests; Desktop and macOS were skipped. Its CI-generated repair adds exactly those 45 blank lines across the actor, broker, real-process fixture and smoke wrapper, without changing nonblank content. The corrected integration still needs CI.

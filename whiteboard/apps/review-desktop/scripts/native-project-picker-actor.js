@@ -1362,10 +1362,12 @@ function attachedSheets(homeWindow) {
     homeWindow,
     AX.children,
   );
+
   const sheets = [];
 
   for (const element of homeChildren) {
     const pid = readElementPID(element);
+
     const newlyAttestedForeignChild =
       pid !== expectedAXPID && panelPID === null;
 
