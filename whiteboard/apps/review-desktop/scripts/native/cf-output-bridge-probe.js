@@ -258,6 +258,7 @@ function emitProgress(mode, ownPID, phase) {
     ownPID,
     phase,
   });
+
   const data = $.NSString.stringWithString(`${event}\n`).dataUsingEncoding(
     $.NSUTF8StringEncoding,
   );
