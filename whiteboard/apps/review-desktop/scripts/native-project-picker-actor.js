@@ -83,6 +83,12 @@ let typeIdDiagnostic;
 
 let pidQueryStatus;
 
+let windowRoleFailureStage;
+
+let windowRoleAXErrorStatus;
+
+let readingHomeWindowRole;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -103,6 +109,9 @@ function run(argv) {
   failureCode = null;
   typeIdDiagnostic = null;
   pidQueryStatus = null;
+  windowRoleFailureStage = null;
+  windowRoleAXErrorStatus = null;
+  readingHomeWindowRole = false;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -231,13 +240,21 @@ function run(argv) {
 
     homeWindow = windows[0];
 
-    failureCode = "window-role-query-failed";
+    failureCode = null;
     let homeWindowRole;
 
     try {
+      readingHomeWindowRole = true;
+      windowRoleFailureStage = "copy";
       homeWindowRole = readStringAttribute(homeWindow, AX.role);
+      readingHomeWindowRole = false;
     } catch (error) {
-      failureCode = "window-role-query-failed";
+      readingHomeWindowRole = false;
+
+      if (failureCode === null) {
+        failureCode = "window-role-query-failed";
+      }
+
       throw error;
     }
 
@@ -388,6 +405,8 @@ function run(argv) {
     const primaryFailureCode = failureCode;
     const primaryTypeIdDiagnostic = typeIdDiagnostic;
     const primaryPidQueryStatus = pidQueryStatus;
+    const primaryWindowRoleFailureStage = windowRoleFailureStage;
+    const primaryWindowRoleAXErrorStatus = windowRoleAXErrorStatus;
 
     if (sheet && homeWindow) {
       try {
@@ -409,6 +428,8 @@ function run(argv) {
       failureCode: primaryFailureCode,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
       pidQueryStatus: primaryPidQueryStatus,
+      windowRoleFailureStage: primaryWindowRoleFailureStage,
+      windowRoleAXErrorStatus: primaryWindowRoleAXErrorStatus,
       actionCount,
       windowCount,
       sheetCount,
@@ -636,6 +657,16 @@ function copyRequiredElementAttribute(element, attribute) {
 function readStringAttribute(element, attribute) {
   const copied = copyAttribute(element, attribute);
 
+  if (readingHomeWindowRole && attribute === AX.role) {
+    if (copied.status !== Number($.kAXErrorSuccess)) {
+      windowRoleFailureStage = "ax-status";
+      windowRoleAXErrorStatus = copied.status;
+      failureCode = "window-role-query-failed";
+    } else {
+      windowRoleFailureStage = "unwrap";
+    }
+  }
+
   if (isOptionalAttributeMissing(copied.status)) {
     return undefined;
   }
@@ -646,12 +677,25 @@ function readStringAttribute(element, attribute) {
 
   const value = ObjC.unwrap(copied.value);
 
-  if (
-    value === null ||
-    value === undefined ||
-    Object.getPrototypeOf(value) !== String.prototype
-  ) {
+  if (value === null || value === undefined) {
+    if (readingHomeWindowRole && attribute === AX.role) {
+      windowRoleFailureStage = "null-value";
+    }
+
     return undefined;
+  }
+
+  if (Object.getPrototypeOf(value) !== String.prototype) {
+    if (readingHomeWindowRole && attribute === AX.role) {
+      windowRoleFailureStage = "non-string";
+    }
+
+    return undefined;
+  }
+
+  if (readingHomeWindowRole && attribute === AX.role) {
+    windowRoleFailureStage = null;
+    failureCode = null;
   }
 
   return value;

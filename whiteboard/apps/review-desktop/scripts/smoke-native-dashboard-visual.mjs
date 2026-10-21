@@ -1897,6 +1897,8 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'status',
         'textFieldCount',
         'typeIdDiagnostic',
+        'windowRoleAXErrorStatus',
+        'windowRoleFailureStage',
         'windowCount',
       ];
 
@@ -1912,6 +1914,23 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'element-pid-query-failed'
           ? result.pidQueryStatus === null
           : result.pidQueryStatus !== null)
+        || ![
+          null,
+          'copy',
+          'ax-status',
+          'unwrap',
+          'null-value',
+          'non-string',
+        ].includes(result.windowRoleFailureStage)
+        || !(result.windowRoleAXErrorStatus === null
+          || (Number.isInteger(result.windowRoleAXErrorStatus)
+            && result.windowRoleAXErrorStatus >= -2_147_483_648
+            && result.windowRoleAXErrorStatus <= 2_147_483_647))
+        || (result.windowRoleFailureStage === 'ax-status'
+          ? result.windowRoleAXErrorStatus === null
+          : result.windowRoleAXErrorStatus !== null)
+        || (result.windowRoleFailureStage !== null
+          && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 1))
         || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
@@ -1943,6 +1962,8 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorFailureCode = result.failureCode;
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.actorPidQueryStatus = result.pidQueryStatus;
+      observation.actorWindowRoleFailureStage = result.windowRoleFailureStage;
+      observation.actorWindowRoleAXErrorStatus = result.windowRoleAXErrorStatus;
       observation.currentHelperPID = result.currentHelperPID;
       observation.currentClientTrusted = result.currentClientTrusted;
       observation.result = 'failed';
@@ -1978,6 +1999,8 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'status',
         'textFieldCount',
         'typeIdDiagnostic',
+        'windowRoleAXErrorStatus',
+        'windowRoleFailureStage',
         'windowCount',
       ];
 
@@ -1992,6 +2015,23 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'element-pid-query-failed'
           ? result.pidQueryStatus === null
           : result.pidQueryStatus !== null)
+        || ![
+          null,
+          'copy',
+          'ax-status',
+          'unwrap',
+          'null-value',
+          'non-string',
+        ].includes(result.windowRoleFailureStage)
+        || !(result.windowRoleAXErrorStatus === null
+          || (Number.isInteger(result.windowRoleAXErrorStatus)
+            && result.windowRoleAXErrorStatus >= -2_147_483_648
+            && result.windowRoleAXErrorStatus <= 2_147_483_647))
+        || (result.windowRoleFailureStage === 'ax-status'
+          ? result.windowRoleAXErrorStatus === null
+          : result.windowRoleAXErrorStatus !== null)
+        || (result.windowRoleFailureStage !== null
+          && (result.failurePhase !== 'WINDOWS' || result.windowCount !== 1))
         || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
@@ -2023,6 +2063,8 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorFailureCode = result.failureCode;
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.actorPidQueryStatus = result.pidQueryStatus;
+      observation.actorWindowRoleFailureStage = result.windowRoleFailureStage;
+      observation.actorWindowRoleAXErrorStatus = result.windowRoleAXErrorStatus;
       observation.result = 'failed';
       observation.sheetCleanup = result.cleanupStatus;
       observation.windowCount = result.windowCount;
