@@ -373,6 +373,17 @@ jobs:
           --test --test-concurrency=1
           code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionContentCapture.test.ts
 
+      - name: Compile and verify native picker process guard
+        id: native_panel_guard
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        timeout-minutes: 3
+        run: >-
+          clang -std=c11 apps/review-desktop/scripts/native/panel-process-guard.c
+          -framework Security -framework CoreFoundation
+          -o "$RUNNER_TEMP/panel-process-guard"
+          && node apps/review-desktop/scripts/native/panel-process-guard-fixture.mjs
+          "$RUNNER_TEMP/panel-process-guard"
+
       - name: Native app process identity cleanup contracts
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         timeout-minutes: 3
@@ -380,7 +391,9 @@ jobs:
         run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
 
       - name: Native project dashboard smoke
-        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' && steps.native_panel_guard.outcome == 'success' }}
+        env:
+          WHITEBOARD_PANEL_PROCESS_GUARD: ${{ runner.temp }}/panel-process-guard
         run: node apps/review-desktop/scripts/smoke-native-dashboard-visual.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-ui-smoke"
 
       - name: Native AI session PTY contracts

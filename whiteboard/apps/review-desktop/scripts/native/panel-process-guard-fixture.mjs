@@ -7,15 +7,15 @@ import {
   stopOwnedProcessTree,
   verifyLiveIdentity,
 } from './app-process-cleanup.mjs';
+import { runPanelProcessGuard } from './panel-process-broker.mjs';
 
 const guardPath = process.argv[2];
 const failures = [];
 const cleanupResults = [];
 let sleepRecord;
-let guardRecord;
 let sleepOwnership;
-let guardOwnership;
 let guardReceipt = null;
+let guardCleanup;
 
 function startChild(command, args, stdio) {
   const child = spawn(command, args, { detached: true, stdio });
@@ -257,51 +257,6 @@ async function cleanupChild(record, ownership, label) {
   });
 }
 
-function parseGuardReceipt(record) {
-  if (record.stdoutTooLarge || record.stdoutBytes > 4096 ||
-      !record.stdout.endsWith('\n') || record.stdout.split('\n').length !== 3) {
-    throw new Error('guard-output-invalid');
-  }
-
-  const lines = record.stdout.split('\n');
-  const ready = JSON.parse(lines[0]);
-  const readyKeys = 'event,ownPID,targetPID,version';
-
-  if (Object.keys(ready).sort().join(',') !== readyKeys ||
-      ready.event !== 'panel-process-guard-ready' || ready.version !== 1 ||
-      ready.ownPID !== record.pid || ready.targetPID !== sleepRecord.pid) {
-    throw new Error('guard-ready-receipt-invalid');
-  }
-
-  const receipt = JSON.parse(lines[1]);
-  const expectedKeys =
-    'appleStatus,birthMicroseconds,birthSeconds,birthStable,errorCode,ownPID,panelRequirementStatus,pathMatchesSystemService,targetPID,verified,version';
-
-  if (Object.keys(receipt).sort().join(',') !== expectedKeys) {
-    throw new Error('guard-receipt-shape-invalid');
-  }
-
-  return receipt;
-}
-
-function validateReadyRecord(record) {
-  if (record.stdoutTooLarge || record.stdoutBytes > 4096 ||
-      !record.stdout.includes('\n')) {
-    return false;
-  }
-
-  const lines = record.stdout.split('\n');
-
-  if (lines.length !== 2 || lines[1] !== '') return false;
-
-  const ready = JSON.parse(lines[0]);
-  const readyKeys = 'event,ownPID,targetPID,version';
-
-  return Object.keys(ready).sort().join(',') === readyKeys &&
-    ready.event === 'panel-process-guard-ready' && ready.version === 1 &&
-    ready.ownPID === record.pid && ready.targetPID === sleepRecord.pid;
-}
-
 async function run() {
   if (!guardPath || !guardPath.startsWith('/')) {
     throw new Error('guard-path-invalid');
@@ -309,35 +264,13 @@ async function run() {
 
   sleepRecord = startChild('/bin/sleep', ['45'], 'ignore');
   sleepOwnership = await captureIdentity(sleepRecord, '/bin/sleep');
-
-  guardRecord = startChild(
+  const guardResult = await runPanelProcessGuard({
     guardPath,
-    [String(sleepRecord.pid)],
-    ['pipe', 'pipe', 'ignore'],
-  );
-  await waitFor(
-    () => guardRecord.stdout.includes('\n') || guardRecord.stdoutTooLarge ||
-      guardRecord.closeResult !== null,
-    'guard-ready-timeout',
-    3_000,
-  );
-
-  if (!validateReadyRecord(guardRecord)) {
-    throw new Error('guard-ready-handshake-invalid');
-  }
-
-  guardOwnership = await captureIdentity(guardRecord, guardPath);
-  guardRecord.child.stdin.end('RUN\n');
-  await waitFor(() => guardRecord.closeResult !== null,
-    'guard-execution-timeout', 10_000);
-  guardReceipt = parseGuardReceipt(guardRecord);
-
-  if (guardRecord.spawnFailed || guardRecord.stdinFailed ||
-      guardRecord.exitCode !== 0 || guardRecord.signal !== null ||
-      guardRecord.closeResult.code !== 0 ||
-      guardRecord.closeResult.signal !== null) {
-    throw new Error('guard-process-result-invalid');
-  }
+    targetPid: sleepRecord.pid,
+    targetIdentity: sleepOwnership.rootIdentity,
+  });
+  guardReceipt = guardResult.receipt;
+  guardCleanup = guardResult.guardCleanup;
 
   const targetIdentityStillLive = verifyLiveIdentity(
     sleepOwnership.rootIdentity,
@@ -346,7 +279,7 @@ async function run() {
   const sleepGroupStillLive = processGroupAlive(sleepRecord.pid);
 
   if (!targetIdentityStillLive || !sleepGroupStillLive ||
-      guardReceipt.version !== 1 || guardReceipt.ownPID !== guardRecord.pid ||
+      guardReceipt.version !== 1 || guardReceipt.ownPID !== guardCleanup?.pid ||
       guardReceipt.targetPID !== sleepRecord.pid ||
       !Number.isSafeInteger(guardReceipt.birthSeconds) ||
       guardReceipt.birthSeconds < 1 ||
@@ -358,17 +291,29 @@ async function run() {
       guardReceipt.appleStatus !== 0 ||
       guardReceipt.panelRequirementStatus !== -67050 ||
       guardReceipt.verified !== false ||
-      guardReceipt.errorCode !== 'target-path-mismatch') {
+      guardReceipt.errorCode !== 'target-path-mismatch' ||
+      guardResult.requestVerified !== false ||
+      guardResult.errorCode !== 'target-path-mismatch' ||
+      guardCleanup?.verified !== true) {
     throw new Error('guard-contract-result-invalid');
   }
 }
 
 try {
   await run();
-} catch {
+} catch (error) {
+  if (error?.guardCleanup) guardCleanup = error.guardCleanup;
   failures.push('panel-process-guard-contract-failed');
 } finally {
-  await cleanupChild(guardRecord, guardOwnership, 'guard');
+  cleanupResults.push({
+    label: 'guard',
+    pid: guardCleanup?.pid ?? null,
+    verified: guardCleanup?.verified === true,
+    exitObserved: guardCleanup?.exitObserved === true,
+    closed: guardCleanup?.closed === true,
+    pidAbsent: guardCleanup?.pidAbsent === true,
+    groupAbsent: guardCleanup?.groupAbsent === true,
+  });
   await cleanupChild(sleepRecord, sleepOwnership, 'sleep');
 }
 

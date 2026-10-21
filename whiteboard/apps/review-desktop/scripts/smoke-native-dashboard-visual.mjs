@@ -10,6 +10,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 import { chromium } from 'playwright';
+import {
+  captureOwnedProcessTree,
+  processAlive,
+  processGroupAlive,
+  processInventory,
+  stopOwnedProcessTree,
+  verifyLiveIdentity,
+} from './native/app-process-cleanup.mjs';
+import { runPanelProcessBroker } from './native/panel-process-broker.mjs';
 
 const [appArgument, outputArgument] = process.argv.slice(2);
 
@@ -1328,7 +1337,14 @@ async function startPackaged({ executable, userData, extensions, reviewHome, des
 
     await watchPage(page);
 
-    return { child, exited, browser, page, port, targetId: target.id, stdout, stderr, owned, consoleCaptures };
+    const appProcessIdentity = processInventory().get(child.pid);
+
+    if (!appProcessIdentity || appProcessIdentity.pgid !== child.pid
+      || !appProcessIdentity.command.includes(executable)) {
+      throw new FatalWaitError('Packaged app root identity is unavailable for native picker attestation');
+    }
+
+    return { child, exited, browser, page, port, targetId: target.id, stdout, stderr, owned, consoleCaptures, appProcessIdentity };
   } catch (error) {
     const cleanupFailures = [];
     const startupScreenshot = await captureStartupFailureScreenshot(child);
@@ -1607,6 +1623,132 @@ async function runNativeAccessibilityProbe() {
   }
 }
 
+async function captureNativeActorOwnership(child, observation) {
+  assert.ok(Number.isSafeInteger(child.pid) && child.pid > 0, 'The native actor needs a valid PID');
+
+  const rootIdentity = await waitFor(() => {
+    if (observation.exitObservedAt) return undefined;
+
+    return processInventory().get(child.pid);
+  }, 'the native actor process identity', 3_000);
+  const ownership = { captured: false, identities: new Map(), rootIdentity };
+
+  captureOwnedProcessTree({
+    rootPid: child.pid,
+    executablePath: '/usr/bin/osascript',
+    appExited: observation.exitObservedAt !== null,
+    state: ownership,
+  });
+
+  assert.ok(ownership.captured && ownership.rootIdentity,
+    'The native actor process tree must be captured before input is sent');
+  assert.ok(verifyLiveIdentity(ownership.rootIdentity, { rootPid: child.pid }),
+    'The native actor identity must remain live before input is sent');
+
+  return ownership;
+}
+
+function inspectNativeActorAbsence(pid, ownership) {
+  if (!ownership?.captured || !Number.isSafeInteger(pid) || pid < 1) {
+    return { pidsAbsent: false, groupAbsent: false, errorCode: 'actor-identity-unavailable' };
+  }
+
+  try {
+    const inventory = processInventory();
+    const pidsAbsent = [...ownership.identities.values()].every(identity =>
+      !inventory.has(identity.pid) && !processAlive(identity.pid));
+    const groupAbsent = ![...inventory.values()].some(identity => identity.pgid === pid)
+      && !processGroupAlive(pid);
+    const errorCode = !pidsAbsent
+      ? 'actor-processes-remain'
+      : groupAbsent ? null : 'actor-process-group-remains';
+
+    return { pidsAbsent, groupAbsent, errorCode };
+  } catch {
+    return { pidsAbsent: false, groupAbsent: false, errorCode: 'actor-absence-unverified' };
+  }
+}
+
+async function cleanupNativeActor(child, observation, ownership, terminate) {
+  let cleanupErrorCode = null;
+
+  if (ownership?.captured) {
+    if (terminate && !observation.exitObservedAt) {
+      try {
+        captureOwnedProcessTree({
+          rootPid: child.pid,
+          executablePath: '/usr/bin/osascript',
+          appExited: false,
+          state: ownership,
+        });
+      } catch {
+        cleanupErrorCode = 'actor-final-tree-capture-failed';
+      }
+    }
+
+    const before = inspectNativeActorAbsence(child.pid, ownership);
+
+    if (terminate || !before.pidsAbsent || !before.groupAbsent) {
+      try {
+        await stopOwnedProcessTree({
+          rootPid: child.pid,
+          rootIdentity: ownership.rootIdentity,
+          identities: [...ownership.identities.values()],
+          captured: ownership.captured,
+          isAppExited: () => observation.exitObservedAt !== null,
+          cleanup: [],
+          waitFor: (predicate, label, timeoutMs) => waitFor(predicate, label, timeoutMs),
+        });
+      } catch {
+        cleanupErrorCode = 'actor-owned-stop-unverified';
+      }
+    }
+  } else {
+    cleanupErrorCode = 'actor-identity-unavailable';
+  }
+
+  if (!observation.exitObservedAt) {
+    try {
+      await waitFor(() => observation.exitObservedAt !== null,
+        'the native actor close event', 5_000);
+    } catch {
+      cleanupErrorCode ??= 'actor-close-unverified';
+    }
+  }
+
+  const absence = inspectNativeActorAbsence(child.pid, ownership);
+
+  return {
+    verified: cleanupErrorCode === null && observation.exitObservedAt !== null &&
+      absence.pidsAbsent && absence.groupAbsent,
+    pidsAbsent: absence.pidsAbsent,
+    groupAbsent: absence.groupAbsent,
+    ownedProcessCount: ownership?.identities.size ?? 0,
+    errorCode: cleanupErrorCode ?? absence.errorCode,
+  };
+}
+
+function frameNativeActorPayload(payload) {
+  const body = Buffer.from(payload, 'utf8');
+
+  assert.ok(body.length >= 1 && body.length <= 16_384,
+    'Native folder picker input exceeded its bounded stdin payload');
+
+  return Buffer.concat([
+    Buffer.from(String(body.length).padStart(5, '0'), 'ascii'),
+    body,
+  ]);
+}
+
+async function writeNativeActorPayload(stream, frame) {
+  const outcome = await settleWithin(new Promise((resolve, reject) => {
+    stream.write(frame, error => error ? reject(error) : resolve(true));
+  }), 5_000);
+
+  assert.ok(outcome.status === 'settled' && outcome.value === true,
+    'Native folder picker input write did not complete within its bound');
+}
+
 async function runNativeProjectPickerActor(session, targetFolder, tag) {
   assert.equal(
     process.env.GITHUB_ACTIONS,
@@ -1623,6 +1765,13 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'darwin',
     'The native folder picker actor requires macOS',
   );
+
+  const guardPath = process.env.WHITEBOARD_PANEL_PROCESS_GUARD;
+
+  assert.ok(guardPath && path.isAbsolute(guardPath), 'The native panel process guard must be compiled in CI');
+  assert.ok(verifyLiveIdentity(session.appProcessIdentity, {
+    rootPid: session.child.pid,
+  }), 'The packaged app root identity must remain live before native picker automation');
 
   const executable = '/usr/bin/osascript';
 
@@ -1664,6 +1813,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'element-pid-query-failed',
     'element-pid-invalid',
     'element-pid-mismatch',
+    'panel-guard-failed',
     'windows-attribute-no-value',
     'windows-attribute-unsupported',
     'windows-attribute-query-failed',
@@ -1737,17 +1887,18 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     const payload = JSON.stringify({
       targetPath: mode === 'select' ? targetFolder : null,
     });
+    const payloadFrame = frameNativeActorPayload(payload);
 
-    if (Buffer.byteLength(payload) > 16_384) {
-      throw new Error(
-        'Native folder picker input exceeded its bounded stdin payload',
-      );
-    }
-
-    const child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(executable, args, {
+      detached: true,
+      stdio: [
+        'pipe',
+        'pipe',
+        'pipe',
+        'pipe',
+      ],
+    });
     let stdinFailed = false;
-
-    child.stdin.on('error', () => { stdinFailed = true; });
 
     const observation = {
       mode,
@@ -1761,7 +1912,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       exitObservedAt: null,
       exit: null,
       cleanupStatus: 'pending',
-      stdinBytes: Buffer.byteLength(payload),
+      stdinBytes: payloadFrame.length,
       stdoutBytes: 0,
       stderrBytes: 0,
       trustPromptRequested: false,
@@ -1771,8 +1922,13 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
     let stdout = '';
     let spawnFailed = false;
+    let brokerState;
+    let brokerFailureCode;
+    let actorOwnership;
+    const brokerController = new AbortController();
+
+    child.stdin.on('error', () => { stdinFailed = true; });
     child.once('error', () => { spawnFailed = true; });
-    child.stdin.end(payload);
     child.stdout.on('data', chunk => {
       observation.stdoutBytes += chunk.length;
 
@@ -1792,43 +1948,159 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       });
     });
 
-    const stopOwnedActor = async () => {
-      let closed = false;
+    try {
+      actorOwnership = await captureNativeActorOwnership(child, observation);
+      observation.actorProcessTreeCaptured = true;
+      observation.actorOwnedProcessCount = actorOwnership.identities.size;
+    } catch {
+      child.stdin.end();
+      child.stdio[3]?.destroy();
+      observation.failureCode = 'actor-identity-capture-failed';
+      const cleanup = await cleanupNativeActor(child, observation, undefined, false);
+      observation.cleanupStatus = cleanup.verified
+        ? 'identity-capture-failed-after-exit'
+        : 'exit-unverified';
+      observation.actorCleanup = cleanup;
 
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGTERM');
-      }
+      return { observation, result: undefined };
+    }
 
-      closed = await exitedWithin(exited, 1_000);
+    try {
+      brokerState = runPanelProcessBroker({
+        actor: child,
+        guardPath,
+        appPid: session.child.pid,
+        appIdentity: session.appProcessIdentity,
+        allowEmptyRequests: mode === 'cancel',
+        signal: brokerController.signal,
+      });
+    } catch {
+      brokerFailureCode = 'panel-guard-broker-failed';
+    }
 
-      if (!closed && child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGKILL');
-      }
+    const brokerOutcome = brokerState
+      ? brokerState.completion.then(
+        records => ({ records }),
+        () => ({ records: brokerState.records, failed: true }),
+      )
+      : Promise.resolve({ failed: true });
 
-      if (!closed) closed = await exitedWithin(exited, 1_000);
+    if (!brokerState) {
+      child.stdin.end();
+      child.stdio[3]?.destroy();
+      const cleanup = await cleanupNativeActor(child, observation, actorOwnership, true);
+      observation.actorCleanup = cleanup;
+      observation.cleanupStatus = cleanup.verified ? 'broker-start-failed' : 'exit-unverified';
+      observation.panelGuardRequests = [];
+      observation.panelGuardFailureCode = brokerFailureCode;
+      observation.failureCode = cleanup.verified
+        ? 'panel-guard-broker-failed'
+        : 'actor-cleanup-unverified';
 
-      return closed;
-    };
+      return { observation, result: undefined };
+    }
+
+    let payloadWriteFailed = false;
+
+    try {
+      await writeNativeActorPayload(child.stdin, payloadFrame);
+    } catch {
+      payloadWriteFailed = true;
+      brokerController.abort();
+      child.stdin.end();
+      child.stdio[3]?.destroy();
+    }
+
+    if (payloadWriteFailed) {
+      const cleanup = await cleanupNativeActor(child, observation, actorOwnership, true);
+      const brokerResult = await brokerOutcome;
+      observation.panelGuardRequests = brokerResult.records ?? [];
+      observation.panelGuardFailureCode = 'panel-guard-broker-failed';
+      observation.actorCleanup = cleanup;
+      observation.cleanupStatus = cleanup.verified ? 'input-write-failed' : 'exit-unverified';
+      observation.failureCode = cleanup.verified
+        ? 'actor-input-write-failed'
+        : 'actor-cleanup-unverified';
+
+      return { observation, result: undefined };
+    }
 
     // Selection permits 10s sheet discovery + 10s dismissal + 5s exact-sheet
-    // cancellation with 5s for AX operations. Cancellation permits 2s discovery
-    // and 5s dismissal plus 1s for AX calls.
-    const timeoutMs = mode === 'select' ? 30_000 : 8_000;
+    // cancellation with 5s for AX operations, plus seven bounded guard calls.
+    // Cancellation permits 2s discovery and 5s dismissal + 1s for AX calls,
+    // plus five bounded guard calls.
+    const timeoutMs = mode === 'select' ? 180_000 : 110_000;
     const finished = await exitedWithin(exited, timeoutMs);
 
     if (!finished) {
-      const closed = await stopOwnedActor();
-      observation.cleanupStatus = closed
+      brokerController.abort();
+      child.stdin.end();
+      child.stdio[3]?.destroy();
+      const cleanup = await cleanupNativeActor(child, observation, actorOwnership, true);
+      const brokerResult = await brokerOutcome;
+      observation.panelGuardRequests = brokerResult.records ?? [];
+      brokerFailureCode = brokerFailureCode ?? (brokerResult.failed
+        ? 'panel-guard-broker-failed'
+        : null);
+      observation.panelGuardFailureCode = brokerFailureCode;
+      observation.actorCleanup = cleanup;
+      observation.cleanupStatus = cleanup.verified
         ? 'terminated-after-timeout'
         : 'exit-unverified';
-      observation.failureCode = closed
+      observation.failureCode = cleanup.verified
         ? 'actor-timeout'
         : 'actor-cleanup-unverified';
 
       return { observation, result: undefined };
     }
 
-    observation.cleanupStatus = 'exit-observed';
+    const actorCleanup = await cleanupNativeActor(child, observation, actorOwnership, false);
+    observation.actorCleanup = actorCleanup;
+    observation.cleanupStatus = actorCleanup.verified
+      ? 'exit-observed'
+      : 'owned-cleanup-unverified';
+    const completedBroker = await brokerOutcome;
+    observation.panelGuardRequests = completedBroker.records ?? [];
+    observation.panelGuardFailureCode = brokerFailureCode ?? (completedBroker.failed
+      ? 'panel-guard-broker-failed'
+      : null);
+
+    const guardErrors = new Set([
+      'invalid-target-pid',
+      'parent-handshake-invalid',
+      'target-inspection-failed',
+      'guest-attributes-unavailable',
+      'guest-code-unavailable',
+      'requirement-create-failed',
+      'target-birth-changed',
+      'target-path-mismatch',
+      'apple-signature-rejected',
+      'panel-signature-rejected',
+    ]);
+    const requestRecordsValid = observation.panelGuardRequests.every(request =>
+      Number.isSafeInteger(request.requestId) && request.requestId >= 1
+        && request.requestId <= 16
+        && ['discovery', 'set-value', 'press-open', 'cancel'].includes(request.context)
+        && Number.isSafeInteger(request.targetPid) && request.targetPid >= 1
+        && [true, false].includes(request.verified)
+        && (request.verified ? request.errorCode === null : guardErrors.has(request.errorCode))
+        && request.guardCleanup?.verified === true
+        && request.guardCleanup.exitObserved === true
+        && request.guardCleanup.closed === true
+        && request.guardCleanup.pidAbsent === true
+        && request.guardCleanup.groupAbsent === true
+        && Number.isSafeInteger(request.guardCleanup.pid)
+        && request.guardCleanup.pid >= 1);
+
+    if (completedBroker.failed || brokerFailureCode
+      || !actorCleanup.verified
+      || (!observation.panelGuardRequests.length && mode !== 'cancel')
+      || observation.panelGuardRequests.length > 16
+      || !requestRecordsValid) {
+      observation.failureCode = 'panel-guard-broker-failed';
+
+      return { observation, result: undefined };
+    }
 
     if (spawnFailed || stdinFailed || observation.exit?.code !== 0
       || observation.exit.signal !== null

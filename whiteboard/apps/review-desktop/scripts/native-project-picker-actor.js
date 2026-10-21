@@ -93,6 +93,22 @@ let windowsAttributeAXErrorStatus;
 
 let pidMismatchDiagnostic;
 
+let guardRequestHandle;
+
+let guardResponseHandle;
+
+let guardRequestId;
+
+let guardRequestCount;
+
+let panelPID;
+
+let panelBirthSeconds;
+
+let panelBirthMicroseconds;
+
+let panelGuardRequired;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -118,6 +134,14 @@ function run(argv) {
   readingHomeWindowRole = false;
   windowsAttributeAXErrorStatus = null;
   pidMismatchDiagnostic = null;
+  guardRequestHandle = null;
+  guardResponseHandle = null;
+  guardRequestId = 0;
+  guardRequestCount = 0;
+  panelPID = null;
+  panelBirthSeconds = null;
+  panelBirthMicroseconds = null;
+  panelGuardRequired = false;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -175,13 +199,30 @@ function run(argv) {
 
     failurePhase = "INPUT";
     const inputHandle = $.NSFileHandle.fileHandleWithStandardInput;
-    const payloadData = inputHandle.readDataToEndOfFile;
+    guardResponseHandle = inputHandle;
+    const inputHeader = decodeTransportData(
+      readTransportData(inputHandle, 5),
+      $.NSASCIIStringEncoding,
+    );
 
-    const payloadText = ObjC.unwrap(
-      $.NSString.alloc.initWithDataEncoding(
-        payloadData,
-        $.NSUTF8StringEncoding,
-      ),
+    if (!/^[0-9]{5}$/.test(inputHeader)) {
+      throw new Error("invalid input frame");
+    }
+
+    const inputLength = Number(inputHeader);
+
+    if (
+      !Number.isInteger(inputLength) ||
+      inputLength < 1 ||
+      inputLength > 16_384
+    ) {
+      throw new Error("invalid input frame length");
+    }
+
+    const payloadData = readTransportData(inputHandle, inputLength);
+    const payloadText = decodeTransportData(
+      payloadData,
+      $.NSUTF8StringEncoding,
     );
 
     const payload = JSON.parse(payloadText);
@@ -197,7 +238,7 @@ function run(argv) {
           Object.getPrototypeOf(targetPath) !== String.prototype ||
           targetPath.length > 4096)) ||
       (mode === "cancel" && targetPath !== null) ||
-      Number(payloadData.length) > 16_384
+      Number(payloadData.length) !== inputLength
     ) {
       throw new Error("invalid input");
     }
@@ -311,6 +352,8 @@ function run(argv) {
       if (mode === "cancel") {
         failurePhase = "SERIALIZE";
 
+        closeGuardTransport();
+
         return JSON.stringify({
           status: "no-sheet",
           appPID,
@@ -336,6 +379,8 @@ function run(argv) {
 
       cleanupStatus = "sheet-canceled-and-drained";
       failurePhase = "SERIALIZE";
+
+      closeGuardTransport();
 
       return JSON.stringify({
         status: "canceled",
@@ -386,6 +431,8 @@ function run(argv) {
 
     failurePhase = "SET_VALUE";
 
+    authorizeMutation(pathFields[0], sheet, homeWindow, "set-value");
+
     const setResult = Number(
       $.AXUIElementSetAttributeValue(
         pathFields[0],
@@ -403,7 +450,7 @@ function run(argv) {
     }
 
     failurePhase = "PRESS_OPEN";
-    performPress(openButtons[0]);
+    performPress(openButtons[0], sheet, homeWindow, "press-open");
     actionCount++;
     failurePhase = "SHEET_DRAIN";
 
@@ -415,6 +462,8 @@ function run(argv) {
     sheetCount = 0;
     cleanupStatus = "sheet-dismissed";
     failurePhase = "SERIALIZE";
+
+    closeGuardTransport();
 
     return JSON.stringify({
       status: "selected",
@@ -436,6 +485,7 @@ function run(argv) {
     });
   } catch {
     const primaryFailureCode = failureCode;
+    let finalFailureCode = primaryFailureCode;
     const primaryTypeIdDiagnostic = typeIdDiagnostic;
     const primaryPidQueryStatus = pidQueryStatus;
     const primaryWindowRoleFailureStage = windowRoleFailureStage;
@@ -453,6 +503,12 @@ function run(argv) {
       }
     }
 
+    try {
+      closeGuardTransport();
+    } catch {
+      finalFailureCode = primaryFailureCode || "panel-guard-failed";
+    }
+
     return JSON.stringify({
       status: "failed",
       appPID,
@@ -460,7 +516,7 @@ function run(argv) {
       currentClientTrusted,
       promptRequested,
       failurePhase,
-      failureCode: primaryFailureCode,
+      failureCode: finalFailureCode,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
       pidQueryStatus: primaryPidQueryStatus,
       windowRoleFailureStage: primaryWindowRoleFailureStage,
@@ -477,6 +533,238 @@ function run(argv) {
       cleanupStatus,
       roleCounts,
     });
+  }
+}
+
+function ensureGuardTransport() {
+  if (guardRequestHandle && guardResponseHandle) {
+    return;
+  }
+
+  failureCode = "panel-guard-failed";
+  if (!guardRequestHandle) {
+    guardRequestHandle = $.NSFileHandle.alloc.initWithFileDescriptorCloseOnDealloc(
+      3,
+      false,
+    );
+  }
+
+  if (!guardResponseHandle) {
+    guardResponseHandle = $.NSFileHandle.fileHandleWithStandardInput;
+  }
+
+  if (!guardRequestHandle || !guardResponseHandle) {
+    throw new Error("Panel guard transport unavailable");
+  }
+}
+
+function sendGuardFrame(value) {
+  const body = JSON.stringify(value);
+
+  if (body.length < 1 || body.length > 1024) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard request bound exceeded");
+  }
+
+  const lengthText = String(body.length);
+  const frame = `${"0000".slice(lengthText.length)}${lengthText}${body}`;
+  const data = $.NSString.stringWithString(frame).dataUsingEncoding(
+    $.NSASCIIStringEncoding,
+  );
+  const error = Ref("id");
+
+  failureCode = "panel-guard-failed";
+  const written = guardRequestHandle.writeDataError(data, error);
+
+  if ((written !== true && written !== 1) || error[0]) {
+    throw new Error("Panel guard request write failed");
+  }
+}
+
+function readGuardBytes(length) {
+  return decodeTransportData(
+    readTransportData(guardResponseHandle, length),
+    $.NSASCIIStringEncoding,
+  );
+}
+
+function readTransportData(handle, length) {
+  const output = $.NSMutableData.alloc.init;
+  let received = 0;
+
+  while (received < length) {
+    const error = Ref("id");
+    failureCode = "panel-guard-failed";
+    const data = handle.readDataUpToLengthError(length - received, error);
+
+    if (error[0]) {
+      throw new Error("Panel guard response read failed");
+    }
+
+    const chunkLength = Number(data.length);
+
+    if (
+      !Number.isSafeInteger(chunkLength) ||
+      chunkLength < 1 ||
+      chunkLength > length - received
+    ) {
+      throw new Error("Panel guard response ended early");
+    }
+
+    output.appendData(data);
+    received += chunkLength;
+  }
+
+  return output;
+}
+
+function decodeTransportData(data, encoding) {
+  const value = ObjC.unwrap(
+    $.NSString.alloc.initWithDataEncoding(data, encoding),
+  );
+
+  if (Object.getPrototypeOf(value) !== String.prototype) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Transport encoding invalid");
+  }
+
+  return value;
+}
+
+function receiveGuardFrame() {
+  const header = readGuardBytes(4);
+
+  if (!/^[0-9]{4}$/.test(header)) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard response frame invalid");
+  }
+
+  const length = Number(header);
+
+  if (!Number.isInteger(length) || length < 1 || length > 1024) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard response bound exceeded");
+  }
+
+  const body = readGuardBytes(length);
+  const response = JSON.parse(body);
+  const expectedKeys = [
+    "birthMicroseconds",
+    "birthSeconds",
+    "errorCode",
+    "requestId",
+    "targetPid",
+    "verified",
+    "version",
+  ];
+
+  if (
+    !response ||
+    Object.getPrototypeOf(response) !== Object.prototype ||
+    Object.keys(response).sort().join(",") !== expectedKeys.join(",")
+  ) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard response shape invalid");
+  }
+
+  return response;
+}
+
+function requestPanelAttestation(targetPid, context) {
+  ensureGuardTransport();
+
+  if (
+    guardRequestCount >= 16 ||
+    guardRequestId >= 16 ||
+    !Number.isSafeInteger(targetPid) ||
+    targetPid < 1 ||
+    targetPid > 2_147_483_647 ||
+    !["discovery", "set-value", "press-open", "cancel"].includes(context)
+  ) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard request invalid");
+  }
+
+  const initial = guardRequestCount === 0;
+
+  if (initial && context !== "discovery") {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard discovery order invalid");
+  }
+
+  if (!initial && targetPid !== panelPID) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard target changed");
+  }
+
+  guardRequestId++;
+  guardRequestCount++;
+  sendGuardFrame({
+    version: 1,
+    requestId: guardRequestId,
+    targetPid,
+    expectedBirthSec: initial ? null : panelBirthSeconds,
+    expectedBirthUsec: initial ? null : panelBirthMicroseconds,
+    context,
+  });
+
+  const response = receiveGuardFrame();
+
+  if (
+    response.version !== 1 ||
+    response.requestId !== guardRequestId ||
+    response.targetPid !== targetPid ||
+    response.verified !== true ||
+    response.errorCode !== null ||
+    !Number.isSafeInteger(response.birthSeconds) ||
+    response.birthSeconds < 1 ||
+    response.birthSeconds > Number.MAX_SAFE_INTEGER ||
+    !Number.isSafeInteger(response.birthMicroseconds) ||
+    response.birthMicroseconds < 0 ||
+    response.birthMicroseconds > 999_999 ||
+    (!initial &&
+      (response.birthSeconds !== panelBirthSeconds ||
+        response.birthMicroseconds !== panelBirthMicroseconds))
+  ) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel process attestation failed");
+  }
+
+  if (initial) {
+    panelPID = targetPid;
+    panelBirthSeconds = response.birthSeconds;
+    panelBirthMicroseconds = response.birthMicroseconds;
+    panelGuardRequired = true;
+  }
+}
+
+function closeGuardTransport() {
+  let closeFailed = false;
+
+  for (const handle of [guardRequestHandle, guardResponseHandle]) {
+    if (!handle) {
+      continue;
+    }
+
+    const error = Ref("id");
+
+    try {
+      const closed = handle.closeAndReturnError(error);
+
+      if ((closed !== true && closed !== 1) || error[0]) {
+        closeFailed = true;
+      }
+    } catch {
+      closeFailed = true;
+    }
+  }
+
+  guardRequestHandle = null;
+  guardResponseHandle = null;
+
+  if (closeFailed) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel guard transport close failed");
   }
 }
 
@@ -513,6 +801,25 @@ function isOptionalAttributeMissing(status) {
 }
 
 function assertOwnedElement(element) {
+  assertAXElement(element);
+
+  const pid = readElementPID(element);
+
+  if (pid !== expectedAXPID) {
+    pidMismatchDiagnostic = {
+      expectedPID: expectedAXPID,
+      actualPID: pid,
+    };
+    failureCode = "element-pid-mismatch";
+    throw new Error("Accessibility element process ownership mismatch");
+  }
+
+  failureCode = null;
+
+  return element;
+}
+
+function assertAXElement(element) {
   typeIdDiagnostic = null;
 
   if (!element) {
@@ -543,8 +850,11 @@ function assertOwnedElement(element) {
     throw new Error("Accessibility element type mismatch");
   }
 
-  failureCode = "element-pid-call-failed";
+  return element;
+}
 
+function readElementPID(element) {
+  failureCode = "element-pid-call-failed";
   pidQueryStatus = null;
   const pid = Ref("int");
   const status = Number($.AXUIElementGetPid(element, pid));
@@ -557,29 +867,26 @@ function assertOwnedElement(element) {
 
   const actualPID = Number(pid[0]);
 
-  if (
-    !Number.isSafeInteger(actualPID) ||
-    actualPID < 1 ||
-    actualPID > 2_147_483_647 ||
-    !Number.isSafeInteger(expectedAXPID) ||
-    expectedAXPID < 1 ||
-    expectedAXPID > 2_147_483_647
-  ) {
+  if (!Number.isSafeInteger(actualPID) || actualPID < 1 || actualPID > 2_147_483_647) {
     failureCode = "element-pid-invalid";
     throw new Error("Accessibility element process identifier invalid");
   }
 
-  if (actualPID !== expectedAXPID) {
-    pidMismatchDiagnostic = {
-      expectedPID: expectedAXPID,
-      actualPID,
-    };
-    failureCode = "element-pid-mismatch";
-    throw new Error("Accessibility element process ownership mismatch");
+  failureCode = null;
+
+  return actualPID;
+}
+
+function assertPanelElement(element) {
+  assertAXElement(element);
+  const pid = readElementPID(element);
+
+  if (pid !== panelPID) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Accessibility element is outside the attached panel process");
   }
 
   failureCode = null;
-
   return element;
 }
 
@@ -599,14 +906,14 @@ function typeIdKind(value) {
   return Number.isInteger(value) ? "unsafe-integer" : "non-integer";
 }
 
-function copyRequiredArrayAttribute(element, attribute) {
+function copyRequiredArrayAttributeUnscoped(element, attribute) {
   const copied = copyAttribute(element, attribute, "pointer");
 
   if (copied.status !== Number($.kAXErrorSuccess)) {
     throw new Error("Required accessibility array unavailable");
   }
 
-  return copyArrayValue(copied);
+  return copyArrayElements(copied, false);
 }
 
 function copyDescendantChildren(element) {
@@ -617,10 +924,25 @@ function copyDescendantChildren(element) {
     return [];
   }
 
-  return copyArrayValue(copied);
+  const children = copyArrayElements(copied, true);
+
+  for (const child of children) {
+    const parent = copyRequiredElementAttribute(child, AX.parent);
+
+    if (!sameAXElement(parent, element)) {
+      failureCode = "panel-guard-failed";
+      throw new Error("Panel child ancestry mismatch");
+    }
+  }
+
+  return children;
 }
 
 function copyArrayValue(copied) {
+  return copyArrayElements(copied, true, assertOwnedElement);
+}
+
+function copyArrayElements(copied, requirePID, validateElement) {
   if (copied.status !== Number($.kAXErrorSuccess)) {
     failureCode = "ax-array-status-failed";
     throw new Error("Accessibility array query failed");
@@ -642,7 +964,14 @@ function copyArrayValue(copied) {
   for (let index = 0; index < count; index++) {
     failureCode = "cf-array-element-retrieval-failed";
     const child = $.CFArrayGetValueAtIndex(copied.value, index);
-    values.push(assertOwnedElement(child));
+
+    if (validateElement) {
+      values.push(validateElement(child));
+    } else if (requirePID) {
+      values.push(assertPanelElement(child));
+    } else {
+      values.push(assertAXElement(child));
+    }
   }
 
   failureCode = null;
@@ -696,7 +1025,15 @@ function copyElementAttribute(element, attribute) {
     throw new Error("Accessibility element query failed");
   }
 
-  return assertOwnedElement(copied.value);
+  assertAXElement(copied.value);
+  const pid = readElementPID(copied.value);
+
+  if (pid !== expectedAXPID && pid !== panelPID) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Accessibility reference is outside the owned project window and panel");
+  }
+
+  return copied.value;
 }
 
 function copyRequiredElementAttribute(element, attribute) {
@@ -706,7 +1043,7 @@ function copyRequiredElementAttribute(element, attribute) {
     throw new Error("Required accessibility element unavailable");
   }
 
-  return assertOwnedElement(copied.value);
+  return assertAXElement(copied.value);
 }
 
 function readStringAttribute(element, attribute) {
@@ -836,11 +1173,16 @@ function hasPressAction(element) {
   return false;
 }
 
-function press(element) {
+function press(element, sheet, homeWindow, context) {
+  if (!hasPressAction(element)) {
+    return false;
+  }
+
+  authorizeMutation(element, sheet, homeWindow, context);
+
   return (
-    hasPressAction(element) &&
     Number($.AXUIElementPerformAction(element, AX.press)) ===
-      Number($.kAXErrorSuccess)
+    Number($.kAXErrorSuccess)
   );
 }
 
@@ -850,9 +1192,101 @@ function sameAXElement(left, right) {
   return equal === true || equal === 1;
 }
 
-function performPress(element) {
-  if (!press(element)) {
+function performPress(element, sheet, homeWindow, context) {
+  if (!press(element, sheet, homeWindow, context)) {
     throw new Error("AXPress unavailable");
+  }
+}
+
+function authorizeMutation(element, expectedSheet, homeWindow, context) {
+  if (panelGuardRequired) {
+    requestPanelAttestation(panelPID, context);
+  }
+
+  const sheets = attachedSheets(homeWindow);
+
+  if (sheets.length !== 1 || !sameAXElement(sheets[0], expectedSheet)) {
+    failureCode = "panel-guard-failed";
+    throw new Error("The attached panel changed before the requested action");
+  }
+
+  const capturedChain = captureElementPathToSheet(
+    element,
+    expectedSheet,
+    homeWindow,
+  );
+
+  if (panelGuardRequired) {
+    requestPanelAttestation(panelPID, context);
+  }
+
+  const targetPID = readElementPID(element);
+  const targetParent = copyRequiredElementAttribute(element, AX.parent);
+  const expectedParent = capturedChain[1];
+
+  if (
+    targetPID !== panelPID ||
+    !expectedParent ||
+    !sameAXElement(targetParent, expectedParent)
+  ) {
+    failureCode = "panel-guard-failed";
+    throw new Error("The requested control changed before the action");
+  }
+
+  assertChildListedExactlyOnce(targetParent, element);
+}
+
+function captureElementPathToSheet(element, expectedSheet, homeWindow) {
+  const chain = [element];
+  let current = element;
+
+  for (let depth = 0; depth <= 8; depth++) {
+    assertPanelElement(current);
+
+    if (sameAXElement(current, expectedSheet)) {
+      const sheetParent = copyRequiredElementAttribute(current, AX.parent);
+      assertOwnedElement(sheetParent);
+
+      if (!sameAXElement(sheetParent, homeWindow)) {
+        failureCode = "panel-guard-failed";
+        throw new Error("The panel detached from the owned project window");
+      }
+
+      assertChildListedExactlyOnce(homeWindow, current);
+      chain.push(sheetParent);
+      return chain;
+    }
+
+    const parent = copyRequiredElementAttribute(current, AX.parent);
+    assertPanelElement(parent);
+
+    if (chain.some((ancestor) => sameAXElement(ancestor, parent))) {
+      failureCode = "panel-guard-failed";
+      throw new Error("The panel parent chain contains a cycle");
+    }
+
+    assertChildListedExactlyOnce(parent, current);
+    chain.push(parent);
+    current = parent;
+  }
+
+  failureCode = "panel-guard-failed";
+  throw new Error("The requested control is outside the attached panel");
+}
+
+function assertChildListedExactlyOnce(parent, child) {
+  const children = copyRequiredArrayAttributeUnscoped(parent, AX.children);
+  let matches = 0;
+
+  for (const candidate of children) {
+    if (sameAXElement(candidate, child)) {
+      matches++;
+    }
+  }
+
+  if (matches !== 1) {
+    failureCode = "panel-guard-failed";
+    throw new Error("Panel parent does not list the exact child once");
   }
 }
 
@@ -910,18 +1344,53 @@ function isPathSemantic(element) {
 }
 
 function attachedSheets(homeWindow) {
-  const homeChildren = copyRequiredArrayAttribute(homeWindow, AX.children);
-  const elements = descendantsWithInitialChildren(homeWindow, homeChildren);
+  const homeChildren = copyRequiredArrayAttributeUnscoped(homeWindow, AX.children);
   const sheets = [];
 
-  for (const element of elements) {
-    if (readStringAttribute(element, AX.role) !== "AXSheet") {
+  for (const element of homeChildren) {
+    const pid = readElementPID(element);
+    const newlyAttestedForeignChild = pid !== expectedAXPID && panelPID === null;
+
+    if (pid === expectedAXPID) {
+      assertOwnedElement(element);
+    } else if (panelPID === null) {
+      requestPanelAttestation(pid, "discovery");
+    } else if (pid !== panelPID) {
+      failureCode = "panel-guard-failed";
+      throw new Error("Unexpected process in the owned window child list");
+    }
+
+    if (pid !== expectedAXPID) {
+      assertPanelElement(element);
+    }
+
+    const role = readStringAttribute(element, AX.role);
+
+    if (newlyAttestedForeignChild && role !== "AXSheet") {
+      failureCode = "panel-guard-failed";
+      throw new Error("The first attested foreign window child is not its sheet");
+    }
+
+    if (role !== "AXSheet") {
       continue;
+    }
+
+    if (panelPID === null) {
+      panelPID = expectedAXPID;
+    }
+
+    if (pid !== panelPID) {
+      failureCode = "panel-guard-failed";
+      throw new Error("Attached sheet process changed");
     }
 
     const parent = copyRequiredElementAttribute(element, AX.parent);
 
-    if (!sameAXElement(parent, homeWindow)) {
+    if (
+      !sameAXElement(parent, homeWindow) ||
+      readElementPID(parent) !== expectedAXPID
+    ) {
+      failureCode = "panel-guard-failed";
       throw new Error("AXSheet parent does not match the owned home window");
     }
 
@@ -931,33 +1400,6 @@ function attachedSheets(homeWindow) {
   return sheets;
 }
 
-function descendantsWithInitialChildren(root, initialChildren) {
-  const found = [root];
-  const pending = initialChildren.map((element) => ({ element, depth: 1 }));
-
-  while (pending.length > 0) {
-    const current = pending.shift();
-
-    if (current.depth > 8) {
-      continue;
-    }
-
-    found.push(current.element);
-
-    if (found.length > 512) {
-      throw new Error("Accessibility hierarchy bound exceeded");
-    }
-
-    const children = copyDescendantChildren(current.element);
-
-    for (const child of children) {
-      pending.push({ element: child, depth: current.depth + 1 });
-    }
-  }
-
-  return found;
-}
-
 function waitForExactSheet(homeWindow, seconds) {
   const deadline = Date.now() + seconds * 1_000;
 
@@ -965,6 +1407,7 @@ function waitForExactSheet(homeWindow, seconds) {
     const sheets = attachedSheets(homeWindow);
 
     if (sheets.length > 1) {
+      failureCode = "panel-guard-failed";
       throw new Error("multiple attached sheets");
     }
 
@@ -1021,7 +1464,11 @@ function pressUniqueCancel(sheet, homeWindow) {
     AX.cancelButton,
   );
 
-  return cancelButtons.length === 1 && press(cancelButtons[0]);
+  if (cancelButtons.length !== 1) {
+    return false;
+  }
+
+  return press(cancelButtons[0], sheet, homeWindow, "cancel");
 }
 
 function cancelExactSheet(homeWindow, expectedSheet) {
@@ -1035,8 +1482,6 @@ function cancelExactSheet(homeWindow, expectedSheet) {
     return false;
   }
 
-  return (
-    pressUniqueCancel(sheets[0], homeWindow) &&
-    waitForNoAttachedSheets(homeWindow, 5)
-  );
+  return pressUniqueCancel(sheets[0], homeWindow) &&
+    waitForNoAttachedSheets(homeWindow, 5);
 }
