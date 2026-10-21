@@ -1421,10 +1421,7 @@ function authorizeMutation(element, expectedSheet, homeWindow, context) {
 
   assertTreePID(targetPID);
 
-  if (
-    !expectedParent ||
-    !sameAXElement(targetParent, expectedParent)
-  ) {
+  if (!expectedParent || !sameAXElement(targetParent, expectedParent)) {
     failureCode = "panel-guard-failed";
     throw new Error("The requested control changed before the action");
   }
@@ -1561,6 +1558,7 @@ function attachedSheets(homeWindow) {
 
   for (const element of homeChildren) {
     const pid = readElementPID(element);
+
     if (pid === expectedAXPID) {
       assertOwnedElement(element);
     } else if (servicePID === null) {
