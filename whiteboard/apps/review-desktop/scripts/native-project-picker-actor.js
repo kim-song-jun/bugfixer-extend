@@ -130,10 +130,29 @@ function run(argv) {
       ["pointer", "long"],
     ]);
     ObjC.bindFunction("CFArrayGetTypeID", ["unsigned long", []]);
+    ObjC.bindFunction("CFStringGetTypeID", ["unsigned long", []]);
+    ObjC.bindFunction("CFStringCompare", [
+      "long",
+      ["pointer", "id", "unsigned long"],
+    ]);
+    ObjC.bindFunction("CFEqual", ["bool", ["pointer", "pointer"]]);
     ObjC.bindFunction("AXUIElementGetPid", ["int", ["pointer", "pointer"]]);
     ObjC.bindFunction("AXUIElementCopyAttributeValue", [
       "int",
       ["pointer", "id", "pointer"],
+    ]);
+    ObjC.bindFunction("AXUIElementIsAttributeSettable", [
+      "int",
+      ["pointer", "id", "pointer"],
+    ]);
+    ObjC.bindFunction("AXUIElementCopyActionNames", [
+      "int",
+      ["pointer", "pointer"],
+    ]);
+    ObjC.bindFunction("AXUIElementPerformAction", ["int", ["pointer", "id"]]);
+    ObjC.bindFunction("AXUIElementSetAttributeValue", [
+      "int",
+      ["pointer", "id", "id"],
     ]);
     AX = {
       windows: $("AXWindows"),
@@ -215,7 +234,7 @@ function run(argv) {
     assertOwnedElement(application);
 
     failurePhase = "WINDOWS";
-    const copiedWindows = copyAttribute(application, AX.windows);
+    const copiedWindows = copyAttribute(application, AX.windows, "pointer");
 
     if (copiedWindows.status !== Number($.kAXErrorSuccess)) {
       windowsAttributeAXErrorStatus = copiedWindows.status;
@@ -456,9 +475,9 @@ function run(argv) {
   }
 }
 
-function copyAttribute(element, attribute) {
+function copyAttribute(element, attribute, outputType) {
   failureCode = "ax-output-ref-create-failed";
-  const result = Ref();
+  const result = Ref(outputType);
 
   failureCode = "ax-copy-call-failed";
 
@@ -558,7 +577,7 @@ function typeIdKind(value) {
 }
 
 function copyRequiredArrayAttribute(element, attribute) {
-  const copied = copyAttribute(element, attribute);
+  const copied = copyAttribute(element, attribute, "pointer");
 
   if (copied.status !== Number($.kAXErrorSuccess)) {
     throw new Error("Required accessibility array unavailable");
@@ -569,7 +588,7 @@ function copyRequiredArrayAttribute(element, attribute) {
 
 function copyDescendantChildren(element) {
   const role = readStringAttribute(element, AX.role);
-  const copied = copyAttribute(element, AX.children);
+  const copied = copyAttribute(element, AX.children, "pointer");
 
   if (isOptionalAttributeMissing(copied.status) && LEAF_ROLES.has(role)) {
     return [];
@@ -644,7 +663,7 @@ function assertCFArray(value) {
 }
 
 function copyElementAttribute(element, attribute) {
-  const copied = copyAttribute(element, attribute);
+  const copied = copyAttribute(element, attribute, "pointer");
 
   if (isOptionalAttributeMissing(copied.status)) {
     return undefined;
@@ -658,7 +677,7 @@ function copyElementAttribute(element, attribute) {
 }
 
 function copyRequiredElementAttribute(element, attribute) {
-  const copied = copyAttribute(element, attribute);
+  const copied = copyAttribute(element, attribute, "pointer");
 
   if (copied.status !== Number($.kAXErrorSuccess)) {
     throw new Error("Required accessibility element unavailable");
@@ -668,7 +687,7 @@ function copyRequiredElementAttribute(element, attribute) {
 }
 
 function readStringAttribute(element, attribute) {
-  const copied = copyAttribute(element, attribute);
+  const copied = copyAttribute(element, attribute, "id");
 
   if (readingHomeWindowRole && attribute === AX.role) {
     if (copied.status !== Number($.kAXErrorSuccess)) {
@@ -715,7 +734,7 @@ function readStringAttribute(element, attribute) {
 }
 
 function isAttributeSettable(element, attribute) {
-  const result = Ref();
+  const result = Ref("bool");
 
   const status = Number(
     $.AXUIElementIsAttributeSettable(element, attribute, result),
@@ -728,7 +747,7 @@ function isAttributeSettable(element, attribute) {
 }
 
 function hasPressAction(element) {
-  const actions = Ref();
+  const actions = Ref("pointer");
   const status = Number($.AXUIElementCopyActionNames(element, actions));
 
   if (status !== Number($.kAXErrorSuccess)) {
@@ -751,11 +770,42 @@ function hasPressAction(element) {
   for (let index = 0; index < count; index++) {
     failureCode = "cf-array-element-retrieval-failed";
     const action = $.CFArrayGetValueAtIndex(actionList, index);
-    failureCode = "cf-array-action-name-read-failed";
-    const actionName = ObjC.unwrap(action);
+
+    if (action === null || action === undefined) {
+      failureCode = "cf-string-value-null";
+      throw new Error("Accessibility action name unavailable");
+    }
+
+    failureCode = "cf-string-type-id-call-failed";
+    const actionTypeID = Number($.CFGetTypeID(action));
+    const expectedStringTypeID = Number($.CFStringGetTypeID());
+
+    if (
+      !Number.isSafeInteger(actionTypeID) ||
+      actionTypeID <= 0 ||
+      !Number.isSafeInteger(expectedStringTypeID) ||
+      expectedStringTypeID <= 0
+    ) {
+      failureCode = "cf-string-type-id-invalid";
+      throw new Error("Accessibility action string type unavailable");
+    }
+
+    if (actionTypeID !== expectedStringTypeID) {
+      failureCode = "cf-string-type-mismatch";
+      throw new Error("Accessibility action name is not a CFString");
+    }
+
+    failureCode = "cf-string-compare-call-failed";
+    const comparison = Number($.CFStringCompare(action, AX.press, 0));
+
+    if (![-1, 0, 1].includes(comparison)) {
+      failureCode = "cf-string-compare-result-invalid";
+      throw new Error("Accessibility action comparison invalid");
+    }
+
     failureCode = null;
 
-    if (actionName === "AXPress") {
+    if (comparison === 0) {
       return true;
     }
   }
@@ -769,6 +819,12 @@ function press(element) {
     Number($.AXUIElementPerformAction(element, AX.press)) ===
       Number($.kAXErrorSuccess)
   );
+}
+
+function sameAXElement(left, right) {
+  const equal = $.CFEqual(left, right);
+
+  return equal === true || equal === 1;
 }
 
 function performPress(element) {
@@ -842,7 +898,7 @@ function attachedSheets(homeWindow) {
 
     const parent = copyRequiredElementAttribute(element, AX.parent);
 
-    if (!$.CFEqual(parent, homeWindow)) {
+    if (!sameAXElement(parent, homeWindow)) {
       throw new Error("AXSheet parent does not match the owned home window");
     }
 
@@ -921,7 +977,7 @@ function buttonsFromAttributes(elements, owners, attribute) {
 
     if (
       button &&
-      !references.some((reference) => $.CFEqual(reference, button))
+      !references.some((reference) => sameAXElement(reference, button))
     ) {
       references.push(button);
     }
@@ -929,7 +985,7 @@ function buttonsFromAttributes(elements, owners, attribute) {
 
   return elements.filter(
     (element) =>
-      references.some((button) => $.CFEqual(element, button)) &&
+      references.some((button) => sameAXElement(element, button)) &&
       readStringAttribute(element, AX.role) === "AXButton" &&
       hasPressAction(element),
   );
@@ -952,7 +1008,7 @@ function cancelExactSheet(homeWindow, expectedSheet) {
     return true;
   }
 
-  if (sheets.length !== 1 || !$.CFEqual(sheets[0], expectedSheet)) {
+  if (sheets.length !== 1 || !sameAXElement(sheets[0], expectedSheet)) {
     return false;
   }
 
