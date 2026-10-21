@@ -41,6 +41,224 @@ jobs:
         timeout-minutes: 3
         run: node --test --test-reporter=tap --test-concurrency=1 scripts/native/app-process-cleanup.test.mjs
 
+      - name: AX PID bridge ABI diagnostic
+        timeout-minutes: 1
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawn } from 'node:child_process';
+
+          const modes = [
+            'metadata-ref',
+            'bound-pointer-ref',
+            'bound-int-ref',
+            'bound-int-pointer-ref',
+          ];
+          const allowedPhases = new Set([
+            'IMPORT',
+            'INPUT',
+            'OWN_PID',
+            'APPLICATION',
+            'ELEMENT_TYPE',
+            'PID_BINDING',
+            'PID_QUERY',
+            'PID_VALUE',
+            'COMPLETE',
+          ]);
+          const results = [];
+
+          for (const mode of modes) {
+            const startedAt = Date.now();
+            const child = spawn('/usr/bin/osascript', [
+              '-l',
+              'JavaScript',
+              'scripts/native/ax-pid-bridge-probe.js',
+              mode,
+            ], {
+              stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            const childPID = child.pid;
+            let stdout = '';
+            let stdoutBytes = 0;
+            let outputTooLarge = false;
+            let timedOut = false;
+            let closed = false;
+            let exitObserved = false;
+            let spawnFailed = false;
+            let parseFailed = false;
+            let stopRequested = false;
+            let killTimer;
+            const stopChild = () => {
+              if (closed || exitObserved || stopRequested) return;
+              stopRequested = true;
+              child.kill('SIGTERM');
+
+              killTimer = setTimeout(() => {
+                if (!closed && !exitObserved) child.kill('SIGKILL');
+              }, 1000);
+            };
+            const timeout = setTimeout(() => {
+              if (closed) return;
+              timedOut = true;
+              stopChild();
+            }, 10_000);
+
+            child.stdout.on('data', chunk => {
+              const text = chunk.toString('utf8');
+              stdoutBytes += Buffer.byteLength(text, 'utf8');
+
+              if (stdoutBytes > 4096) {
+                outputTooLarge = true;
+
+                stopChild();
+
+                return;
+              }
+
+              stdout += text;
+            });
+            child.once('error', () => {
+              spawnFailed = true;
+            });
+
+            let exitCode = null;
+            let exitSignal = null;
+            const outcome = await new Promise(resolve => {
+              const closeDeadline = setTimeout(() => {
+                if (closed) return;
+                clearTimeout(timeout);
+                clearTimeout(killTimer);
+                child.stdout.destroy();
+                child.unref();
+                resolve({ closed: false });
+              }, 13_000);
+
+              child.once('exit', (code, signal) => {
+                exitObserved = true;
+                exitCode = code;
+                exitSignal = signal;
+                clearTimeout(timeout);
+                clearTimeout(killTimer);
+              });
+              child.once('close', (exitCode, signal) => {
+                closed = true;
+                clearTimeout(timeout);
+                clearTimeout(killTimer);
+                clearTimeout(closeDeadline);
+                resolve({ closed: true, exitCode, signal });
+              });
+            });
+            const finalExitCode = outcome.closed ? outcome.exitCode : exitCode;
+            const finalSignal = outcome.closed ? outcome.signal : exitSignal;
+            let cleanupStatus = 'unverified';
+
+            if (outcome.closed && exitObserved &&
+                Number.isSafeInteger(childPID) && childPID > 0) {
+              try {
+                process.kill(childPID, 0);
+                cleanupStatus = 'present-or-reused';
+              } catch (error) {
+                cleanupStatus = error.code === 'ESRCH' ? 'absent' : 'unknown';
+              }
+            }
+            const cleanupVerified = outcome.closed && exitObserved &&
+              cleanupStatus === 'absent';
+
+            let probe = null;
+
+            if (!spawnFailed && !timedOut && !outputTooLarge) {
+              try {
+                probe = JSON.parse(stdout);
+              } catch {
+                parseFailed = true;
+                probe = null;
+              }
+            }
+
+            const validShape = probe !== null &&
+              Object.keys(probe).sort().join(',') ===
+                'errorCode,mode,ownPID,phase,returnedPID,status' &&
+              probe.mode === mode &&
+              (probe.ownPID === null ||
+                (Number.isSafeInteger(probe.ownPID) &&
+                  probe.ownPID > 0 && probe.ownPID <= 2_147_483_647)) &&
+              (probe.status === null ||
+                (Number.isSafeInteger(probe.status) &&
+                  probe.status >= -2_147_483_648 &&
+                  probe.status <= 2_147_483_647)) &&
+              (probe.returnedPID === null ||
+                (Number.isSafeInteger(probe.returnedPID) &&
+                  probe.returnedPID > 0 &&
+                  probe.returnedPID <= 2_147_483_647)) &&
+              allowedPhases.has(probe.phase) &&
+              (probe.errorCode === null ||
+                [
+                  'invalid-mode',
+                  'own-pid-unavailable',
+                  'element-type-mismatch',
+                  'status-invalid',
+                  'ax-error-status-nonzero',
+                  'returned-pid-invalid',
+                  'returned-pid-mismatch',
+                  'bridge-operation-threw',
+                ].includes(probe.errorCode));
+
+            const identityMatches = validShape &&
+              probe.ownPID === childPID;
+            const invocation = {
+              mode,
+              command: 'osascript -l JavaScript scripts/native/ax-pid-bridge-probe.js',
+              cwd: 'whiteboard/apps/review-desktop',
+              parentPID: process.pid,
+              childPID: Number.isSafeInteger(childPID) ? childPID : null,
+              startedAtEpochMilliseconds: startedAt,
+              elapsedMs: Date.now() - startedAt,
+              exitObserved,
+              closed: outcome.closed,
+              exitCode: finalExitCode,
+              signal: finalSignal,
+              cleanupStatus,
+              cleanupVerified,
+              timedOut,
+              outputTooLarge,
+              spawnFailed,
+              parseFailed,
+              identityMatches,
+              probe: validShape ? probe : null,
+            };
+            results.push(invocation);
+            process.stdout.write(`${JSON.stringify(invocation)}\n`);
+
+            if (
+              !validShape ||
+              !identityMatches ||
+              !outcome.closed ||
+              !exitObserved ||
+              finalExitCode !== 0 ||
+              finalSignal !== null ||
+              !cleanupVerified ||
+              timedOut ||
+              outputTooLarge ||
+              spawnFailed ||
+              parseFailed ||
+              (mode === 'metadata-ref' || mode === 'bound-int-pointer-ref') &&
+                (probe.phase !== 'COMPLETE' ||
+                  probe.status !== 0 ||
+                  probe.errorCode !== null ||
+                  probe.returnedPID !== probe.ownPID)
+            ) {
+              process.exitCode = 1;
+            }
+
+            if (!outcome.closed || !exitObserved) break;
+          }
+
+          process.stdout.write(`${JSON.stringify({
+            event: 'ax-pid-bridge-probe-summary',
+            parentPID: process.pid,
+            results,
+          })}\n`);
+          NODE
+
       - name: Record remaining Node process identities
         if: ${{ always() }}
         run: ps -axo pid=,ppid=,pgid=,stat=,comm= | awk '/node/ {print}'
