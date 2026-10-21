@@ -53,24 +53,6 @@ const PATH_SEMANTICS = new Set([
   "폴더로 이동:",
 ]);
 
-const LEAF_ROLES = new Set([
-  "AXButton",
-  "AXCheckBox",
-  "AXImage",
-  "AXIncrementor",
-  "AXMenuButton",
-  "AXPopUpButton",
-  "AXProgressIndicator",
-  "AXRadioButton",
-  "AXSecureTextField",
-  "AXSlider",
-  "AXStaticText",
-  "AXTextArea",
-  "AXTextField",
-  "AXTokenField",
-  "AXValueIndicator",
-]);
-
 let AX;
 
 let expectedAXPID;
@@ -1108,7 +1090,7 @@ function copyDescendantChildren(element, expectedSheet, homeWindow) {
   const role = readStringAttribute(element, AX.role);
   const copied = copyAttribute(element, AX.children, "pointer");
 
-  if (isOptionalAttributeMissing(copied.status) && LEAF_ROLES.has(role)) {
+  if (isOptionalAttributeMissing(copied.status)) {
     return [];
   }
 
