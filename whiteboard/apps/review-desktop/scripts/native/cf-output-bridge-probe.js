@@ -54,13 +54,16 @@ function run(argv) {
       );
     }
 
+    emitProgress(mode, ownPID, "OWN_PID");
     phase = "FIXTURE";
+    emitProgress(mode, ownPID, phase);
 
     const key = $.NSString.stringWithString("abi-fixture-key");
     const expected = $.NSString.stringWithString("abi-fixture-value");
 
     const dictionary = $.NSDictionary.dictionaryWithObjectForKey(expected, key);
     phase = "FIXTURE_READBACK";
+    emitProgress(mode, ownPID, phase);
     const fixtureValue = dictionary.objectForKey(key);
 
     if (fixtureValue === null || fixtureValue === undefined) {
@@ -78,6 +81,8 @@ function run(argv) {
       );
     }
 
+    phase = "FIXTURE_TYPE";
+    emitProgress(mode, ownPID, phase);
     const fixtureTypeID = Number($.CFGetTypeID(fixtureValue));
     const fixtureExpectedTypeID = Number($.CFStringGetTypeID());
 
@@ -102,6 +107,8 @@ function run(argv) {
       );
     }
 
+    phase = "FIXTURE_EQUALITY";
+    emitProgress(mode, ownPID, phase);
     const fixtureEqual = $.CFEqual(fixtureValue, expected);
 
     if (fixtureEqual !== true && fixtureEqual !== 1) {
@@ -122,15 +129,18 @@ function run(argv) {
     fixtureVerified = true;
 
     phase = "FUNCTION_BINDING";
+    emitProgress(mode, ownPID, phase);
     ObjC.bindFunction("CFDictionaryGetValueIfPresent", [
       "bool",
       ["pointer", "pointer", "pointer"],
     ]);
 
     phase = "OUTPUT_REF";
+    emitProgress(mode, ownPID, phase);
     const output = mode === "bound-id-ref" ? Ref("id") : Ref("pointer");
 
     phase = "DICTIONARY_LOOKUP";
+    emitProgress(mode, ownPID, phase);
     const present = $.CFDictionaryGetValueIfPresent(dictionary, key, output);
 
     if (present !== true && present !== 1) {
@@ -150,10 +160,11 @@ function run(argv) {
 
     found = true;
 
+    phase = "OUTPUT_VALUE";
+    emitProgress(mode, ownPID, phase);
     const value = output[0];
 
     if (value === null || value === undefined) {
-      phase = "OUTPUT_VALUE";
       errorCode = "output-value-unavailable";
 
       return makeReceipt(
@@ -169,6 +180,7 @@ function run(argv) {
     }
 
     phase = "VALUE_TYPE";
+    emitProgress(mode, ownPID, phase);
 
     const actualTypeID = Number($.CFGetTypeID(value));
     const expectedTypeID = Number($.CFStringGetTypeID());
@@ -195,6 +207,7 @@ function run(argv) {
     }
 
     phase = "VALUE_EQUALITY";
+    emitProgress(mode, ownPID, phase);
 
     const equal = $.CFEqual(value, expected);
     valuesEqual = equal === true || equal === 1;
@@ -215,6 +228,7 @@ function run(argv) {
     }
 
     phase = "COMPLETE";
+    emitProgress(mode, ownPID, phase);
 
     return makeReceipt(
       mode,
@@ -240,6 +254,20 @@ function run(argv) {
       errorCode,
     );
   }
+}
+
+function emitProgress(mode, ownPID, phase) {
+  const event = JSON.stringify({
+    event: "cf-output-progress",
+    mode,
+    ownPID,
+    phase,
+  });
+  const data = $.NSString.stringWithString(`${event}\n`).dataUsingEncoding(
+    $.NSUTF8StringEncoding,
+  );
+
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
 }
 
 function makeReceipt(

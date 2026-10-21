@@ -81,6 +81,8 @@ jobs:
             'PID_QUERY',
             'PID_VALUE',
             'OUTPUT_REF',
+            'FIXTURE_TYPE',
+            'FIXTURE_EQUALITY',
             'FIXTURE_READBACK',
             'DICTIONARY_LOOKUP',
             'OUTPUT_VALUE',
@@ -111,6 +113,14 @@ jobs:
             let exitObserved = false;
             let spawnFailed = false;
             let parseFailed = false;
+            let progressSequenceValid = true;
+            let progressPID = null;
+            let progressEventCount = 0;
+            let lastProgressPhase = null;
+            let progressPIDVerified = false;
+            let outputParseAmbiguous = false;
+            let progressOnlyOutput = true;
+            let progressReceiptSeen = false;
             let stopRequested = false;
             let killTimer;
             const stopChild = () => {
@@ -191,7 +201,90 @@ jobs:
 
             let probe = null;
 
-            if (!spawnFailed && !timedOut && !outputTooLarge) {
+            if (kind === 'cf-output') {
+              const progressPhases = [
+                'OWN_PID',
+                'FIXTURE',
+                'FIXTURE_READBACK',
+                'FIXTURE_TYPE',
+                'FIXTURE_EQUALITY',
+                'FUNCTION_BINDING',
+                'OUTPUT_REF',
+                'DICTIONARY_LOOKUP',
+                'OUTPUT_VALUE',
+                'VALUE_TYPE',
+                'VALUE_EQUALITY',
+                'COMPLETE',
+              ];
+              const lines = stdout.split('\n');
+
+              if (lines[lines.length - 1] === '') lines.pop();
+
+              for (const line of lines) {
+                if (line.length === 0) {
+                  outputParseAmbiguous = true;
+                  break;
+                }
+
+                let record;
+
+                try {
+                  record = JSON.parse(line);
+                } catch {
+                  outputParseAmbiguous = true;
+                  break;
+                }
+
+                if (record !== null && record.event === 'cf-output-progress') {
+                  if (
+                    progressReceiptSeen ||
+                    Object.keys(record).sort().join(',') !==
+                      'event,mode,ownPID,phase' ||
+                    record.mode !== mode ||
+                    !Number.isSafeInteger(record.ownPID) ||
+                    record.ownPID < 1 ||
+                    record.ownPID > 2_147_483_647 ||
+                    record.phase !== progressPhases[progressEventCount]
+                  ) {
+                    progressSequenceValid = false;
+                    outputParseAmbiguous = true;
+                    break;
+                  }
+
+                  if (progressPID === null) {
+                    progressPID = record.ownPID;
+                  } else if (progressPID !== record.ownPID) {
+                    progressSequenceValid = false;
+                    outputParseAmbiguous = true;
+                    break;
+                  }
+
+                  progressEventCount += 1;
+                  lastProgressPhase = record.phase;
+                  continue;
+                }
+
+                if (progressReceiptSeen) {
+                  outputParseAmbiguous = true;
+                  break;
+                }
+
+                progressReceiptSeen = true;
+                progressOnlyOutput = false;
+                probe = record;
+              }
+
+              progressPIDVerified = progressSequenceValid &&
+                progressEventCount > 0 && progressPID === childPID;
+
+              if (!progressReceiptSeen && outcome.closed && exitCode === 0) {
+                parseFailed = true;
+              }
+
+              if (timedOut || outputTooLarge || spawnFailed) {
+                outputParseAmbiguous = true;
+              }
+            } else if (!spawnFailed && !timedOut && !outputTooLarge) {
               try {
                 probe = JSON.parse(stdout);
               } catch {
@@ -250,11 +343,32 @@ jobs:
                   probe.valueTypeMatches === false) &&
                 (probe.valuesEqual === null ||
                   probe.valuesEqual === true || probe.valuesEqual === false));
+            const progressReceiptConsistent = kind !== 'cf-output' ||
+              probe === null ||
+              (probe.ownPID === null
+                ? progressEventCount === 0
+                : progressPIDVerified &&
+                  probe.phase === lastProgressPhase);
+            const cfOutputProtocolValid = kind !== 'cf-output' ||
+              (!outputParseAmbiguous && progressSequenceValid &&
+                progressPIDVerified && progressReceiptSeen);
             const receiptShapeValid = validShape && axPIDShapeValid &&
-              cfOutputShapeValid;
+              cfOutputShapeValid && progressReceiptConsistent &&
+              cfOutputProtocolValid;
 
             const identityMatches = receiptShapeValid &&
               probe.ownPID === childPID;
+            const processIdentityObserved = kind === 'cf-output' &&
+              progressPIDVerified &&
+              (probe === null || probe.ownPID === progressPID);
+            const diagnosticCrashContinuation = kind === 'cf-output' &&
+              outcome.closed && exitObserved &&
+              (finalExitCode !== 0 || finalSignal !== null) &&
+              probe === null && cleanupVerified &&
+              !timedOut && !outputTooLarge && !spawnFailed &&
+              !parseFailed && !outputParseAmbiguous &&
+              progressOnlyOutput && progressSequenceValid &&
+              progressPIDVerified;
             const invocation = {
               mode,
               kind,
@@ -275,6 +389,13 @@ jobs:
               spawnFailed,
               parseFailed,
               identityMatches,
+              progressEventCount,
+              lastProgressPhase,
+              progressPIDVerified,
+              progressSequenceValid,
+              outputParseAmbiguous,
+              progressReceiptSeen,
+              processIdentityObserved,
               probe: receiptShapeValid ? probe : null,
             };
             results.push(invocation);
@@ -304,11 +425,12 @@ jobs:
             }
 
             if (!processLifecycleVerified ||
-                (kind === 'ax-pid' && !axPIDContractPassed)) {
+                (kind === 'ax-pid' && !axPIDContractPassed) ||
+                (kind === 'cf-output' && !processIdentityObserved)) {
               process.exitCode = 1;
             }
 
-            if (!processLifecycleVerified) break;
+            if (!processLifecycleVerified && !diagnosticCrashContinuation) break;
           }
 
           if (!cfOutputTypedContractPassed) {
