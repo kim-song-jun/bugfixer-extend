@@ -1835,7 +1835,6 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'header-append',
     'header-decode',
     'header-length',
-    'header-error-check',
     'payload-buffer-create',
     'payload-ref-create',
     'payload-read',
@@ -1843,7 +1842,6 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'payload-append',
     'payload-decode',
     'payload-parse',
-    'payload-error-check',
     'schema',
   ]);
 

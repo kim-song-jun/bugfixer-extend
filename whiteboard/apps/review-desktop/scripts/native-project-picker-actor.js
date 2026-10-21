@@ -623,7 +623,7 @@ function sendGuardFrame(value) {
   failureCode = "panel-guard-failed";
   const written = guardRequestHandle.writeDataError(data, error);
 
-  if ((written !== true && written !== 1) || error[0]) {
+  if (written !== true && written !== 1) {
     throw new Error("Panel guard request write failed");
   }
 }
@@ -657,12 +657,8 @@ function readTransportData(handle, length, segment) {
 
     const data = handle.readDataUpToLengthError(length - received, error);
 
-    if (segment) {
-      inputTransportStage = `${segment}-error-check`;
-    }
-
-    if (error[0]) {
-      throw new Error("Panel guard response read failed");
+    if (!data) {
+      throw new Error("Panel guard response read returned no data");
     }
 
     if (segment) {
@@ -828,7 +824,7 @@ function closeGuardTransport() {
     try {
       const closed = handle.closeAndReturnError(error);
 
-      if ((closed !== true && closed !== 1) || error[0]) {
+      if (closed !== true && closed !== 1) {
         closeFailed = true;
       }
     } catch {

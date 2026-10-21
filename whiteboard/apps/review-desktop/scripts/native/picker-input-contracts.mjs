@@ -20,7 +20,6 @@ const allowedInputStages = new Set([
   'header-append',
   'header-decode',
   'header-length',
-  'header-error-check',
   'payload-buffer-create',
   'payload-ref-create',
   'payload-read',
@@ -28,7 +27,6 @@ const allowedInputStages = new Set([
   'payload-append',
   'payload-decode',
   'payload-parse',
-  'payload-error-check',
   'schema',
 ]);
 
@@ -507,7 +505,7 @@ try {
   await runCase({
     name: 'truncated-body-eof',
     frameKind: 'truncated-body',
-    expectedStages: ['payload-read', 'payload-error-check', 'payload-count'],
+    expectedStages: ['payload-read', 'payload-count'],
     expectedPayloadBytes: null,
   });
 } catch {
