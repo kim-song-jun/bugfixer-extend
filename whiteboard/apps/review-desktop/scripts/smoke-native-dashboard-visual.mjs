@@ -2242,7 +2242,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
   const cancelControlStages = new Set([
     'collect-controls',
     'resolve-control',
+    'resolve-sheet-action',
     'press-control',
+    'perform-sheet-action',
     'wait-sheet-absence',
   ]);
 
@@ -2273,6 +2275,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         && result.cancelCandidateCount === null
         && result.cancelControlStage === null
         && result.cancelReferenceDiagnostic === null
+        && result.cancelMutationAttemptCount === 0
         && result.guardTransportStage === null;
     }
 
@@ -2312,6 +2315,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     return (result.sheetPIDRelation === null
         || ['owned-app', 'foreign-candidate'].includes(result.sheetPIDRelation))
       && validNullableCount(result.cancelCandidateCount, 512)
+      && [0, 1].includes(result.cancelMutationAttemptCount)
       && (result.failurePhase === 'CANCEL'
         ? result.cancelControlStage === null || cancelControlStages.has(result.cancelControlStage)
         : result.cancelCandidateCount === null && result.cancelControlStage === null)
@@ -2371,6 +2375,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'cancelCandidateCount',
       'cancelControlStage',
       'cancelReferenceDiagnostic',
+      'cancelMutationAttemptCount',
       'inputPayloadByteCount',
       'inputTargetPathLength',
       'inputTransportStage',
@@ -2457,6 +2462,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     observation.cancelCandidateCount = candidate.cancelCandidateCount;
     observation.cancelControlStage = candidate.cancelControlStage;
     observation.cancelReferenceDiagnostic = candidate.cancelReferenceDiagnostic;
+    observation.cancelMutationAttemptCount = candidate.cancelMutationAttemptCount;
     observation.actorActionCount = candidate.actionCount;
     observation.actorWindowCount = candidate.windowCount;
     observation.actorSheetCount = candidate.sheetCount;
@@ -2972,6 +2978,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'cancelCandidateCount',
         'cancelControlStage',
         'cancelReferenceDiagnostic',
+        'cancelMutationAttemptCount',
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
@@ -3082,6 +3089,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
       observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
       observation.cancelReferenceDiagnostic = result.cancelReferenceDiagnostic;
+      observation.cancelMutationAttemptCount = result.cancelMutationAttemptCount;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
@@ -3123,6 +3131,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'cancelCandidateCount',
         'cancelControlStage',
         'cancelReferenceDiagnostic',
+        'cancelMutationAttemptCount',
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
@@ -3232,6 +3241,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
       observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
       observation.cancelReferenceDiagnostic = result.cancelReferenceDiagnostic;
+      observation.cancelMutationAttemptCount = result.cancelMutationAttemptCount;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(

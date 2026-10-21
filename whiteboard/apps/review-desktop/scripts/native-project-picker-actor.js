@@ -113,6 +113,8 @@ let cancelControlStage;
 
 let cancelReferenceDiagnostic;
 
+let cancelMutationAttemptCount;
+
 let guardTransportStage;
 
 function run(argv) {
@@ -158,6 +160,7 @@ function run(argv) {
   sheetPIDRelation = null;
   cancelCandidateCount = null;
   cancelControlStage = null;
+  cancelMutationAttemptCount = 0;
   cancelReferenceDiagnostic = {
     appOwnerAttributePresentCount: null,
     serviceOwnerAttributePresentCount: null,
@@ -219,6 +222,7 @@ function run(argv) {
       defaultButton: $("AXDefaultButton"),
       cancelButton: $("AXCancelButton"),
       press: $("AXPress"),
+      cancel: $("AXCancel"),
     };
     retainedArrays = [];
 
@@ -433,7 +437,7 @@ function run(argv) {
 
       cancelControlStage = "wait-sheet-absence";
 
-      if (!waitForNoAttachedSheets(homeWindow, 5)) {
+      if (!waitForNoAttachedSheets(homeWindow, sheet, 5)) {
         throw new Error("owned sheet cancellation unverified");
       }
 
@@ -516,7 +520,7 @@ function run(argv) {
     actionCount++;
     failurePhase = "SHEET_DRAIN";
 
-    if (!waitForNoAttachedSheets(homeWindow, 10)) {
+    if (!waitForNoAttachedSheets(homeWindow, sheet, 10)) {
       throw new Error("open sheet remained attached");
     }
 
@@ -617,6 +621,7 @@ function run(argv) {
       cancelCandidateCount: primaryCancelCandidateCount,
       cancelControlStage: primaryCancelControlStage,
       cancelReferenceDiagnostic: primaryCancelReferenceDiagnostic,
+      cancelMutationAttemptCount,
       guardTransportStage: primaryGuardTransportStage,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
       pidQueryStatus: primaryPidQueryStatus,
@@ -1328,7 +1333,7 @@ function isAttributeSettable(element, attribute) {
   );
 }
 
-function hasPressAction(element) {
+function hasAction(element, requestedAction) {
   const actions = Ref("pointer");
   const status = Number($.AXUIElementCopyActionNames(element, actions));
 
@@ -1378,7 +1383,7 @@ function hasPressAction(element) {
     }
 
     failureCode = "cf-string-compare-call-failed";
-    const comparison = Number($.CFStringCompare(action, AX.press, 0));
+    const comparison = Number($.CFStringCompare(action, requestedAction, 0));
 
     if (![-1, 0, 1].includes(comparison)) {
       failureCode = "cf-string-compare-result-invalid";
@@ -1395,15 +1400,23 @@ function hasPressAction(element) {
   return false;
 }
 
-function press(element, sheet, homeWindow, context) {
-  if (!hasPressAction(element)) {
+function performAction(element, requestedAction, sheet, homeWindow, context) {
+  if (context === "cancel" && cancelMutationAttemptCount !== 0) {
+    return false;
+  }
+
+  if (!hasAction(element, requestedAction)) {
     return false;
   }
 
   authorizeMutation(element, sheet, homeWindow, context);
 
+  if (context === "cancel") {
+    cancelMutationAttemptCount = 1;
+  }
+
   return (
-    Number($.AXUIElementPerformAction(element, AX.press)) ===
+    Number($.AXUIElementPerformAction(element, requestedAction)) ===
     Number($.kAXErrorSuccess)
   );
 }
@@ -1415,7 +1428,7 @@ function sameAXElement(left, right) {
 }
 
 function performPress(element, sheet, homeWindow, context) {
-  if (!press(element, sheet, homeWindow, context)) {
+  if (!performAction(element, AX.press, sheet, homeWindow, context)) {
     throw new Error("AXPress unavailable");
   }
 }
@@ -1669,12 +1682,18 @@ function waitForExactSheet(homeWindow, seconds) {
   return undefined;
 }
 
-function waitForNoAttachedSheets(homeWindow, seconds) {
+function waitForNoAttachedSheets(homeWindow, expectedSheet, seconds) {
   const deadline = Date.now() + seconds * 1_000;
 
   while (Date.now() <= deadline) {
-    if (attachedSheets(homeWindow).length === 0) {
+    const sheets = attachedSheets(homeWindow);
+
+    if (sheets.length === 0) {
       return true;
+    }
+
+    if (sheets.length !== 1 || !sameAXElement(sheets[0], expectedSheet)) {
+      return false;
     }
 
     $.NSThread.sleepForTimeInterval(0.1);
@@ -1749,7 +1768,7 @@ function buttonsFromAttributes(
 
     buttonRoleMatchCount += 1;
 
-    if (!hasPressAction(element)) {
+    if (!hasAction(element, AX.press)) {
       return false;
     }
 
@@ -1770,6 +1789,10 @@ function buttonsFromAttributes(
 function pressUniqueCancel(sheet, homeWindow) {
   cancelControlStage = "collect-controls";
 
+  if (cancelMutationAttemptCount !== 0) {
+    return false;
+  }
+
   const elements = descendants(sheet, homeWindow);
 
   cancelControlStage = "resolve-control";
@@ -1789,12 +1812,24 @@ function pressUniqueCancel(sheet, homeWindow) {
   cancelCandidateCount = cancelButtons.length;
 
   if (cancelButtons.length !== 1) {
-    return false;
+    if (cancelButtons.length !== 0) {
+      return false;
+    }
+
+    cancelControlStage = "resolve-sheet-action";
+
+    if (!hasAction(sheet, AX.cancel)) {
+      return false;
+    }
+
+    cancelControlStage = "perform-sheet-action";
+
+    return performAction(sheet, AX.cancel, sheet, homeWindow, "cancel");
   }
 
   cancelControlStage = "press-control";
 
-  return press(cancelButtons[0], sheet, homeWindow, "cancel");
+  return performAction(cancelButtons[0], AX.press, sheet, homeWindow, "cancel");
 }
 
 function cancelExactSheet(homeWindow, expectedSheet) {
@@ -1808,8 +1843,17 @@ function cancelExactSheet(homeWindow, expectedSheet) {
     return false;
   }
 
-  return (
-    pressUniqueCancel(sheets[0], homeWindow) &&
-    waitForNoAttachedSheets(homeWindow, 5)
-  );
+  if (cancelMutationAttemptCount !== 0) {
+    return waitForNoAttachedSheets(homeWindow, expectedSheet, 5);
+  }
+
+  const actionSucceeded = pressUniqueCancel(sheets[0], homeWindow);
+
+  if (cancelMutationAttemptCount !== 0) {
+    const sheetDrained = waitForNoAttachedSheets(homeWindow, expectedSheet, 5);
+
+    return actionSucceeded && sheetDrained;
+  }
+
+  return false;
 }
