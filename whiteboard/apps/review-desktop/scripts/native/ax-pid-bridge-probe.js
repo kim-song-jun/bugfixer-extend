@@ -1,12 +1,7 @@
 /* global ObjC, $, Ref */
 /* exported run */
 
-const MODES = new Set([
-  "metadata-ref",
-  "bound-pointer-ref",
-  "bound-int-ref",
-  "bound-int-pointer-ref",
-]);
+const MODES = new Set(["metadata-ref", "bound-int-ref"]);
 
 function run(argv) {
   const mode = argv[0];
@@ -68,15 +63,7 @@ function run(argv) {
     }
 
     phase = "PID_QUERY";
-    let pidReference;
-
-    if (mode === "metadata-ref" || mode === "bound-pointer-ref") {
-      pidReference = Ref();
-    } else if (mode === "bound-int-ref") {
-      pidReference = Ref("int");
-    } else {
-      pidReference = Ref("int*");
-    }
+    const pidReference = mode === "metadata-ref" ? Ref() : Ref("int");
 
     status = Number($.AXUIElementGetPid(application, pidReference));
 

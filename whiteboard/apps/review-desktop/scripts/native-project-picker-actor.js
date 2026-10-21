@@ -81,6 +81,8 @@ let failureCode;
 
 let typeIdDiagnostic;
 
+let pidQueryStatus;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -100,6 +102,7 @@ function run(argv) {
   let cleanupStatus = "not-needed";
   failureCode = null;
   typeIdDiagnostic = null;
+  pidQueryStatus = null;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -384,6 +387,7 @@ function run(argv) {
   } catch {
     const primaryFailureCode = failureCode;
     const primaryTypeIdDiagnostic = typeIdDiagnostic;
+    const primaryPidQueryStatus = pidQueryStatus;
 
     if (sheet && homeWindow) {
       try {
@@ -404,6 +408,7 @@ function run(argv) {
       failurePhase,
       failureCode: primaryFailureCode,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
+      pidQueryStatus: primaryPidQueryStatus,
       actionCount,
       windowCount,
       sheetCount,
@@ -482,10 +487,12 @@ function assertOwnedElement(element) {
 
   failureCode = "element-pid-call-failed";
 
-  const pid = Ref();
+  pidQueryStatus = null;
+  const pid = Ref("int");
   const status = Number($.AXUIElementGetPid(element, pid));
 
   if (status !== Number($.kAXErrorSuccess)) {
+    pidQueryStatus = status;
     failureCode = "element-pid-query-failed";
     throw new Error("Accessibility element process query failed");
   }

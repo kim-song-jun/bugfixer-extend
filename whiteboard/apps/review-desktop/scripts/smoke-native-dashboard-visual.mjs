@@ -1889,6 +1889,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'failureCode',
         'failurePhase',
         'promptRequested',
+        'pidQueryStatus',
         'roleCounts',
         'semanticPathFieldCount',
         'settableTextFieldCount',
@@ -1904,6 +1905,13 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)
         || (result.failureCode !== null && !failureCodes.has(result.failureCode))
+        || !(result.pidQueryStatus === null
+          || (Number.isInteger(result.pidQueryStatus)
+            && result.pidQueryStatus >= -2_147_483_648
+            && result.pidQueryStatus <= 2_147_483_647))
+        || (result.failureCode === 'element-pid-query-failed'
+          ? result.pidQueryStatus === null
+          : result.pidQueryStatus !== null)
         || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
@@ -1934,6 +1942,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.failurePhase = result.failurePhase;
       observation.actorFailureCode = result.failureCode;
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
+      observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.currentHelperPID = result.currentHelperPID;
       observation.currentClientTrusted = result.currentClientTrusted;
       observation.result = 'failed';
@@ -1961,6 +1970,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'failureCode',
         'failurePhase',
         'promptRequested',
+        'pidQueryStatus',
         'roleCounts',
         'semanticPathFieldCount',
         'settableTextFieldCount',
@@ -1975,6 +1985,13 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
       if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys.sort())
         || (result.failureCode !== null && !failureCodes.has(result.failureCode))
+        || !(result.pidQueryStatus === null
+          || (Number.isInteger(result.pidQueryStatus)
+            && result.pidQueryStatus >= -2_147_483_648
+            && result.pidQueryStatus <= 2_147_483_647))
+        || (result.failureCode === 'element-pid-query-failed'
+          ? result.pidQueryStatus === null
+          : result.pidQueryStatus !== null)
         || !validTypeIdDiagnostic(result)
         || ![
           'IMPORT', 'INPUT', 'TRUST', 'APPLICATION', 'WINDOWS', 'SHEET',
@@ -2005,6 +2022,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.failurePhase = result.failurePhase;
       observation.actorFailureCode = result.failureCode;
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
+      observation.actorPidQueryStatus = result.pidQueryStatus;
       observation.result = 'failed';
       observation.sheetCleanup = result.cleanupStatus;
       observation.windowCount = result.windowCount;

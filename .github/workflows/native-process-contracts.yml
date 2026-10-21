@@ -49,9 +49,7 @@ jobs:
 
           const modes = [
             'metadata-ref',
-            'bound-pointer-ref',
             'bound-int-ref',
-            'bound-int-pointer-ref',
           ];
           const allowedPhases = new Set([
             'IMPORT',
@@ -240,11 +238,10 @@ jobs:
               outputTooLarge ||
               spawnFailed ||
               parseFailed ||
-              (mode === 'metadata-ref' || mode === 'bound-int-pointer-ref') &&
-                (probe.phase !== 'COMPLETE' ||
-                  probe.status !== 0 ||
-                  probe.errorCode !== null ||
-                  probe.returnedPID !== probe.ownPID)
+              probe.phase !== 'COMPLETE' ||
+              probe.status !== 0 ||
+              probe.errorCode !== null ||
+              probe.returnedPID !== probe.ownPID
             ) {
               process.exitCode = 1;
             }
