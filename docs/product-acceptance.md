@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+A new failure-only Cancel diagnostic reuses the existing root attribute reads, exact reference comparisons, roles and action-availability checks. It reports six bounded counts, with incomplete stages left null and the primary values copied before cleanup. The original per-element read order, target authority, success receipts and fatal checks are preserved. All three strict failure parsers and the real INPUT fixture share the exact contract. Independent source review passed; focused input and full native CI validation remain pending.
+
 The full [CI 39658320154](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39658320154) on `854a1c4` passed Agent, Desktop, macOS assembly and the remaining native contracts; only dashboard smoke failed. Both new desktop captures succeeded: capture processes 20059 and 20091 had verified identity, normal exit/close, fresh PID/group absence and no quarantined staging. The complete images are 193,002 and 193,078 bytes. They show the native picker still open after actor cleanup, with a Search field and visible Cancel/Open buttons; no path-entry field is visible.
 
 Select actor 19662 still stops in `DISCOVER` with zero approved path-semantic matches; cancel actor 20067 has zero resolved cancel candidates. Both performed zero actions and have verified cleanup. The visible buttons do not establish that the existing AX default/cancel references point to them. All 25 PTY and four two-terminal checks passed with verified cleanup and all owned processes gone; the terminal fixture did not authenticate or execute providers. Two extension-scan errors remain recorded. Actual project selection and cancellation are unresolved.

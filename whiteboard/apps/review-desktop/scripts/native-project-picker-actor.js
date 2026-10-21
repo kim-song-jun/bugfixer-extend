@@ -111,6 +111,8 @@ let cancelCandidateCount;
 
 let cancelControlStage;
 
+let cancelReferenceDiagnostic;
+
 let guardTransportStage;
 
 function run(argv) {
@@ -156,6 +158,14 @@ function run(argv) {
   sheetPIDRelation = null;
   cancelCandidateCount = null;
   cancelControlStage = null;
+  cancelReferenceDiagnostic = {
+    appOwnerAttributePresentCount: null,
+    serviceOwnerAttributePresentCount: null,
+    uniqueReferenceCount: null,
+    listedReferenceMatchCount: null,
+    buttonRoleMatchCount: null,
+    pressActionMatchCount: null,
+  };
   guardTransportStage = null;
 
   const mode = argv[0];
@@ -569,6 +579,9 @@ function run(argv) {
     const primaryCancelControlStage =
       failurePhase === "CANCEL" ? cancelControlStage : null;
 
+    const primaryCancelReferenceDiagnostic =
+      failurePhase === "CANCEL" ? { ...cancelReferenceDiagnostic } : null;
+
     const primaryGuardTransportStage = guardTransportStage;
 
     if (sheet && homeWindow) {
@@ -603,6 +616,7 @@ function run(argv) {
       sheetPIDRelation: primarySheetPIDRelation,
       cancelCandidateCount: primaryCancelCandidateCount,
       cancelControlStage: primaryCancelControlStage,
+      cancelReferenceDiagnostic: primaryCancelReferenceDiagnostic,
       guardTransportStage: primaryGuardTransportStage,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
       pidQueryStatus: primaryPidQueryStatus,
@@ -1669,11 +1683,35 @@ function waitForNoAttachedSheets(homeWindow, seconds) {
   return false;
 }
 
-function buttonsFromAttributes(elements, owners, attribute) {
+function buttonsFromAttributes(
+  elements,
+  owners,
+  attribute,
+  diagnostic,
+  ownerContext,
+) {
   const references = [];
+  let appOwnerAttributePresentCount = 0;
+  const sheetOwnerKnown = ownerContext &&
+    ["owned-app", "foreign-candidate"].includes(ownerContext.sheetPIDRelation);
+  let serviceOwnerAttributePresentCount = sheetOwnerKnown ? 0 : null;
 
   for (const owner of owners) {
     const button = copyElementAttribute(owner, attribute);
+
+    if (diagnostic && button) {
+      if (
+        owner === ownerContext.homeWindow ||
+        (owner === ownerContext.sheet && ownerContext.sheetPIDRelation === "owned-app")
+      ) {
+        appOwnerAttributePresentCount += 1;
+      } else if (
+        owner === ownerContext.sheet &&
+        ownerContext.sheetPIDRelation === "foreign-candidate"
+      ) {
+        serviceOwnerAttributePresentCount += 1;
+      }
+    }
 
     if (
       button &&
@@ -1683,12 +1721,45 @@ function buttonsFromAttributes(elements, owners, attribute) {
     }
   }
 
-  return elements.filter(
-    (element) =>
-      references.some((button) => sameAXElement(element, button)) &&
-      readStringAttribute(element, AX.role) === "AXButton" &&
-      hasPressAction(element),
-  );
+  if (diagnostic) {
+    diagnostic.appOwnerAttributePresentCount = appOwnerAttributePresentCount;
+    diagnostic.serviceOwnerAttributePresentCount = serviceOwnerAttributePresentCount;
+    diagnostic.uniqueReferenceCount = references.length;
+  }
+
+  let listedReferenceMatchCount = 0;
+  let buttonRoleMatchCount = 0;
+  let pressActionMatchCount = 0;
+
+  const buttons = elements.filter((element) => {
+    if (!references.some((button) => sameAXElement(element, button))) {
+      return false;
+    }
+
+    listedReferenceMatchCount += 1;
+
+    if (readStringAttribute(element, AX.role) !== "AXButton") {
+      return false;
+    }
+
+    buttonRoleMatchCount += 1;
+
+    if (!hasPressAction(element)) {
+      return false;
+    }
+
+    pressActionMatchCount += 1;
+
+    return true;
+  });
+
+  if (diagnostic) {
+    diagnostic.listedReferenceMatchCount = listedReferenceMatchCount;
+    diagnostic.buttonRoleMatchCount = buttonRoleMatchCount;
+    diagnostic.pressActionMatchCount = pressActionMatchCount;
+  }
+
+  return buttons;
 }
 
 function pressUniqueCancel(sheet, homeWindow) {
@@ -1702,6 +1773,12 @@ function pressUniqueCancel(sheet, homeWindow) {
     elements,
     [sheet, homeWindow],
     AX.cancelButton,
+    cancelReferenceDiagnostic,
+    {
+      homeWindow,
+      sheet,
+      sheetPIDRelation,
+    },
   );
 
   cancelCandidateCount = cancelButtons.length;

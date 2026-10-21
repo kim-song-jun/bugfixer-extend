@@ -2272,6 +2272,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         && result.sheetPIDRelation === null
         && result.cancelCandidateCount === null
         && result.cancelControlStage === null
+        && result.cancelReferenceDiagnostic === null
         && result.guardTransportStage === null;
     }
 
@@ -2284,12 +2285,38 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     const validNullableCount = (value, maximum) => value === null
       || (Number.isSafeInteger(value) && value >= 0 && value <= maximum);
 
+    const validCancelReferenceDiagnostic = value => {
+      if (value === undefined || value === null || Array.isArray(value) ||
+        Object.getPrototypeOf(value) !== Object.prototype) return false;
+
+      const expectedKeys = [
+        'appOwnerAttributePresentCount',
+        'buttonRoleMatchCount',
+        'listedReferenceMatchCount',
+        'pressActionMatchCount',
+        'serviceOwnerAttributePresentCount',
+        'uniqueReferenceCount',
+      ].sort();
+      const observedKeys = Object.keys(value).sort();
+
+      return JSON.stringify(observedKeys) === JSON.stringify(expectedKeys)
+        && validNullableCount(value.appOwnerAttributePresentCount, 2)
+        && validNullableCount(value.serviceOwnerAttributePresentCount, 1)
+        && validNullableCount(value.uniqueReferenceCount, 2)
+        && validNullableCount(value.listedReferenceMatchCount, 512)
+        && validNullableCount(value.buttonRoleMatchCount, 512)
+        && validNullableCount(value.pressActionMatchCount, 512);
+    };
+
     return (result.sheetPIDRelation === null
         || ['owned-app', 'foreign-candidate'].includes(result.sheetPIDRelation))
       && validNullableCount(result.cancelCandidateCount, 512)
       && (result.failurePhase === 'CANCEL'
         ? result.cancelControlStage === null || cancelControlStages.has(result.cancelControlStage)
         : result.cancelCandidateCount === null && result.cancelControlStage === null)
+      && (result.failurePhase === 'CANCEL'
+        ? validCancelReferenceDiagnostic(result.cancelReferenceDiagnostic)
+        : result.cancelReferenceDiagnostic === null)
       && (result.guardTransportStage === null || guardTransportStages.has(result.guardTransportStage));
   };
 
@@ -2342,6 +2369,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'guardTransportStage',
       'cancelCandidateCount',
       'cancelControlStage',
+      'cancelReferenceDiagnostic',
       'inputPayloadByteCount',
       'inputTargetPathLength',
       'inputTransportStage',
@@ -2427,6 +2455,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     observation.sheetPIDRelation = candidate.sheetPIDRelation;
     observation.cancelCandidateCount = candidate.cancelCandidateCount;
     observation.cancelControlStage = candidate.cancelControlStage;
+    observation.cancelReferenceDiagnostic = candidate.cancelReferenceDiagnostic;
     observation.actorActionCount = candidate.actionCount;
     observation.actorWindowCount = candidate.windowCount;
     observation.actorSheetCount = candidate.sheetCount;
@@ -2941,6 +2970,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'guardTransportStage',
         'cancelCandidateCount',
         'cancelControlStage',
+        'cancelReferenceDiagnostic',
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
@@ -3050,6 +3080,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
       observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
+      observation.cancelReferenceDiagnostic = result.cancelReferenceDiagnostic;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
@@ -3090,6 +3121,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'guardTransportStage',
         'cancelCandidateCount',
         'cancelControlStage',
+        'cancelReferenceDiagnostic',
         'inputPayloadByteCount',
         'inputTargetPathLength',
         'inputTransportStage',
@@ -3198,6 +3230,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
       observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
+      observation.cancelReferenceDiagnostic = result.cancelReferenceDiagnostic;
 
       if (result.pidMismatchDiagnostic !== null) {
         observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(

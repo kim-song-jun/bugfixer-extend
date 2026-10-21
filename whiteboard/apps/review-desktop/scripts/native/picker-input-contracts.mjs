@@ -45,6 +45,7 @@ const expectedFailureKeys = [
   'guardTransportStage',
   'cancelCandidateCount',
   'cancelControlStage',
+  'cancelReferenceDiagnostic',
   'inputPayloadByteCount',
   'inputTargetPathLength',
   'inputTransportStage',
@@ -203,6 +204,7 @@ function parseReceipt(stdout, stdoutBytes) {
       receipt.windowCount !== 0 || receipt.cleanupStatus !== 'not-needed' ||
       receipt.guardTransportStage !== null || receipt.sheetPIDRelation !== null ||
       receipt.cancelCandidateCount !== null || receipt.cancelControlStage !== null ||
+      receipt.cancelReferenceDiagnostic !== null ||
       receipt.panelPidMismatchDiagnostic !== null ||
       receipt.arrayQueryDiagnostic !== null ||
       receipt.pidQueryStatus !== null || receipt.pidMismatchDiagnostic !== null ||
