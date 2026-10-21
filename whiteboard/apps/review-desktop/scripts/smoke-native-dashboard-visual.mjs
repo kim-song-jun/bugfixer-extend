@@ -1923,6 +1923,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'windowRoleFailureStage',
       'windowsAttributeAXErrorStatus',
     ].sort();
+
     const observedKeys = Object.keys(candidate).sort();
 
     if (JSON.stringify(observedKeys) !== JSON.stringify(expectedKeys)

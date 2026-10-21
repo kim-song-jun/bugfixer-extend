@@ -217,6 +217,7 @@ function run(argv) {
     );
 
     inputTransportStage = "header-length";
+
     if (!/^[0-9]{5}$/.test(inputHeader)) {
       throw new Error("invalid input frame");
     }
@@ -523,12 +524,16 @@ function run(argv) {
   } catch {
     const primaryFailureCode = failureCode;
     let finalFailureCode = primaryFailureCode;
+
     const primaryInputPayloadByteCount =
       failurePhase === "INPUT" ? inputPayloadByteCount : null;
+
     const primaryInputTargetPathLength =
       failurePhase === "INPUT" ? inputTargetPathLength : null;
+
     const primaryInputTransportStage =
       failurePhase === "INPUT" ? inputTransportStage : null;
+
     const primaryTypeIdDiagnostic = typeIdDiagnostic;
     const primaryPidQueryStatus = pidQueryStatus;
     const primaryWindowRoleFailureStage = windowRoleFailureStage;
@@ -651,6 +656,7 @@ function readTransportData(handle, length, segment) {
     }
 
     const error = Ref("id");
+
     if (segment) {
       inputTransportStage = `${segment}-read`;
     }

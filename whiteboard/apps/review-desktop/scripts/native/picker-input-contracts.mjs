@@ -11,7 +11,9 @@ import {
 } from './app-process-cleanup.mjs';
 
 const actorPath = fileURLToPath(new URL('../native-project-picker-actor.js', import.meta.url));
+
 const osascriptPath = '/usr/bin/osascript';
+
 const allowedInputStages = new Set([
   'header-buffer-create',
   'header-ref-create',
@@ -325,6 +327,7 @@ async function settleOwned(record, ownership, label) {
 
 async function runCase(spec) {
   const encoded = spec.targetPath === undefined ? null : encodePayload(spec.targetPath);
+
   const child = spawn(osascriptPath, [
     '-l',
     'JavaScript',
@@ -450,6 +453,7 @@ async function runCase(spec) {
   const cleanup = await settleOwned(record, ownership, spec.name);
   const passed = failureCode === null && cleanup.verified;
   const identity = ownership?.rootIdentity;
+
   const result = {
     name: spec.name,
     actorPID: Number.isSafeInteger(record.pid) ? record.pid : null,
@@ -475,7 +479,9 @@ async function runCase(spec) {
 }
 
 const asciiPath = '/tmp/whiteboard-picker-input-contract';
+
 const koreanPath = '/tmp/whiteboard-picker-input-한글';
+
 const malformedPayloadBytes = Buffer.byteLength('{bad', 'utf8');
 
 try {
