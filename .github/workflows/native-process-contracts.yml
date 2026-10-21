@@ -454,6 +454,10 @@ jobs:
           })}\n`);
           NODE
 
+      - name: Verify native project picker input framing
+        timeout-minutes: 2
+        run: node scripts/native/picker-input-contracts.mjs
+
       - name: Record remaining Node process identities
         if: ${{ always() }}
         run: ps -axo pid=,ppid=,pgid=,stat=,comm= | awk '/node/ {print}'

@@ -109,6 +109,12 @@ let panelBirthMicroseconds;
 
 let panelGuardRequired;
 
+let inputTransportStage;
+
+let inputPayloadByteCount;
+
+let inputTargetPathLength;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -142,6 +148,9 @@ function run(argv) {
   panelBirthSeconds = null;
   panelBirthMicroseconds = null;
   panelGuardRequired = false;
+  inputTransportStage = null;
+  inputPayloadByteCount = null;
+  inputTargetPathLength = null;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -202,10 +211,12 @@ function run(argv) {
     guardResponseHandle = inputHandle;
 
     const inputHeader = decodeTransportData(
-      readTransportData(inputHandle, 5),
+      readTransportData(inputHandle, 5, "header"),
       $.NSASCIIStringEncoding,
+      "header",
     );
 
+    inputTransportStage = "header-length";
     if (!/^[0-9]{5}$/.test(inputHeader)) {
       throw new Error("invalid input frame");
     }
@@ -220,15 +231,39 @@ function run(argv) {
       throw new Error("invalid input frame length");
     }
 
-    const payloadData = readTransportData(inputHandle, inputLength);
+    const payloadData = readTransportData(inputHandle, inputLength, "payload");
+    inputTransportStage = "payload-count";
+    const payloadByteCount = Number(payloadData.length);
+
+    if (
+      !Number.isSafeInteger(payloadByteCount) ||
+      payloadByteCount < 0 ||
+      payloadByteCount > 16_384
+    ) {
+      throw new Error("invalid input payload byte count");
+    }
+
+    inputPayloadByteCount = payloadByteCount;
 
     const payloadText = decodeTransportData(
       payloadData,
       $.NSUTF8StringEncoding,
+      "payload",
     );
 
+    inputTransportStage = "payload-parse";
     const payload = JSON.parse(payloadText);
+    inputTransportStage = "schema";
     const targetPath = payload.targetPath;
+
+    if (
+      targetPath !== null &&
+      targetPath !== undefined &&
+      Object.getPrototypeOf(targetPath) === String.prototype &&
+      targetPath.length <= 4096
+    ) {
+      inputTargetPathLength = targetPath.length;
+    }
 
     if (
       !["select", "cancel"].includes(mode) ||
@@ -488,6 +523,12 @@ function run(argv) {
   } catch {
     const primaryFailureCode = failureCode;
     let finalFailureCode = primaryFailureCode;
+    const primaryInputPayloadByteCount =
+      failurePhase === "INPUT" ? inputPayloadByteCount : null;
+    const primaryInputTargetPathLength =
+      failurePhase === "INPUT" ? inputTargetPathLength : null;
+    const primaryInputTransportStage =
+      failurePhase === "INPUT" ? inputTransportStage : null;
     const primaryTypeIdDiagnostic = typeIdDiagnostic;
     const primaryPidQueryStatus = pidQueryStatus;
     const primaryWindowRoleFailureStage = windowRoleFailureStage;
@@ -519,6 +560,9 @@ function run(argv) {
       promptRequested,
       failurePhase,
       failureCode: finalFailureCode,
+      inputTransportStage: primaryInputTransportStage,
+      inputPayloadByteCount: primaryInputPayloadByteCount,
+      inputTargetPathLength: primaryInputTargetPathLength,
       typeIdDiagnostic: primaryTypeIdDiagnostic,
       pidQueryStatus: primaryPidQueryStatus,
       windowRoleFailureStage: primaryWindowRoleFailureStage,
@@ -591,17 +635,38 @@ function readGuardBytes(length) {
   );
 }
 
-function readTransportData(handle, length) {
+function readTransportData(handle, length, segment) {
+  failureCode = "panel-guard-failed";
+
+  if (segment) {
+    inputTransportStage = `${segment}-buffer-create`;
+  }
+
   const output = $.NSMutableData.alloc.init;
   let received = 0;
 
   while (received < length) {
+    if (segment) {
+      inputTransportStage = `${segment}-ref-create`;
+    }
+
     const error = Ref("id");
-    failureCode = "panel-guard-failed";
+    if (segment) {
+      inputTransportStage = `${segment}-read`;
+    }
+
     const data = handle.readDataUpToLengthError(length - received, error);
+
+    if (segment) {
+      inputTransportStage = `${segment}-error-check`;
+    }
 
     if (error[0]) {
       throw new Error("Panel guard response read failed");
+    }
+
+    if (segment) {
+      inputTransportStage = `${segment}-count`;
     }
 
     const chunkLength = Number(data.length);
@@ -614,6 +679,10 @@ function readTransportData(handle, length) {
       throw new Error("Panel guard response ended early");
     }
 
+    if (segment) {
+      inputTransportStage = `${segment}-append`;
+    }
+
     output.appendData(data);
     received += chunkLength;
   }
@@ -621,7 +690,11 @@ function readTransportData(handle, length) {
   return output;
 }
 
-function decodeTransportData(data, encoding) {
+function decodeTransportData(data, encoding, segment) {
+  if (segment) {
+    inputTransportStage = `${segment}-decode`;
+  }
+
   const value = ObjC.unwrap(
     $.NSString.alloc.initWithDataEncoding(data, encoding),
   );
