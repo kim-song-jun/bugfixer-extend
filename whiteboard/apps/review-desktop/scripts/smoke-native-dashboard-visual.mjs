@@ -514,6 +514,59 @@ async function readOwnedProcessTree(rootPid) {
   }
 }
 
+async function readPidMismatchProcessSnapshot(pid) {
+  const snapshot = await readOwnedProcessTree(pid);
+
+  if (snapshot.status !== 'captured') {
+    return {
+      status: snapshot.status === 'collection-error'
+        ? 'collection-error'
+        : 'root-pid-unavailable',
+      pid,
+      ppid: null,
+      command: null,
+      identityVerified: false,
+    };
+  }
+
+  const root = snapshot.processes.find(process => process.pid === pid);
+
+  if (!root) {
+    return {
+      status: 'not-found',
+      pid,
+      ppid: null,
+      command: null,
+      identityVerified: false,
+    };
+  }
+
+  if (
+    !Number.isSafeInteger(root.ppid) ||
+    root.ppid < 0 ||
+    root.ppid > 2_147_483_647 ||
+    root.command.length === 0 ||
+    root.command.length > 96 ||
+    path.basename(root.command) !== root.command
+  ) {
+    return {
+      status: 'invalid-record',
+      pid,
+      ppid: null,
+      command: null,
+      identityVerified: false,
+    };
+  }
+
+  return {
+    status: 'captured',
+    pid,
+    ppid: root.ppid,
+    command: root.command,
+    identityVerified: false,
+  };
+}
+
 async function readStartupLogDirectory(userData) {
   const logsRoot = path.join(userData, 'logs');
 
@@ -1609,6 +1662,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     'element-type-mismatch',
     'element-pid-call-failed',
     'element-pid-query-failed',
+    'element-pid-invalid',
     'element-pid-mismatch',
     'windows-attribute-no-value',
     'windows-attribute-unsupported',
@@ -1650,6 +1704,20 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
     return value.actualKind !== 'safe-integer' || value.expectedKind !== 'safe-integer'
       || value.actualTypeId !== value.expectedTypeId;
+  };
+
+  const validPidMismatchDiagnostic = value => {
+    if (value === null || value === undefined || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) return false;
+
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([
+      'actualPID', 'expectedPID',
+    ])) return false;
+
+    return [value.actualPID, value.expectedPID].every(pid =>
+      Number.isSafeInteger(pid) && pid >= 1 && pid <= 2_147_483_647)
+      && value.expectedPID === session.child.pid
+      && value.actualPID !== value.expectedPID;
   };
 
   const validRoleCounts = value => {
@@ -1895,6 +1963,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'failurePhase',
         'promptRequested',
         'pidQueryStatus',
+        'pidMismatchDiagnostic',
         'roleCounts',
         'semanticPathFieldCount',
         'settableTextFieldCount',
@@ -1920,6 +1989,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'element-pid-query-failed'
           ? result.pidQueryStatus === null
           : result.pidQueryStatus !== null)
+        || (result.failureCode === 'element-pid-mismatch'
+          ? !validPidMismatchDiagnostic(result.pidMismatchDiagnostic)
+          : result.pidMismatchDiagnostic !== null)
         || ![
           null,
           'copy',
@@ -1978,6 +2050,14 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorFailureCode = result.failureCode;
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.actorPidQueryStatus = result.pidQueryStatus;
+      observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
+
+      if (result.pidMismatchDiagnostic !== null) {
+        observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
+          result.pidMismatchDiagnostic.actualPID,
+        );
+      }
+
       observation.actorWindowRoleFailureStage = result.windowRoleFailureStage;
       observation.actorWindowRoleAXErrorStatus = result.windowRoleAXErrorStatus;
       observation.actorWindowsAttributeAXErrorStatus = result.windowsAttributeAXErrorStatus;
@@ -2009,6 +2089,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'failurePhase',
         'promptRequested',
         'pidQueryStatus',
+        'pidMismatchDiagnostic',
         'roleCounts',
         'semanticPathFieldCount',
         'settableTextFieldCount',
@@ -2033,6 +2114,9 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         || (result.failureCode === 'element-pid-query-failed'
           ? result.pidQueryStatus === null
           : result.pidQueryStatus !== null)
+        || (result.failureCode === 'element-pid-mismatch'
+          ? !validPidMismatchDiagnostic(result.pidMismatchDiagnostic)
+          : result.pidMismatchDiagnostic !== null)
         || ![
           null,
           'copy',
@@ -2091,6 +2175,14 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorFailureCode = result.failureCode;
       observation.actorTypeIdDiagnostic = result.typeIdDiagnostic;
       observation.actorPidQueryStatus = result.pidQueryStatus;
+      observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
+
+      if (result.pidMismatchDiagnostic !== null) {
+        observation.actorPidMismatchProcessSnapshot = await readPidMismatchProcessSnapshot(
+          result.pidMismatchDiagnostic.actualPID,
+        );
+      }
+
       observation.actorWindowRoleFailureStage = result.windowRoleFailureStage;
       observation.actorWindowRoleAXErrorStatus = result.windowRoleAXErrorStatus;
       observation.actorWindowsAttributeAXErrorStatus = result.windowsAttributeAXErrorStatus;

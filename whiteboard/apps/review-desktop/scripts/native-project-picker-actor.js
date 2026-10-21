@@ -91,6 +91,8 @@ let readingHomeWindowRole;
 
 let windowsAttributeAXErrorStatus;
 
+let pidMismatchDiagnostic;
+
 function run(argv) {
   let failurePhase = "IMPORT";
   let appPID = null;
@@ -115,6 +117,7 @@ function run(argv) {
   windowRoleAXErrorStatus = null;
   readingHomeWindowRole = false;
   windowsAttributeAXErrorStatus = null;
+  pidMismatchDiagnostic = null;
 
   const mode = argv[0];
   appPID = Number(argv[1]);
@@ -438,6 +441,7 @@ function run(argv) {
     const primaryWindowRoleFailureStage = windowRoleFailureStage;
     const primaryWindowRoleAXErrorStatus = windowRoleAXErrorStatus;
     const primaryWindowsAttributeAXErrorStatus = windowsAttributeAXErrorStatus;
+    const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
 
     if (sheet && homeWindow) {
       try {
@@ -462,6 +466,7 @@ function run(argv) {
       windowRoleFailureStage: primaryWindowRoleFailureStage,
       windowRoleAXErrorStatus: primaryWindowRoleAXErrorStatus,
       windowsAttributeAXErrorStatus: primaryWindowsAttributeAXErrorStatus,
+      pidMismatchDiagnostic: primaryPidMismatchDiagnostic,
       actionCount,
       windowCount,
       sheetCount,
@@ -550,7 +555,25 @@ function assertOwnedElement(element) {
     throw new Error("Accessibility element process query failed");
   }
 
-  if (Number(pid[0]) !== expectedAXPID) {
+  const actualPID = Number(pid[0]);
+
+  if (
+    !Number.isSafeInteger(actualPID) ||
+    actualPID < 1 ||
+    actualPID > 2_147_483_647 ||
+    !Number.isSafeInteger(expectedAXPID) ||
+    expectedAXPID < 1 ||
+    expectedAXPID > 2_147_483_647
+  ) {
+    failureCode = "element-pid-invalid";
+    throw new Error("Accessibility element process identifier invalid");
+  }
+
+  if (actualPID !== expectedAXPID) {
+    pidMismatchDiagnostic = {
+      expectedPID: expectedAXPID,
+      actualPID,
+    };
     failureCode = "element-pid-mismatch";
     throw new Error("Accessibility element process ownership mismatch");
   }
