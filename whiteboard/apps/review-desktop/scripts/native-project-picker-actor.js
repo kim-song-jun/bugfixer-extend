@@ -574,6 +574,7 @@ function run(argv) {
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
     const primaryPanelPidMismatchDiagnostic = panelPidMismatchDiagnostic;
     const primarySheetPIDRelation = sheetPIDRelation;
+
     const primaryArrayQueryDiagnostic =
       primaryFailureCode === "ax-array-status-failed" &&
       ["DISCOVER", "CANCEL"].includes(failurePhase)
