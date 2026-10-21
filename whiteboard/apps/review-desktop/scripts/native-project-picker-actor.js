@@ -1692,8 +1692,10 @@ function buttonsFromAttributes(
 ) {
   const references = [];
   let appOwnerAttributePresentCount = 0;
+
   const sheetOwnerKnown = ownerContext &&
     ["owned-app", "foreign-candidate"].includes(ownerContext.sheetPIDRelation);
+
   let serviceOwnerAttributePresentCount = sheetOwnerKnown ? 0 : null;
 
   for (const owner of owners) {

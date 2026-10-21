@@ -2297,6 +2297,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'serviceOwnerAttributePresentCount',
         'uniqueReferenceCount',
       ].sort();
+
       const observedKeys = Object.keys(value).sort();
 
       return JSON.stringify(observedKeys) === JSON.stringify(expectedKeys)
