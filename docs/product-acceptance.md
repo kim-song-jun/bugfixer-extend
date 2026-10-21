@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+The full [CI 39638078942](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39638078942) on `bdec401` passed the Agent session contracts, then stopped at two statement layouts in Desktop formatting. Its exact generated formatting repair is applied without changing behavior; macOS assembly and native execution were skipped.
+
 The focused [CI 39637431541](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39637431541) on `04add11` passed all five real-actor input cases, both AX PID and both CF output contracts, and the shared signed-process guard's expected negative fixture. Every spawned child had verified cleanup, and typed CF output passed. The full [CI 39637619751](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39637619751) stopped at one required blank line before Desktop or native execution. Its exact generated blank-line repair and a whitespace-only conditional layout correction are applied. This validates input handling for the mixed-ownership source, not the native panel journey.
 
 The latest full [CI 39630560262](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39630560262) on `11e52ab` passed Agent, Desktop, macOS assembly and the remaining native contracts; only dashboard smoke failed. The failure is now classified: both actors reject a descendant with `panel-element-pid-mismatch`. The exact sheet root belongs to app PID 18932, while the rejected child has PID 19226. A bounded read-only snapshot observes PPID 1 and basename `com.apple.appkit.xpc.openAndSavePanelService`, explicitly with `identityVerified: false`; no guard request or UI action occurred. The service has not yet been authenticated by the signed-process guard in this journey.

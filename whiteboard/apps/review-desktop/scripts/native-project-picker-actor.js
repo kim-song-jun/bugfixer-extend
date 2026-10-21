@@ -1056,7 +1056,9 @@ function assertServiceElement(element) {
       actualPID: pid,
     };
     failureCode = "panel-element-pid-mismatch";
-    throw new Error("Accessibility element is outside the attested panel service");
+    throw new Error(
+      "Accessibility element is outside the attested panel service",
+    );
   }
 
   failureCode = null;
@@ -1589,9 +1591,7 @@ function attachedSheets(homeWindow) {
 
     if (pid !== expectedAXPID && role !== "AXSheet") {
       failureCode = "panel-guard-failed";
-      throw new Error(
-        "A foreign home-window child is not its sheet",
-      );
+      throw new Error("A foreign home-window child is not its sheet");
     }
 
     if (role !== "AXSheet") {
