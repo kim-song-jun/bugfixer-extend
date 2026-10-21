@@ -546,10 +546,8 @@ function ensureGuardTransport() {
   failureCode = "panel-guard-failed";
 
   if (!guardRequestHandle) {
-    guardRequestHandle = $.NSFileHandle.alloc.initWithFileDescriptorCloseOnDealloc(
-      3,
-      false,
-    );
+    guardRequestHandle =
+      $.NSFileHandle.alloc.initWithFileDescriptorCloseOnDealloc(3, false);
   }
 
   if (!guardResponseHandle) {
@@ -873,7 +871,11 @@ function readElementPID(element) {
 
   const actualPID = Number(pid[0]);
 
-  if (!Number.isSafeInteger(actualPID) || actualPID < 1 || actualPID > 2_147_483_647) {
+  if (
+    !Number.isSafeInteger(actualPID) ||
+    actualPID < 1 ||
+    actualPID > 2_147_483_647
+  ) {
     failureCode = "element-pid-invalid";
     throw new Error("Accessibility element process identifier invalid");
   }
@@ -889,7 +891,9 @@ function assertPanelElement(element) {
 
   if (pid !== panelPID) {
     failureCode = "panel-guard-failed";
-    throw new Error("Accessibility element is outside the attached panel process");
+    throw new Error(
+      "Accessibility element is outside the attached panel process",
+    );
   }
 
   failureCode = null;
@@ -1037,7 +1041,9 @@ function copyElementAttribute(element, attribute) {
 
   if (pid !== expectedAXPID && pid !== panelPID) {
     failureCode = "panel-guard-failed";
-    throw new Error("Accessibility reference is outside the owned project window and panel");
+    throw new Error(
+      "Accessibility reference is outside the owned project window and panel",
+    );
   }
 
   return copied.value;
@@ -1352,12 +1358,16 @@ function isPathSemantic(element) {
 }
 
 function attachedSheets(homeWindow) {
-  const homeChildren = copyRequiredArrayAttributeUnscoped(homeWindow, AX.children);
+  const homeChildren = copyRequiredArrayAttributeUnscoped(
+    homeWindow,
+    AX.children,
+  );
   const sheets = [];
 
   for (const element of homeChildren) {
     const pid = readElementPID(element);
-    const newlyAttestedForeignChild = pid !== expectedAXPID && panelPID === null;
+    const newlyAttestedForeignChild =
+      pid !== expectedAXPID && panelPID === null;
 
     if (pid === expectedAXPID) {
       assertOwnedElement(element);
@@ -1376,7 +1386,9 @@ function attachedSheets(homeWindow) {
 
     if (newlyAttestedForeignChild && role !== "AXSheet") {
       failureCode = "panel-guard-failed";
-      throw new Error("The first attested foreign window child is not its sheet");
+      throw new Error(
+        "The first attested foreign window child is not its sheet",
+      );
     }
 
     if (role !== "AXSheet") {
@@ -1490,6 +1502,8 @@ function cancelExactSheet(homeWindow, expectedSheet) {
     return false;
   }
 
-  return pressUniqueCancel(sheets[0], homeWindow) &&
-    waitForNoAttachedSheets(homeWindow, 5);
+  return (
+    pressUniqueCancel(sheets[0], homeWindow) &&
+    waitForNoAttachedSheets(homeWindow, 5)
+  );
 }

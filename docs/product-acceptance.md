@@ -2,6 +2,8 @@
 
 ## Current execution evidence
 
+The following [CI 39604509530](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39604509530) on `e584605` passed the Agent job, then stopped at formatting of the native picker actor. Desktop build and macOS did not run. The CI-generated eight-hunk actor formatting repair is applied without changing its control flow and still needs a matching CI run.
+
 The integration [CI 39604003232](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39604003232) on `4557dd1` stopped at 45 required blank lines before contract tests; Desktop and macOS were skipped. Its CI-generated repair adds exactly those 45 blank lines across the actor, broker, real-process fixture and smoke wrapper, without changing nonblank content. The corrected integration still needs CI.
 
 The latest full [CI 39594059398](https://github.com/kim-song-jun/bugfixer-extend/actions/runs/39594059398) on `57cb3b0` passed the Agent and Desktop jobs and macOS assembly. Its 25 PTY checks and four-check two-terminal fixture flow completed with verified cleanup and all owned processes gone. The fixture reports no provider execution or authentication. The only failing step was the native project dashboard smoke.
