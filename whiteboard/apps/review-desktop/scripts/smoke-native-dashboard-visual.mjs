@@ -2449,6 +2449,11 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     }
 
     observation.actorFailureReceiptStatus = 'valid-failure-receipt';
+
+    if (candidate.failurePhase === 'DISCOVER') {
+      observation.roleCounts = candidate.roleCounts;
+    }
+
     observation.failurePhase = candidate.failurePhase;
     observation.actorFailurePhase = candidate.failurePhase;
     observation.actorFailureCode = candidate.failureCode;
