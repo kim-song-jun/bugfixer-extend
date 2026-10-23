@@ -574,6 +574,7 @@ function run(argv) {
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
     const primaryPanelPidMismatchDiagnostic = panelPidMismatchDiagnostic;
     const primarySheetPIDRelation = sheetPIDRelation;
+
     const primaryRoleTopology =
       failurePhase === "DISCOVER" ? roleTopology : null;
 
