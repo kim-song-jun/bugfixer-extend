@@ -470,6 +470,7 @@ async function verifyCompactWorkspaceViewport(page, expectedSessionId) {
 
       return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
     };
+
     const header = element.querySelector('.ai-session__project-header');
     const toolbar = element.querySelector('.ai-session__narrow-toolbar');
     const selector = toolbar?.querySelector('select[aria-label="현재 세션 선택"]');
