@@ -16,6 +16,13 @@ The selected nested import keeps the source's root `package.json`, `pnpm-workspa
 
 A targeted scan of the 7,449 imported Whiteboard files on 2026-09-26 found no case-insensitive matches for the former private company name, `bugfixer`, or `posco-mds`; no AWS, Slack, OpenAI, or Notion key-pattern hits; and no Git LFS pointers. This claim applies to the pinned upstream import, not the outer Bugfixer Extend documentation or subsequent implementation. Two files contained a synthetic GitHub-token-shaped fixture in error-redaction tests, and one agent-host source file contained a private-key-header detection expression; these were reviewed in context. This finite pattern scan is not a complete credentials audit.
 
+## Current fork source review
+
+The [2026-10-23 source review](source-provenance.md) records the current fork tree,
+the finite post-import review, the official Pretendard asset comparison, retained
+notices and the corrected lightningcss version. It does not extend the original
+import-only scan into a claim of complete private-data or signed-release clearance.
+
 ## Nested import result
 
 The source was exported at the exact pinned commit with `git archive` and moved as one staged directory into `whiteboard/`. All 7,449 relative paths and file hashes matched the pinned tree; 7,409 entries have mode `100644` and 40 have mode `100755`, with 108,912,698 tracked bytes in total. The imported tree contains no Git LFS pointer file. Its internal pnpm workspace and notices remain together, while the outer README and `docs/` remain separate. These are source-integrity checks, not a new-product build or a release-license clearance.

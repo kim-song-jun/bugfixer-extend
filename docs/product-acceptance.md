@@ -325,6 +325,19 @@ The macOS Code OSS main process opens `workspace.db` under its user-data profile
 
 Earlier isolated-profile checks established database startup, invalid-database handling, and Review health. Current source and gateway tests additionally cover Review create/list/open/primary operations; the supplied isolated QA includes three gateway tests. The new [dual-store restore fixture](../whiteboard/apps/review-desktop/scripts/dual-store-restore.test.mjs) verifies SQLite-aware backups from WAL-only rows and a missing Review after independently timed snapshots. It does not prove every crash/restart race, packaged recovery, or project-window restoration and routing required by row 3.
 
+## Source notice review — 2026-10-23
+
+The [source provenance review](source-provenance.md) independently matches the
+public pinned tree to the local import, records the 463-path fork delta and
+retained source notices, and verifies the only changed binary against official
+Pretendard v1.3.9. Its license text is preserved after whitespace normalization.
+The Review notice's stale lightningcss version was corrected to the locked
+1.33.0, with a versioned source and license reference. The finite private-name,
+import and credential-pattern checks found only intended product references and
+synthetic test inputs in their stated scope. Source checks and a metadata fix do
+not prove signed package contents, a complete dependency inventory or absence of
+every possible private snippet or credential; row 1 remains open on those proofs.
+
 ## Open choices versus missing evidence
 
 Remaining product choices or proof: real Notion PAT import and expiry behavior, signed-in website capture beyond user-selected Ego text, live package installation and account-import behavior, and the later Windows CPU target. The user selected A — a user-provided personal access token for the first-party Notion importer. Source stores a separate label for each project-scoped Notion connection and the token in macOS Keychain. The Notion importer now follows property-item pages for truncated relations and for people, title, and rich text that may lack a truncation marker; it preserves raw responses, caps property pagination globally, and records visible omissions at limits. Focused tests cover encoded property IDs, continuation values, same-identity account separation, and authentication errors. Real account use remains unverified.
