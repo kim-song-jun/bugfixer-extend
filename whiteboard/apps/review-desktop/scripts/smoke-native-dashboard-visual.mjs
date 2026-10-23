@@ -2313,6 +2313,11 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         && validNullableCount(value.pressActionMatchCount, 512);
     };
 
+    const topologyValid = result.failurePhase === 'DISCOVER'
+      ? result.roleTopology === null
+        || validRoleTopology(result.roleTopology, result.roleCounts)
+      : result.roleTopology === null;
+
     return (result.sheetPIDRelation === null
         || ['owned-app', 'foreign-candidate'].includes(result.sheetPIDRelation))
       && validNullableCount(result.cancelCandidateCount, 512)
@@ -2323,7 +2328,8 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       && (result.failurePhase === 'CANCEL'
         ? validCancelReferenceDiagnostic(result.cancelReferenceDiagnostic)
         : result.cancelReferenceDiagnostic === null)
-      && (result.guardTransportStage === null || guardTransportStages.has(result.guardTransportStage));
+      && (result.guardTransportStage === null || guardTransportStages.has(result.guardTransportStage))
+      && topologyValid;
   };
 
   const captureActorFailureDiagnostics = ({
@@ -2385,6 +2391,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       'pidQueryStatus',
       'promptRequested',
       'roleCounts',
+      'roleTopology',
       'semanticPathFieldCount',
       'settableTextFieldCount',
       'sheetPIDRelation',
@@ -2452,6 +2459,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
     if (candidate.failurePhase === 'DISCOVER') {
       observation.roleCounts = candidate.roleCounts;
+      observation.roleTopology = candidate.roleTopology;
     }
 
     observation.failurePhase = candidate.failurePhase;
@@ -2567,6 +2575,68 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
     return Object.entries(value).every(([role, count]) =>
       nativePickerRoles.has(role) && validCount(count))
       && Object.values(value).reduce((sum, count) => sum + count, 0) <= 512;
+  };
+
+  const validRoleTopology = (value, roleCounts) => {
+    if (value === null || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+      || !validRoleCounts(roleCounts)) return false;
+
+    const expectedKeys = ['edges', 'omittedEdgeCount', 'unclassifiedEdgeCount'];
+    const roleIndexes = Object.keys(roleCounts).sort();
+
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)
+      || !Array.isArray(value.edges)
+      || value.edges.length > 64
+      || !Number.isSafeInteger(value.omittedEdgeCount)
+      || value.omittedEdgeCount < 0
+      || value.omittedEdgeCount > 511
+      || !Number.isSafeInteger(value.unclassifiedEdgeCount)
+      || value.unclassifiedEdgeCount < 0
+      || value.unclassifiedEdgeCount > 511
+      || (value.edges.length < 64 && value.omittedEdgeCount > 0)) return false;
+
+    let observedEdgeCount = value.omittedEdgeCount + value.unclassifiedEdgeCount;
+    let previousParent = -1;
+    let previousChild = -1;
+    const incomingCounts = Array(roleIndexes.length).fill(0);
+
+    for (const edge of value.edges) {
+      if (!Array.isArray(edge) || edge.length !== 3) return false;
+
+      const [parentRoleIndex, childRoleIndex, count] = edge;
+
+      if (!Number.isSafeInteger(parentRoleIndex)
+        || parentRoleIndex < 0
+        || parentRoleIndex >= roleIndexes.length
+        || !Number.isSafeInteger(childRoleIndex)
+        || childRoleIndex < 0
+        || childRoleIndex >= roleIndexes.length
+        || !Number.isSafeInteger(count)
+        || count < 1
+        || count > 511
+        || parentRoleIndex < previousParent
+        || (parentRoleIndex === previousParent && childRoleIndex <= previousChild)) {
+        return false;
+      }
+
+      observedEdgeCount += count;
+      incomingCounts[childRoleIndex] += count;
+      previousParent = parentRoleIndex;
+      previousChild = childRoleIndex;
+    }
+
+    const knownRoleCount = Object.values(roleCounts)
+      .reduce((sum, count) => sum + count, 0);
+    const edgeTotalMatchesRoleCounts = value.unclassifiedEdgeCount === 0
+      ? observedEdgeCount === Math.max(0, knownRoleCount - 1)
+      : observedEdgeCount >= knownRoleCount;
+    const retainedIncomingCountsFit = incomingCounts.every((count, index) =>
+      count <= roleCounts[roleIndexes[index]]);
+
+    return observedEdgeCount <= 511
+      && edgeTotalMatchesRoleCounts
+      && retainedIncomingCountsFit;
   };
 
   const launch = async mode => {
@@ -2974,6 +3044,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       const allowedKeys = [
         'actionCount',
         'appPID',
+        'arrayQueryDiagnostic',
         'cleanupStatus',
         'currentClientTrusted',
         'currentHelperPID',
@@ -2993,6 +3064,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'pidQueryStatus',
         'pidMismatchDiagnostic',
         'roleCounts',
+        'roleTopology',
         'semanticPathFieldCount',
         'settableTextFieldCount',
         'sheetPIDRelation',
@@ -3094,6 +3166,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
       observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
+      observation.roleTopology = result.roleTopology;
       observation.cancelReferenceDiagnostic = result.cancelReferenceDiagnostic;
       observation.cancelMutationAttemptCount = result.cancelMutationAttemptCount;
 
@@ -3146,6 +3219,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
         'pidQueryStatus',
         'pidMismatchDiagnostic',
         'roleCounts',
+        'roleTopology',
         'semanticPathFieldCount',
         'settableTextFieldCount',
         'sheetPIDRelation',
@@ -3246,6 +3320,7 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
       observation.actorPidMismatchDiagnostic = result.pidMismatchDiagnostic;
       observation.panelPidMismatchDiagnostic = result.panelPidMismatchDiagnostic;
       observation.arrayQueryDiagnostic = result.arrayQueryDiagnostic;
+      observation.roleTopology = result.roleTopology;
       observation.cancelReferenceDiagnostic = result.cancelReferenceDiagnostic;
       observation.cancelMutationAttemptCount = result.cancelMutationAttemptCount;
 

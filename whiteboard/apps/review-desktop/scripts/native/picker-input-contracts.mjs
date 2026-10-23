@@ -55,6 +55,7 @@ const expectedFailureKeys = [
   'pidQueryStatus',
   'promptRequested',
   'roleCounts',
+  'roleTopology',
   'semanticPathFieldCount',
   'settableTextFieldCount',
   'sheetPIDRelation',
@@ -218,6 +219,7 @@ function parseReceipt(stdout, stdoutBytes) {
       receipt.roleCounts === null || Array.isArray(receipt.roleCounts) ||
       Object.getPrototypeOf(receipt.roleCounts) !== Object.prototype ||
       Object.keys(receipt.roleCounts).length !== 0 ||
+      receipt.roleTopology !== null ||
       !allowedInputStages.has(receipt.inputTransportStage) ||
       !(receipt.inputPayloadByteCount === null ||
         (Number.isSafeInteger(receipt.inputPayloadByteCount) &&

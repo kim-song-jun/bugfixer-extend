@@ -126,6 +126,7 @@ function run(argv) {
   let homeWindow;
   let sheet;
   let roleCounts = {};
+  let roleTopology = null;
   let actionCount = 0;
   let windowCount = 0;
   let sheetCount = 0;
@@ -460,8 +461,11 @@ function run(argv) {
     }
 
     failurePhase = "DISCOVER";
-    const elements = descendants(sheet, homeWindow);
-    roleCounts = countRoles(elements);
+    const parentIndexes = [];
+    const nodeRoles = [];
+    const elements = descendants(sheet, homeWindow, parentIndexes);
+    roleCounts = countRoles(elements, nodeRoles);
+    roleTopology = buildRoleTopology(parentIndexes, nodeRoles, roleCounts);
 
     const textFields = elements.filter(
       (element) => readStringAttribute(element, AX.role) === "AXTextField",
@@ -570,6 +574,7 @@ function run(argv) {
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
     const primaryPanelPidMismatchDiagnostic = panelPidMismatchDiagnostic;
     const primarySheetPIDRelation = sheetPIDRelation;
+    const primaryRoleTopology = failurePhase === "DISCOVER" ? roleTopology : null;
 
     const primaryArrayQueryDiagnostic =
       primaryFailureCode === "ax-array-status-failed" &&
@@ -640,6 +645,7 @@ function run(argv) {
       defaultActionCount,
       cleanupStatus,
       roleCounts,
+      roleTopology: primaryRoleTopology,
     });
   }
 }
@@ -1536,7 +1542,7 @@ function assertArrayListsChildExactlyOnce(children, child) {
   }
 }
 
-function descendants(root, homeWindow) {
+function descendants(root, homeWindow, parentIndexes = []) {
   const found = [];
   const pending = [{ element: root, depth: 0 }];
 
@@ -1547,7 +1553,9 @@ function descendants(root, homeWindow) {
       continue;
     }
 
+    const currentIndex = found.length;
     found.push(current.element);
+    parentIndexes.push(current.parentIndex ?? null);
 
     if (found.length > 512) {
       failureCode = "panel-descendant-count-exceeded";
@@ -1557,26 +1565,106 @@ function descendants(root, homeWindow) {
     const children = copyDescendantChildren(current.element, root, homeWindow);
 
     for (const child of children) {
-      pending.push({ element: child, depth: current.depth + 1 });
+      pending.push({
+        element: child,
+        depth: current.depth + 1,
+        parentIndex: currentIndex,
+      });
     }
   }
 
   return found;
 }
 
-function countRoles(elements) {
+function countRoles(elements, nodeRoles = []) {
   const counts = {};
 
   for (const element of elements) {
     const role = readStringAttribute(element, AX.role);
+    let key = null;
 
     if (role) {
-      const key = ALLOWED_ROLES.has(role) ? role : "AXOther";
+      key = ALLOWED_ROLES.has(role) ? role : "AXOther";
+    }
+
+    nodeRoles.push(key);
+
+    if (key) {
       counts[key] = (counts[key] || 0) + 1;
     }
   }
 
   return counts;
+}
+
+function buildRoleTopology(parentIndexes, nodeRoles, roleCounts) {
+  const roleKeys = Object.keys(roleCounts).sort();
+  const roleIndexes = new Map(roleKeys.map((role, index) => [role, index]));
+  const pairCounts = new Map();
+  let unclassifiedEdgeCount = 0;
+
+  if (
+    parentIndexes.length !== nodeRoles.length
+    || parentIndexes.length > 512
+  ) {
+    throw new Error("Accessibility topology is inconsistent");
+  }
+
+  for (let childIndex = 0; childIndex < parentIndexes.length; childIndex++) {
+    const parentIndex = parentIndexes[childIndex];
+
+    if (parentIndex === null) {
+      if (childIndex !== 0) {
+        throw new Error("Accessibility topology root is inconsistent");
+      }
+
+      continue;
+    }
+
+    if (
+      !Number.isSafeInteger(parentIndex)
+      || parentIndex < 0
+      || parentIndex >= childIndex
+    ) {
+      throw new Error("Accessibility topology parent is inconsistent");
+    }
+
+    const parentRoleIndex = roleIndexes.get(nodeRoles[parentIndex]);
+    const childRoleIndex = roleIndexes.get(nodeRoles[childIndex]);
+
+    if (parentRoleIndex === undefined || childRoleIndex === undefined) {
+      unclassifiedEdgeCount++;
+      continue;
+    }
+
+    const pairKey = `${parentRoleIndex}:${childRoleIndex}`;
+    pairCounts.set(pairKey, (pairCounts.get(pairKey) || 0) + 1);
+  }
+
+  const pairs = [...pairCounts.entries()]
+    .map(([pairKey, count]) => {
+      const [parentRoleIndex, childRoleIndex] = pairKey.split(":").map(Number);
+
+      return { parentRoleIndex, childRoleIndex, count };
+    })
+    .sort((left, right) =>
+      left.parentRoleIndex - right.parentRoleIndex
+      || left.childRoleIndex - right.childRoleIndex,
+    );
+  const retainedPairs = pairs.slice(0, 64);
+  const omittedEdgeCount = pairs
+    .slice(64)
+    .reduce((sum, pair) => sum + pair.count, 0);
+
+  return {
+    edges: retainedPairs.map((pair) => [
+      pair.parentRoleIndex,
+      pair.childRoleIndex,
+      pair.count,
+    ]),
+    omittedEdgeCount,
+    unclassifiedEdgeCount,
+  };
 }
 
 function isPathSemantic(element) {
