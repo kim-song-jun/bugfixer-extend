@@ -325,6 +325,26 @@ The macOS Code OSS main process opens `workspace.db` under its user-data profile
 
 Earlier isolated-profile checks established database startup, invalid-database handling, and Review health. Current source and gateway tests additionally cover Review create/list/open/primary operations; the supplied isolated QA includes three gateway tests. The new [dual-store restore fixture](../whiteboard/apps/review-desktop/scripts/dual-store-restore.test.mjs) verifies SQLite-aware backups from WAL-only rows and a missing Review after independently timed snapshots. It does not prove every crash/restart race, packaged recovery, or project-window restoration and routing required by row 3.
 
+## Live terminal theme and compact-window acceptance
+
+The dedicated native session-terminal smoke uses a prepared project and two
+app-owned, provider-free PTYs. The previous run proved duplex input, parent/child
+tree controls, retained terminal instances, log reattachment and individual stop
+at a 900 px viewport. That width does not exercise the session workspace's
+760 px compact selector, and the run did not explicitly select both themes.
+
+The expanded CI contract must exercise both live terminals at 1440 × 900 and
+760 × 820 with explicit light and dark workbench themes. It must verify the
+rendered theme, compact control visibility, exact-session keyboard selection,
+terminal identity, actual PTY resize and geometry, then retain the existing
+input, stop and owned-process cleanup checks. Theme runs are serial and dark
+may start only after light succeeds, including its cleanup assertion. Separate
+theme evidence directories prevent screenshot and receipt replacement.
+
+This expansion is pending exact-commit CI execution and screenshot inspection.
+It cannot establish authenticated Codex/Claude use, provider-native child
+discovery/control, or fresh-project file selection; those proofs remain open.
+
 ## Source notice review — 2026-10-23
 
 The [source provenance review](source-provenance.md) independently matches the

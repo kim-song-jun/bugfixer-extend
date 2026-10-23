@@ -413,12 +413,20 @@ jobs:
           test -f "$BUGFIXER_NATIVE_PTY_GUARDIAN"
           ELECTRON_RUN_AS_NODE=1 TSX_TSCONFIG_PATH=tsconfig.test.json "$app/Contents/MacOS/Whiteboard" --import ./scripts/test-code-oss-preload.mjs --import tsx --test --test-concurrency=1 code-oss/src/vs/workspace/electron-main/agentSessions/agentSessionPtyRuntime.native.ts
 
-      - name: Native session terminal UI contracts
+      - name: Native session terminal UI contracts (Review Light)
+        id: native_session_terminal_light
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         timeout-minutes: 8
         env:
           WHITEBOARD_NATIVE_SESSION_TERMINAL_FIXTURE: '1'
-        run: node apps/review-desktop/scripts/smoke-native-session-terminal.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-session-terminal-smoke"
+        run: node apps/review-desktop/scripts/smoke-native-session-terminal.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-session-terminal-smoke/light" light
+
+      - name: Native session terminal UI contracts (Review Dark)
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' && steps.native_session_terminal_light.outcome == 'success' }}
+        timeout-minutes: 8
+        env:
+          WHITEBOARD_NATIVE_SESSION_TERMINAL_FIXTURE: '1'
+        run: node apps/review-desktop/scripts/smoke-native-session-terminal.mjs "$RUNNER_TEMP/review-desktop-package/VSCode-darwin-arm64/Whiteboard.app" "$RUNNER_TEMP/review-desktop-native-session-terminal-smoke/dark" dark
 
       - name: Native project-window session IPC and publication runtime contracts
         if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}

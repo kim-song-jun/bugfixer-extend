@@ -22,11 +22,17 @@ import {
   verifyLiveIdentity,
 } from './native/app-process-cleanup.mjs';
 
-const [appArgument, outputArgument] = process.argv.slice(2);
+const [appArgument, outputArgument, themeArgument] = process.argv.slice(2);
 
 assert.ok(appArgument, 'Pass the assembled Whiteboard.app path');
 
 assert.ok(outputArgument, 'Pass the native session terminal evidence directory');
+
+assert.ok(['light', 'dark'].includes(themeArgument), 'Pass the explicit light or dark Review theme.');
+
+const themeId = themeArgument === 'dark' ? 'Review Dark' : 'Review Light';
+
+const expectedDarkTheme = themeArgument === 'dark';
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'This smoke runs only in GitHub Actions.');
 
@@ -78,6 +84,8 @@ const receipt = {
   processBaseline: { scriptPid: process.pid, scriptPpid: process.ppid, capturedAt: new Date().toISOString(), ownedChildrenBeforeLaunch: 0 },
   cleanup: [],
   cleanupVerified: false,
+  theme: { id: themeId, dark: expectedDarkTheme },
+  uiCheckpoints: [],
   startupDiagnosticCodes: [],
   failure: null,
 };
@@ -361,6 +369,65 @@ async function waitTerminalText(page, text, label, timeout = 20_000) {
   await waitFor(async () => (await readTerminalText(page).catch(() => '')).includes(text), `${label} actual xterm accessibility output`, timeout);
 }
 
+function terminalDimensions(text) {
+  return [...text.matchAll(/SIZE cols=(\d+) rows=(\d+)/g)]
+    .map(match => `${match[1]}x${match[2]}`);
+}
+
+function terminalDimensionBaseline(text) {
+  const dimensions = terminalDimensions(text);
+
+  return { count: dimensions.length, latest: dimensions.at(-1) };
+}
+
+async function waitForTerminalResize(page, session, previousDimensions) {
+  return waitFor(async () => {
+    const text = await readTerminalText(page).catch(() => '');
+    const dimensions = terminalDimensions(text);
+    const currentDimensions = dimensions.at(-1);
+
+    if (dimensions.length <= previousDimensions.count || !currentDimensions || currentDimensions === previousDimensions.latest) return false;
+
+    return {
+      countBefore: previousDimensions.count,
+      countAfter: dimensions.length,
+      before: previousDimensions.latest,
+      after: currentDimensions,
+      observedDimensions: [...new Set(dimensions)],
+      sessionId: session.id,
+      turnId: session.turnId,
+      fixturePid: session.fixturePid,
+    };
+  }, `${session.name} actual PTY dimensions change after viewport switch`, 30_000);
+}
+
+async function verifyWorkbenchTheme(page) {
+  const expectedColors = expectedDarkTheme
+    ? { editor: '#17171c', activityBar: '#202426' }
+    : { editor: '#ffffff', activityBar: '#f5f5f2' };
+
+  await page.waitForFunction(({ dark, colors }) => {
+    const workbench = document.querySelector('.monaco-workbench');
+
+    if (!workbench || workbench.classList.contains('vs-dark') !== dark) return false;
+
+    const style = getComputedStyle(workbench);
+
+    return style.getPropertyValue('--vscode-editor-background').trim().toLowerCase() === colors.editor
+      && style.getPropertyValue('--vscode-activityBar-background').trim().toLowerCase() === colors.activityBar;
+  }, { dark: expectedDarkTheme, colors: expectedColors }, { timeout: 30_000 });
+
+  return page.locator('.monaco-workbench').evaluate(workbench => {
+    const style = getComputedStyle(workbench);
+
+    return {
+      dark: workbench.classList.contains('vs-dark'),
+      editorBackground: style.getPropertyValue('--vscode-editor-background').trim(),
+      activityBarBackground: style.getPropertyValue('--vscode-activityBar-background').trim(),
+    };
+  });
+}
+
 async function terminalInstance(page) {
   const wrapper = page.locator('.ai-session__terminal .terminal-wrapper');
   await wrapper.waitFor({ state: 'visible' });
@@ -392,6 +459,82 @@ async function verifyWorkspaceViewport(page) {
     'Project controls must remain visible in the workspace after terminal focus.');
   assert.ok(geometry.list.top >= geometry.header.bottom - 1 && geometry.list.bottom <= geometry.workspace.bottom + 1,
     'The scrollable session list must fit below the header inside the native editor.');
+
+  return geometry;
+}
+
+async function verifyCompactWorkspaceViewport(page, expectedSessionId) {
+  const geometry = await page.locator('.ai-session-workspace').evaluate(element => {
+    const bounds = target => {
+      const rect = target.getBoundingClientRect();
+
+      return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+    };
+    const header = element.querySelector('.ai-session__project-header');
+    const toolbar = element.querySelector('.ai-session__narrow-toolbar');
+    const selector = toolbar?.querySelector('select[aria-label="현재 세션 선택"]');
+    const main = element.querySelector('.ai-session__main');
+    const list = element.querySelector('.ai-session__list');
+
+    if (!header || !toolbar || !selector || !main || !list) {
+      throw new Error('The compact workspace header, selector, main content and sidebar must exist.');
+    }
+
+    return {
+      workspace: bounds(element),
+      header: bounds(header),
+      toolbar: bounds(toolbar),
+      selector: bounds(selector),
+      main: bounds(main),
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      sidebarDisplay: getComputedStyle(list).display,
+      toolbarDisplay: getComputedStyle(toolbar).display,
+      selectorDisplay: getComputedStyle(selector).display,
+      toolbarVisibility: getComputedStyle(toolbar).visibility,
+      selectorVisibility: getComputedStyle(selector).visibility,
+      toolbarOpacity: Number(getComputedStyle(toolbar).opacity),
+      selectorOpacity: Number(getComputedStyle(selector).opacity),
+      selectedSessionId: selector.value,
+      horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+    };
+  });
+
+  for (const [name, bounds] of Object.entries({
+    workspace: geometry.workspace,
+    header: geometry.header,
+    toolbar: geometry.toolbar,
+  })) {
+    assert.ok(bounds.top >= -1 && bounds.bottom <= geometry.viewportHeight + 1,
+      `The compact ${name} must remain inside the viewport.`);
+    assert.ok(bounds.left >= -1 && bounds.right <= geometry.viewportWidth + 1,
+      `The compact ${name} must remain inside the viewport width.`);
+  }
+
+  assert.ok(geometry.main.top >= geometry.toolbar.bottom - 1,
+    'Compact main content must begin below the session toolbar.');
+  assert.ok(geometry.main.left >= -1 && geometry.main.right <= geometry.viewportWidth + 1,
+    'Compact main content must remain inside the viewport width.');
+
+  assert.equal(geometry.sidebarDisplay, 'none', 'Compact layout must hide the desktop session list.');
+  assert.notEqual(geometry.toolbarDisplay, 'none', 'Compact layout must show the session selector toolbar.');
+  assert.notEqual(geometry.selectorDisplay, 'none', 'Compact layout must show its session selector.');
+  assert.notEqual(geometry.toolbarVisibility, 'hidden', 'Compact session toolbar must be visible.');
+  assert.notEqual(geometry.selectorVisibility, 'hidden', 'Compact session selector must be visible.');
+  assert.ok(geometry.toolbarOpacity > 0, 'Compact session toolbar must not be transparent.');
+  assert.ok(geometry.selectorOpacity > 0, 'Compact session selector must not be transparent.');
+  assert.ok(geometry.toolbar.bottom - geometry.toolbar.top >= 36, 'Compact session toolbar must have a usable height.');
+  assert.ok(geometry.selector.bottom - geometry.selector.top >= 24, 'Compact session selector must have a usable height.');
+  assert.ok(geometry.selector.right > geometry.selector.left, 'Compact session selector must have a usable width.');
+  assert.ok(geometry.selector.top >= geometry.toolbar.top - 1 && geometry.selector.bottom <= geometry.toolbar.bottom + 1,
+    'Compact session selector must fit inside its toolbar.');
+  assert.ok(geometry.selector.left >= geometry.workspace.left - 1 && geometry.selector.right <= geometry.workspace.right + 1,
+    'Compact session selector must fit inside the workspace.');
+  assert.ok(geometry.selector.top >= -1 && geometry.selector.bottom <= geometry.viewportHeight + 1
+    && geometry.selector.left >= -1 && geometry.selector.right <= geometry.viewportWidth + 1,
+  'Compact session selector must fit inside the viewport.');
+  assert.equal(geometry.selectedSessionId, expectedSessionId, 'Compact selector must retain the exact selected session ID.');
+  assert.equal(geometry.horizontalOverflow, false, 'Compact session workspace must not overflow horizontally.');
 
   return geometry;
 }
@@ -479,6 +622,7 @@ try {
   await mkdir(extensions);
   await mkdir(projectFolder);
   await writeFile(path.join(userData, 'User/settings.json'), JSON.stringify({
+    'workbench.colorTheme': themeId,
     'window.autoDetectColorScheme': false,
     'telemetry.telemetryLevel': 'off',
     'review.telemetry.enabled': false,
@@ -560,6 +704,7 @@ try {
 
     return names.includes('code/didLoadExtensions') && names.includes('code/didInitializeLocalExtensionHost');
   }), 'native extension host readiness', 90_000);
+  receipt.theme.verification = await verifyWorkbenchTheme(page);
   const projectMenu = page.getByRole('button', { name: '프로젝트 메뉴', exact: true });
   await projectMenu.waitFor({ state: 'visible', timeout: 90_000 });
   await projectMenu.click();
@@ -580,17 +725,6 @@ try {
   first.inputObserved = true;
   first.inputTagsObserved.push('FIXTURE_TAG_A');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_B'), false, 'Session A cannot display the other terminal input tag.');
-
-  await page.setViewportSize({ width: 900, height: 700 });
-  first.resizeDimensions = await waitFor(async () => {
-    const sizes = [...(await readTerminalText(page)).matchAll(/SIZE cols=(\d+) rows=(\d+)/g)].map(match => `${match[1]}x${match[2]}`);
-
-    return sizes.length >= 2 && new Set(sizes).size >= 2 ? [...new Set(sizes)] : false;
-  }, 'real PTY resize event with changed terminal dimensions');
-  first.resizeObserved = true;
-  assert.equal(processAlive(first.fixturePid), true, 'Session A fixture process must remain live after resize.');
-  first.workspaceGeometry = await verifyWorkspaceViewport(page);
-  await page.screenshot({ path: path.join(output, 'session-a-terminal.png') });
 
   const second = await createAndStartSession(page, 'CI terminal session B', 'ci-fixture-codex-session-b', first.id);
   assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live while session B starts.');
@@ -663,12 +797,122 @@ try {
   await waitTerminalText(page, 'ECHO FIXTURE_TAG_B_CONCURRENT', 'session B concurrent input');
   second.inputTagsObserved.push('FIXTURE_TAG_B_CONCURRENT');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_A_CONCURRENT'), false, 'Session B output must remain scoped to its PTY.');
-  second.workspaceGeometry = await verifyWorkspaceViewport(page);
-  await page.screenshot({ path: path.join(output, 'session-b-terminal.png') });
   await sessionA.click();
   await waitTerminalText(page, `READY pid=${first.fixturePid}`, 'session A after concurrent duplex input');
   assert.equal((await readTerminalText(page)).includes('FIXTURE_TAG_B_CONCURRENT'), false, 'Session A output must remain scoped to its PTY.');
   second.terminalInstanceRetained = true;
+
+  const firstWideText = await readTerminalText(page);
+  first.desktopDimensions = terminalDimensionBaseline(firstWideText);
+  assert.ok(first.desktopDimensions.latest, 'Session A must report its real desktop PTY dimensions.');
+  first.workspaceGeometry = await verifyWorkspaceViewport(page);
+  assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live at the wide checkpoint.');
+  assert.equal(processAlive(second.fixturePid), true, 'Session B must remain live at the wide checkpoint.');
+  await page.screenshot({ path: path.join(output, 'session-a-terminal.png') });
+  receipt.uiCheckpoints.push({
+    theme: themeId,
+    sessionId: first.id,
+    turnId: first.turnId,
+    fixturePid: first.fixturePid,
+    viewport: { width: 1440, height: 900 },
+    terminalDimensions: first.desktopDimensions.latest,
+    screenshot: 'session-a-terminal.png',
+  });
+
+  await sessionB.click();
+  await waitTerminalText(page, `READY pid=${second.fixturePid}`, 'session B wide desktop checkpoint');
+  const secondWideInstance = await terminalInstance(page);
+  assert.equal(await secondWideInstance.evaluate((element, retained) => element === retained, secondInstance), true,
+    'The desktop checkpoint must reattach the same actual session B terminal instance.');
+  const secondWideText = await readTerminalText(page);
+  second.desktopDimensions = terminalDimensionBaseline(secondWideText);
+  assert.ok(second.desktopDimensions.latest, 'Session B must report its real desktop PTY dimensions.');
+  second.workspaceGeometry = await verifyWorkspaceViewport(page);
+  assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live at the wide checkpoint.');
+  assert.equal(processAlive(second.fixturePid), true, 'Session B must remain live at the wide checkpoint.');
+  await page.screenshot({ path: path.join(output, 'session-b-terminal.png') });
+  receipt.uiCheckpoints.push({
+    theme: themeId,
+    sessionId: second.id,
+    turnId: second.turnId,
+    fixturePid: second.fixturePid,
+    viewport: { width: 1440, height: 900 },
+    terminalDimensions: second.desktopDimensions.latest,
+    screenshot: 'session-b-terminal.png',
+  });
+
+  await page.setViewportSize({ width: 760, height: 820 });
+  assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live at the compact checkpoint.');
+  assert.equal(processAlive(second.fixturePid), true, 'Session B must remain live at the compact checkpoint.');
+  assert.deepEqual(await verifyWorkbenchTheme(page), receipt.theme.verification,
+    'The configured theme must remain active in the compact viewport.');
+  second.compactResizeObservation = await waitForTerminalResize(page, second, second.desktopDimensions);
+  second.resizeObserved = true;
+  second.resizeDimensions = second.compactResizeObservation.observedDimensions;
+  second.compactWorkspaceGeometry = await verifyCompactWorkspaceViewport(page, second.id);
+  await page.screenshot({ path: path.join(output, 'session-b-terminal-compact.png') });
+  receipt.uiCheckpoints.push({
+    theme: themeId,
+    sessionId: second.id,
+    turnId: second.turnId,
+    fixturePid: second.fixturePid,
+    viewport: { width: 760, height: 820 },
+    terminalDimensions: second.compactResizeObservation.after,
+    terminalResize: second.compactResizeObservation,
+    screenshot: 'session-b-terminal-compact.png',
+  });
+
+  const compactSelector = workspace.getByRole('combobox', { name: '현재 세션 선택', exact: true });
+  assert.deepEqual(await compactSelector.locator('option').evaluateAll(options => options.map(option => option.value)),
+    ['', first.id, second.id], 'Compact selector options must map exactly to the two durable session IDs.');
+  await compactSelector.focus();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Tab');
+  await waitFor(async () => (await compactSelector.inputValue()) === first.id,
+    'Keyboard selection of the exact session A ID in compact layout');
+  await waitTerminalText(page, `READY pid=${first.fixturePid}`, 'session A compact keyboard selection');
+  const firstCompactInstance = await terminalInstance(page);
+  assert.equal(await firstCompactInstance.evaluate((element, retained) => element === retained, firstInstance), true,
+    'Compact selection must reattach the same actual session A terminal instance.');
+  assert.equal((await readTerminalText(page)).match(/READY pid=/g)?.length, 1,
+    'Compact selection must not launch another session A fixture process.');
+  assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live at its compact checkpoint.');
+  assert.equal(processAlive(second.fixturePid), true, 'Session B must remain live while session A is selected compactly.');
+  first.compactResizeObservation = await waitForTerminalResize(page, first, first.desktopDimensions);
+  first.resizeObserved = true;
+  first.resizeDimensions = first.compactResizeObservation.observedDimensions;
+  first.compactWorkspaceGeometry = await verifyCompactWorkspaceViewport(page, first.id);
+  await page.screenshot({ path: path.join(output, 'session-a-terminal-compact.png') });
+  receipt.uiCheckpoints.push({
+    theme: themeId,
+    sessionId: first.id,
+    turnId: first.turnId,
+    fixturePid: first.fixturePid,
+    viewport: { width: 760, height: 820 },
+    terminalDimensions: first.compactResizeObservation.after,
+    terminalResize: first.compactResizeObservation,
+    screenshot: 'session-a-terminal-compact.png',
+  });
+
+  await workspace.locator('.ai-session__narrow-selector select').focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Tab');
+  await waitFor(async () => (await compactSelector.inputValue()) === second.id,
+    'Keyboard return to the exact session B ID in compact layout');
+  await waitTerminalText(page, `READY pid=${second.fixturePid}`, 'session B compact keyboard reselection');
+  const secondCompactInstance = await terminalInstance(page);
+  assert.equal(await secondCompactInstance.evaluate((element, retained) => element === retained, secondInstance), true,
+    'Compact reselection must reattach the same actual session B terminal instance.');
+  assert.equal((await readTerminalText(page)).match(/READY pid=/g)?.length, 1,
+    'Compact reselection must not launch another session B fixture process.');
+  assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live while session B is selected compactly.');
+  assert.equal(processAlive(second.fixturePid), true, 'Session B must remain live at its compact checkpoint.');
+  await verifyCompactWorkspaceViewport(page, second.id);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await waitTerminalText(page, `READY pid=${second.fixturePid}`, 'session B restored to the wide desktop before stop');
+  second.workspaceGeometry = await verifyWorkspaceViewport(page);
+  receipt.checks.push('actual A/B fixture PTYs retained identity and resized at 1440px and the 760px compact breakpoint under the selected Review theme');
 
   for (const session of [second, first]) {
     await workspace.locator(`button[data-session-select="${session.id}"]`).click();
