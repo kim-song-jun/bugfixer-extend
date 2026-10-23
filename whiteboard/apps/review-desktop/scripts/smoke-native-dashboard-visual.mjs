@@ -2628,9 +2628,11 @@ async function runNativeProjectPickerActor(session, targetFolder, tag) {
 
     const knownRoleCount = Object.values(roleCounts)
       .reduce((sum, count) => sum + count, 0);
+
     const edgeTotalMatchesRoleCounts = value.unclassifiedEdgeCount === 0
       ? observedEdgeCount === Math.max(0, knownRoleCount - 1)
       : observedEdgeCount >= knownRoleCount;
+
     const retainedIncomingCountsFit = incomingCounts.every((count, index) =>
       count <= roleCounts[roleIndexes[index]]);
 

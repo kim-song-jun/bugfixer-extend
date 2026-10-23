@@ -1651,7 +1651,9 @@ function buildRoleTopology(parentIndexes, nodeRoles, roleCounts) {
       left.parentRoleIndex - right.parentRoleIndex
       || left.childRoleIndex - right.childRoleIndex,
     );
+
   const retainedPairs = pairs.slice(0, 64);
+
   const omittedEdgeCount = pairs
     .slice(64)
     .reduce((sum, pair) => sum + pair.count, 0);
