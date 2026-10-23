@@ -463,7 +463,14 @@ async function verifyWorkspaceViewport(page) {
   return geometry;
 }
 
-async function verifyCompactWorkspaceViewport(page, expectedSessionId) {
+async function scrollWorkspaceToTop(page, label) {
+  const workspace = page.locator('.ai-session-workspace');
+
+  await workspace.evaluate(element => element.scrollTo({ top: 0, behavior: 'instant' }));
+  await waitFor(() => workspace.evaluate(element => element.scrollTop === 0), `${label} workspace scroll position`);
+}
+
+async function captureCompactWorkspaceViewport(page) {
   const geometry = await page.locator('.ai-session-workspace').evaluate(element => {
     const bounds = target => {
       const rect = target.getBoundingClientRect();
@@ -498,9 +505,16 @@ async function verifyCompactWorkspaceViewport(page, expectedSessionId) {
       selectorOpacity: Number(getComputedStyle(selector).opacity),
       selectedSessionId: selector.value,
       horizontalOverflow: element.scrollWidth > element.clientWidth + 1,
+      scrollTop: element.scrollTop,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
     };
   });
 
+  return geometry;
+}
+
+function assertCompactWorkspaceViewport(geometry, expectedSessionId) {
   for (const [name, bounds] of Object.entries({
     workspace: geometry.workspace,
     header: geometry.header,
@@ -538,6 +552,80 @@ async function verifyCompactWorkspaceViewport(page, expectedSessionId) {
   assert.equal(geometry.horizontalOverflow, false, 'Compact session workspace must not overflow horizontally.');
 
   return geometry;
+}
+
+async function captureCompactTerminalViewport(page, session) {
+  return page.locator('.ai-session__terminal').evaluate((terminal, identity) => {
+    const bounds = target => {
+      const rect = target.getBoundingClientRect();
+
+      return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+    };
+
+    const workspace = terminal.closest('.ai-session-workspace');
+    const header = workspace?.querySelector('.ai-session__project-header');
+
+    if (!workspace || !header) throw new Error('The compact terminal must remain inside its session workspace.');
+
+    return {
+      sessionId: identity.id,
+      turnId: identity.turnId,
+      fixturePid: identity.fixturePid,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      workspace: bounds(workspace),
+      stickyHeader: bounds(header),
+      terminal: bounds(terminal),
+      workspaceScrollTop: workspace.scrollTop,
+    };
+  }, { id: session.id, turnId: session.turnId, fixturePid: session.fixturePid });
+}
+
+function assertCompactTerminalViewport(geometry) {
+  assert.equal(geometry.viewport.width, 760, 'Compact terminal evidence must use the 760px viewport.');
+  assert.equal(geometry.workspaceScrollTop > 0, true, 'The terminal view must be captured after scrolling the workspace.');
+  assert.ok(geometry.workspace.top >= -1 && geometry.workspace.bottom <= geometry.viewport.height + 1,
+    'The compact terminal workspace must fit the viewport height.');
+  assert.ok(geometry.terminal.top >= Math.max(geometry.workspace.top, geometry.stickyHeader.bottom) - 1,
+    'The compact terminal must begin below the sticky project header.');
+  assert.ok(geometry.terminal.bottom <= geometry.workspace.bottom + 1
+    && geometry.terminal.bottom <= geometry.viewport.height + 1,
+  'The compact terminal must fit inside the workspace and viewport height.');
+  assert.ok(geometry.terminal.left >= Math.max(geometry.workspace.left, -1)
+    && geometry.terminal.right <= Math.min(geometry.workspace.right, geometry.viewport.width) + 1,
+  'The compact terminal must fit inside the workspace and viewport width.');
+}
+
+async function captureCompactTerminalView(page, session, expectedInstance, screenshotName) {
+  const terminal = page.locator('.ai-session__terminal');
+
+  await terminal.evaluate(element => element.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'instant' }));
+  await waitFor(async () => page.locator('.ai-session-workspace').evaluate(element => element.scrollTop > 0),
+    `${session.name} terminal scroll into view`);
+  const terminalText = await readTerminalText(page);
+  const geometry = await captureCompactTerminalViewport(page, session);
+
+  const checkpoint = {
+    theme: themeId,
+    sessionId: session.id,
+    turnId: session.turnId,
+    fixturePid: session.fixturePid,
+    viewport: geometry.viewport,
+    terminalDimensions: terminalDimensionBaseline(terminalText).latest,
+    terminalGeometry: geometry,
+    verified: false,
+    screenshot: null,
+  };
+
+  receipt.uiCheckpoints.push(checkpoint);
+  assert.ok(terminalText.includes(`READY pid=${session.fixturePid}`),
+    `${session.name} compact terminal must show its exact fixture PID.`);
+  const actualInstance = await terminalInstance(page);
+  assert.equal(await actualInstance.evaluate((element, retained) => element === retained, expectedInstance), true,
+    `${session.name} compact terminal view must retain the actual TerminalInstance.`);
+  assertCompactTerminalViewport(geometry);
+  await page.screenshot({ path: path.join(output, screenshotName) });
+  checkpoint.screenshot = screenshotName;
+  checkpoint.verified = true;
 }
 
 async function createAndStartSession(page, name, model, parentSessionId) {
@@ -850,9 +938,10 @@ try {
   second.compactResizeObservation = await waitForTerminalResize(page, second, second.desktopDimensions);
   second.resizeObserved = true;
   second.resizeDimensions = second.compactResizeObservation.observedDimensions;
-  second.compactWorkspaceGeometry = await verifyCompactWorkspaceViewport(page, second.id);
-  await page.screenshot({ path: path.join(output, 'session-b-terminal-compact.png') });
-  receipt.uiCheckpoints.push({
+  await scrollWorkspaceToTop(page, 'session B compact overview');
+  second.compactWorkspaceGeometry = await captureCompactWorkspaceViewport(page);
+
+  const secondOverviewCheckpoint = {
     theme: themeId,
     sessionId: second.id,
     turnId: second.turnId,
@@ -860,9 +949,20 @@ try {
     viewport: { width: 760, height: 820 },
     terminalDimensions: second.compactResizeObservation.after,
     terminalResize: second.compactResizeObservation,
-    screenshot: 'session-b-terminal-compact.png',
-  });
+    workspaceScrollTop: second.compactWorkspaceGeometry.scrollTop,
+    workspaceGeometry: second.compactWorkspaceGeometry,
+    verified: false,
+    screenshot: null,
+  };
 
+  receipt.uiCheckpoints.push(secondOverviewCheckpoint);
+  assertCompactWorkspaceViewport(second.compactWorkspaceGeometry, second.id);
+  await page.screenshot({ path: path.join(output, 'session-b-overview-compact.png') });
+  secondOverviewCheckpoint.screenshot = 'session-b-overview-compact.png';
+  secondOverviewCheckpoint.verified = true;
+  await captureCompactTerminalView(page, second, secondInstance, 'session-b-terminal-compact.png');
+
+  await scrollWorkspaceToTop(page, 'session selector keyboard interaction');
   const compactSelector = workspace.getByRole('combobox', { name: '현재 세션 선택', exact: true });
   assert.deepEqual(await compactSelector.locator('option').evaluateAll(options => options.map(option => option.value)),
     ['', first.id, second.id], 'Compact selector options must map exactly to the two durable session IDs.');
@@ -882,9 +982,10 @@ try {
   first.compactResizeObservation = await waitForTerminalResize(page, first, first.desktopDimensions);
   first.resizeObserved = true;
   first.resizeDimensions = first.compactResizeObservation.observedDimensions;
-  first.compactWorkspaceGeometry = await verifyCompactWorkspaceViewport(page, first.id);
-  await page.screenshot({ path: path.join(output, 'session-a-terminal-compact.png') });
-  receipt.uiCheckpoints.push({
+  await scrollWorkspaceToTop(page, 'session A compact overview');
+  first.compactWorkspaceGeometry = await captureCompactWorkspaceViewport(page);
+
+  const firstOverviewCheckpoint = {
     theme: themeId,
     sessionId: first.id,
     turnId: first.turnId,
@@ -892,9 +993,20 @@ try {
     viewport: { width: 760, height: 820 },
     terminalDimensions: first.compactResizeObservation.after,
     terminalResize: first.compactResizeObservation,
-    screenshot: 'session-a-terminal-compact.png',
-  });
+    workspaceScrollTop: first.compactWorkspaceGeometry.scrollTop,
+    workspaceGeometry: first.compactWorkspaceGeometry,
+    verified: false,
+    screenshot: null,
+  };
 
+  receipt.uiCheckpoints.push(firstOverviewCheckpoint);
+  assertCompactWorkspaceViewport(first.compactWorkspaceGeometry, first.id);
+  await page.screenshot({ path: path.join(output, 'session-a-overview-compact.png') });
+  firstOverviewCheckpoint.screenshot = 'session-a-overview-compact.png';
+  firstOverviewCheckpoint.verified = true;
+  await captureCompactTerminalView(page, first, firstInstance, 'session-a-terminal-compact.png');
+
+  await scrollWorkspaceToTop(page, 'session B compact reselection');
   await workspace.locator('.ai-session__narrow-selector select').focus();
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Tab');
@@ -908,9 +1020,30 @@ try {
     'Compact reselection must not launch another session B fixture process.');
   assert.equal(processAlive(first.fixturePid), true, 'Session A must remain live while session B is selected compactly.');
   assert.equal(processAlive(second.fixturePid), true, 'Session B must remain live at its compact checkpoint.');
-  await verifyCompactWorkspaceViewport(page, second.id);
+  await scrollWorkspaceToTop(page, 'session B compact overview after reselection');
+  second.compactWorkspaceGeometry = await captureCompactWorkspaceViewport(page);
+
+  const secondReselectedOverviewCheckpoint = {
+    theme: themeId,
+    sessionId: second.id,
+    turnId: second.turnId,
+    fixturePid: second.fixturePid,
+    viewport: { width: 760, height: 820 },
+    workspaceScrollTop: second.compactWorkspaceGeometry.scrollTop,
+    workspaceGeometry: second.compactWorkspaceGeometry,
+    verified: false,
+    screenshot: null,
+  };
+
+  receipt.uiCheckpoints.push(secondReselectedOverviewCheckpoint);
+  assertCompactWorkspaceViewport(second.compactWorkspaceGeometry, second.id);
+  await page.screenshot({ path: path.join(output, 'session-b-overview-compact-reselected.png') });
+  secondReselectedOverviewCheckpoint.screenshot = 'session-b-overview-compact-reselected.png';
+  secondReselectedOverviewCheckpoint.verified = true;
+  await captureCompactTerminalView(page, second, secondInstance, 'session-b-terminal-compact-reselected.png');
 
   await page.setViewportSize({ width: 1440, height: 900 });
+  await scrollWorkspaceToTop(page, 'wide desktop stop flow');
   await waitTerminalText(page, `READY pid=${second.fixturePid}`, 'session B restored to the wide desktop before stop');
   second.workspaceGeometry = await verifyWorkspaceViewport(page);
   receipt.checks.push('actual A/B fixture PTYs retained identity and resized at 1440px and the 760px compact breakpoint under the selected Review theme');

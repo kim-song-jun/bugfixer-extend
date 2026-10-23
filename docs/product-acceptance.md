@@ -341,6 +341,12 @@ input, stop and owned-process cleanup checks. Theme runs are serial and dark
 may start only after light succeeds, including its cleanup assertion. Separate
 theme evidence directories prevent screenshot and receipt replacement.
 
+Compact checks navigate to the workspace top for the selector overview, then
+scroll to the terminal for a separate output view. The selector is not sticky;
+the contract does not require the selector and deep terminal content to be
+visible simultaneously. Geometry is recorded before assertions so failures
+retain the observed scroll position and bounds.
+
 This expansion is pending exact-commit CI execution and screenshot inspection.
 It cannot establish authenticated Codex/Claude use, provider-native child
 discovery/control, or fresh-project file selection; those proofs remain open.
