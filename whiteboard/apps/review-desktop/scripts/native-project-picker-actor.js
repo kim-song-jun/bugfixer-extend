@@ -574,7 +574,8 @@ function run(argv) {
     const primaryPidMismatchDiagnostic = pidMismatchDiagnostic;
     const primaryPanelPidMismatchDiagnostic = panelPidMismatchDiagnostic;
     const primarySheetPIDRelation = sheetPIDRelation;
-    const primaryRoleTopology = failurePhase === "DISCOVER" ? roleTopology : null;
+    const primaryRoleTopology =
+      failurePhase === "DISCOVER" ? roleTopology : null;
 
     const primaryArrayQueryDiagnostic =
       primaryFailureCode === "ax-array-status-failed" &&
@@ -1603,10 +1604,7 @@ function buildRoleTopology(parentIndexes, nodeRoles, roleCounts) {
   const pairCounts = new Map();
   let unclassifiedEdgeCount = 0;
 
-  if (
-    parentIndexes.length !== nodeRoles.length
-    || parentIndexes.length > 512
-  ) {
+  if (parentIndexes.length !== nodeRoles.length || parentIndexes.length > 512) {
     throw new Error("Accessibility topology is inconsistent");
   }
 
@@ -1622,9 +1620,9 @@ function buildRoleTopology(parentIndexes, nodeRoles, roleCounts) {
     }
 
     if (
-      !Number.isSafeInteger(parentIndex)
-      || parentIndex < 0
-      || parentIndex >= childIndex
+      !Number.isSafeInteger(parentIndex) ||
+      parentIndex < 0 ||
+      parentIndex >= childIndex
     ) {
       throw new Error("Accessibility topology parent is inconsistent");
     }
@@ -1647,9 +1645,10 @@ function buildRoleTopology(parentIndexes, nodeRoles, roleCounts) {
 
       return { parentRoleIndex, childRoleIndex, count };
     })
-    .sort((left, right) =>
-      left.parentRoleIndex - right.parentRoleIndex
-      || left.childRoleIndex - right.childRoleIndex,
+    .sort(
+      (left, right) =>
+        left.parentRoleIndex - right.parentRoleIndex ||
+        left.childRoleIndex - right.childRoleIndex,
     );
 
   const retainedPairs = pairs.slice(0, 64);
