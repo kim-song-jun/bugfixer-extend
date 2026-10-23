@@ -65,9 +65,10 @@ copyright notices when distributing source or built artifacts that include it.
 ### `lightningcss`
 
 - Package: `lightningcss`
-- Version observed: `1.32.0`
+- Version observed: `1.33.0`
 - License: `MPL-2.0`
-- Source: `https://github.com/parcel-bundler/lightningcss`
+- Source: `https://github.com/parcel-bundler/lightningcss/tree/v1.33.0`
+- License text: `https://github.com/parcel-bundler/lightningcss/blob/v1.33.0/LICENSE`
 - npm: `https://www.npmjs.com/package/lightningcss`
 
 `lightningcss` is present in the resolved dependency tree through build tooling.
